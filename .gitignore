@@ -1,0 +1,16 @@
+node_modules/
+out/
+.codeidx/
+.lh/
+.django-shell/
+.djangoshell/
+.vscode-test/
+django_shell_console_cell_*.py
+django_shell_console_prelude.py
+__pycache__/
+*.vsix
+.DS_Store
+.codeidx
+.zoek-rs
+.vscode
+.git

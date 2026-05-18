@@ -1,0 +1,241 @@
+{
+  "name": "django-shell",
+  "displayName": "Django Shell",
+  "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "./out/extension.js",
+  "extensionDependencies": [
+    "ms-python.python",
+    "ms-python.vscode-pylance"
+  ],
+  "extensionOptionalDependencies": [
+    "newdlops.django-orm-intellisense",
+    "newdlops.intellisense-recursion",
+    "newdlops.vscode-auto-import"
+  ],
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "activationEvents": [
+    "onCommand:djangoShell.acceptInput",
+    "onCommand:djangoShell.openConsole",
+    "onCommand:djangoShell.openNotebookConsoleDeprecated",
+    "onCommand:djangoShell.overlayAcceptInput",
+    "onCommand:djangoShell.overlayInsertNewline",
+    "onCommand:djangoShell.refreshInspector",
+    "onCommand:djangoShell.showOverlayEditor",
+    "onCommand:djangoShell.showEnvironment",
+    "onNotebook:django-shell-console",
+    "onView:djangoShell.runtimeInspector",
+    "onRenderer:django-shell-terminal-renderer"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "djangoShell.openConsole",
+        "title": "Django Shell: Open Console",
+        "category": "Django Shell",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "djangoShell.openNotebookConsoleDeprecated",
+        "title": "Django Shell: Open Notebook Console (Deprecated)",
+        "category": "Django Shell",
+        "icon": "$(notebook)"
+      },
+      {
+        "command": "djangoShell.showOverlayEditor",
+        "title": "Django Shell: Show Overlay Editor",
+        "category": "Django Shell",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "djangoShell.showEnvironment",
+        "title": "Django Shell: Show Process Environment",
+        "category": "Django Shell",
+        "icon": "$(info)"
+      },
+      {
+        "command": "djangoShell.refreshInspector",
+        "title": "Django Shell: Refresh Runtime Inspector",
+        "category": "Django Shell",
+        "icon": "$(refresh)"
+      }
+    ],
+    "notebooks": [
+      {
+        "type": "django-shell-console",
+        "displayName": "Django Shell Console (Deprecated)",
+        "selector": [
+          {
+            "filenamePattern": "*.djshell"
+          }
+        ]
+      }
+    ],
+    "notebookRenderer": [
+      {
+        "id": "django-shell-terminal-renderer",
+        "displayName": "Django Shell Setup Terminal",
+        "entrypoint": "./media/dist/terminalRenderer.js",
+        "mimeTypes": [
+          "application/vnd.django-shell.terminal+json",
+          "application/vnd.django-shell.python-history+json"
+        ],
+        "requiresMessaging": "always"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "djangoShell",
+          "title": "Django Shell",
+          "icon": "media/django-shell.svg"
+        }
+      ]
+    },
+    "views": {
+      "djangoShell": [
+        {
+          "id": "djangoShell.runtimeInspector",
+          "name": "Runtime"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "djangoShell.openConsole"
+        },
+        {
+          "command": "djangoShell.openNotebookConsoleDeprecated"
+        },
+        {
+          "command": "djangoShell.showOverlayEditor"
+        },
+        {
+          "command": "djangoShell.refreshInspector",
+          "when": "false"
+        },
+        {
+          "command": "djangoShell.showEnvironment",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "djangoShell.openConsole",
+          "group": "navigation",
+          "when": "view == djangoShell.runtimeInspector"
+        },
+        {
+          "command": "djangoShell.refreshInspector",
+          "group": "navigation",
+          "when": "view == djangoShell.runtimeInspector"
+        },
+        {
+          "command": "djangoShell.showEnvironment",
+          "group": "navigation",
+          "when": "view == djangoShell.runtimeInspector"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "djangoShell.overlayAcceptInput",
+        "key": "enter",
+        "mac": "enter",
+        "when": "editorTextFocus && editorLangId == 'python' && resourceScheme == 'file' && resourceFilename == 'console-cell.py' && !editorReadonly && !suggestWidgetVisible && !parameterHintsVisible && !inlineSuggestionVisible"
+      },
+      {
+        "command": "djangoShell.overlayInsertNewline",
+        "key": "shift+enter",
+        "mac": "shift+enter",
+        "when": "editorTextFocus && editorLangId == 'python' && resourceScheme == 'file' && resourceFilename == 'console-cell.py' && !editorReadonly"
+      },
+      {
+        "command": "djangoShell.acceptInput",
+        "key": "enter",
+        "mac": "enter",
+        "when": "notebookCellEditorFocused && notebookType == 'django-shell-console' && editorLangId == 'python' && !editorReadonly && !suggestWidgetVisible && !parameterHintsVisible && !inlineSuggestionVisible"
+      },
+      {
+        "command": "type",
+        "key": "shift+enter",
+        "mac": "shift+enter",
+        "args": {
+          "text": "\n"
+        },
+        "when": "notebookCellEditorFocused && notebookType == 'django-shell-console' && editorLangId == 'python' && !editorReadonly"
+      }
+    ],
+    "configuration": {
+      "title": "Django Shell",
+      "properties": {
+        "djangoShell.autoActivateWorkspaceVenv": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, Django console setup terminals prepend a workspace .venv or venv to PATH and set VIRTUAL_ENV."
+        },
+        "djangoShell.enableCodeActions": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, forwards VS Code code actions through the generated Python shadow document. This can be expensive in large Django projects."
+        },
+        "djangoShell.enableModelPreludeImports": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, statically scans workspace model files and imports discovered model classes into editor analysis preludes. This is expensive in large Django projects."
+        },
+        "djangoShell.enableRuntimeCompletion": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, Django shell cells complete dynamic runtime variables from the attached process. This can be expensive in large Django projects."
+        },
+        "djangoShell.diagnosticLogging": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, Django Shell writes runtime, source analysis, and editor bridge timing diagnostics to its output channel."
+        }
+      }
+    },
+    "configurationDefaults": {
+      "inlineChat.affordance": "off",
+      "inlineChat.notebookAgent": false,
+      "notebook.experimental.cellChat": false,
+      "notebook.experimental.generate": false,
+      "python.analysis.supportAllPythonDocuments": true,
+      "[python]": {
+        "editor.semanticHighlighting.enabled": true
+      }
+    }
+  },
+  "scripts": {
+    "build:custom-console": "esbuild media/customConsoleSource.js --bundle --format=esm --loader:.css=text --outfile=media/dist/customConsole.js",
+    "build:renderer": "npm run build:terminal-renderer && npm run build:custom-console",
+    "build:terminal-renderer": "esbuild media/terminalRendererSource.js --bundle --format=esm --loader:.css=text --outfile=media/dist/terminalRenderer.js",
+    "check:guidelines": "node scripts/check-code-guidelines.mjs",
+    "compile": "tsc -p ./ && npm run build:renderer",
+    "test": "npm run compile && node --test test/*.test.mjs",
+    "test:e2e": "npm run compile && node test/e2e/run.mjs",
+    "check": "npm run check:guidelines && npm run test"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "ws": "^8.20.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.12",
+    "@types/vscode": "^1.92.0",
+    "@types/vscode-notebook-renderer": "^1.72.4",
+    "@types/ws": "^8.18.1",
+    "@vscode/test-electron": "^2.5.2",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.5.4"
+  }
+}

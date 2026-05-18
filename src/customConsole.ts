@@ -1,0 +1,461 @@
+// Custom webview frontend that reuses the Django shell backend without notebooks.
+
+import * as path from "path";
+import * as vscode from "vscode";
+import { BackendExecutionResult, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment } from "./backendClient";
+import { DiagnosticLogger } from "./diagnostics";
+import { NotebookPtySession } from "./notebookPtySession";
+import { runtimePreludeLines } from "./runtimePrelude";
+import { WorkbenchOverlay, WorkbenchOverlayGeometry } from "./workbenchOverlay";
+
+const VIEW_TYPE = "djangoShell.customConsole";
+
+/** Runs the primary custom Django shell UI backed by the existing backend bridge. */
+export class CustomDjangoConsole implements vscode.Disposable {
+  private readonly disposables: vscode.Disposable[] = [];
+  private readonly runtimeEmitter = new vscode.EventEmitter<void>();
+  private panel: vscode.WebviewPanel | undefined;
+  private inspectionCache: BackendRuntimeInspection | undefined;
+  private inspectionInFlight: Promise<BackendRuntimeInspection> | undefined;
+  private lastEditorGeometry: WorkbenchOverlayGeometry | undefined;
+  private runtimeReady = false;
+  private runtimeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private session: NotebookPtySession | undefined;
+  private sessionDisposables: vscode.Disposable[] = [];
+  private readonly overlay: WorkbenchOverlay;
+  private executionCount = 1;
+
+  readonly onDidChangeRuntime = this.runtimeEmitter.event;
+
+  /** Stores the extension path used to locate the Python backend file. */
+  constructor(
+    private readonly extensionPath: string,
+    private readonly logger?: DiagnosticLogger
+  ) {
+    this.overlay = new WorkbenchOverlay(logger);
+  }
+
+  /** Registers the command that opens the custom console frontend. */
+  activate(context: vscode.ExtensionContext): void {
+    this.disposables.push(vscode.commands.registerCommand("djangoShell.openConsole", () => this.openConsole()));
+    this.overlay.activate(context, (code) => this.executePython(code));
+    context.subscriptions.push(this);
+  }
+
+  /** Opens or reveals the custom webview console and starts its backend session. */
+  async openConsole(): Promise<void> {
+    if (this.panel) {
+      this.panel.reveal(vscode.ViewColumn.One);
+      this.postStatus();
+      this.post({ show: true, type: "measureEditor" });
+      return;
+    }
+    this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Django Shell", vscode.ViewColumn.One, {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.file(path.join(this.extensionPath, "media"))],
+      retainContextWhenHidden: true
+    });
+    this.panel.webview.html = webviewHtml(this.panel.webview, this.extensionPath);
+    this.panel.onDidDispose(() => this.closePanel(), undefined, this.disposables);
+    this.panel.onDidChangeViewState((event) => this.handleViewState(event.webviewPanel.visible), undefined, this.disposables);
+    this.panel.webview.onDidReceiveMessage((message) => void this.handleMessage(message), undefined, this.disposables);
+    this.ensureSession();
+  }
+
+  /** Returns safe runtime summaries for the active custom console backend. */
+  async inspectActiveRuntime(): Promise<BackendRuntimeInspection> {
+    if (!this.session?.backend) {
+      return { error: "Open the Django Shell console and enter Django shell first.", modules: [], ok: false, variables: [] };
+    }
+    if (!this.session.backend.supportsRuntimeInspection()) {
+      return remoteRuntimeInspectionDisabled();
+    }
+    if (this.inspectionCache) {
+      return this.inspectionCache;
+    }
+    if (!this.inspectionInFlight) {
+      this.inspectionInFlight = this.session.backend.inspect().then((inspection) => {
+        this.inspectionCache = inspection;
+        return inspection;
+      }).finally(() => {
+        this.inspectionInFlight = undefined;
+      });
+    }
+    return this.inspectionInFlight;
+  }
+
+  /** Returns safe child summaries for one runtime object path. */
+  async inspectRuntimeChildren(pathSegments: BackendRuntimePathSegment[]): Promise<BackendRuntimeChildren> {
+    if (!this.session?.backend) {
+      return { children: [], error: "Open the Django Shell console and enter Django shell first.", ok: false };
+    }
+    if (!this.session.backend.supportsRuntimeInspection()) {
+      return remoteRuntimeChildrenDisabled();
+    }
+    return this.session.backend.children(pathSegments);
+  }
+
+  /** Returns a compact state snapshot for extension host E2E tests. */
+  e2eSnapshot(): Record<string, unknown> {
+    const html = this.panel?.webview.html ?? "";
+    const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd()), ".django-shell", "console-cell.py");
+    const analysisUri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd()), ".django-shell", "analysis.py");
+    const document = vscode.workspace.textDocuments.find((item) => item.uri.toString() === uri.toString());
+    const analysisDocument = vscode.workspace.textDocuments.find((item) => item.uri.toString() === analysisUri.toString());
+    return {
+      hasEditorAnchor: html.includes("id=\"editorAnchor\""),
+      hasShowEditorButton: html.includes("id=\"showEditor\""),
+      lastEditorGeometry: this.lastEditorGeometry,
+      overlayAnalysisDocumentHasMarker: analysisDocument?.getText().includes("# --- django shell input ---") ?? false,
+      overlayAnalysisDocumentOpen: Boolean(analysisDocument),
+      overlayDocumentHasMarker: document?.getText().includes("# --- django shell input ---") ?? false,
+      overlayDocumentLanguage: document?.languageId,
+      overlayDocumentOpen: Boolean(document),
+      panelOpen: Boolean(this.panel),
+      panelVisible: Boolean(this.panel?.visible)
+    };
+  }
+
+  /** Releases the custom console session and webview resources. */
+  dispose(): void {
+    const panel = this.panel;
+    this.closePanel();
+    panel?.dispose();
+    for (const disposable of this.disposables) {
+      disposable.dispose();
+    }
+    this.overlay.dispose();
+    this.runtimeEmitter.dispose();
+  }
+
+  /** Starts a backend-capable setup terminal session when one is not already running. */
+  private ensureSession(): void {
+    if (this.session) {
+      this.postStatus();
+      return;
+    }
+    this.runtimeReady = false;
+    this.session = new NotebookPtySession({
+      autoActivateWorkspaceVenv: autoActivateWorkspaceVenv(),
+      backendRuntimePath: path.join(this.extensionPath, "python", "django_shell_backend.py"),
+      cwd: workspaceCwd(),
+      diagnosticLogger: this.logger,
+      sessionId: `custom:${workspaceCwd()}`,
+      settingsCandidates: []
+    });
+    this.sessionDisposables.push(
+      this.session.onDidData((data) => this.post({ data, type: "terminalData" })),
+      this.session.onDidChange((snapshot) => {
+        this.post({ snapshot, type: "terminalStatus" });
+        if (snapshot.ready && !this.runtimeReady) {
+          this.runtimeReady = true;
+          this.runtimeEmitter.fire();
+          void this.updateOverlayPrelude();
+        }
+      })
+    );
+    this.session.start();
+  }
+
+  /** Handles messages sent by the custom console webview. */
+  private async handleMessage(message: unknown): Promise<void> {
+    const typed = message as { code?: string; cols?: number; data?: string; rect?: unknown; rows?: number; type?: string };
+    if (typed.type === "ready") {
+      this.postStatus();
+      this.post({ show: true, type: "measureEditor" });
+      return;
+    }
+    if (typed.type === "editorGeometry") {
+      if (this.panel?.visible && isOverlayGeometry(typed.rect)) {
+        this.lastEditorGeometry = typed.rect;
+        this.overlay.updateGeometry(typed.rect);
+      }
+      return;
+    }
+    if (typed.type === "showOverlayEditor") {
+      if (!this.panel?.visible) {
+        return;
+      }
+      if (isOverlayGeometry(typed.rect)) {
+        this.lastEditorGeometry = typed.rect;
+        this.overlay.updateGeometry(typed.rect);
+      }
+      await this.showOverlay();
+      return;
+    }
+    if (typed.type === "terminalInput" && typeof typed.data === "string") {
+      this.ensureSession();
+      this.session?.write(typed.data);
+      return;
+    }
+    if (typed.type === "terminalResize" && Number.isFinite(typed.cols) && Number.isFinite(typed.rows)) {
+      this.session?.resize(Math.max(1, typed.cols ?? 1), Math.max(1, typed.rows ?? 1));
+      return;
+    }
+    if (typed.type === "restart") {
+      this.restartSession();
+      return;
+    }
+    if (typed.type === "runPython" && typeof typed.code === "string") {
+      await this.executePython(typed.code);
+      return;
+    }
+  }
+
+  /** Executes Python through the attached backend and posts a textual result. */
+  private async executePython(code: string): Promise<boolean> {
+    if (!code.trim()) {
+      return false;
+    }
+    const backend = this.session?.backend;
+    if (!backend) {
+      const execution = this.executionCount++;
+      this.post({ execution, type: "pythonStarted" });
+      const text = "Backend is not ready. Enter Django shell in the setup terminal first.";
+      this.post({ execution, ok: false, text, type: "pythonResult" });
+      void this.overlay.postOutput(text, false);
+      return false;
+    }
+    if (isLikelyIncompletePython(code)) {
+      this.logger?.log("python.incomplete", { chars: code.length, lines: lineCount(code) });
+      return false;
+    }
+    const execution = this.executionCount++;
+    this.post({ execution, type: "pythonStarted" });
+    const result = await backend.execute(code);
+    this.clearInspectionCache();
+    const text = executionText(result);
+    this.post({ execution, ok: result.ok, text, type: "pythonResult" });
+    void this.overlay.postOutput(text, result.ok);
+    this.scheduleRuntimeRefresh();
+    return true;
+  }
+
+  /** Shows the workbench overlay editor without failing the webview flow. */
+  private async showOverlay(): Promise<void> {
+    if (!this.panel?.visible) {
+      return;
+    }
+    try {
+      await this.overlay.show();
+    } catch (error) {
+      this.logger?.log("overlay.show.error", { error: error instanceof Error ? error.message : String(error) });
+      void vscode.window.showWarningMessage("Django Shell overlay editor could not be opened.");
+    }
+  }
+
+  /** Keeps the workbench overlay lifecycle bound to the Django Shell webview tab. */
+  private handleViewState(visible: boolean): void {
+    if (visible) {
+      this.post({ show: false, type: "measureEditor" });
+    }
+  }
+
+  /** Refreshes hidden runtime imports used by the overlay Python analyzer. */
+  private async updateOverlayPrelude(): Promise<void> {
+    const backend = this.session?.backend;
+    if (!backend?.supportsRuntimeInspection()) {
+      return;
+    }
+    const inspection = await backend.prelude();
+    if (inspection?.ok) {
+      this.overlay.updatePrelude(runtimePreludeLines(inspection.variables));
+    }
+  }
+
+  /** Schedules runtime-dependent UI refresh without blocking rapid shell input. */
+  private scheduleRuntimeRefresh(): void {
+    this.clearRuntimeRefreshTimer();
+    this.runtimeRefreshTimer = setTimeout(() => {
+      this.runtimeRefreshTimer = undefined;
+      this.runtimeEmitter.fire();
+      void this.updateOverlayPrelude();
+    }, 750);
+  }
+
+  /** Clears any pending delayed runtime refresh. */
+  private clearRuntimeRefreshTimer(): void {
+    if (!this.runtimeRefreshTimer) {
+      return;
+    }
+    clearTimeout(this.runtimeRefreshTimer);
+    this.runtimeRefreshTimer = undefined;
+  }
+
+  /** Clears cached runtime inspection data after code changes the namespace. */
+  private clearInspectionCache(): void {
+    this.inspectionCache = undefined;
+  }
+
+  /** Restarts the setup terminal and clears the current backend readiness state. */
+  private restartSession(): void {
+    this.runtimeReady = false;
+    this.clearInspectionCache();
+    this.clearRuntimeRefreshTimer();
+    this.session?.restart();
+    this.runtimeEmitter.fire();
+  }
+
+  /** Posts the latest session snapshot to the webview. */
+  private postStatus(): void {
+    const snapshot = this.session?.snapshot();
+    if (snapshot) {
+      this.post({ snapshot, type: "terminalStatus" });
+    }
+  }
+
+  /** Posts one message to the active webview when it is still open. */
+  private post(message: unknown): void {
+    void this.panel?.webview.postMessage(message);
+  }
+
+  /** Closes only the webview panel while keeping dispose idempotent. */
+  private closePanel(): void {
+    for (const disposable of this.sessionDisposables) {
+      disposable.dispose();
+    }
+    this.sessionDisposables = [];
+    this.session?.dispose();
+    this.session = undefined;
+    this.panel = undefined;
+    this.runtimeReady = false;
+    this.clearInspectionCache();
+    this.clearRuntimeRefreshTimer();
+  }
+}
+
+/** Returns whether conventional workspace virtualenvs should be activated. */
+function autoActivateWorkspaceVenv(): boolean {
+  return vscode.workspace.getConfiguration("djangoShell").get<boolean>("autoActivateWorkspaceVenv", true);
+}
+
+/** Returns the workspace root used as the child shell working directory. */
+function workspaceCwd(): string {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+}
+
+/** Returns true for common Python continuations without a backend round trip. */
+function isLikelyIncompletePython(source: string): boolean {
+  const trimmed = source.trimEnd();
+  return trimmed.endsWith(":") || trimmed.endsWith("\\") || hasUnclosedBracket(trimmed);
+}
+
+/** Returns whether brackets are still open in simple Python source. */
+function hasUnclosedBracket(source: string): boolean {
+  const stack: string[] = [];
+  const pairs: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+  for (const char of source) {
+    if (pairs[char]) {
+      stack.push(pairs[char]);
+    } else if ([")", "]", "}"].includes(char) && stack.pop() !== char) {
+      return false;
+    }
+  }
+  return stack.length > 0;
+}
+
+/** Returns the common remote inspection disabled message. */
+function remoteRuntimeMessage(): string {
+  return "Remote runtime inspection is disabled because the backend is only reachable through the interactive terminal.";
+}
+
+/** Returns a safe inspection response when remote TCP is unreachable. */
+function remoteRuntimeInspectionDisabled(): BackendRuntimeInspection {
+  return { error: remoteRuntimeMessage(), loadedModuleCount: 0, modules: [], ok: false, variables: [] };
+}
+
+/** Returns a safe child response when remote TCP is unreachable. */
+function remoteRuntimeChildrenDisabled(): BackendRuntimeChildren {
+  return { children: [], error: remoteRuntimeMessage(), ok: false };
+}
+
+/** Formats one backend execution result for display in the custom console. */
+function executionText(result: BackendExecutionResult): string {
+  return [result.stdout, result.stderr, result.result, result.traceback].filter(Boolean).join("\n") || "(no output)";
+}
+
+/** Returns a compact line count for diagnostics. */
+function lineCount(text: string): number {
+  return text ? text.split(/\r?\n/).length : 0;
+}
+
+/** Returns whether a webview message contains a usable editor anchor rectangle. */
+function isOverlayGeometry(value: unknown): value is WorkbenchOverlayGeometry {
+  const rect = value as WorkbenchOverlayGeometry | undefined;
+  return !!rect &&
+    Number.isFinite(rect.left) &&
+    Number.isFinite(rect.top) &&
+    Number.isFinite(rect.width) &&
+    Number.isFinite(rect.height) &&
+    rect.width > 40 &&
+    rect.height > 40;
+}
+
+/** Builds the custom console webview document. */
+function webviewHtml(webview: vscode.Webview, extensionPath: string): string {
+  const nonce = String(Date.now());
+  const scriptUri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionPath, "media", "dist", "customConsole.js")));
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'nonce-${nonce}';">
+<title>Django Shell</title>
+<style>
+body{margin:0;font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background)}
+.shell{min-height:100vh;display:grid;grid-template-rows:auto 1fr}
+.topbar{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:10px;height:32px;padding:0 12px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background)}
+.title{font-weight:600}.kernel{color:var(--vscode-descriptionForeground);font-size:12px}.spacer{flex:1}
+button{color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0;border-radius:3px;padding:3px 9px;font:inherit}
+button.secondary{color:var(--vscode-foreground);background:var(--vscode-button-secondaryBackground)}
+button.icon{display:inline-grid;place-items:center;width:22px;height:22px;padding:0;border-radius:4px}
+button:hover{background:var(--vscode-button-hoverBackground)}
+.runGlyph{width:0;height:0;border-top:5px solid transparent;border-bottom:5px solid transparent;border-left:8px solid currentColor}
+.notebook{width:100%;box-sizing:border-box;margin:0;padding:8px 12px 32px}
+.cell{display:grid;grid-template-columns:56px minmax(0,1fr);margin:0 0 6px}
+.cell:focus-within .body,.cell:hover .body{border-color:var(--vscode-focusBorder)}
+.prompt{box-sizing:border-box;padding:7px 8px 0 0;text-align:right;color:var(--vscode-descriptionForeground);font-family:var(--vscode-editor-font-family);font-size:12px;white-space:nowrap}
+.body{border:1px solid transparent;background:var(--vscode-notebook-cellEditorBackground,var(--vscode-editor-background))}
+.toolbar{display:flex;align-items:center;gap:6px;height:26px;padding:0 6px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-sideBar-background))}
+.toolbar .label{font-size:12px;color:var(--vscode-descriptionForeground)}.toolbar .grow{flex:1}
+.terminalHost{height:180px;min-height:80px;overflow:hidden;padding:0;background:var(--vscode-terminal-background,var(--vscode-editor-background))}
+.terminalHost .xterm,.terminalHost .xterm-screen,.terminalHost .xterm-viewport{height:100%;background:var(--vscode-terminal-background,var(--vscode-editor-background))!important}
+.result,.editorLauncher{margin:0;box-sizing:border-box;font-family:var(--vscode-editor-font-family);font-size:var(--vscode-editor-font-size);line-height:1.45;letter-spacing:0;font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0;tab-size:4}
+.editor{display:grid;grid-template-rows:auto}
+.editorLauncher{height:280px;background:var(--vscode-editor-background)}
+.hint{padding:5px 10px;border-top:1px solid var(--vscode-panel-border);font-size:12px;color:var(--vscode-descriptionForeground)}
+.cellOutput{border-top:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background);max-height:min(46vh,420px);overflow:auto}
+.outputHidden{display:none}
+.outputLabel{padding:6px 10px 0;color:var(--vscode-descriptionForeground);font-family:var(--vscode-editor-font-family);font-size:12px}
+.outputList{display:grid;gap:6px;padding:4px 0 8px}.outputItem{border-top:1px solid var(--vscode-panel-border)}
+.outputItemLabel{padding:5px 10px 0;color:var(--vscode-descriptionForeground);font-family:var(--vscode-editor-font-family);font-size:12px}
+.result{margin:0;padding:4px 10px 8px;white-space:pre;overflow:visible;min-width:max-content;background:var(--vscode-editor-background)}
+.result.error{color:var(--vscode-errorForeground)}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar"><span class="title">Django Shell</span><span id="status" class="kernel">starting</span><span class="spacer"></span><button id="restart" class="secondary" type="button">Restart Kernel</button></header>
+  <main class="notebook">
+    <section class="cell setupCell">
+      <div class="prompt">Setup</div>
+      <div class="body">
+        <div class="toolbar"><button id="focusTerminal" class="icon" type="button" title="Focus setup input">&gt;</button><span class="label">setup terminal</span><span class="grow"></span></div>
+        <div id="terminal" class="terminalHost"></div>
+      </div>
+    </section>
+    <section class="cell inputCell">
+      <div id="inputPrompt" class="prompt">In&nbsp;[&nbsp;]:</div>
+      <div class="body editor">
+        <div class="toolbar"><button id="showEditor" class="icon" type="button" title="Show Python editor"><span class="runGlyph"></span></button><span class="label">Python</span><span class="grow"></span><button id="clear" class="secondary" type="button">Clear</button></div>
+        <div id="editorAnchor" class="editorLauncher"></div>
+        <div id="currentOutput" class="cellOutput outputHidden"><div id="currentOutputLabel" class="outputLabel">Outputs</div><div id="outputList" class="outputList"></div></div>
+      </div>
+    </section>
+  </main>
+</div>
+<script nonce="${nonce}" type="module" src="${scriptUri}"></script>
+</body>
+</html>`;
+}
