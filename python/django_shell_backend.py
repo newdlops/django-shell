@@ -3,6 +3,7 @@
 import ast
 import codeop
 import contextlib
+import dataclasses
 import io
 import inspect
 import json
@@ -142,31 +143,14 @@ def _inspect_environment():
     """Returns lightweight Python and Django runtime environment details."""
     with _EXECUTION_LOCK:
         try:
-            return {
-                "basePrefix": sys.base_prefix,
-                "cwd": os.getcwd(),
-                "django": _django_environment(),
-                "executable": sys.executable,
-                "ok": True,
-                "path": list(sys.path),
-                "prefix": sys.prefix,
-                "settingsModule": os.environ.get("DJANGO_SETTINGS_MODULE"),
-                "version": sys.version,
-                "virtualEnv": os.environ.get("VIRTUAL_ENV"),
-            }
+            return {"basePrefix": sys.base_prefix, "cwd": os.getcwd(), "django": _django_environment(), "executable": sys.executable, "ok": True, "path": list(sys.path), "prefix": sys.prefix, "settingsModule": os.environ.get("DJANGO_SETTINGS_MODULE"), "version": sys.version, "virtualEnv": os.environ.get("VIRTUAL_ENV")}
         except Exception:
             return {"ok": False, "error": traceback.format_exc()}
 
 
 def _django_environment():
     """Returns Django-specific runtime metadata without calling django.setup()."""
-    info = {
-        "appsReady": False,
-        "available": False,
-        "configured": False,
-        "installedApps": [],
-        "settingsModule": os.environ.get("DJANGO_SETTINGS_MODULE"),
-    }
+    info = {"appsReady": False, "available": False, "configured": False, "installedApps": [], "settingsModule": os.environ.get("DJANGO_SETTINGS_MODULE")}
     try:
         import django
         from django.apps import apps
@@ -233,7 +217,7 @@ def _inspect_value_children(value, path):
         return _sequence_children(value, path)
     if isinstance(value, (set, frozenset)):
         return _sequence_children(list(value), path)
-    mapping = _safe_vars(value)
+    mapping = _attribute_mapping(value, evaluate_values=True)
     if mapping is not None:
         return _attribute_children(mapping, path)
     return []
@@ -250,10 +234,7 @@ def _dict_children(value, path):
 
 def _sequence_children(value, path):
     """Builds child summaries for indexable sequence values."""
-    return [
-        _value_summary(f"[{index}]", child, path + [{"op": "index", "index": index}])
-        for index, child in enumerate(list(value)[:200])
-    ]
+    return [_value_summary(f"[{index}]", child, path + [{"op": "index", "index": index}]) for index, child in enumerate(list(value)[:200])]
 
 
 def _attribute_children(mapping, path):
@@ -270,16 +251,7 @@ def _attribute_children(mapping, path):
 
 def _value_summary(name, value, path, origin=None):
     """Builds one serializable runtime value summary."""
-    summary = {
-        "hasChildren": _has_children(value),
-        "importLine": _import_line(name, value),
-        "kind": _variable_kind(value),
-        "name": name,
-        "path": path,
-        "preview": _preview_value(value),
-        "type": _type_name(value),
-        "typeImportLine": _type_import_line(name, value),
-    }
+    summary = {"hasChildren": _has_children(value), "importLine": _import_line(name, value), "kind": _variable_kind(value), "name": name, "path": path, "preview": _preview_value(value), "type": _type_name(value), "typeImportLine": _type_import_line(name, value)}
     if origin is not None:
         summary["origin"] = origin
     return summary
@@ -334,7 +306,7 @@ def _resolve_child(value, segment):
     """Resolves one safe child path segment."""
     op = segment.get("op")
     if op == "attr":
-        mapping = _safe_vars(value)
+        mapping = _attribute_mapping(value, evaluate_values=True)
         if mapping is None:
             raise ValueError("Object does not expose a safe attribute dictionary.")
         return mapping[segment["name"]]
@@ -375,8 +347,53 @@ def _has_children(value):
     """Returns whether a runtime value has safe children to show in the tree."""
     if isinstance(value, (dict, list, tuple, set, frozenset)):
         return len(value) > 0
-    mapping = _safe_vars(value)
+    mapping = _attribute_mapping(value)
     return bool(mapping and any(not (name.startswith("__") and name.endswith("__")) for name in mapping))
+
+
+def _attribute_mapping(value, evaluate_values=False):
+    """Returns safe attributes, dataclass fields, and readable properties."""
+    if not inspect.isclass(value):
+        mapping = dict(_safe_vars(value) or {})
+        _merge_dataclass_fields(value, mapping, evaluate_values)
+        _merge_property_values(value, mapping, evaluate_values)
+        return mapping or None
+    merged = {}
+    for cls in reversed(inspect.getmro(value)):
+        mapping = _safe_vars(cls)
+        if mapping:
+            merged.update(mapping)
+    _merge_dataclass_fields(value, merged, evaluate_values)
+    return merged
+
+
+def _merge_dataclass_fields(value, mapping, evaluate_values):
+    """Adds dataclass field names and reads values only for explicit child inspection."""
+    try:
+        fields = dataclasses.fields(value)
+    except TypeError:
+        return
+    is_class = inspect.isclass(value)
+    for field in fields:
+        if field.name in mapping:
+            continue
+        if is_class or not evaluate_values:
+            mapping[field.name] = field
+            continue
+        with contextlib.suppress(Exception):
+            mapping[field.name] = getattr(value, field.name)
+
+
+def _merge_property_values(value, mapping, evaluate_values):
+    """Adds property names and reads values only for explicit child inspection."""
+    for cls in reversed(inspect.getmro(type(value))):
+        for name, descriptor in (_safe_vars(cls) or {}).items():
+            if name in mapping or not isinstance(descriptor, property):
+                continue
+            mapping[name] = descriptor
+            if evaluate_values:
+                with contextlib.suppress(Exception):
+                    mapping[name] = getattr(value, name)
 
 
 def _safe_vars(value):
@@ -393,11 +410,7 @@ def _inspect_modules():
     for name, module in sorted(sys.modules.items()):
         if not isinstance(module, types.ModuleType):
             continue
-        modules.append({
-            "file": str(getattr(module, "__file__", "") or ""),
-            "name": name,
-            "package": str(getattr(module, "__package__", "") or ""),
-        })
+        modules.append({"file": str(getattr(module, "__file__", "") or ""), "name": name, "package": str(getattr(module, "__package__", "") or "")})
         if len(modules) >= 300:
             break
     return modules
@@ -459,12 +472,7 @@ def _execute_code(namespace, code):
                     result = pprint.pformat(value, width=120, compact=False)
             return {"ok": True, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "result": result}
         except Exception:
-            return {
-                "ok": False,
-                "stdout": stdout.getvalue(),
-                "stderr": stderr.getvalue(),
-                "traceback": traceback.format_exc(),
-            }
+            return {"ok": False, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "traceback": traceback.format_exc()}
 
 
 def _split_last_expression(tree):

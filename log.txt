@@ -1,125 +1,44 @@
-[2026-05-18T13:47:29.854Z] terminal.spawn cwd="/Users/lky/project/captain" djangoSettingsModule="zuzu.staff.settings" pathHead="/Users/lky/project/captain/.venv/bin" shell="/bin/zsh" shellArgs="-l" virtualEnv="/Users/lky/project/captain/.venv"
-[2026-05-18T13:47:29.863Z] runtime.inspector.refresh modules=0 ms=0 ok=false variables=0
-[2026-05-18T13:47:29.899Z] overlay.memory.write chars=29 lines=2 kind="editor" offset=1
-[2026-05-18T13:47:31.940Z] overlay.inject report="django-shell-overlay-shown:pending:widgets=0 insts=0 modelSvcs=0 ctors=0 factory=false editorError= widgetError= captureError="
-[2026-05-18T13:47:32.636Z] overlay.show ms=2005 report="django-shell-overlay-shown:editor:widgets=1 insts=15 modelSvcs=3 ctors=1 factory=true editorError= widgetError= captureError="
-[2026-05-18T13:47:32.682Z] overlay.probe report="{\"root\":true,\"editor\":true,\"sync\":true,\"enter\":true,\"sameEnter\":true,\"hasRunner\":true,\"hasSync\":true,\"uri\":\"file:///Users/lky/project/captain/.django-shell/console-cell.py\",\"lines\":2,\"chars\":29,\"active\":\"native-edit-context\"}"
-[2026-05-18T13:47:34.976Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=0
-[2026-05-18T13:47:36.472Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=0
-[2026-05-18T13:47:42.143Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=0
-[2026-05-18T13:47:50.211Z] terminal.command command="./zz shell alpha" djangoCandidate=true lineLength=16 mode="candidate-django" previousMode="shell" sinceSpawnMs=20358
-[2026-05-18T13:47:55.833Z] terminal.command command="kiyoung" djangoCandidate=false lineLength=7 mode="candidate-django" previousMode="candidate-django" sinceSpawnMs=25980
-[2026-05-18T13:48:02.314Z] terminal.command command="<redacted>" djangoCandidate=false lineLength=16 mode="candidate-django" previousMode="candidate-django" sinceSpawnMs=32460
-[2026-05-18T13:48:30.006Z] terminal.mode mode="django" previousMode="candidate-django" sinceDjangoCommandMs=39795 sinceSpawnMs=60153
-[2026-05-18T13:48:30.009Z] backend.attach bootstrapBytes=6411 bootstrapMode="inline" runtimePath="/Users/lky/project/django-shell/python/django_shell_backend.py" sinceDjangoCommandMs=39798 sinceSpawnMs=60156 sessionId="custom:/Users/lky/project/captain"
-[2026-05-18T13:48:32.035Z] backend.ready host="127.0.0.1" port=33993 sessionId="custom:/Users/lky/project/captain"
-[2026-05-18T13:48:32.036Z] backend.request bytes=0 error="connect ECONNREFUSED 127.0.0.1:33993; host=127.0.0.1; endpointHost=127.0.0.1" kind="inspect" ms=0 port=33993 transport="tcp"
-[2026-05-18T13:48:32.037Z] backend.pty.request id="mpb9ezdw-1" kind="inspect" lightweight=true queueMs=0 sessionId="custom:/Users/lky/project/captain"
-[2026-05-18T13:48:34.067Z] backend.request bytes=356028 kind="inspect" ms=2031 ok=true port=33993 transport="pty"
-[2026-05-18T13:48:34.069Z] overlay.memory.prelude chars=17851 lines=184 changed=true offset=184
-[2026-05-18T13:48:34.069Z] runtime.inspector.refresh loadedModules=8880 modules=0 ms=1879 ok=true variables=900
-[2026-05-18T13:48:34.069Z] overlay.memory.write chars=17880 lines=185 kind="editor" offset=184
-[2026-05-18T13:48:34.526Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:35.170Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:35.668Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:36.479Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:37.009Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:37.475Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:39.351Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:40.625Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:41.138Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:48:42.187Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:43.461Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:48:46.910Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:47.714Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:48.305Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:48.876Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:48:49.595Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:48:50.076Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:49:32.038Z] backend.pty.request id="mpb9g9om-2" kind="environment" queueMs=0 sessionId="custom:/Users/lky/project/captain"
-[2026-05-18T13:49:33.379Z] backend.request bytes=1447 kind="environment" ms=1341 ok=true port=33993 transport="pty"
-[2026-05-18T13:49:33.379Z] backend.keepalive idleMs=-1340 ms=1341 ok=true sessionId="custom:/Users/lky/project/captain" transport="pty"
-[2026-05-18T13:50:09.141Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:09.996Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:11.061Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:11.646Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:12.952Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:13.913Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:14.915Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:15.443Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:16.627Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:17.513Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:18.082Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:18.560Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:19.299Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:19.866Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:20.459Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:22.490Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:22.993Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:23.493Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:24.051Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:24.530Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:24.984Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:25.596Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:26.181Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:27.185Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:27.695Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:28.221Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:29.468Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:30.442Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:30.984Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:32.043Z] backend.pty.request id="mpb9hjzf-3" kind="environment" queueMs=0 sessionId="custom:/Users/lky/project/captain"
-[2026-05-18T13:50:32.357Z] backend.request bytes=1447 kind="environment" ms=314 ok=true port=33993 transport="pty"
-[2026-05-18T13:50:32.357Z] backend.keepalive idleMs=-314 ms=314 ok=true sessionId="custom:/Users/lky/project/captain" transport="pty"
-[2026-05-18T13:50:32.657Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:33.266Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:33.745Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:34.522Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:35.900Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:37.085Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:37.580Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:38.465Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:39.261Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:39.802Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:40.551Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:41.375Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:41.976Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:42.637Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:43.269Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:43.806Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:44.300Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:44.750Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:45.275Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:45.755Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:46.312Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:46.746Z] overlay.document.newline inputStartLine=185 line=185 suppressed=false
-[2026-05-18T13:50:46.760Z] overlay.lint changed=false edits=0 end=185 ms=14 start=185
-[2026-05-18T13:50:46.761Z] overlay.document.enter chars=34 end=185 inputStartLine=185 lines=1 start=185
-[2026-05-18T13:50:46.761Z] backend.pty.request id="mpb9hvc9-4" kind="execute" queueMs=0 sessionId="custom:/Users/lky/project/captain"
-[2026-05-18T13:50:47.086Z] backend.request bytes=50 kind="execute" ms=325 ok=true port=33993 transport="pty"
-[2026-05-18T13:50:47.196Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:47.839Z] backend.pty.request id="mpb9hw67-5" kind="inspect" lightweight=true queueMs=0 sessionId="custom:/Users/lky/project/captain"
-[2026-05-18T13:50:48.533Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:49.039Z] backend.request bytes=356028 kind="inspect" ms=1200 ok=true port=33993 transport="pty"
-[2026-05-18T13:50:49.040Z] runtime.inspector.refresh loadedModules=8880 modules=0 ms=1049 ok=true variables=900
-[2026-05-18T13:50:49.131Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:49.680Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:50.527Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:51.006Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:51.622Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:52.401Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:53.154Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:53.648Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:54.411Z] overlay.feature feature="semanticTokens" items=0 ms=1 symbols=210
-[2026-05-18T13:50:54.606Z] overlay.document.newline inputStartLine=185 line=186 suppressed=false
-[2026-05-18T13:50:54.617Z] overlay.lint changed=false edits=0 end=186 ms=11 start=186
-[2026-05-18T13:50:54.617Z] overlay.document.enter chars=29 end=186 inputStartLine=185 lines=1 start=186
-[2026-05-18T13:50:54.617Z] backend.pty.request id="mpb9i1eh-6" kind="execute" queueMs=0 sessionId="custom:/Users/lky/project/captain"
-[2026-05-18T13:50:55.057Z] overlay.feature feature="semanticTokens" items=0 ms=0 symbols=210
-[2026-05-18T13:50:55.978Z] backend.request bytes=50 kind="execute" ms=1361 ok=true port=33993 transport="pty"
-[2026-05-18T13:50:56.736Z] backend.pty.request id="mpb9i31c-7" kind="inspect" lightweight=true queueMs=0 sessionId="custom:/Users/lky/project/captain"
-[2026-05-18T13:50:58.275Z] backend.request bytes=355849 kind="inspect" ms=1539 ok=true port=33993 transport="pty"
-[2026-05-18T13:50:58.277Z] runtime.inspector.refresh loadedModules=8880 modules=0 ms=1386 ok=true variables=900
-[2026-05-18T13:51:09.161Z] backend.pty.request id="mpb9icmg-8" kind="children" queueMs=0 sessionId="custom:/Users/lky/project/captain"
-[2026-05-18T13:51:10.584Z] backend.request bytes=57697 kind="children" ms=1424 ok=true port=33993 transport="pty"
-[2026-05-18T13:51:10.584Z] runtime.inspector.children children=200 ok=true variable="Company"
+[2026-05-19T08:57:25.401Z] terminal.spawn cwd="/Users/lky/project/captain" djangoSettingsModule="zuzu.staff.settings" pathHead="/Users/lky/project/captain/.venv/bin" shell="/bin/zsh" shellArgs="-l" virtualEnv="/Users/lky/project/captain/.venv"
+[2026-05-19T08:57:25.426Z] runtime.inspector.refresh modules=0 ms=0 ok=false variables=0
+[2026-05-19T08:57:25.604Z] overlay.memory.write chars=29 lines=2 kind="analysis" offset=1
+[2026-05-19T08:57:25.613Z] overlay.memory.write chars=29 lines=2 kind="editor" offset=1
+[2026-05-19T08:57:40.148Z] terminal.command command="./zz shell alpha" djangoCandidate=true lineLength=16 mode="candidate-django" previousMode="shell" sinceSpawnMs=14748
+[2026-05-19T08:57:52.567Z] terminal.command command="38p3Z@Xqmnkiyoung" djangoCandidate=false lineLength=17 mode="candidate-django" previousMode="candidate-django" sinceSpawnMs=27167
+[2026-05-19T08:57:54.352Z] terminal.command command="<redacted>" djangoCandidate=false lineLength=16 mode="candidate-django" previousMode="candidate-django" sinceSpawnMs=28952
+[2026-05-19T08:58:21.080Z] terminal.mode mode="django" previousMode="candidate-django" sinceDjangoCommandMs=40932 sinceSpawnMs=55680
+[2026-05-19T08:58:21.081Z] backend.attach bootstrapBytes=6827 bootstrapMode="inline" runtimePath="/Users/lky/.vscode/extensions/newdlops.django-shell-0.0.2/python/django_shell_backend.py" sinceDjangoCommandMs=40933 sinceSpawnMs=55681 sessionId="custom:/Users/lky/project/captain"
+[2026-05-19T08:58:27.396Z] backend.ready host="127.0.0.1" port=44853 sessionId="custom:/Users/lky/project/captain"
+[2026-05-19T08:58:27.398Z] backend.request bytes=0 error="connect ECONNREFUSED 127.0.0.1:44853; host=127.0.0.1; endpointHost=127.0.0.1" kind="prelude" ms=2 port=44853 transport="tcp"
+[2026-05-19T08:58:27.398Z] backend.pty.request id="mpcehsjq-1" kind="prelude" queueMs=0 sessionId="custom:/Users/lky/project/captain"
+[2026-05-19T08:58:29.987Z] backend.request bytes=599854 kind="prelude" ms=2589 ok=true port=44853 transport="pty"
+[2026-05-19T08:58:29.988Z] backend.pty.request id="mpcehujo-2" kind="inspect" lightweight=true queueMs=2437 sessionId="custom:/Users/lky/project/captain"
+[2026-05-19T08:58:29.992Z] overlay.memory.prelude chars=23684 lines=240 changed=true offset=240
+[2026-05-19T08:58:29.992Z] overlay.memory.write chars=23713 lines=241 kind="editor" offset=240
+[2026-05-19T08:58:29.992Z] overlay.memory.write chars=23713 lines=241 kind="analysis" offset=240
+[2026-05-19T08:58:31.813Z] backend.request bytes=376076 kind="inspect" ms=4262 ok=true port=44853 transport="pty"
+[2026-05-19T08:58:31.813Z] runtime.inspector.refresh loadedModules=8880 modules=0 ms=4262 ok=true variables=900
+[2026-05-19T08:58:52.610Z] overlay.inject report="django-shell-overlay-shown:pending:widgets=0 insts=0 modelSvcs=0 ctors=0 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:58:52.990Z] overlay.show ms=462 report="django-shell-overlay-shown:pending:widgets=0 insts=0 modelSvcs=0 ctors=0 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:58:52.991Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
+[2026-05-19T08:58:53.667Z] overlay.show ms=375 report="django-shell-overlay-shown:pending:widgets=1 insts=4 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:58:53.668Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
+[2026-05-19T08:58:55.972Z] runtime.inspector.refresh loadedModules=8880 modules=0 ms=0 ok=true variables=900
+[2026-05-19T08:58:56.354Z] overlay.show ms=381 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:58:56.355Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
+[2026-05-19T08:59:00.531Z] runtime.inspector.refresh loadedModules=8880 modules=0 ms=0 ok=true variables=900
+[2026-05-19T08:59:00.942Z] overlay.show ms=380 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:59:00.942Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
+[2026-05-19T08:59:01.924Z] overlay.show ms=379 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:59:01.925Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
+[2026-05-19T08:59:02.116Z] overlay.show ms=376 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:59:02.117Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
+[2026-05-19T08:59:02.323Z] overlay.show ms=386 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:59:02.324Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
+[2026-05-19T08:59:02.509Z] overlay.show ms=374 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:59:02.510Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
+[2026-05-19T08:59:08.113Z] overlay.show ms=379 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:59:08.114Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
+[2026-05-19T08:59:08.545Z] overlay.show ms=377 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:59:08.546Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
+[2026-05-19T08:59:08.965Z] overlay.show ms=377 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
+[2026-05-19T08:59:08.966Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"

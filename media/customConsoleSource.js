@@ -7,14 +7,20 @@ import xtermCss from "@xterm/xterm/css/xterm.css";
 const STYLE_ID = "django-shell-custom-console-style";
 const vscode = acquireVsCodeApi();
 const terminalHost = document.getElementById("terminal");
+const focusTerminalButton = document.getElementById("focusTerminal");
+const setupCell = document.getElementById("setupCell");
 const status = document.getElementById("status");
 const currentOutput = document.getElementById("currentOutput");
 const currentOutputLabel = document.getElementById("currentOutputLabel");
 const outputList = document.getElementById("outputList");
 const editorAnchor = document.getElementById("editorAnchor");
 const inputPrompt = document.getElementById("inputPrompt");
+const inputPromptText = inputPrompt && inputPrompt.querySelector(".promptMark");
+const pythonCell = document.getElementById("pythonCell");
+const statusText = document.getElementById("statusText");
 
 let fitAddon;
+let geometryFrame = 0;
 let pendingExecution = 0;
 let snapshotWritten = false;
 let terminal;
@@ -24,8 +30,9 @@ function main() {
   ensureStyle();
   mountTerminal();
   wirePythonCell();
+  wireCellResizers();
   window.addEventListener("message", (event) => handleHostMessage(event.data || {}));
-  document.getElementById("focusTerminal").addEventListener("click", () => terminal.focus());
+  focusTerminalButton.addEventListener("click", () => terminal.focus());
   document.getElementById("restart").addEventListener("click", () => vscode.postMessage({ type: "restart" }));
   vscode.postMessage({ type: "ready" });
 }
@@ -55,14 +62,95 @@ function mountTerminal() {
 
 /** Registers editor-like Python input behavior and cell actions. */
 function wirePythonCell() {
-  document.getElementById("showEditor").addEventListener("click", showOverlayEditor);
   document.getElementById("clear").addEventListener("click", clearOutput);
   if (editorAnchor) {
-    new ResizeObserver(() => sendEditorGeometry()).observe(editorAnchor);
-    window.addEventListener("resize", sendEditorGeometry);
-    window.addEventListener("scroll", sendEditorGeometry, true);
-    setTimeout(sendEditorGeometry, 0);
+    editorAnchor.addEventListener("click", showOverlayEditor);
+    new ResizeObserver(() => scheduleEditorGeometry()).observe(editorAnchor);
+    window.addEventListener("resize", scheduleEditorGeometry);
+    window.addEventListener("scroll", scheduleEditorGeometry, true);
+    window.visualViewport?.addEventListener("resize", scheduleEditorGeometry);
+    window.visualViewport?.addEventListener("scroll", scheduleEditorGeometry);
+    setInterval(scheduleEditorGeometry, 600);
+    scheduleEditorGeometry();
   }
+}
+
+/** Registers notebook-style vertical resize handles for each visible cell. */
+function wireCellResizers() {
+  for (const handle of document.querySelectorAll("[data-resize-target]")) {
+    const target = cellResizeTarget(handle);
+    if (!target) {
+      continue;
+    }
+    handle.addEventListener("pointerdown", (event) => startCellResize(event, handle, target));
+    handle.addEventListener("dblclick", () => resetCellSize(target));
+    handle.addEventListener("keydown", (event) => nudgeCellSize(event, target));
+  }
+}
+
+/** Resolves the element resized by a cell handle. */
+function cellResizeTarget(handle) {
+  if (handle.dataset.resizeTarget === "terminal") {
+    return terminalHost;
+  }
+  if (handle.dataset.resizeTarget === "editor") {
+    return editorAnchor;
+  }
+  return undefined;
+}
+
+/** Starts a pointer-driven vertical resize operation for one cell body. */
+function startCellResize(event, handle, target) {
+  event.preventDefault();
+  handle.setPointerCapture(event.pointerId);
+  const startY = event.clientY;
+  const startHeight = target.getBoundingClientRect().height;
+  document.body.classList.add("resizingCell");
+  const move = (moveEvent) => resizeCell(target, startHeight + moveEvent.clientY - startY);
+  const stop = () => {
+    handle.removeEventListener("pointermove", move);
+    document.body.classList.remove("resizingCell");
+    refreshAfterCellResize(target);
+  };
+  handle.addEventListener("pointermove", move);
+  handle.addEventListener("pointerup", stop, { once: true });
+  handle.addEventListener("pointercancel", stop, { once: true });
+}
+
+/** Applies a bounded pixel height to a resizable cell element. */
+function resizeCell(target, height) {
+  const min = target === terminalHost ? 92 : 160;
+  const max = Math.max(window.innerHeight * 1.2, 720, min);
+  target.style.height = `${Math.round(Math.min(max, Math.max(min, height)))}px`;
+  refreshAfterCellResize(target);
+}
+
+/** Resets a cell to its stylesheet-defined default height. */
+function resetCellSize(target) {
+  target.style.height = "";
+  refreshAfterCellResize(target);
+}
+
+/** Supports keyboard resizing from a focused cell resize handle. */
+function nudgeCellSize(event, target) {
+  const delta = event.key === "ArrowDown" ? 24 : event.key === "ArrowUp" ? -24 : 0;
+  if (!delta && event.key !== "Home") {
+    return;
+  }
+  event.preventDefault();
+  if (event.key === "Home") {
+    resetCellSize(target);
+    return;
+  }
+  resizeCell(target, target.getBoundingClientRect().height + delta);
+}
+
+/** Refreshes terminal fit or overlay geometry after a cell height changes. */
+function refreshAfterCellResize(target) {
+  if (target === terminalHost) {
+    fitTerminal();
+  }
+  scheduleEditorGeometry();
 }
 
 /** Handles one message from the extension host. */
@@ -76,13 +164,16 @@ function handleHostMessage(message) {
   }
   if (message.type === "pythonStarted" && Number.isFinite(message.execution)) {
     pendingExecution = message.execution;
-    inputPrompt.textContent = `In [${pendingExecution}]:`;
+    setInputPrompt(`In [${pendingExecution}]:`);
   }
   if (message.type === "pythonResult") {
     showOutput(message.execution || pendingExecution, cleanPythonResult(message.text), Boolean(message.ok));
   }
+  if (message.type === "resetPythonCell") {
+    resetPythonCell();
+  }
   if (message.type === "measureEditor") {
-    if (message.show) {
+    if (message.show && !pythonCell?.classList.contains("disabled")) {
       showOverlayEditor();
     } else {
       sendEditorGeometry();
@@ -92,7 +183,10 @@ function handleHostMessage(message) {
 
 /** Updates the status label and writes the initial terminal snapshot once. */
 function updateStatus(snapshot) {
-  status.textContent = snapshot.ready ? "Python 3 / Django ready" : `${snapshot.state} / ${snapshot.mode}`;
+  status.dataset.ready = snapshot.ready ? "true" : "false";
+  setSetupReady(Boolean(snapshot.ready));
+  setPythonReady(Boolean(snapshot.ready));
+  statusText.textContent = snapshot.ready ? "Python 3 / Django ready" : `${snapshot.state} / ${snapshot.mode}`;
   if (snapshot.state === "starting" && !snapshot.text) {
     terminal.clear();
     snapshotWritten = false;
@@ -104,9 +198,56 @@ function updateStatus(snapshot) {
   }
 }
 
+/** Minimizes the setup terminal while Django shell input is active. */
+function setSetupReady(ready) {
+  if (!setupCell || !terminalHost) {
+    return;
+  }
+  const wasMinimized = setupCell.classList.contains("minimized");
+  setupCell.classList.toggle("minimized", ready);
+  focusTerminalButton.disabled = ready;
+  if (ready && !wasMinimized) {
+    terminalHost.dataset.expandedHeight = terminalHost.style.height;
+    terminalHost.style.height = "34px";
+    terminal.blur?.();
+  }
+  if (!ready && wasMinimized) {
+    terminalHost.style.height = terminalHost.dataset.expandedHeight || "";
+    delete terminalHost.dataset.expandedHeight;
+    setTimeout(() => terminal.focus(), 0);
+  }
+  fitTerminal();
+}
+
+/** Updates the visible input prompt without dropping its notebook styling wrapper. */
+function setInputPrompt(text) {
+  if (inputPromptText) {
+    inputPromptText.textContent = text;
+  }
+}
+
+/** Enables Python input only after the setup terminal has attached the backend. */
+function setPythonReady(ready) {
+  pythonCell?.classList.toggle("disabled", !ready);
+}
+
 /** Shows the workbench overlay editor used for Python input. */
 function showOverlayEditor() {
+  if (pythonCell?.classList.contains("disabled")) {
+    return;
+  }
   vscode.postMessage({ rect: editorGeometry(), type: "showOverlayEditor" });
+}
+
+/** Schedules one editor geometry measurement on the next animation frame. */
+function scheduleEditorGeometry() {
+  if (geometryFrame) {
+    return;
+  }
+  geometryFrame = requestAnimationFrame(() => {
+    geometryFrame = 0;
+    sendEditorGeometry();
+  });
 }
 
 /** Sends the editor anchor rectangle to the extension host. */
@@ -153,6 +294,13 @@ function showOutput(count, result, ok) {
 function clearOutput() {
   currentOutput.classList.add("outputHidden");
   outputList.textContent = "";
+}
+
+/** Clears Python prompt and output state after a backend restart. */
+function resetPythonCell() {
+  pendingExecution = 0;
+  setInputPrompt("In\u00a0[\u00a0]:");
+  clearOutput();
 }
 
 /** Strips ANSI control sequences from Python backend result text. */

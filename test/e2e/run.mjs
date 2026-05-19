@@ -12,11 +12,12 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 async function main() {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "django-shell-e2e-"));
   const extensionPath = prepareDevelopmentExtension();
+  const manifest = JSON.parse(fs.readFileSync(path.join(extensionPath, "package.json"), "utf8"));
   fs.mkdirSync(path.join(workspace, ".vscode"), { recursive: true });
   fs.writeFileSync(path.join(workspace, ".vscode", "settings.json"), JSON.stringify({ "djangoShell.autoActivateWorkspaceVenv": false }, null, 2));
   await runTests({
     extensionDevelopmentPath: extensionPath,
-    extensionTestsEnv: { DJANGO_SHELL_E2E: "1" },
+    extensionTestsEnv: { DJANGO_SHELL_E2E: "1", DJANGO_SHELL_E2E_EXTENSION_ID: `${manifest.publisher}.${manifest.name}` },
     extensionTestsPath: path.join(ROOT, "test", "e2e", "suite", "index.js"),
     launchArgs: [workspace],
     reuseMachineInstall: Boolean(process.env.VSCODE_E2E_EXECUTABLE),

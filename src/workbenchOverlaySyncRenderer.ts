@@ -1,5 +1,7 @@
 // Renderer-side editor text synchronization for the Django shell overlay.
 
+import { overlayPythonRangeRendererSource } from "./workbenchOverlayPythonRangeRenderer";
+
 /** Builds JavaScript that mirrors overlay Monaco text into the extension host. */
 export function overlaySyncRendererSource(): string {
   return `
@@ -75,14 +77,17 @@ export function overlaySyncRendererSource(): string {
     /** Returns user text even when backspace merges it into the marker line. */
     function __dsoUserText(text, root) {
       const value = String(text || "");
-      const index = value.indexOf(__DSO_INPUT_MARKER);
+      const index = value.lastIndexOf(__DSO_INPUT_MARKER);
       if (index < 0) {
         const prefix = __dsoCanonicalPrefix(root);
         const prelude = prefix.slice(0, -(__DSO_INPUT_MARKER.length + 1));
         return value.startsWith(prelude) ? value.slice(prelude.length) : "";
       }
       const after = value.slice(index + __DSO_INPUT_MARKER.length);
-      return after.startsWith("\\r\\n") ? after.slice(2) : (after.startsWith("\\n") ? after.slice(1) : after);
+      let userText = after.startsWith("\\r\\n") ? after.slice(2) : (after.startsWith("\\n") ? after.slice(1) : after);
+      const prefix = __dsoCanonicalPrefix(root);
+      while (userText.startsWith(prefix)) { userText = userText.slice(prefix.length); }
+      return userText;
     }
 
     /** Restores the generated prefix if an edit crosses the hidden boundary. */
@@ -93,6 +98,12 @@ export function overlaySyncRendererSource(): string {
       const prefix = __dsoCanonicalPrefix(root);
       const text = model.getValue();
       if (text.startsWith(prefix)) {
+        const normalizedText = prefix + __dsoUserText(text, root);
+        if (normalizedText !== text) {
+          root.__dsoPreludeRepairing = true;
+          try { model.setValue(normalizedText); __dsoLog(post, "prelude.guard.dedupe", { prefixLines: __dsoLineCount(prefix) }); } catch (eDedupe) {}
+          root.__dsoPreludeRepairing = false;
+        }
         root.__dsoProtectedPrefix = prefix;
         __dsoApplyPreludeView(root, editor, model, __dsoFindInputStartLine(model));
         return false;
@@ -169,106 +180,7 @@ export function overlaySyncRendererSource(): string {
       __dsoInstallPreludeGuard(root, editor, __dsoPost);
     };
 
-    /** Returns a shell-style prompt label for one visible input line. */
-    function __dsoPromptForLine(model, startLine, line) {
-      if (line < startLine) { return ""; }
-      const text = model && model.getLineContent ? model.getLineContent(line) : "";
-      const previous = line > startLine && model && model.getLineContent ? model.getLineContent(line - 1) : "";
-      return __dsoIndent(text) > 0 || __dsoBlockHeader(previous) ? "..." : ">>>";
-    }
-
-    /** Returns the first user-editable line after the generated prelude. */
-    function __dsoInputStartLine(root, model, lineNumber) {
-      const stored = root && root.__dsoUserStartLine ? root.__dsoUserStartLine : __dsoFindInputStartLine(model);
-      return Math.min(Math.max(1, stored), Math.max(1, Math.min(lineNumber, model.getLineCount())));
-    }
-
-    /** Returns the logical Python statement or block around the cursor. */
-    function __dsoExecutionRange(root, model, lineNumber) {
-      const floor = __dsoInputStartLine(root, model, lineNumber);
-      const cursor = __dsoNonBlankCursorLine(model, Math.max(floor, lineNumber), floor);
-      const start = __dsoStatementStart(model, cursor, floor);
-      let end = __dsoStatementEnd(model, start, cursor);
-      while (end > start && !model.getLineContent(end).trim()) { end--; }
-      return { end: end, start: start };
-    }
-
-    /** Returns the closest non-empty cursor line without crossing the prelude boundary. */
-    function __dsoNonBlankCursorLine(model, lineNumber, floor) {
-      let line = Math.min(lineNumber, model.getLineCount());
-      while (line > floor && !model.getLineContent(line).trim()) { line--; }
-      return line;
-    }
-
-    /** Returns the leading whitespace width for one source line. */
-    function __dsoIndent(line) {
-      const match = String(line || "").match(/^\\s*/);
-      return match ? match[0].length : 0;
-    }
-
-    /** Returns the indentation that should be used after one Python line. */
-    function __dsoNextIndent(model, lineNumber) {
-      const text = model && model.getLineContent ? model.getLineContent(Math.min(lineNumber, model.getLineCount())) : "";
-      const match = String(text || "").match(/^\\s*/);
-      const base = match ? match[0] : "";
-      return __dsoBlockHeader(text) ? base + "    " : base;
-    }
-
-    /** Returns whether a line starts a Python block suite. */
-    function __dsoBlockHeader(line) {
-      return /:\\s*(?:#.*)?$/.test(String(line || "").trimEnd());
-    }
-
-    /** Returns whether a line continues a prior compound statement. */
-    function __dsoCompoundFollower(line) {
-      return /^(?:elif|else|except|finally)\\b/.test(String(line || "").trimStart());
-    }
-
-    /** Returns the first line of the Python statement containing the cursor. */
-    function __dsoStatementStart(model, lineNumber, floor) {
-      const line = model.getLineContent(lineNumber);
-      const indent = __dsoIndent(line);
-      let start = lineNumber;
-      if (indent > 0 || __dsoCompoundFollower(line)) {
-        for (let index = lineNumber - 1; index >= floor; index--) {
-          const candidate = model.getLineContent(index);
-          if (candidate.trim() && __dsoIndent(candidate) < indent && __dsoBlockHeader(candidate)) { start = index; break; }
-          if (candidate.trim() && indent === 0 && __dsoIndent(candidate) === 0 && __dsoBlockHeader(candidate)) { start = index; break; }
-        }
-      }
-      return __dsoCompoundPrefixStart(model, start, floor);
-    }
-
-    /** Includes preceding if/try siblings for else, elif, except, and finally blocks. */
-    function __dsoCompoundPrefixStart(model, start, floor) {
-      if (!__dsoCompoundFollower(model.getLineContent(start))) { return start; }
-      const baseIndent = __dsoIndent(model.getLineContent(start));
-      for (let index = start - 1; index >= floor; index--) {
-        const text = model.getLineContent(index);
-        if (!text.trim()) { continue; }
-        if (__dsoIndent(text) < baseIndent) { break; }
-        if (__dsoIndent(text) === baseIndent && __dsoBlockHeader(text)) {
-          start = index;
-          if (!__dsoCompoundFollower(text)) { break; }
-        }
-      }
-      return start;
-    }
-
-    /** Returns the last line of the Python statement containing the cursor. */
-    function __dsoStatementEnd(model, start, cursor) {
-      if (!__dsoBlockHeader(model.getLineContent(start))) { return cursor; }
-      const baseIndent = __dsoIndent(model.getLineContent(start));
-      let end = Math.max(start, cursor);
-      for (let index = start + 1; index <= model.getLineCount(); index++) {
-        const text = model.getLineContent(index);
-        if (!text.trim()) { if (index <= cursor) { end = index; } continue; }
-        const indent = __dsoIndent(text);
-        if (indent <= baseIndent && index > start + 1 && !__dsoCompoundFollower(text)) { break; }
-        end = index;
-      }
-      return end;
-    }
+    ${overlayPythonRangeRendererSource()}
 
     /** Returns the selected source or current logical Python block with its source range. */
     function __dsoEnterPayload(root, editor) {
@@ -389,7 +301,7 @@ export function overlaySyncRendererSource(): string {
         return;
       }
       __dsoLog(post, "enter.install", { hasNode: true, sameEditor: root.__dsoEnterEditor === editor });
-      const execute = function (event, source) {
+      const execute = function (event, source, allowContinuation) {
         const inputStartLine = root.__dsoInputStartLine || 1;
         const payload = __dsoEnterPayload(root, editor);
         if (!payload.code.trim()) {
@@ -413,7 +325,7 @@ export function overlaySyncRendererSource(): string {
         __dsoRunCode(post, payload.code).then(function (outcome) {
           if (outcome && outcome.executed === false) {
             __dsoLog(post, "enter.incomplete", { chars: payload.code.length, inputStartLine: inputStartLine, source: source });
-            __dsoInsertNewline(editor, post, source + "-incomplete");
+            if (allowContinuation !== false) { __dsoInsertNewline(editor, post, source + "-incomplete"); }
             return;
           }
           __dsoLog(post, "enter.execute", { end: payload.range ? payload.range.end : 0, inputStartLine: inputStartLine, source: source, start: payload.range ? payload.range.start : 0 });
@@ -426,7 +338,11 @@ export function overlaySyncRendererSource(): string {
         if (!__dsoIsEnter(event, raw)) { return; }
         const suggest = __dsoSuggestOpen();
         __dsoLog(post, "key.enter", { alt: !!raw.altKey, composing: !!raw.isComposing, ctrl: !!raw.ctrlKey, meta: !!raw.metaKey, shift: !!raw.shiftKey, source: source, suggest: suggest });
-        if (raw.metaKey || raw.ctrlKey || raw.altKey || raw.isComposing || suggest) { return; }
+        if (raw.metaKey) {
+          execute(event, source + "-cmd", false);
+          return;
+        }
+        if (raw.ctrlKey || raw.altKey || raw.isComposing || suggest) { return; }
         if (raw.shiftKey) {
           if (event.preventDefault) { event.preventDefault(); }
           if (event.stopPropagation) { event.stopPropagation(); }
@@ -437,10 +353,17 @@ export function overlaySyncRendererSource(): string {
           __dsoInsertNewline(editor, post, source);
           return;
         }
-        execute(event, source);
+        execute(event, source, true);
       };
-      const command = editor.addCommand ? editor.addCommand(3, function () { __dsoLog(post, "command.enter", { source: "command" }); execute(null, "command"); }) : null;
+      const command = editor.addCommand ? editor.addCommand(3, function () {
+        if (__dsoSuggestOpen()) { __dsoLog(post, "command.enter.suggest", { source: "command" }); return; }
+        __dsoLog(post, "command.enter", { source: "command" });
+        execute(null, "command", true);
+      }, "!suggestWidgetVisible && !parameterHintsVisible") : null;
       const shiftCommand = editor.addCommand ? editor.addCommand(1027, function () { __dsoLog(post, "command.shiftEnter", { source: "command" }); __dsoInsertNewline(editor, post, "command"); }) : null;
+      const cmdCommand = editor.addCommand ? editor.addCommand(2051, function () { __dsoLog(post, "command.cmdEnter", { source: "command" }); execute(null, "command-cmd", false); }) : null;
+      root.__dsoRunCurrentInput = function () { return execute(null, "host-command-cmd", false) ? "requested" : "empty"; };
+      window.__dsoRunCurrentOverlayInput = function () { const activeRoot = document.getElementById("django-shell-overlay"); return activeRoot && activeRoot.__dsoRunCurrentInput ? activeRoot.__dsoRunCurrentInput() : "missing-root"; };
       const keyDisposable = editor.onKeyDown ? editor.onKeyDown(function (event) { run(event, "monaco"); }) : null;
       const docListener = function (event) { if (node.contains(event.target)) { run(event, "document"); } };
       const nodeListener = function (event) { run(event, "node"); };
@@ -461,6 +384,7 @@ export function overlaySyncRendererSource(): string {
         try { keyDisposable && keyDisposable.dispose && keyDisposable.dispose(); } catch (eKeyDispose) {}
         try { command && editor._standaloneKeybindingService && editor._standaloneKeybindingService.removeDynamicKeybinding && editor._standaloneKeybindingService.removeDynamicKeybinding(command); } catch (eCommandDispose) {}
         try { shiftCommand && editor._standaloneKeybindingService && editor._standaloneKeybindingService.removeDynamicKeybinding && editor._standaloneKeybindingService.removeDynamicKeybinding(shiftCommand); } catch (eShiftDispose) {}
+        try { cmdCommand && editor._standaloneKeybindingService && editor._standaloneKeybindingService.removeDynamicKeybinding && editor._standaloneKeybindingService.removeDynamicKeybinding(cmdCommand); } catch (eCmdDispose) {}
         window.removeEventListener("keydown", windowListener, true);
         document.removeEventListener("keydown", docListener, true);
         node.removeEventListener("keydown", nodeListener, true);

@@ -130,6 +130,14 @@ export function overlayWidgetRendererSource(): string {
       document.addEventListener("scroll", schedule, true);
       root.__dsoWidgetClampInstalled = true;
       root.__dsoWidgetClampObserver = observer;
+      /** Stops popup clamping listeners for a disposed overlay root. */
+      root.__dsoWidgetClampCleanup = function () {
+        try { observer.disconnect(); } catch (eWidgetObserver) {}
+        window.removeEventListener("resize", schedule, true);
+        document.removeEventListener("scroll", schedule, true);
+        root.__dsoWidgetClampInstalled = false;
+        root.__dsoWidgetClampObserver = null;
+      };
       schedule();
     }
   `;

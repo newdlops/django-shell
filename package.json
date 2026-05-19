@@ -2,10 +2,35 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "0.0.1",
-  "publisher": "local",
+  "version": "0.0.2",
+  "publisher": "newdlops",
   "license": "UNLICENSED",
-  "private": true,
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/newdlops/django-shell.git"
+  },
+  "bugs": {
+    "url": "https://github.com/newdlops/django-shell/issues"
+  },
+  "homepage": "https://github.com/newdlops/django-shell#readme",
+  "categories": [
+    "Other",
+    "Notebooks"
+  ],
+  "keywords": [
+    "django",
+    "python",
+    "shell",
+    "repl",
+    "console",
+    "notebook"
+  ],
+  "galleryBanner": {
+    "color": "#0d4f3a",
+    "theme": "dark"
+  },
+  "qna": false,
   "main": "./out/extension.js",
   "extensionDependencies": [
     "ms-python.python",
@@ -51,6 +76,12 @@
         "title": "Django Shell: Show Overlay Editor",
         "category": "Django Shell",
         "icon": "$(edit)"
+      },
+      {
+        "command": "djangoShell.overlayRunCurrentInput",
+        "title": "Django Shell: Run Current Python Input",
+        "category": "Django Shell",
+        "icon": "$(run)"
       },
       {
         "command": "djangoShell.showEnvironment",
@@ -157,6 +188,12 @@
         "when": "editorTextFocus && editorLangId == 'python' && resourceScheme == 'file' && resourceFilename == 'console-cell.py' && !editorReadonly"
       },
       {
+        "command": "djangoShell.overlayRunCurrentInput",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "djangoShell.overlayVisible"
+      },
+      {
         "command": "djangoShell.acceptInput",
         "key": "enter",
         "mac": "enter",
@@ -219,13 +256,14 @@
     "build:terminal-renderer": "esbuild media/terminalRendererSource.js --bundle --format=esm --loader:.css=text --outfile=media/dist/terminalRenderer.js",
     "check:guidelines": "node scripts/check-code-guidelines.mjs",
     "compile": "tsc -p ./ && npm run build:renderer",
+    "vscode:prepublish": "npm run compile",
     "test": "npm run compile && node --test test/*.test.mjs",
     "test:e2e": "npm run compile && node test/e2e/run.mjs",
-    "check": "npm run check:guidelines && npm run test"
+    "check": "npm run check:guidelines && npm run test",
+    "package": "npm run check && npx --yes @vscode/vsce package",
+    "publish": "npm run check && npm run test:e2e && npx --yes @vscode/vsce publish"
   },
   "dependencies": {
-    "@xterm/addon-fit": "^0.11.0",
-    "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.1.0",
     "ws": "^8.20.1"
   },
@@ -234,6 +272,8 @@
     "@types/vscode": "^1.92.0",
     "@types/vscode-notebook-renderer": "^1.72.4",
     "@types/ws": "^8.18.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "@vscode/test-electron": "^2.5.2",
     "esbuild": "^0.28.0",
     "typescript": "^5.5.4"

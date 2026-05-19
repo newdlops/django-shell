@@ -1,0 +1,43 @@
+<!-- Marketplace icon source for the Django Shell extension. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Django Shell">
+  <defs>
+    <linearGradient id="bg" x1="18" y1="10" x2="112" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d4f3a"/>
+      <stop offset="0.62" stop-color="#0a2f35"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="26" y1="29" x2="103" y2="93" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#132f3f"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="57" y1="64" x2="94" y2="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#60a5fa"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="72" y1="79" x2="106" y2="105" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fde68a"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="128" height="128" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="7" stdDeviation="8" flood-color="#020617" flood-opacity="0.38"/>
+    </filter>
+  </defs>
+  <rect width="128" height="128" rx="29" fill="url(#bg)"/>
+  <path d="M19 35C34 19 58 15 81 23C101 30 113 48 114 69C115 92 100 110 78 116C53 122 30 113 19 93C8 74 6 50 19 35Z" fill="#34d399" opacity="0.12"/>
+  <g filter="url(#shadow)">
+    <rect x="23" y="29" width="82" height="66" rx="14" fill="url(#panel)" stroke="#5eead4" stroke-width="3"/>
+    <path d="M23 45H105" stroke="#2dd4bf" stroke-opacity="0.42" stroke-width="2"/>
+    <circle cx="37" cy="37" r="3" fill="#f87171"/>
+    <circle cx="48" cy="37" r="3" fill="#fbbf24"/>
+    <circle cx="59" cy="37" r="3" fill="#34d399"/>
+    <path d="M38 57L49 67L38 77" fill="none" stroke="#6ee7b7" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M57 78H80" stroke="#fde68a" stroke-width="7" stroke-linecap="round"/>
+  </g>
+  <g filter="url(#shadow)">
+    <path d="M70 61H92C100 61 106 67 106 75V86H82C74 86 68 80 68 72V63C68 62 69 61 70 61Z" fill="url(#blue)"/>
+    <circle cx="84" cy="72" r="2.6" fill="#dbeafe"/>
+    <path d="M58 84H82C90 84 96 90 96 98V104C96 107 94 109 91 109H69C61 109 55 103 55 95V86C55 85 56 84 58 84Z" fill="url(#gold)"/>
+    <circle cx="76" cy="98" r="2.6" fill="#78350f"/>
+    <path d="M68 84H90" stroke="#0f172a" stroke-opacity="0.2" stroke-width="3" stroke-linecap="round"/>
+  </g>
+</svg>

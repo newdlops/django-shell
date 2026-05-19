@@ -22,8 +22,8 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   /** Opens the file document so file-only language extensions can attach to it. */
   activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(this);
-    void this.writeEditor();
-    void this.writeAnalysis();
+    void this.writeEditor(false);
+    void this.writeAnalysis(false);
   }
 
   /** Returns how many generated lines are inserted before user code in the analysis document. */
@@ -53,14 +53,14 @@ export class OverlayMemoryDocument implements vscode.Disposable {
 
   /** Synchronizes editor text into the in-memory TextDocument. */
   async sync(text: string): Promise<void> {
-    const userText = extractUserText(text);
+    const userText = extractUserText(text, this.prelude);
     const changed = userText !== this.text;
     this.logger?.log("overlay.memory.sync", { ...textFields(userText), changed, fullLines: textFields(text).lines });
     if (!changed) {
       return;
     }
     this.text = userText;
-    await Promise.all([this.writeEditor(), this.writeAnalysis()]);
+    await Promise.all([this.writeEditor(false), this.writeAnalysis(false)]);
   }
 
   /** Updates hidden import text used for file-scheme language analysis. */
@@ -75,18 +75,29 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     void this.writeAnalysis();
   }
 
+  /** Clears user input and generated imports for a fresh shell session. */
+  async reset(): Promise<void> {
+    const changed = this.text !== "" || this.prelude !== "";
+    this.logger?.log("overlay.memory.reset", { changed });
+    this.text = "";
+    this.prelude = "";
+    await Promise.all([this.writeEditor(false), this.writeAnalysis(false)]);
+  }
+
   /** Writes generated analysis text into the dirty editor document without saving it. */
-  private async writeEditor(): Promise<void> {
+  private async writeEditor(mergeLive = true): Promise<void> {
     const document = await this.ensureEditorOpen();
-    this.mergeLiveUserText(document);
+    if (mergeLive) {
+      this.mergeLiveUserText(document);
+    }
     const text = this.editorText();
     this.logger?.log("overlay.memory.write", { ...textFields(text), kind: "editor", offset: this.lineOffset() });
     await writeDocument(document, this.editorUri, text);
   }
 
   /** Writes generated prelude plus user text into the hidden analysis document. */
-  private async writeAnalysis(): Promise<void> {
-    if (this.editorPromise) {
+  private async writeAnalysis(mergeLive = true): Promise<void> {
+    if (mergeLive && this.editorPromise) {
       this.mergeLiveUserText(await this.editorPromise);
     }
     const document = await this.ensureAnalysisOpen();
@@ -119,7 +130,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   /** Preserves unsynced editor input before writing generated prelude changes. */
   private mergeLiveUserText(document: vscode.TextDocument): void {
     const fullText = document.getText();
-    const userText = extractUserText(fullText);
+    const userText = extractUserText(fullText, this.prelude);
     if (userText === this.text) {
       return;
     }
@@ -150,10 +161,15 @@ function prefixLineCount(prelude: string): number {
 }
 
 /** Returns the user-editable text after the generated marker. */
-function extractUserText(text: string): string {
+function extractUserText(text: string, prelude = ""): string {
   const marker = `${INPUT_MARKER}\n`;
-  const index = text.indexOf(marker);
-  return index >= 0 ? text.slice(index + marker.length) : text;
+  const index = text.lastIndexOf(marker);
+  let userText = index >= 0 ? text.slice(index + marker.length) : prelude && text.startsWith(prelude) ? text.slice(prelude.length) : text;
+  const prefix = `${prelude}${marker}`;
+  while (prelude && userText.startsWith(prefix)) {
+    userText = userText.slice(prefix.length);
+  }
+  return userText;
 }
 
 /** Opens one Python document. */
@@ -168,11 +184,7 @@ async function ensureBackingFile(uri: vscode.Uri, text: string): Promise<void> {
   const directory = path.dirname(uri.fsPath);
   await vscode.workspace.fs.createDirectory(vscode.Uri.file(directory));
   await ensureIgnoredShadowDirectory(directory);
-  try {
-    await vscode.workspace.fs.stat(uri);
-  } catch {
-    await vscode.workspace.fs.writeFile(uri, Buffer.from(text, "utf8"));
-  }
+  await vscode.workspace.fs.writeFile(uri, Buffer.from(text, "utf8"));
 }
 
 /** Replaces an open document's contents without saving it to disk. */
@@ -185,3 +197,5 @@ async function writeDocument(document: vscode.TextDocument, uri: vscode.Uri, tex
   edit.replace(uri, new vscode.Range(document.positionAt(0), document.positionAt(current.length)), text);
   await vscode.workspace.applyEdit(edit);
 }
+
+export const __test = { extractUserText };

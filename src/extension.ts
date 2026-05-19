@@ -23,6 +23,7 @@ export function activate(context: vscode.ExtensionContext): void {
   if (process.env.DJANGO_SHELL_E2E === "1") {
     context.subscriptions.push(
       environmentOutput,
+      vscode.commands.registerCommand("djangoShell.e2eRestartKernel", () => customConsole.e2eRestartKernel()),
       vscode.commands.registerCommand("djangoShell.e2eSnapshot", () => customConsole.e2eSnapshot())
     );
     return;

@@ -142,11 +142,12 @@ function nonBlankCursorLine(document: vscode.TextDocument, lineNumber: number, f
 
 /** Returns the first line of the Python statement containing the cursor. */
 function statementStart(document: vscode.TextDocument, lineNumber: number, floor: number): number {
-  const line = document.lineAt(lineNumber).text;
+  const bracketStart = bracketStatementStart(document, lineNumber, floor);
+  const line = document.lineAt(bracketStart).text;
   const indent = indentation(line);
-  let start = lineNumber;
+  let start = bracketStart;
   if (indent > 0 || isCompoundFollower(line)) {
-    for (let index = lineNumber - 1; index >= floor; index -= 1) {
+    for (let index = bracketStart - 1; index >= floor; index -= 1) {
       const candidate = document.lineAt(index).text;
       if (candidate.trim() && indentation(candidate) < indent && isBlockHeader(candidate)) {
         start = index;
@@ -187,11 +188,12 @@ function compoundPrefixStart(document: vscode.TextDocument, start: number, floor
 
 /** Returns the last line of the Python statement containing the cursor. */
 function statementEnd(document: vscode.TextDocument, start: number, cursor: number): number {
+  const bracketEnd = bracketStatementEnd(document, start, cursor);
   if (!isBlockHeader(document.lineAt(start).text)) {
-    return cursor;
+    return bracketEnd;
   }
   const baseIndent = indentation(document.lineAt(start).text);
-  let end = Math.max(start, cursor);
+  let end = Math.max(start, bracketEnd);
   for (let index = start + 1; index < document.lineCount; index += 1) {
     const text = document.lineAt(index).text;
     if (!text.trim()) {
@@ -204,7 +206,7 @@ function statementEnd(document: vscode.TextDocument, start: number, cursor: numb
     if (indent <= baseIndent && index > start + 1 && !isCompoundFollower(text)) {
       break;
     }
-    end = index;
+    end = Math.max(end, index);
   }
   return end;
 }
@@ -254,7 +256,70 @@ async function indentInsertedLine(document: vscode.TextDocument, sourceLine: num
 function nextIndent(document: vscode.TextDocument, lineNumber: number): string {
   const text = document.lineAt(Math.min(lineNumber, document.lineCount - 1)).text;
   const base = text.match(/^\s*/)?.[0] ?? "";
-  return isBlockHeader(text) ? `${base}    ` : base;
+  return isBlockHeader(text) || bracketDelta(text) > 0 ? `${base}    ` : base;
+}
+
+/** Returns the top-level statement start for bracketed continuation lines. */
+function bracketStatementStart(document: vscode.TextDocument, lineNumber: number, floor: number): number {
+  let depth = 0;
+  let start = lineNumber;
+  for (let index = floor; index <= lineNumber; index += 1) {
+    const text = document.lineAt(index).text;
+    if (text.trim() && depth === 0) {
+      start = index;
+    }
+    depth = Math.max(0, depth + bracketDelta(text, depth));
+  }
+  return start;
+}
+
+/** Returns the statement end after bracketed continuations close. */
+function bracketStatementEnd(document: vscode.TextDocument, start: number, cursor: number): number {
+  let depth = 0;
+  let end = Math.max(start, cursor);
+  for (let index = start; index < document.lineCount; index += 1) {
+    const text = document.lineAt(index).text;
+    if (text.trim()) {
+      end = index;
+    }
+    depth = Math.max(0, depth + bracketDelta(text, depth));
+    if (index >= cursor && depth <= 0) {
+      break;
+    }
+  }
+  return end;
+}
+
+/** Returns bracket balance change for one Python line, ignoring simple strings and comments. */
+function bracketDelta(line: string, depth = 0): number {
+  const pairs: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+  const closes = new Set([")", "]", "}"]);
+  let quote = "";
+  let delta = 0;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    const previous = index > 0 ? line[index - 1] : "";
+    if (quote) {
+      if (char === quote && previous !== "\\") {
+        quote = "";
+      }
+      continue;
+    }
+    if (char === "#") {
+      break;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (pairs[char]) {
+      delta += 1;
+    }
+    if (closes.has(char)) {
+      delta -= 1;
+    }
+  }
+  return delta;
 }
 
 /** Returns a compact line count for diagnostics. */

@@ -1,7 +1,7 @@
 // Renderer-side workbench overlay source for the Django shell Python cell.
-
 import { overlaySyncRendererSource } from "./workbenchOverlaySyncRenderer";
 import { overlayWidgetRendererSource } from "./workbenchOverlayWidgetRenderer";
+import { overlayCleanupRendererSource } from "./workbenchOverlayCleanupRenderer";
 /** Builds the JavaScript injected into the focused VS Code workbench window. */
 export function overlayRendererSource(modelUri: string): string {
   return `
@@ -93,6 +93,7 @@ export function overlayRendererSource(modelUri: string): string {
           try { child = value[keys[i]]; } catch (eChildRead) { continue; }
           if (__dsoIsInst(child)) { __dsoRemember(caps.insts, child, 24); }
           if (__dsoIsModelSvc(child)) { __dsoRemember(caps.modelSvcs, child, 24); }
+          if (child && typeof child === "object") { try { const nested = Object.getOwnPropertyNames(child); for (let j = 0; j < nested.length; j++) { let grand; try { grand = child[nested[j]]; } catch (eGrandRead) { continue; } if (__dsoIsInst(grand)) { __dsoRemember(caps.insts, grand, 24); } if (__dsoIsModelSvc(grand)) { __dsoRemember(caps.modelSvcs, grand, 24); } } } catch (eNestedKeys) {} }
         }
       } catch (eKeys) {}
     }
@@ -220,8 +221,10 @@ export function overlayRendererSource(modelUri: string): string {
       for (let i = 0; i < caps.modelSvcs.length; i++) {
         if (!__dsoValidateModelSvc(caps.modelSvcs[i])) { modelSvc = caps.modelSvcs[i]; break; }
       }
-      return caps.ctors[0] && inst && modelSvc
-        ? { ctor: caps.ctors[0], inst: inst, modelSvc: modelSvc }
+      let model = null;
+      if (!modelSvc) { for (let i = 0; i < caps.widgets.length; i++) { try { const candidate = caps.widgets[i].getModel && caps.widgets[i].getModel(); if (candidate && String(candidate.uri) === window.__djangoShellOverlayModelUri) { model = candidate; break; } } catch (eModel) {} } }
+      return caps.ctors[0] && inst && (modelSvc || model)
+        ? { ctor: caps.ctors[0], inst: inst, model: model, modelSvc: modelSvc }
         : null;
     }
 
@@ -260,13 +263,13 @@ export function overlayRendererSource(modelUri: string): string {
     function __dsoCreateWorkbenchEditor(host) {
       const factory = __dsoFactory();
       if (!factory) { return null; }
-      const options = { acceptSuggestionOnEnter: "on", automaticLayout: true, fixedOverflowWidgets: false, folding: true, glyphMargin: false, hover: { enabled: true }, lineNumbers: "on", lineNumbersMinChars: 3, minimap: { enabled: false }, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
+      const options = { acceptSuggestionOnEnter: "on", automaticLayout: true, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, lineNumbers: "on", lineNumbersMinChars: 3, minimap: { enabled: false }, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
       const widgetOptions = { isSimpleWidget: false };
       const editor = factory.inst.createInstance(factory.ctor, host, options, widgetOptions);
       const uri = __dsoUri(factory.modelSvc);
-      let model = null;
-      try { model = uri && factory.modelSvc.getModel(uri); } catch (eGetModel) {}
-      if (!model) {
+      let model = factory.model || null;
+      try { model = model || (uri && factory.modelSvc && factory.modelSvc.getModel(uri)); } catch (eGetModel) {}
+      if (!model && factory.modelSvc) {
         model = uri ? factory.modelSvc.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python", uri, false) : factory.modelSvc.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python");
       }
       try { if (model && model.setLanguage) { model.setLanguage("python"); } } catch (eSetLanguage) {}
@@ -283,7 +286,7 @@ export function overlayRendererSource(modelUri: string): string {
       if (!monacoApi) { return null; }
       const uri = monacoApi.Uri.parse(window.__djangoShellOverlayModelUri);
       const model = monacoApi.editor.getModel(uri) || monacoApi.editor.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python", uri);
-      return monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: true, fixedOverflowWidgets: false, folding: true, glyphMargin: false, hover: { enabled: true }, isSimpleWidget: false, lineNumbers: "on", lineNumbersMinChars: 3, minimap: { enabled: false }, model: model, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
+      return monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: true, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, isSimpleWidget: false, lineNumbers: "on", lineNumbersMinChars: 3, minimap: { enabled: false }, model: model, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
     }
 
     /** Creates or focuses the overlay editor widget. */
@@ -300,16 +303,17 @@ export function overlayRendererSource(modelUri: string): string {
         root.__dsoPendingRetries = (root.__dsoPendingRetries || 0) + 1;
         if (root.__dsoPendingRetries <= 10) {
           try { __dsoStartCapture(); } catch (ePendingCapture) { window.__dsoCaptureStartError = String(ePendingCapture && ePendingCapture.message || ePendingCapture); }
-          window.setTimeout(function () { if (root.style.display !== "none") { window.__djangoShellOverlayShow(window.__djangoShellOverlayGeometry); } }, 500);
+          root.__dsoPendingRetryTimer = window.setTimeout(function () { if (root.isConnected && root.style.display !== "none") { window.__djangoShellOverlayShow(window.__djangoShellOverlayGeometry); } }, 500);
         }
       } else {
         root.style.visibility = "visible";
         root.__dsoPendingRetries = 0; try { window.__dsoApplyPreludeHiddenArea && window.__dsoApplyPreludeHiddenArea(root, root.__djangoShellEditor); } catch (ePreludeHidden) {}
         try { window.__dsoConfigureOverlayWidgets && window.__dsoConfigureOverlayWidgets(root, root.__djangoShellEditor); } catch (eWidgetOptions) { root.__dsoLastWidgetError = String(eWidgetOptions && eWidgetOptions.message || eWidgetOptions); }
-        new ResizeObserver(function () {
+        try { root.__dsoResizeObserver && root.__dsoResizeObserver.disconnect && root.__dsoResizeObserver.disconnect(); } catch (eResizeDisconnect) {}
+        root.__dsoResizeObserver = new ResizeObserver(function () {
           const rect = host.getBoundingClientRect();
           try { root.__djangoShellEditor.layout && root.__djangoShellEditor.layout({ width: Math.max(100, rect.width), height: Math.max(80, rect.height) }); } catch (eLayout) {}
-        }).observe(host);
+        }); root.__dsoResizeObserver.observe(host);
       }
       return root.__djangoShellEditor;
     }
@@ -446,6 +450,7 @@ export function overlayRendererSource(modelUri: string): string {
 
     ${overlayWidgetRendererSource()}
     ${overlaySyncRendererSource()}
+    ${overlayCleanupRendererSource()}
     try { __dsoStartCapture(); } catch (eStartCapture) { window.__dsoCaptureStartError = String(eStartCapture && eStartCapture.message || eStartCapture); }
     window.__djangoShellOverlayShow = function (geometry) {
       __dsoEnsureStyle();
@@ -488,8 +493,7 @@ export function overlayRendererSource(modelUri: string): string {
     };
     window.__djangoShellOverlayHide = function () {
       const root = document.getElementById("django-shell-overlay");
-      if (root) { root.style.display = "none"; }
-      return "ok";
+      return window.__dsoDisposeOverlay ? window.__dsoDisposeOverlay(root) : (root ? (root.style.display = "none", "ok") : "no-overlay");
     };
   `;
 }
