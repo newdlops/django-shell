@@ -5,6 +5,7 @@ const childProcess = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const vscode = require("vscode");
+const { assertWorkbenchModelLanguageSelection } = require("./workbenchOverlayModelLanguage.js");
 
 /** Runs the extension host E2E suite. */
 async function run() {
@@ -74,6 +75,7 @@ async function run() {
   assertRestartResetGuards(extension);
   assertOverlayRendererGuards(extension);
   assertOverlayChromeIsEmbedded(extension);
+  assertWorkbenchModelLanguageSelection(extension);
   await assertGeneratedShadowCleanup(extension);
 }
 
@@ -206,6 +208,7 @@ function assertOverlayReinjectsAfterRendererLoss(extension) {
   const source = fs.readFileSync(path.join(extension.extensionPath, "out", "workbenchOverlay.js"), "utf8");
   assert.ok(source.includes("overlay-not-installed"));
   assert.ok(source.includes("await this.inject()"));
+  assert.ok(source.includes("waitForOverlayCapture"));
   assert.ok(source.includes("report.includes(\":editor:\")"));
 }
 
@@ -478,21 +481,6 @@ function fakeEditor(model, position) {
     setHiddenAreas(areas) { this.hiddenAreas = areas; },
     setPosition(next) { this.position = next; },
     updateOptions(options) { this.options = options; }
-  };
-}
-
-/** Builds a minimal DOM document for renderer source E2E checks. */
-function fakeDocument() {
-  const nodes = new Map();
-  return {
-    createElement: () => ({ parentElement: null, style: {}, textContent: "" }),
-    getElementById: (id) => nodes.get(id) ?? null,
-    head: {
-      appendChild(node) {
-        node.parentElement = this;
-        nodes.set(node.id, node);
-      }
-    }
   };
 }
 

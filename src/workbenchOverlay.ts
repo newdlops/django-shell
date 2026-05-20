@@ -16,7 +16,7 @@ export interface WorkbenchOverlayGeometry { height: number; left: number; top: n
 
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*" };
-const RENDERER_PATCH_VERSION = 25;
+const RENDERER_PATCH_VERSION = 26;
 
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
@@ -57,8 +57,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
     if (report.includes(":pending") && !report.includes("no-webview-host")) {
       const closeWarmup = await this.openWarmupEditor();
       try {
-        await delay(350);
-        report = await this.evalInWorkbench(showExpression(this.geometry));
+        report = await this.waitForOverlayCapture();
       } finally {
         await closeWarmup();
       }
@@ -333,6 +332,21 @@ export class WorkbenchOverlay implements vscode.Disposable {
         await vscode.window.tabGroups.close(tabs, true);
       }
     };
+  }
+
+  /** Polls until renderer capture has a CodeEditorWidget constructor or the editor appears. */
+  private async waitForOverlayCapture(): Promise<string> {
+    const started = Date.now();
+    let report = "";
+    while (Date.now() - started < 2500) {
+      await delay(100);
+      report = await this.evalInWorkbench(showExpression(this.geometry));
+      const ctorMatch = /\bctors=(\d+)/.exec(report);
+      if (report.includes(":editor:") || report.includes("no-webview-host") || Number(ctorMatch?.[1] ?? 0) > 0) {
+        return report;
+      }
+    }
+    return report || this.evalInWorkbench(showExpression(this.geometry));
   }
 }
 

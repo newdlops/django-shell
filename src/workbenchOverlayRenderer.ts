@@ -27,12 +27,12 @@ export function overlayRendererSource(modelUri: string): string {
     function __dsoIsInst(value) {
       return !!(value && typeof value.createInstance === "function" && typeof value.invokeFunction === "function");
     }
-
     /** Returns whether a value looks like VS Code's model service. */
     function __dsoIsModelSvc(value) {
       return !!(value && typeof value.createModel === "function" && typeof value.getModel === "function" && typeof value.getModels === "function");
     }
-
+    /** Returns whether a value looks like VS Code's text model. */
+    function __dsoIsTextModel(value) { return !!(value && value.uri && typeof value.getLanguageId === "function" && typeof value.getValue === "function" && typeof value.onDidChangeContent === "function"); }
     /** Stores one captured object in a bounded unique list. */
     function __dsoRemember(list, value, limit) {
       if (!value || list.indexOf(value) >= 0 || list.length >= limit) { return; }
@@ -52,7 +52,6 @@ export function overlayRendererSource(modelUri: string): string {
       }
       return widget.constructor || null;
     }
-
     /** Returns an error string when an instantiation service is not usable. */
     function __dsoValidateInst(inst) {
       if (!__dsoIsInst(inst)) { return "missing-inst"; }
@@ -63,13 +62,14 @@ export function overlayRendererSource(modelUri: string): string {
         return "bad-inst:" + String(e && e.message || e).slice(0, 120);
       }
     }
-
     /** Returns an error string when a model service is not usable. */
     function __dsoValidateModelSvc(modelSvc) {
       if (!__dsoIsModelSvc(modelSvc)) { return "missing-modelSvc"; }
       try {
-        modelSvc.getModels();
-        return "";
+        const models = modelSvc.getModels();
+        if (!Array.isArray(models)) { return "bad-modelSvc:models-not-array"; }
+        for (let i = 0; i < models.length; i++) { if (__dsoIsTextModel(models[i])) { return ""; } }
+        return "bad-modelSvc:no-text-model";
       } catch (e) {
         return "bad-modelSvc:" + String(e && e.message || e).slice(0, 120);
       }
@@ -246,7 +246,6 @@ export function overlayRendererSource(modelUri: string): string {
         return "status-err:" + String(e && e.message || e);
       }
     }
-
     /** Builds a Monaco URI with the captured model service's URI class. */
     function __dsoUri(modelSvc) {
       try {
@@ -258,6 +257,8 @@ export function overlayRendererSource(modelUri: string): string {
       } catch (eUri) {}
       return null;
     }
+    /** Returns a workbench-compatible Python language selection. */
+    function __dsoPythonLanguage() { return { getLanguageId: function () { return "python"; }, languageId: "python", onDidChange: function () { return { dispose: function () {} }; } }; }
 
     /** Creates a real workbench CodeEditorWidget using captured VS Code services. */
     function __dsoCreateWorkbenchEditor(host) {
@@ -270,16 +271,16 @@ export function overlayRendererSource(modelUri: string): string {
       let model = factory.model || null;
       try { model = model || (uri && factory.modelSvc && factory.modelSvc.getModel(uri)); } catch (eGetModel) {}
       if (!model && factory.modelSvc) {
-        model = uri ? factory.modelSvc.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python", uri, false) : factory.modelSvc.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python");
+        const text = window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", language = __dsoPythonLanguage();
+        model = uri ? factory.modelSvc.createModel(text, language, uri, false) : factory.modelSvc.createModel(text, language);
       }
-      try { if (model && model.setLanguage) { model.setLanguage("python"); } } catch (eSetLanguage) {}
+      try { if (model && model.setLanguage) { model.setLanguage(__dsoPythonLanguage()); } } catch (eSetLanguage) {}
       try { if (globalThis.monaco && globalThis.monaco.editor && globalThis.monaco.editor.setModelLanguage) { globalThis.monaco.editor.setModelLanguage(model, "python"); } } catch (eSetModelLanguage) {}
       if (editor && editor.setModel) { editor.setModel(model); }
       const rect = host.getBoundingClientRect();
       if (editor && editor.layout) { editor.layout({ width: Math.max(100, rect.width), height: Math.max(80, rect.height) }); }
       return editor;
     }
-
     /** Creates a standalone Monaco editor only when the workbench exposes the public API. */
     function __dsoCreateGlobalMonacoEditor(host) {
       const monacoApi = (globalThis.monaco && globalThis.monaco.editor) ? globalThis.monaco : ((window.monaco && window.monaco.editor) ? window.monaco : null);
@@ -288,7 +289,6 @@ export function overlayRendererSource(modelUri: string): string {
       const model = monacoApi.editor.getModel(uri) || monacoApi.editor.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python", uri);
       return monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: true, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, isSimpleWidget: false, lineNumbers: "on", lineNumbersMinChars: 3, minimap: { enabled: false }, model: model, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
     }
-
     /** Creates or focuses the overlay editor widget. */
     function __dsoEnsureEditor(root) {
       if (root.__djangoShellEditor) { return root.__djangoShellEditor; }
