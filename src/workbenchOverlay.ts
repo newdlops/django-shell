@@ -108,6 +108,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
 
   /** Asks the renderer-owned overlay editor to run the current cursor execution unit. */
   async runCurrentInput(): Promise<void> { await this.ensureInjected(); this.logger?.log("overlay.command.rerun.eval", { report: await this.evalInWorkbench("window.__dsoRunCurrentOverlayInput ? window.__dsoRunCurrentOverlayInput() : 'missing-runner'").catch((error: unknown) => `error:${error instanceof Error ? error.message : String(error)}`) }); }
+  /** Evaluates a renderer expression for extension host E2E tests. */
+  async e2eEvaluate(expression: string): Promise<string> { await this.ensureInjected(); return this.evalInWorkbench(expression); }
 
   /** Disposes the bridge and hides the overlay if possible. */
   dispose(): void {
@@ -319,9 +321,10 @@ export class WorkbenchOverlay implements vscode.Disposable {
 
   /** Opens an existing workspace file briefly so VS Code creates a real editor widget to capture. */
   private async openWarmupEditor(): Promise<() => Promise<void>> {
-    const uri = this.memoryDocument.editorUri;
+    const document = await vscode.workspace.openTextDocument({ content: "", language: "python" });
+    const uri = document.uri;
     const preExisting = snapshotTabUris();
-    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), {
+    await vscode.window.showTextDocument(document, {
       preserveFocus: true,
       preview: true,
       viewColumn: vscode.ViewColumn.Beside

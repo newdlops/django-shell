@@ -19,7 +19,7 @@ export class DiagnosticLogger {
 
   /** Returns whether diagnostic logging is enabled in workspace settings. */
   private enabled(): boolean {
-    return vscode.workspace.getConfiguration("djangoShell").get<boolean>("diagnosticLogging", true);
+    return vscode.workspace.getConfiguration("djangoShell").get<boolean>("diagnosticLogging", false);
   }
 }
 

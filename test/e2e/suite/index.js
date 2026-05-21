@@ -5,6 +5,7 @@ const childProcess = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const vscode = require("vscode");
+const { assertPythonCellBehavior } = require("./pythonCellBehavior.js");
 const { assertWorkbenchModelLanguageSelection } = require("./workbenchOverlayModelLanguage.js");
 
 /** Runs the extension host E2E suite. */
@@ -14,7 +15,7 @@ async function run() {
   await writePreActivationStaleOverlayFiles();
   await extension.activate();
   await vscode.commands.executeCommand("djangoShell.openConsole");
-  const opened = await waitForSnapshot((snapshot) => snapshot.panelOpen && snapshot.hasEditorAnchor && snapshot.overlayDocumentOpen && snapshot.overlayAnalysisDocumentOpen);
+  const opened = await waitForSnapshot((snapshot) => snapshot.panelOpen && snapshot.hasEditorAnchor);
   assert.equal(opened.panelVisible, true);
   assert.equal(opened.hasCellResizers, true);
   assert.equal(opened.hasNotebookChrome, true);
@@ -22,10 +23,9 @@ async function run() {
   assert.equal(opened.hasPythonIcon, true);
   assert.equal(opened.hasPythonRunButton, false);
   assert.equal(opened.hasSetupAutoMinimize, true);
-  assert.equal(opened.overlayDocumentLanguage, "python");
-  assert.equal(opened.overlayDocumentHasMarker, true);
-  assert.equal(opened.overlayAnalysisDocumentOpen, true);
-  assert.equal(opened.overlayAnalysisDocumentHasMarker, true);
+  const overlayText = await waitForOverlayText((value) => value.editor.includes("# --- django shell input ---") && value.analysis.includes("# --- django shell input ---"));
+  assert.equal(overlayText.editor.includes("# --- django shell input ---"), true);
+  assert.equal(overlayText.analysis.includes("# --- django shell input ---"), true);
   assert.equal(generatedShadowTabOpen(), false);
   await assertPreActivationStaleOverlayFilesCleaned();
 
@@ -70,6 +70,7 @@ async function run() {
   assertDjangoManagerCompletion(bridge);
   assertNoFakeInlaySemanticProviders(extension);
   assertNoStructuralFormatOnEnter(extension);
+  assertNoHiddenDocumentEnterRunner(extension);
   assertCmdEnterKeybinding(extension);
   assertOverlayReinjectsAfterRendererLoss(extension);
   assertRestartResetGuards(extension);
@@ -77,6 +78,7 @@ async function run() {
   assertOverlayChromeIsEmbedded(extension);
   assertWorkbenchModelLanguageSelection(extension);
   await assertGeneratedShadowCleanup(extension);
+  await assertPythonCellBehavior(extension);
 }
 
 /** Polls the hidden E2E snapshot command until one predicate passes. */
@@ -181,6 +183,9 @@ function pythonExecutable() {
   assert.ok(found, "Python executable is required for backend E2E probes.");
   return found;
 }
+
+/** Verifies hidden console-cell.py document changes cannot execute Python code. */
+function assertNoHiddenDocumentEnterRunner(extension) { const source = fs.readFileSync(path.join(extension.extensionPath, "out", "overlayShellCommand.js"), "utf8"); assert.equal(source.includes("onDidChangeTextDocument") || source.includes("overlay.document.enter"), false); }
 
 /** Verifies fake inlay and semantic providers do not compete with Pylance. */
 function assertNoFakeInlaySemanticProviders(extension) {
@@ -298,10 +303,8 @@ function overlayUris() {
 
 /** Replaces one open text document with the requested content. */
 async function replaceDocument(uri, text) {
-  const document = await vscode.workspace.openTextDocument(uri);
-  const edit = new vscode.WorkspaceEdit();
-  edit.replace(uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), text);
-  assert.equal(await vscode.workspace.applyEdit(edit), true);
+  await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, ".django-shell"));
+  await vscode.workspace.fs.writeFile(uri, Buffer.from(text, "utf8"));
 }
 
 /** Waits until both generated overlay documents match a predicate. */
@@ -310,15 +313,22 @@ async function waitForOverlayText(predicate, timeoutMs = 10000) {
   let last = {};
   while (Date.now() - started < timeoutMs) {
     const uris = overlayUris();
-    const editor = await vscode.workspace.openTextDocument(uris.editor);
-    const analysis = await vscode.workspace.openTextDocument(uris.analysis);
-    last = { analysis: analysis.getText(), editor: editor.getText() };
+    last = { analysis: await readTextFile(uris.analysis), editor: await readTextFile(uris.editor) };
     if (predicate(last)) {
       return last;
     }
     await delay(100);
   }
   throw new Error(`Timed out waiting for overlay documents: ${JSON.stringify(last)}`);
+}
+
+/** Reads a UTF-8 workspace file, returning an empty string while it is absent. */
+async function readTextFile(uri) {
+  try {
+    return Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
+  } catch {
+    return "";
+  }
 }
 
 /** Returns whether a URI exists. */
@@ -388,14 +398,9 @@ function assertOverlayRendererGuards(extension) {
     posts.push(payload);
     return { json: async () => ({ executed: true }) };
   });
-  commands.get(1027)();
+  assert.equal(commands.size, 0);
   assert.equal(posts.some((payload) => payload.type === "run"), false);
-  assert.equal(rerunEditor.edits[0].text, "\n");
   rerunEditor.position = { column: 2, lineNumber: 1 };
-  commands.get(2051)();
-  assert.equal(posts.some((payload) => payload.type === "run" && payload.code === "x = 1"), true);
-  posts.length = 0;
-  runnerRoot.__dsoLastEnterRunAt = 0;
   assert.equal(window.__dsoRunCurrentOverlayInput(), "requested");
   assert.equal(posts.some((payload) => payload.type === "run" && payload.code === "x = 1"), true);
 }

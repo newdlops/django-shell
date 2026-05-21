@@ -111,6 +111,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       hasPythonIcon: html.includes("pythonIcon"),
       hasPythonRunButton: html.includes("id=\"showEditor\"") || html.includes("runGlyph"),
       hasSetupAutoMinimize: html.includes("id=\"setupCell\"") && html.includes("setupCell.minimized"),
+      executionCount: this.executionCount,
       lastEditorGeometry: this.lastEditorGeometry,
       overlayAnalysisDocumentHasMarker: analysisDocument?.getText().includes("# --- django shell input ---") ?? false,
       overlayAnalysisDocumentOpen: Boolean(analysisDocument),
@@ -122,10 +123,9 @@ export class CustomDjangoConsole implements vscode.Disposable {
     };
   }
 
-  /** Restarts the console through the same path used by the webview restart button. */
-  async e2eRestartKernel(): Promise<void> {
-    await this.restartSession();
-  }
+  /** Restarts the console through the same path used by the webview restart button. */ async e2eRestartKernel(): Promise<void> { await this.restartSession(); }
+  /** Injects hidden overlay prelude lines for extension host E2E tests. */ e2eSetPrelude(importLines: string[]): void { this.overlay.updatePrelude(importLines); }
+  /** Evaluates an overlay renderer expression for extension host E2E tests. */ async e2eEvaluateOverlay(expression: string): Promise<string> { return this.overlay.e2eEvaluate(expression); }
 
   /** Releases the custom console session and webview resources. */
   dispose(): void {

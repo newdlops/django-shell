@@ -83,8 +83,7 @@ Runtime inspection needs the backend socket bridge. If the active environment on
 
 The extension creates generated Python files in `.django-shell/` to let Python language features work against Django shell input:
 
-- `console-cell.py` stores the visible overlay input.
-- `analysis.py` stores the analysis version with hidden runtime/source preludes.
+- `console-cell.py` stores provider-only runtime/source preludes plus user input; the Python cell view shows only user input.
 
 The extension overwrites these files as implementation details. They should not be edited or committed.
 
@@ -98,7 +97,7 @@ Runtime and source preludes are intentionally separated from visible input so ge
 | `djangoShell.enableCodeActions` | `false` | Forwards code actions through generated Python shadow documents. This can be expensive in large projects. |
 | `djangoShell.enableModelPreludeImports` | `false` | Scans workspace model files and imports discovered model classes into editor preludes. This can be expensive in large projects. |
 | `djangoShell.enableRuntimeCompletion` | `false` | Enables deprecated notebook-cell runtime variable completions. |
-| `djangoShell.diagnosticLogging` | `true` | Writes runtime, source analysis, and editor bridge diagnostics to the `Django Shell` output channel. |
+| `djangoShell.diagnosticLogging` | `false` | Writes runtime, source analysis, and editor bridge diagnostics to the `Django Shell` output channel. |
 
 ## Deprecated Notebook Console
 

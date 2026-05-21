@@ -1,44 +1,15 @@
-[2026-05-19T08:57:25.401Z] terminal.spawn cwd="/Users/lky/project/captain" djangoSettingsModule="zuzu.staff.settings" pathHead="/Users/lky/project/captain/.venv/bin" shell="/bin/zsh" shellArgs="-l" virtualEnv="/Users/lky/project/captain/.venv"
-[2026-05-19T08:57:25.426Z] runtime.inspector.refresh modules=0 ms=0 ok=false variables=0
-[2026-05-19T08:57:25.604Z] overlay.memory.write chars=29 lines=2 kind="analysis" offset=1
-[2026-05-19T08:57:25.613Z] overlay.memory.write chars=29 lines=2 kind="editor" offset=1
-[2026-05-19T08:57:40.148Z] terminal.command command="./zz shell alpha" djangoCandidate=true lineLength=16 mode="candidate-django" previousMode="shell" sinceSpawnMs=14748
-[2026-05-19T08:57:52.567Z] terminal.command command="38p3Z@Xqmnkiyoung" djangoCandidate=false lineLength=17 mode="candidate-django" previousMode="candidate-django" sinceSpawnMs=27167
-[2026-05-19T08:57:54.352Z] terminal.command command="<redacted>" djangoCandidate=false lineLength=16 mode="candidate-django" previousMode="candidate-django" sinceSpawnMs=28952
-[2026-05-19T08:58:21.080Z] terminal.mode mode="django" previousMode="candidate-django" sinceDjangoCommandMs=40932 sinceSpawnMs=55680
-[2026-05-19T08:58:21.081Z] backend.attach bootstrapBytes=6827 bootstrapMode="inline" runtimePath="/Users/lky/.vscode/extensions/newdlops.django-shell-0.0.2/python/django_shell_backend.py" sinceDjangoCommandMs=40933 sinceSpawnMs=55681 sessionId="custom:/Users/lky/project/captain"
-[2026-05-19T08:58:27.396Z] backend.ready host="127.0.0.1" port=44853 sessionId="custom:/Users/lky/project/captain"
-[2026-05-19T08:58:27.398Z] backend.request bytes=0 error="connect ECONNREFUSED 127.0.0.1:44853; host=127.0.0.1; endpointHost=127.0.0.1" kind="prelude" ms=2 port=44853 transport="tcp"
-[2026-05-19T08:58:27.398Z] backend.pty.request id="mpcehsjq-1" kind="prelude" queueMs=0 sessionId="custom:/Users/lky/project/captain"
-[2026-05-19T08:58:29.987Z] backend.request bytes=599854 kind="prelude" ms=2589 ok=true port=44853 transport="pty"
-[2026-05-19T08:58:29.988Z] backend.pty.request id="mpcehujo-2" kind="inspect" lightweight=true queueMs=2437 sessionId="custom:/Users/lky/project/captain"
-[2026-05-19T08:58:29.992Z] overlay.memory.prelude chars=23684 lines=240 changed=true offset=240
-[2026-05-19T08:58:29.992Z] overlay.memory.write chars=23713 lines=241 kind="editor" offset=240
-[2026-05-19T08:58:29.992Z] overlay.memory.write chars=23713 lines=241 kind="analysis" offset=240
-[2026-05-19T08:58:31.813Z] backend.request bytes=376076 kind="inspect" ms=4262 ok=true port=44853 transport="pty"
-[2026-05-19T08:58:31.813Z] runtime.inspector.refresh loadedModules=8880 modules=0 ms=4262 ok=true variables=900
-[2026-05-19T08:58:52.610Z] overlay.inject report="django-shell-overlay-shown:pending:widgets=0 insts=0 modelSvcs=0 ctors=0 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:58:52.990Z] overlay.show ms=462 report="django-shell-overlay-shown:pending:widgets=0 insts=0 modelSvcs=0 ctors=0 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:58:52.991Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
-[2026-05-19T08:58:53.667Z] overlay.show ms=375 report="django-shell-overlay-shown:pending:widgets=1 insts=4 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:58:53.668Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
-[2026-05-19T08:58:55.972Z] runtime.inspector.refresh loadedModules=8880 modules=0 ms=0 ok=true variables=900
-[2026-05-19T08:58:56.354Z] overlay.show ms=381 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:58:56.355Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
-[2026-05-19T08:59:00.531Z] runtime.inspector.refresh loadedModules=8880 modules=0 ms=0 ok=true variables=900
-[2026-05-19T08:59:00.942Z] overlay.show ms=380 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:59:00.942Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
-[2026-05-19T08:59:01.924Z] overlay.show ms=379 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:59:01.925Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
-[2026-05-19T08:59:02.116Z] overlay.show ms=376 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:59:02.117Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
-[2026-05-19T08:59:02.323Z] overlay.show ms=386 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:59:02.324Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
-[2026-05-19T08:59:02.509Z] overlay.show ms=374 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:59:02.510Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
-[2026-05-19T08:59:08.113Z] overlay.show ms=379 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:59:08.114Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
-[2026-05-19T08:59:08.545Z] overlay.show ms=377 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:59:08.546Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
-[2026-05-19T08:59:08.965Z] overlay.show ms=377 report="django-shell-overlay-shown:pending:widgets=1 insts=5 modelSvcs=0 ctors=1 factory=false editorError= widgetError= captureError="
-[2026-05-19T08:59:08.966Z] overlay.probe report="{\"root\":true,\"editor\":false,\"sync\":false,\"enter\":false,\"sameEnter\":false,\"hasRunner\":true,\"hasSync\":true,\"uri\":null,\"lines\":null,\"chars\":null,\"active\":\"webview ready\"}"
+[2026-05-21T00:18:40.589Z] [v0.1.707] zoekt selected on activation; preserving existing codesearch trigram cache.
+[2026-05-21T00:18:40.590Z] [v0.1.707] Extension activated. Ext host pid=50683, ppid=58508
+[2026-05-21T00:18:40.590Z] [v0.1.707] ripgrep: /Users/lky/Library/Application Support/Code/User/globalStorage/newdlops.intellij-styled-search/ripgrep/v15.0.1/darwin-arm64/rg
+[2026-05-21T00:18:40.591Z] [v0.1.707] Prewarm complete (lightweight only; zoekt build/index and CDP/Monaco capture disabled on activation).
+[2026-05-21T00:18:41.387Z] [v0.1.707] call graph cache metadata loaded without symbol relation buckets; derived relation cache will rebuild lazily
+[2026-05-21T00:18:41.387Z] [v0.1.707] call graph cache metadata loaded: files=110139 symbols=208640 edges=0 references=2360202 recordChunks=0 recordIndex=0 recordOverrides=0 snapshotChunks=0 symbolRelationBuckets=0 documentSummaryBuckets=0 documentSummaryFiles=0 cachedAt=2026-05-20T04:47:09.385Z restore=lazy
+[2026-05-21T00:18:41.642Z] [v0.1.707] codeidx MCP server started: http://127.0.0.1:63010/mcp
+[2026-05-21T00:18:41.642Z] [v0.1.707] codeidx MCP auto-started: http://127.0.0.1:63010/mcp
+[2026-05-21T00:18:47.108Z] [v0.1.707] zoek-rs update: generation=379 entries=4 live=3 tombstones=1 overlay=222 latest=93 journal=163323
+[2026-05-21T00:18:58.849Z] [v0.1.707] zoek-rs update: generation=380 entries=4 live=1 tombstones=3 overlay=226 latest=93 journal=167746
+[2026-05-21T00:19:17.686Z] [v0.1.707] zoek-rs update: generation=382 entries=1 live=0 tombstones=1 overlay=229 latest=93 journal=172242 suppressedLogs=1
+[2026-05-21T00:19:35.593Z] [v0.1.707] zoek-rs update: generation=384 entries=1 live=0 tombstones=1 overlay=232 latest=93 journal=172885 suppressedLogs=1
+[2026-05-21T00:19:52.804Z] [v0.1.707] zoek-rs update: generation=386 entries=2 live=0 tombstones=2 overlay=235 latest=93 journal=173528 suppressedLogs=1
+[2026-05-21T00:20:04.807Z] [v0.1.707] zoek-rs update: generation=387 entries=2 live=0 tombstones=2 overlay=237 latest=93 journal=173958
+[2026-05-21T00:20:15.139Z] [v0.1.707] zoek-rs update: generation=388 entries=2 live=0 tombstones=2 overlay=239 latest=93 journal=174388

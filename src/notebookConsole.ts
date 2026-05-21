@@ -165,7 +165,7 @@ export class DjangoNotebookConsole implements vscode.Disposable {
   }
 
   /** Executes only newly entered Python code and leaves prior editor text intact. */
-  private async acceptInput(textEditor?: vscode.TextEditor): Promise<void> {
+  async acceptInput(textEditor?: vscode.TextEditor): Promise<void> {
     const active = this.activePythonInput(textEditor);
     const source = active ? this.pendingSource(active) : "";
     if (!active || !source.trim()) {
@@ -252,7 +252,7 @@ export class DjangoNotebookConsole implements vscode.Disposable {
   }
 
   /** Focuses the active Python input or creates one for a ready Django shell. */
-  private async focusInput(sessionId?: string): Promise<void> {
+  async focusInput(sessionId?: string): Promise<void> {
     const editor = this.consoleEditor(sessionId);
     if (!editor) {
       return;
