@@ -28,7 +28,11 @@ export async function closeGeneratedOverlayTabs(uris: vscode.Uri[]): Promise<voi
   if (tabs.length) {
     await vscode.window.tabGroups.close(tabs, true);
   }
-  if (isGeneratedActiveEditor(generated)) {
+  const active = generatedActiveDocument(generated);
+  if (active?.isDirty) {
+    await active.save();
+  }
+  if (active) {
     await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
   }
 }
@@ -39,8 +43,8 @@ function tabUri(tab: vscode.Tab): vscode.Uri | undefined {
   return input?.uri;
 }
 
-/** Returns whether the active text editor is one of the generated overlay files. */
-function isGeneratedActiveEditor(generated: Set<string>): boolean {
-  const active = vscode.window.activeTextEditor?.document.uri;
-  return active ? generated.has(active.toString()) : false;
+/** Returns the active generated overlay document when one is focused. */
+function generatedActiveDocument(generated: Set<string>): vscode.TextDocument | undefined {
+  const active = vscode.window.activeTextEditor?.document;
+  return active && generated.has(active.uri.toString()) ? active : undefined;
 }
