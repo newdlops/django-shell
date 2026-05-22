@@ -58,8 +58,8 @@ async function run() {
   assert.equal(mappedObjects.range.inserting.start.character, 18);
   assert.equal(mappedObjects.textEdit.range.start.character, 18);
   assert.equal(mappedObjects.additionalTextEdits, undefined);
-  assert.equal(bridge.__test.analysisOffsetForText("from app.models import Company\n# --- django shell input ---\nCompany.obj", 2, 1), 1);
-  assert.equal(bridge.__test.analysisOffsetForText("Company.obj", 2, 1), 0);
+  assert.equal(bridge.__test.analysisOffsetForText("from app.models import Company\n# --- django shell input ---\nCompany.obj", 2, 1), -1);
+  assert.equal(bridge.__test.analysisOffsetForText("Company.obj", 2, 1), 1);
   objectItem.additionalTextEdits = [new vscode.TextEdit(new vscode.Range(0, 0, 0, 0), "from app.models import Company\n")];
   assert.equal(bridge.__test.mapCompletionResult([objectItem], 0, 2)[0].additionalTextEdits, undefined);
   const memory = require(path.join(extension.extensionPath, "out", "overlayMemoryDocument.js"));

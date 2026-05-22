@@ -82,7 +82,6 @@ export function overlayCleanupRendererSource(): string {
       __dsoDisposeValue(root.__dsoSemanticDisposable);
       __dsoStopOverlayObservers(root);
       __dsoForgetOverlayCapture(editor);
-      try { editor && editor.setModel && editor.setModel(null); } catch (eSetModelNull) {}
       __dsoDisposeValue(editor);
       if (__dsoIsOverlayModel(model)) { __dsoDisposeValue(model); }
       try { root.__dsoWidgetRoot && root.__dsoWidgetRoot.parentElement && root.__dsoWidgetRoot.parentElement.removeChild(root.__dsoWidgetRoot); } catch (eRemoveWidgetRoot) {}

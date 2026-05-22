@@ -1,7 +1,7 @@
 // Renderer-side editor text synchronization for the Django shell overlay.
-
+import { overlayDiagnosticPrefixRendererSource } from "./workbenchOverlayDiagnosticPrefixRenderer";
+import { overlayPreludeViewRendererSource } from "./workbenchOverlayPreludeViewRenderer";
 import { overlayPythonRangeRendererSource } from "./workbenchOverlayPythonRangeRenderer";
-
 /** Builds JavaScript that mirrors overlay Monaco text into the extension host. */
 export function overlaySyncRendererSource(): string {
   return `
@@ -20,9 +20,12 @@ export function overlaySyncRendererSource(): string {
     /** Sends the latest overlay editor text after a short idle window. */
     function __dsoScheduleModelSync(root, editor, readValue, post) {
       window.clearTimeout(root.__dsoSyncTimer);
+      if (root.__dsoSuppressModelSync || root.__dsoPreludeRepairing) { return; }
       root.__dsoSyncTimer = window.setTimeout(function () {
+        if (root.__dsoSuppressModelSync || root.__dsoPreludeRepairing) { return; }
         const code = String(readValue(editor) || "");
-        post({ type: "change", code: code });
+        root.__dsoLastSyncText = code;
+        try { const request = post({ type: "change", code: code }); if (request && request.then) { request.then(function (response) { root.__dsoLastSyncStatus = response && response.status; }).catch(function (error) { root.__dsoLastSyncError = String(error && error.message || error); }); } } catch (error) { root.__dsoLastSyncError = String(error && error.message || error); }
       }, 80);
     }
 
@@ -32,13 +35,14 @@ export function overlaySyncRendererSource(): string {
         __dsoLog(post, "model.install.skip", { hasEditor: !!editor, hasRoot: !!root });
         return;
       }
-      if (root.__dsoSyncEditor === editor) {
-        __dsoLog(post, "model.install.skip", { reason: "same-editor" });
+      const model = editor.getModel && editor.getModel();
+      if (root.__dsoSyncEditor === editor && root.__dsoSyncModel === model) {
+        __dsoLog(post, "model.install.skip", { reason: "same-editor-model" });
         return;
       }
       try { root.__dsoSyncDisposable && root.__dsoSyncDisposable.dispose && root.__dsoSyncDisposable.dispose(); } catch (eDisposeSync) {}
       root.__dsoSyncEditor = editor;
-      const model = editor.getModel && editor.getModel();
+      root.__dsoSyncModel = model;
       if (model && model.onDidChangeContent) {
         root.__dsoSyncDisposable = model.onDidChangeContent(function () {
           __dsoScheduleModelSync(root, editor, readValue, post);
@@ -70,6 +74,7 @@ export function overlaySyncRendererSource(): string {
     /** Returns the protected generated prefix from the canonical prelude text. */
     function __dsoCanonicalPrefix(root) {
       const marker = __DSO_INPUT_MARKER + "\\n";
+      if (root && !root.__dsoUseVisiblePrelude) { return String(root.__dsoProtectedPrefix || __dsoDiagnosticPrefix(root, "")); }
       const prelude = root && root.__dsoPreludeText !== undefined ? root.__dsoPreludeText : window.__djangoShellOverlayPrelude;
       return String(prelude || "") + marker;
     }
@@ -77,6 +82,13 @@ export function overlaySyncRendererSource(): string {
     /** Returns user text even when backspace merges it into the marker line. */
     function __dsoUserText(text, root) {
       const value = String(text || "");
+      if (root && !root.__dsoUseVisiblePrelude) {
+        const marker = __DSO_INPUT_MARKER, fullMarker = marker + "\\n", index = value.lastIndexOf(marker), prefix = __dsoCanonicalPrefix(root);
+        let userText = index >= 0 ? value.slice(index + marker.length) : "";
+        if (index >= 0) { userText = userText.startsWith("\\r\\n") ? userText.slice(2) : (userText.startsWith("\\n") ? userText.slice(1) : userText); while (userText.startsWith(prefix)) { userText = userText.slice(prefix.length); } return userText; }
+        const prelude = prefix.slice(0, -fullMarker.length);
+        return prelude && value.startsWith(prelude) ? value.slice(prelude.length) : value;
+      }
       const index = value.lastIndexOf(__DSO_INPUT_MARKER);
       if (index < 0) {
         const prefix = __dsoCanonicalPrefix(root);
@@ -94,7 +106,7 @@ export function overlaySyncRendererSource(): string {
     function __dsoRepairPrefix(root, editor, post) {
       const model = editor && editor.getModel && editor.getModel();
       if (!root || !model || root.__dsoPreludeRepairing) { return false; }
-      if (!root.__dsoUseVisiblePrelude) { root.__dsoUserStartLine = 1; root.__dsoInputStartLine = 1; root.__dsoProtectedPrefix = ""; return false; }
+      if (!root.__dsoUseVisiblePrelude) { const text = model.getValue(); const userText = __dsoUserText(text, root); const prefix = __dsoDiagnosticPrefix(root, userText); const nextText = prefix + userText; const oldStartLine = root.__dsoUserStartLine || __dsoFindInputStartLine(model); const position = editor && editor.getPosition && editor.getPosition(); const relativeLine = position ? Math.max(0, position.lineNumber - oldStartLine) : 0; const relativeColumn = position ? position.column : 1; const changed = text !== nextText, oldVisibility = root.style.visibility; root.__dsoProtectedPrefix = prefix; if (changed) { root.style.visibility = "hidden"; root.__dsoPreludeRepairing = true; try { model.setValue(nextText); __dsoLog(post, "prelude.guard.diagnostics", { prefixLines: __dsoLineCount(prefix) }); } catch (eVisible) {} root.__dsoPreludeRepairing = false; } root.__dsoProtectedPrefix = prefix; const startLine = __dsoFindInputStartLine(model); __dsoApplyPreludeView(root, editor, model, startLine); if (changed && position) { const targetLine = Math.min(model.getLineCount(), startLine + relativeLine); const targetColumn = Math.min(model.getLineMaxColumn(targetLine), Math.max(1, relativeColumn)); try { editor.setPosition({ column: targetColumn, lineNumber: targetLine }); } catch (eDiagnosticPosition) {} } if (changed) { root.style.visibility = oldVisibility || "visible"; } return changed; }
       const prefix = __dsoCanonicalPrefix(root);
       const text = model.getValue();
       if (text.startsWith(prefix)) {
@@ -127,11 +139,15 @@ export function overlaySyncRendererSource(): string {
 
     /** Reapplies hidden prelude state after editor transactions settle. */
     function __dsoSchedulePreludeGuard(root, editor) {
-      if (!root || root.__dsoPreludeGuardTimer) { return; }
-      root.__dsoPreludeGuardTimer = window.setTimeout(function () {
+      if (!root) { return; }
+      if (root.__dsoPreludeGuardTimer) { window.clearTimeout(root.__dsoPreludeGuardTimer); }
+      const apply = function () {
         root.__dsoPreludeGuardTimer = 0;
         try { window.__dsoApplyPreludeHiddenArea && window.__dsoApplyPreludeHiddenArea(root, editor); } catch (ePreludeLater) {}
-      }, 0);
+      };
+      root.__dsoPreludeGuardTimer = window.setTimeout(apply, 0);
+      window.setTimeout(apply, 32);
+      window.setTimeout(apply, 96);
     }
 
     /** Keeps the cursor and edits out of the generated prelude area. */
@@ -155,19 +171,13 @@ export function overlaySyncRendererSource(): string {
         const raw = event.browserEvent || event;
         const pos = editor.getPosition && editor.getPosition();
         if (pos && pos.lineNumber <= (root.__dsoUserStartLine || 1) && pos.column <= 1 && (raw.key === "Backspace" || raw.keyCode === 8)) {
-          if (event.preventDefault) { event.preventDefault(); }
-          if (raw.preventDefault) { raw.preventDefault(); }
+          if (event.preventDefault) { event.preventDefault(); } if (event.stopPropagation) { event.stopPropagation(); } if (event.stopImmediatePropagation) { event.stopImmediatePropagation(); }
+          if (raw.preventDefault) { raw.preventDefault(); } if (raw.stopPropagation) { raw.stopPropagation(); } if (raw.stopImmediatePropagation) { raw.stopImmediatePropagation(); }
         }
       }); } catch (eKeyGuard) {}
     }
 
-    /** Applies hidden prelude lines, shell prompts, and protected line metadata. */
-    function __dsoApplyPreludeView(root, editor, model, startLine) {
-      if (root) { root.__dsoUserStartLine = startLine; root.__dsoInputStartLine = startLine; root.__dsoProtectedPrefix = __dsoCanonicalPrefix(root); }
-      try { if (editor && editor.setHiddenAreas) { editor.setHiddenAreas(startLine > 1 ? [{ startLineNumber: 1, endLineNumber: startLine - 1 }] : [], "django-shell-prelude"); } } catch (eHide) {}
-      try { if (editor && editor.updateOptions) { editor.updateOptions({ lineNumbers: function (line) { return __dsoPromptForLine(model, startLine, line); } }); } } catch (eLineNumbers) {}
-      try { window.__dsoSchedulePreludeSemanticDecorations ? window.__dsoSchedulePreludeSemanticDecorations(root) : (window.__dsoRefreshPreludeSemanticDecorations && window.__dsoRefreshPreludeSemanticDecorations(root)); } catch (eSemanticRefresh) {}
-    }
+    ${overlayPreludeViewRendererSource()}
 
     /** Hides generated prelude lines from the shell editor when the API exists. */
     window.__dsoApplyPreludeHiddenArea = function (root, editor) {
@@ -180,6 +190,7 @@ export function overlaySyncRendererSource(): string {
       __dsoInstallPreludeGuard(root, editor, __dsoPost);
     };
 
+    ${overlayDiagnosticPrefixRendererSource()}
     ${overlayPythonRangeRendererSource()}
 
     /** Returns the selected source or current logical Python block with its source range. */
@@ -237,14 +248,39 @@ export function overlaySyncRendererSource(): string {
       } catch (eEdit) {}
     }
 
-    /** Posts one execution request and returns the extension host decision. */
-    function __dsoRunCode(post, code) {
-      return Promise.resolve(post({ type: "run", code: code })).then(function (response) {
-        if (!response || !response.json) { return { executed: true }; }
-        return response.json().catch(function () { return { executed: true }; });
-      }).catch(function () { return { executed: false }; });
+    /** Returns true when local Python syntax clearly needs a continuation line. */
+    function __dsoLikelyIncompletePython(code) {
+      const lines = String(code || "").split(/\\r?\\n/);
+      let depth = 0;
+      let last = "";
+      for (let index = 0; index < lines.length; index++) {
+        const line = lines[index];
+        if (line.trim()) { last = line; }
+        depth = Math.max(0, depth + __dsoBracketDelta(line, depth));
+      }
+      const trimmed = String(last || "").trimEnd();
+      return !!trimmed && (__dsoBlockHeader(trimmed) || /\\\\$/.test(trimmed) || depth > 0);
     }
 
+    /** Posts one execution request and returns the extension host decision. */
+    function __dsoRunCode(post, code, root, editor) {
+      window.__dsoLastRunOutcome = { chars: String(code || "").length, pending: true };
+      return Promise.resolve(post({ type: "run", code: code })).then(function (response) {
+        if (response && response.type === "opaque") { window.__dsoLastRunOutcome = { executed: true, opaque: true }; return { executed: true }; }
+        if (!response || !response.json || response.ok === false) { window.__dsoLastRunOutcome = { executed: false, status: response && response.status }; return __dsoRunWebviewFallback(code); }
+        return response.json().then(function (outcome) { window.__dsoLastRunOutcome = outcome || { executed: false }; return window.__dsoLastRunOutcome; }).catch(function (error) { window.__dsoLastRunOutcome = { error: String(error && error.message || error), executed: false }; return window.__dsoLastRunOutcome; });
+      }).catch(function (error) { window.__dsoLastRunOutcome = { error: String(error && error.message || error), executed: false }; return __dsoRunWebviewFallback(code); });
+    }
+    /** Uses the custom console webview bridge when localhost fetch is unavailable. */
+    function __dsoRunWebviewFallback(code) {
+      const frame = typeof __dsoFindWebviewFrame === "function" ? __dsoFindWebviewFrame() : null;
+      const message = { code: code, type: "overlayRunPython" };
+      let sent = 0;
+      const postTo = function (target) { if (!target || sent > 16) { return; } try { target.postMessage(message, "*"); sent++; } catch (ePost) {} try { for (let index = 0; target.frames && index < target.frames.length; index++) { postTo(target.frames[index]); } } catch (eFrames) {} };
+      postTo(frame && frame.contentWindow); postTo(frame);
+      if (!sent) { return Promise.resolve(window.__dsoLastRunOutcome = Object.assign({ executed: false, webview: "missing" }, window.__dsoLastRunOutcome || {})); }
+      return Promise.resolve(window.__dsoLastRunOutcome = { executed: true, sent: sent, webview: "postMessage" });
+    }
     /** Returns whether one Monaco or DOM key event is Enter. */
     function __dsoIsEnter(event, raw) {
       return raw.key === "Enter" || raw.code === "Enter" || raw.keyCode === 13 || event.keyCode === 3;
@@ -286,7 +322,7 @@ export function overlaySyncRendererSource(): string {
     }
 
     /** Returns whether a key event belongs to the overlay editor. */
-    function __dsoTouchesEditor(node, event) {
+    function __dsoTouchesEditor(node, event, editor) {
       const target = event && event.target;
       if (target && node.contains && node.contains(target)) { return true; }
       try {
@@ -294,8 +330,10 @@ export function overlaySyncRendererSource(): string {
         if (path && path.indexOf(node) >= 0) { return true; }
       } catch (ePath) {}
       const active = document.activeElement;
+      if (active && active !== document.body && active !== document.documentElement && node.contains && !node.contains(active)) { return false; }
       if (active && node.contains && node.contains(active)) { return true; }
-      return !!(node.classList && node.classList.contains("focused"));
+      try { if (editor && editor.hasTextFocus && editor.hasTextFocus()) { return true; } } catch (eFocus) {}
+      return false;
     }
 
     /** Installs Django shell Enter execution semantics on the overlay editor. */
@@ -331,8 +369,13 @@ export function overlaySyncRendererSource(): string {
         if (raw && raw.preventDefault) { raw.preventDefault(); }
         if (raw && raw.stopPropagation) { raw.stopPropagation(); }
         if (raw && raw.stopImmediatePropagation) { raw.stopImmediatePropagation(); }
+        if (__dsoLikelyIncompletePython(payload.code)) {
+          __dsoLog(post, "enter.incomplete.local", { chars: payload.code.length, inputStartLine: inputStartLine, source: source });
+          if (allowContinuation !== false) { __dsoInsertNewline(editor, post, source + "-local-incomplete"); }
+          return true;
+        }
         __dsoLog(post, "enter.execute.request", { chars: payload.code.length, end: payload.range ? payload.range.end : 0, inputStartLine: inputStartLine, lines: __dsoLineCount(payload.code), source: source, start: payload.range ? payload.range.start : 0 });
-        __dsoRunCode(post, payload.code).then(function (outcome) {
+        __dsoRunCode(post, payload.code, root, editor).then(function (outcome) {
           if (outcome && outcome.executed === false) {
             __dsoLog(post, "enter.incomplete", { chars: payload.code.length, inputStartLine: inputStartLine, source: source });
             if (allowContinuation !== false) { __dsoInsertNewline(editor, post, source + "-incomplete"); }
@@ -365,6 +408,7 @@ export function overlaySyncRendererSource(): string {
         }
         execute(event, source, true);
       };
+      root.__dsoCurrentInputPayload = function () { return __dsoEnterPayload(root, editor); };
       root.__dsoRunCurrentInput = function () { return execute(null, "host-command-cmd", false) ? "requested" : "empty"; };
       window.__dsoRunCurrentOverlayInput = function () { const activeRoot = document.getElementById("django-shell-overlay"); return activeRoot && activeRoot.__dsoRunCurrentInput ? activeRoot.__dsoRunCurrentInput() : "missing-root"; };
       const keyDisposable = editor.onKeyDown ? editor.onKeyDown(function (event) { run(event, "monaco"); }) : null;
@@ -373,7 +417,7 @@ export function overlaySyncRendererSource(): string {
       const windowListener = function (event) {
         const raw = event.browserEvent || event;
         if (!__dsoIsEnter(event, raw)) { return; }
-        if (__dsoTouchesEditor(node, event)) {
+        if (__dsoTouchesEditor(node, event, editor)) {
           run(event, "window");
           return;
         }
@@ -396,25 +440,31 @@ export function overlaySyncRendererSource(): string {
       const editor = root && root.__djangoShellEditor;
       const model = editor && editor.getModel && editor.getModel();
       if (model) {
-        if (!root.__dsoUseVisiblePrelude) { root.__dsoPreludeText = String(text || ""); window.__dsoApplyPreludeHiddenArea(root, editor); return "ok"; }
-        __dsoRepairPrefix(root, editor, __dsoPost);
-        const current = model.getValue();
-        const userText = __dsoUserText(current, root);
-        const oldStartLine = root.__dsoUserStartLine || __dsoFindInputStartLine(model);
-        const position = editor && editor.getPosition && editor.getPosition();
-        const relativeLine = position ? Math.max(0, position.lineNumber - oldStartLine) : 0;
-        root.__dsoPreludeText = String(text || "");
-        root.__dsoProtectedPrefix = __dsoCanonicalPrefix(root);
-        const nextValue = root.__dsoProtectedPrefix + userText;
-        if (current !== nextValue) {
-          root.__dsoPreludeRepairing = true;
-          model.setValue(nextValue);
-          root.__dsoPreludeRepairing = false;
+        const oldVisibility = root.style.visibility;
+        root.style.visibility = "hidden";
+        try {
+          if (!root.__dsoUseVisiblePrelude) { root.__dsoPreludeText = String(text || ""); window.__dsoApplyPreludeHiddenArea(root, editor); return "ok"; }
+          __dsoRepairPrefix(root, editor, __dsoPost);
+          const current = model.getValue();
+          const userText = __dsoUserText(current, root);
+          const oldStartLine = root.__dsoUserStartLine || __dsoFindInputStartLine(model);
+          const position = editor && editor.getPosition && editor.getPosition();
+          const relativeLine = position ? Math.max(0, position.lineNumber - oldStartLine) : 0;
+          root.__dsoPreludeText = String(text || "");
+          root.__dsoProtectedPrefix = __dsoCanonicalPrefix(root);
+          const nextValue = root.__dsoProtectedPrefix + userText;
+          if (current !== nextValue) {
+            root.__dsoPreludeRepairing = true;
+            model.setValue(nextValue);
+            root.__dsoPreludeRepairing = false;
+          }
+          window.__dsoApplyPreludeHiddenArea(root, editor);
+          const targetLine = Math.min(model.getLineCount(), (root.__dsoUserStartLine || 1) + relativeLine);
+          const targetColumn = Math.min(model.getLineMaxColumn(targetLine), Math.max(1, position ? position.column : 1));
+          try { editor.setPosition({ column: targetColumn, lineNumber: targetLine }); } catch (ePreludeCursor) {}
+        } finally {
+          root.style.visibility = oldVisibility || "visible";
         }
-        window.__dsoApplyPreludeHiddenArea(root, editor);
-        const targetLine = Math.min(model.getLineCount(), (root.__dsoUserStartLine || 1) + relativeLine);
-        const targetColumn = Math.min(model.getLineMaxColumn(targetLine), Math.max(1, position ? position.column : 1));
-        try { editor.setPosition({ column: targetColumn, lineNumber: targetLine }); } catch (ePreludeCursor) {}
       }
       return "ok";
     };

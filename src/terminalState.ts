@@ -7,7 +7,7 @@ export interface SubmittedLine {
 }
 
 const DEFAULT_DJANGO_SHELL_PATTERNS = [
-  "\\bpython\\s+manage\\.py\\s+shell(?:_plus)?\\b",
+  "\\bpython(?:\\d+(?:\\.\\d+)?)?\\s+manage\\.py\\s+shell(?:_plus)?\\b",
   "\\bdjango-admin\\s+shell\\b",
   "(^|\\s)(?:\\./)?[\\w./-]+\\s+shell\\b"
 ];

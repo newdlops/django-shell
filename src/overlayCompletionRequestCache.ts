@@ -6,7 +6,7 @@ import { DiagnosticLogger } from "./diagnostics";
 import { withLatencyBudget } from "./latencyBudget";
 
 const COMPLETION_CACHE_TTL_MS = 3000;
-const COMPLETION_BUDGET_MS = 500;
+const COMPLETION_BUDGET_MS = 150;
 
 type Loader = () => Promise<CompletionResult | undefined>;
 

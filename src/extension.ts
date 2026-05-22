@@ -64,6 +64,7 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand("djangoShell.e2eEvaluateOverlay", async (expression: string) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).e2eEvaluateOverlay(expression)),
       vscode.commands.registerCommand("djangoShell.e2eRestartKernel", async () => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).e2eRestartKernel()),
       vscode.commands.registerCommand("djangoShell.e2eSetPrelude", async (lines: string[]) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).e2eSetPrelude(lines)),
+      vscode.commands.registerCommand("djangoShell.e2eWriteTerminal", async (data: string) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).e2eWriteTerminal(data)),
       vscode.commands.registerCommand("djangoShell.e2eSnapshot", async () => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).e2eSnapshot())
     );
     return;
@@ -102,7 +103,7 @@ function registerCustomConsoleEntryPoints(context: vscode.ExtensionContext, diag
       await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).showOverlayEditor();
     }),
     vscode.commands.registerCommand("djangoShell.overlayRunCurrentInput", async () => {
-      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).runCurrentOverlayInput();
+      return (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).runCurrentOverlayInput();
     }),
     vscode.commands.registerCommand("djangoShell.overlayAcceptInput", async () => {
       await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).acceptOverlayInput();

@@ -9443,6 +9443,7 @@ var fitAddon;
 var geometryFrame = 0;
 var pendingExecution = 0;
 var snapshotWritten = false;
+var e2eSawShellPrompt = false;
 var terminal;
 function main() {
   ensureStyle();
@@ -9553,6 +9554,9 @@ function refreshAfterCellResize(target) {
   scheduleEditorGeometry();
 }
 function handleHostMessage(message) {
+  if (message.type === "overlayRunPython" && typeof message.code === "string") {
+    vscode.postMessage({ code: message.code, type: "runPython" });
+  }
   if (message.type === "terminalData" && typeof message.data === "string") {
     snapshotWritten = true;
     terminal.write(message.data);
@@ -9616,6 +9620,7 @@ function setInputPrompt(text) {
   if (inputPromptText) {
     inputPromptText.textContent = text;
   }
+  e2eCellState("prompt");
 }
 function setPythonReady(ready) {
   pythonCell?.classList.toggle("disabled", !ready);
@@ -9668,6 +9673,14 @@ function showOutput(count, result, ok) {
   item.appendChild(body);
   outputList.appendChild(item);
   currentOutput.scrollTop = currentOutput.scrollHeight;
+  vscode.postMessage({ ...e2eCellState("output"), execution: count || 0, ok: Boolean(ok), text: result, type: "e2eOutputRendered" });
+}
+function e2eCellState(reason) {
+  const promptText = String(inputPromptText?.textContent || "");
+  const cellText = String(pythonCell?.textContent || "");
+  const hasShellPrompt = promptText.includes(">>>") || cellText.includes(">>>");
+  e2eSawShellPrompt = e2eSawShellPrompt || hasShellPrompt;
+  return { cellText, hasShellPrompt, outputClientHeight: currentOutput?.clientHeight || 0, outputCount: outputList?.children.length || 0, outputScrollHeight: currentOutput?.scrollHeight || 0, outputScrollTop: currentOutput?.scrollTop || 0, outputVisible: !currentOutput?.classList.contains("outputHidden"), promptText, reason, sawShellPrompt: e2eSawShellPrompt };
 }
 function clearOutput() {
   currentOutput.classList.add("outputHidden");

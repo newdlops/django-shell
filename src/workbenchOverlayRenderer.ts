@@ -7,29 +7,29 @@ export function overlayRendererSource(modelUri: string): string {
   return `
     window.__djangoShellOverlayModelUri = window.__djangoShellOverlayModelUri || ${JSON.stringify(modelUri)};
     window.__dsoCaptures = window.__dsoCaptures || { widgets: [], insts: [], modelSvcs: [], ctors: [] };
-
+    window.__dsoBadModelSvcs = window.__dsoBadModelSvcs || []; window.__dsoGoodModelSvcs = window.__dsoGoodModelSvcs || [];
     /** Posts one renderer event to the extension-host bridge. */
     function __dsoPost(payload) {
       const bridge = window.__djangoShellOverlayBridge || {};
-      return fetch("http://127.0.0.1:" + bridge.port + "/django-shell-overlay", {
-        body: JSON.stringify(payload),
-        headers: { "content-type": "application/json", "x-django-shell-token": bridge.token },
-        method: "POST"
-      }).catch(function () {});
+      const url = "http://127.0.0.1:" + bridge.port + "/django-shell-overlay?token=" + encodeURIComponent(bridge.token || "");
+      const body = JSON.stringify(payload);
+      const request = function (mode) { return fetch(url, { body: body, headers: { "content-type": "text/plain" }, method: "POST", mode: mode }); };
+      const fallback = function (error) { window.__dsoLastPostError = String(error && error.message || error); window.__dsoLastPostType = payload && payload.type; return request("no-cors"); };
+      return payload && payload.type === "run" ? request("cors").catch(fallback) : request("cors").catch(function (error) { return fallback(error).catch(function () { return undefined; }); });
     }
-
     /** Returns whether a value looks like VS Code's CodeEditorWidget. */
     function __dsoIsWidget(value) {
       return !!(value && typeof value.layout === "function" && typeof value.getModel === "function" && typeof value.getDomNode === "function");
     }
-
     /** Returns whether a value looks like VS Code's instantiation service. */
     function __dsoIsInst(value) {
-      return !!(value && typeof value.createInstance === "function" && typeof value.invokeFunction === "function");
+      return !!(value && typeof value.createInstance === "function" && typeof value.invokeFunction === "function" && typeof value.createModel !== "function" && typeof value.getModel !== "function");
     }
+    /** Returns whether an object owns one property without invoking proxy traps. */
+    function __dsoOwn(value, key) { return !!(value && Object.prototype.hasOwnProperty.call(value, key)); }
     /** Returns whether a value looks like VS Code's model service. */
     function __dsoIsModelSvc(value) {
-      return !!(value && typeof value.createModel === "function" && typeof value.getModel === "function" && typeof value.getModels === "function");
+      return !!(value && typeof value.createModel === "function" && typeof value.getModel === "function" && typeof value.getModels === "function" && (__dsoOwn(value, "onModelAdded") || __dsoOwn(value, "onModelRemoved") || __dsoOwn(value, "destroyModel")));
     }
     /** Returns whether a value looks like VS Code's text model. */
     function __dsoIsTextModel(value) { return !!(value && value.uri && typeof value.getLanguageId === "function" && typeof value.getValue === "function" && typeof value.onDidChangeContent === "function"); }
@@ -38,7 +38,10 @@ export function overlayRendererSource(modelUri: string): string {
       if (!value || list.indexOf(value) >= 0 || list.length >= limit) { return; }
       list[list.length] = value;
     }
-
+    /** Returns whether a captured model service already failed a safe probe. */ function __dsoBadModelSvc(value) { return window.__dsoBadModelSvcs && window.__dsoBadModelSvcs.indexOf(value) >= 0; }
+    /** Marks a captured model service so later probes skip it. */ function __dsoRememberBadModelSvc(value) { if (value && !__dsoBadModelSvc(value)) { window.__dsoBadModelSvcs[window.__dsoBadModelSvcs.length] = value; } }
+    /** Returns whether a captured model service already passed a safe probe. */ function __dsoGoodModelSvc(value) { return window.__dsoGoodModelSvcs && window.__dsoGoodModelSvcs.indexOf(value) >= 0; }
+    /** Marks a captured model service as usable for later probes. */ function __dsoRememberGoodModelSvc(value) { if (value && !__dsoGoodModelSvc(value)) { window.__dsoGoodModelSvcs[window.__dsoGoodModelSvcs.length] = value; } }
     /** Finds the real CodeEditorWidget constructor through the prototype chain. */
     function __dsoRealCtor(widget) {
       if (!widget) { return null; }
@@ -65,16 +68,10 @@ export function overlayRendererSource(modelUri: string): string {
     /** Returns an error string when a model service is not usable. */
     function __dsoValidateModelSvc(modelSvc) {
       if (!__dsoIsModelSvc(modelSvc)) { return "missing-modelSvc"; }
-      try {
-        const models = modelSvc.getModels();
-        if (!Array.isArray(models)) { return "bad-modelSvc:models-not-array"; }
-        for (let i = 0; i < models.length; i++) { if (__dsoIsTextModel(models[i])) { return ""; } }
-        return "bad-modelSvc:no-text-model";
-      } catch (e) {
-        return "bad-modelSvc:" + String(e && e.message || e).slice(0, 120);
-      }
+      if (__dsoBadModelSvc(modelSvc)) { return "bad-modelSvc:cached"; }
+      __dsoRememberGoodModelSvc(modelSvc);
+      return "";
     }
-
     /** Scans one object for editor widget, instantiation service, and model service references. */
     function __dsoSniff(value) {
       const caps = window.__dsoCaptures;
@@ -82,6 +79,7 @@ export function overlayRendererSource(modelUri: string): string {
       if (__dsoIsWidget(value)) {
         __dsoRemember(caps.widgets, value, 40);
         __dsoRemember(caps.ctors, __dsoRealCtor(value), 8);
+        try { const model = value.getModel && value.getModel(); const URI = model && model.uri && model.uri.constructor; if (URI && typeof URI.parse === "function") { window.__dsoUriCtor = URI; } } catch (eWidgetUri) {}
         try { __dsoSniff(value._instantiationService); } catch (eDirectInst) {}
       }
       if (__dsoIsInst(value)) { __dsoRemember(caps.insts, value, 24); }
@@ -223,9 +221,7 @@ export function overlayRendererSource(modelUri: string): string {
       }
       let model = null;
       if (!modelSvc) { for (let i = 0; i < caps.widgets.length; i++) { try { const candidate = caps.widgets[i].getModel && caps.widgets[i].getModel(); if (candidate && String(candidate.uri) === window.__djangoShellOverlayModelUri) { model = candidate; break; } } catch (eModel) {} } }
-      return caps.ctors[0] && inst && (modelSvc || model)
-        ? { ctor: caps.ctors[0], inst: inst, model: model, modelSvc: modelSvc }
-        : null;
+      return caps.ctors[0] && inst && (modelSvc || model) ? { ctor: caps.ctors[0], inst: inst, model: model, modelSvc: modelSvc } : null;
     }
 
     /** Returns a lightweight capture state summary. */
@@ -246,36 +242,41 @@ export function overlayRendererSource(modelUri: string): string {
         return "status-err:" + String(e && e.message || e);
       }
     }
-    /** Builds a Monaco URI with the captured model service's URI class. */
-    function __dsoUri(modelSvc) {
+    /** Builds a Monaco URI from an already captured editor model or global Monaco. */
+    function __dsoUri() {
+      try { if (window.__dsoUriCtor && typeof window.__dsoUriCtor.parse === "function") { return window.__dsoUriCtor.parse(window.__djangoShellOverlayModelUri); } } catch (eCachedUri) {}
       try {
-        const models = modelSvc.getModels();
-        for (let i = 0; i < models.length; i++) {
-          const URI = models[i] && models[i].uri && models[i].uri.constructor;
+        const widgets = (window.__dsoCaptures && window.__dsoCaptures.widgets) || [];
+        for (let i = 0; i < widgets.length; i++) {
+          const model = widgets[i] && widgets[i].getModel && widgets[i].getModel();
+          const URI = model && model.uri && model.uri.constructor;
           if (URI && typeof URI.parse === "function") { return URI.parse(window.__djangoShellOverlayModelUri); }
         }
       } catch (eUri) {}
+      try { const URI = globalThis.monaco && globalThis.monaco.Uri || window.monaco && window.monaco.Uri; if (URI && typeof URI.parse === "function") { return URI.parse(window.__djangoShellOverlayModelUri); } } catch (eGlobalUri) {}
       return null;
     }
     /** Returns a workbench-compatible Python language selection. */
     function __dsoPythonLanguage() { return { getLanguageId: function () { return "python"; }, languageId: "python", onDidChange: function () { return { dispose: function () {} }; } }; }
-
     /** Creates a real workbench CodeEditorWidget using captured VS Code services. */
     function __dsoCreateWorkbenchEditor(host) {
       const factory = __dsoFactory();
       if (!factory) { return null; }
+      const uri = __dsoUri();
+      let model = factory.model || null;
+      if (!model && factory.modelSvc && uri) {
+        const text = window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", language = __dsoPythonLanguage();
+        try { model = factory.modelSvc.createModel(text, language, uri, false); } catch (eCreateModel) {
+        try { model = factory.modelSvc.getModel(uri); if (model && model.isDisposed && model.isDisposed()) { model = null; } if (model && model.getValue) { try { model.getValue(); } catch (eDisposedValue) { model = null; } } } catch (eGetModel) {}
+          if (!model) { __dsoRememberBadModelSvc(factory.modelSvc); return null; }
+        }
+      }
+      if (!model || !model.uri) { __dsoRememberBadModelSvc(factory.modelSvc); return null; }
+      try { if (model && model.setLanguage) { model.setLanguage(__dsoPythonLanguage()); } } catch (eSetLanguage) {}
+      try { if (globalThis.monaco && globalThis.monaco.editor && globalThis.monaco.editor.setModelLanguage) { globalThis.monaco.editor.setModelLanguage(model, "python"); } } catch (eSetModelLanguage) {}
       const options = { acceptSuggestionOnEnter: "on", automaticLayout: true, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, lineNumbers: "on", lineNumbersMinChars: 3, minimap: { enabled: false }, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
       const widgetOptions = { isSimpleWidget: false };
       const editor = factory.inst.createInstance(factory.ctor, host, options, widgetOptions);
-      const uri = __dsoUri(factory.modelSvc);
-      let model = factory.model || null;
-      try { model = model || (uri && factory.modelSvc && factory.modelSvc.getModel(uri)); } catch (eGetModel) {}
-      if (!model && factory.modelSvc) {
-        const text = window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", language = __dsoPythonLanguage();
-        model = uri ? factory.modelSvc.createModel(text, language, uri, false) : factory.modelSvc.createModel(text, language);
-      }
-      try { if (model && model.setLanguage) { model.setLanguage(__dsoPythonLanguage()); } } catch (eSetLanguage) {}
-      try { if (globalThis.monaco && globalThis.monaco.editor && globalThis.monaco.editor.setModelLanguage) { globalThis.monaco.editor.setModelLanguage(model, "python"); } } catch (eSetModelLanguage) {}
       if (editor && editor.setModel) { editor.setModel(model); }
       const rect = host.getBoundingClientRect();
       if (editor && editor.layout) { editor.layout({ width: Math.max(100, rect.width), height: Math.max(80, rect.height) }); }
@@ -286,18 +287,16 @@ export function overlayRendererSource(modelUri: string): string {
       const monacoApi = (globalThis.monaco && globalThis.monaco.editor) ? globalThis.monaco : ((window.monaco && window.monaco.editor) ? window.monaco : null);
       if (!monacoApi) { return null; }
       const uri = monacoApi.Uri.parse(window.__djangoShellOverlayModelUri);
-      const model = monacoApi.editor.getModel(uri) || monacoApi.editor.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python", uri);
+      let model = monacoApi.editor.getModel(uri); if (model && model.isDisposed && model.isDisposed()) { model = null; } if (model && model.getValue) { try { model.getValue(); } catch (eDisposedValue) { model = null; } } model = model || monacoApi.editor.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python", uri);
       return monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: true, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, isSimpleWidget: false, lineNumbers: "on", lineNumbersMinChars: 3, minimap: { enabled: false }, model: model, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
     }
     /** Creates or focuses the overlay editor widget. */
     function __dsoEnsureEditor(root) {
-      if (root.__djangoShellEditor) { return root.__djangoShellEditor; }
+      if (root.__djangoShellEditor) { try { const model = root.__djangoShellEditor.getModel && root.__djangoShellEditor.getModel(); if (!model || (model.isDisposed && model.isDisposed())) { root.__djangoShellEditor.dispose && root.__djangoShellEditor.dispose(); root.__djangoShellEditor = null; } else if (model.getValue) { try { model.getValue(); } catch (eDisposedValue) { root.__djangoShellEditor.dispose && root.__djangoShellEditor.dispose(); root.__djangoShellEditor = null; } } } catch (eDisposedModel) { root.__djangoShellEditor = null; } if (root.__djangoShellEditor) { return root.__djangoShellEditor; } }
       const host = root.querySelector(".django-shell-overlay-editor");
       host.textContent = "";
-      try { root.__djangoShellEditor = __dsoCreateWorkbenchEditor(host); } catch (eWorkbench) { root.__dsoLastEditorError = String(eWorkbench && eWorkbench.message || eWorkbench); }
-      if (!root.__djangoShellEditor) {
-        try { root.__djangoShellEditor = __dsoCreateGlobalMonacoEditor(host); } catch (eGlobal) { root.__dsoLastEditorError = String(eGlobal && eGlobal.message || eGlobal); }
-      }
+      if (!root.__djangoShellEditor && !window.__dsoSkipWorkbenchEditor) { try { root.__djangoShellEditor = __dsoCreateWorkbenchEditor(host); } catch (eWorkbench) { const msg = String(eWorkbench && eWorkbench.message || eWorkbench); root.__dsoLastEditorError = msg; if (/UNKNOWN service|Maximum call stack/.test(msg)) { window.__dsoSkipWorkbenchEditor = true; } } }
+      if (!root.__djangoShellEditor) { try { root.__djangoShellEditor = __dsoCreateGlobalMonacoEditor(host); } catch (eGlobal) { root.__dsoLastEditorError = String(eGlobal && eGlobal.message || eGlobal); } }
       if (!root.__djangoShellEditor) {
         host.textContent = "Editor widget is waiting for VS Code editor services.";
         root.__dsoPendingRetries = (root.__dsoPendingRetries || 0) + 1;
@@ -319,11 +318,11 @@ export function overlayRendererSource(modelUri: string): string {
     }
     /** Reads code from either a workbench CodeEditorWidget or standalone Monaco editor. */
     function __dsoEditorValue(editor) {
-      try { if (editor && editor.getValue) { return editor.getValue(); } } catch (eGetValue) {}
       try {
         const model = editor && editor.getModel && editor.getModel();
         return model && model.getValue ? model.getValue() : "";
       } catch (eModelValue) {}
+      try { if (editor && editor.getValue) { return editor.getValue(); } } catch (eGetValue) {}
       return "";
     }
     /** Finds the visible VS Code webview frame that contains the custom console tab. */
@@ -420,7 +419,7 @@ export function overlayRendererSource(modelUri: string): string {
       if (document.getElementById("django-shell-overlay-style")) { return; }
       const style = document.createElement("style");
       style.id = "django-shell-overlay-style";
-      style.textContent = ".django-shell-overlay{position:absolute;left:0;top:0;width:1px;height:1px;z-index:10;box-sizing:border-box;overflow:hidden;background:var(--vscode-editor-background);color:var(--vscode-foreground);border:0;font-family:var(--vscode-font-family)}.django-shell-overlay-head{display:none}.django-shell-overlay-title{font-size:12px;color:var(--vscode-descriptionForeground)}.django-shell-overlay-spacer{flex:1}.django-shell-overlay button{border:0;border-radius:3px;padding:2px 8px;color:var(--vscode-button-foreground);background:var(--vscode-button-background)}.django-shell-overlay-editor{height:100%;min-height:80px}.django-shell-overlay-output,.django-shell-overlay-output.error{display:none}";
+      style.textContent = ".django-shell-overlay{position:absolute;left:0;top:0;width:1px;height:1px;z-index:10;box-sizing:border-box;overflow:hidden;background:var(--vscode-editor-background);color:var(--vscode-foreground);border:0;font-family:var(--vscode-font-family)}.django-shell-overlay-head{display:none}.django-shell-overlay-title{font-size:12px;color:var(--vscode-descriptionForeground)}.django-shell-overlay-spacer{flex:1}.django-shell-overlay button{border:0;border-radius:3px;padding:2px 8px;color:var(--vscode-button-foreground);background:var(--vscode-button-background)}.django-shell-overlay-editor{height:100%;min-height:80px}.django-shell-overlay-output,.django-shell-overlay-output.error{display:none}.monaco-workbench .tab[aria-label='analysis.py'],.monaco-workbench .tab[aria-label='console-cell.py'],.monaco-workbench .tab[aria-label*='.django-shell'][aria-label*='analysis.py'],.monaco-workbench .tab[title*='/.django-shell/analysis.py'],.monaco-workbench .tab[aria-label*='.django-shell'][aria-label*='console-cell.py'],.monaco-workbench .tab[title*='/.django-shell/console-cell.py']{display:none!important}";
       document.head.appendChild(style);
     }
 
@@ -451,7 +450,6 @@ export function overlayRendererSource(modelUri: string): string {
     ${overlayWidgetRendererSource()}
     ${overlaySyncRendererSource()}
     ${overlayCleanupRendererSource()}
-    try { __dsoStartCapture(); } catch (eStartCapture) { window.__dsoCaptureStartError = String(eStartCapture && eStartCapture.message || eStartCapture); }
     window.__djangoShellOverlayShow = function (geometry) {
       __dsoEnsureStyle();
       let root = document.getElementById("django-shell-overlay");

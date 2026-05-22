@@ -23,6 +23,7 @@ let fitAddon;
 let geometryFrame = 0;
 let pendingExecution = 0;
 let snapshotWritten = false;
+let e2eSawShellPrompt = false;
 let terminal;
 
 /** Starts the webview client after the DOM has been created by the extension host. */
@@ -155,6 +156,9 @@ function refreshAfterCellResize(target) {
 
 /** Handles one message from the extension host. */
 function handleHostMessage(message) {
+  if (message.type === "overlayRunPython" && typeof message.code === "string") {
+    vscode.postMessage({ code: message.code, type: "runPython" });
+  }
   if (message.type === "terminalData" && typeof message.data === "string") {
     snapshotWritten = true;
     terminal.write(message.data);
@@ -224,6 +228,7 @@ function setInputPrompt(text) {
   if (inputPromptText) {
     inputPromptText.textContent = text;
   }
+  e2eCellState("prompt");
 }
 
 /** Enables Python input only after the setup terminal has attached the backend. */
@@ -288,6 +293,16 @@ function showOutput(count, result, ok) {
   item.appendChild(body);
   outputList.appendChild(item);
   currentOutput.scrollTop = currentOutput.scrollHeight;
+  vscode.postMessage({ ...e2eCellState("output"), execution: count || 0, ok: Boolean(ok), text: result, type: "e2eOutputRendered" });
+}
+
+/** Returns E2E-visible Python cell state for prompt, output, and scroll regressions. */
+function e2eCellState(reason) {
+  const promptText = String(inputPromptText?.textContent || "");
+  const cellText = String(pythonCell?.textContent || "");
+  const hasShellPrompt = promptText.includes(">>>") || cellText.includes(">>>");
+  e2eSawShellPrompt = e2eSawShellPrompt || hasShellPrompt;
+  return { cellText, hasShellPrompt, outputClientHeight: currentOutput?.clientHeight || 0, outputCount: outputList?.children.length || 0, outputScrollHeight: currentOutput?.scrollHeight || 0, outputScrollTop: currentOutput?.scrollTop || 0, outputVisible: !currentOutput?.classList.contains("outputHidden"), promptText, reason, sawShellPrompt: e2eSawShellPrompt };
 }
 
 /** Clears the active Python cell output without touching the setup terminal session. */

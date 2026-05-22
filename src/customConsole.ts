@@ -5,7 +5,7 @@ import * as vscode from "vscode";
 import type { BackendExecutionResult, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment } from "./backendClient";
 import { webviewHtml } from "./customConsoleHtml";
 import { DiagnosticLogger } from "./diagnostics";
-import { scheduleWorkspaceGeneratedOverlayTabCleanup } from "./generatedOverlayTabs";
+import { closeWorkspaceGeneratedOverlayTabs, scheduleWorkspaceGeneratedOverlayTabCleanup } from "./generatedOverlayTabs";
 import { NotebookPtySession } from "./notebookPtySession";
 import { resetOverlayBackingFiles } from "./overlayBackingFiles";
 import { runtimePreludeLines } from "./runtimePrelude";
@@ -37,6 +37,8 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private session: NotebookPtySession | undefined;
   private sessionDisposables: vscode.Disposable[] = [];
   private executionCount = 1;
+  private lastRenderedOutput: Record<string, unknown> | undefined;
+  private lastPythonResult: { execution: number; ok: boolean; text: string } | undefined;
 
   readonly onDidChangeRuntime = this.runtimeEmitter.event;
 
@@ -81,16 +83,10 @@ export class CustomDjangoConsole implements vscode.Disposable {
   }
 
   /** Opens the console and shows the overlay editor for command-driven access. */
-  async showOverlayEditor(): Promise<void> {
-    await this.openConsole();
-    await this.showOverlay();
-  }
+  async showOverlayEditor(): Promise<void> { await this.openConsole(); await this.showOverlay(); }
 
   /** Runs the current overlay input through the renderer-owned editor command. */
-  async runCurrentOverlayInput(): Promise<void> {
-    const overlay = await this.ensureOverlay();
-    await overlay.runCurrentInput();
-  }
+  async runCurrentOverlayInput(): Promise<string> { return (await this.ensureOverlay()).runCurrentInput(); }
   /** Accepts Enter from the file-backed overlay command facade. */ async acceptOverlayInput(): Promise<void> { await (await this.ensureOverlay()).acceptInput(); }
   /** Inserts an indented newline from the file-backed overlay command facade. */ async insertOverlayNewline(): Promise<void> { await (await this.ensureOverlay()).insertNewline(); }
 
@@ -143,6 +139,8 @@ export class CustomDjangoConsole implements vscode.Disposable {
       hasPythonRunButton: html.includes("id=\"showEditor\"") || html.includes("runGlyph"),
       hasSetupAutoMinimize: html.includes("id=\"setupCell\"") && html.includes("setupCell.minimized"),
       executionCount: this.executionCount,
+      lastPythonResult: this.lastPythonResult,
+      lastRenderedOutput: this.lastRenderedOutput,
       lastEditorGeometry: this.lastEditorGeometry,
       overlayAnalysisDocumentHasMarker: analysisDocument?.getText().includes("# --- django shell input ---") ?? false,
       overlayAnalysisDocumentOpen: Boolean(analysisDocument),
@@ -150,12 +148,14 @@ export class CustomDjangoConsole implements vscode.Disposable {
       overlayDocumentLanguage: document?.languageId,
       overlayDocumentOpen: Boolean(document),
       panelOpen: Boolean(this.panel),
-      panelVisible: Boolean(this.panel?.visible)
+      panelVisible: Boolean(this.panel?.visible),
+      runtimeReady: this.runtimeReady
     };
   }
 
   /** Restarts the console through the same path used by the webview restart button. */ async e2eRestartKernel(): Promise<void> { await this.restartSession(); }
-  /** Injects hidden overlay prelude lines for extension host E2E tests. */ async e2eSetPrelude(importLines: string[]): Promise<void> { this.overlayPrelude = importLines; (await this.ensureOverlay()).updatePrelude(importLines); }
+  /** Injects hidden overlay prelude lines for extension host E2E tests. */ async e2eSetPrelude(importLines: string[]): Promise<void> { this.overlayPrelude = importLines; await (await this.ensureOverlay()).updatePrelude(importLines); }
+  /** Writes setup terminal input for extension host E2E tests. */ e2eWriteTerminal(data: string): void { this.ensureSession(); this.session?.write(data); }
   /** Evaluates an overlay renderer expression for extension host E2E tests. */ async e2eEvaluateOverlay(expression: string): Promise<string> { return (await this.ensureOverlay()).e2eEvaluate(expression); }
 
   /** Releases the custom console session and webview resources. */
@@ -179,15 +179,13 @@ export class CustomDjangoConsole implements vscode.Disposable {
       throw new Error("Django Shell console has not been activated.");
     }
     if (!this.overlayPromise) {
-      this.overlayPromise = import("./workbenchOverlay").then(({ WorkbenchOverlay }) => {
+      this.overlayPromise = import("./workbenchOverlay").then(async ({ WorkbenchOverlay }) => {
         const overlay = new WorkbenchOverlay(this.logger);
         overlay.activate(this.activationContext!, (code) => this.executePython(code), { registerCommands: this.registerOverlayCommands });
         if (this.lastEditorGeometry) {
           overlay.updateGeometry(this.lastEditorGeometry);
         }
-        if (this.overlayPrelude.length) {
-          overlay.updatePrelude(this.overlayPrelude);
-        }
+        if (this.overlayPrelude.length) { await overlay.updatePrelude(this.overlayPrelude); }
         this.overlay = overlay;
         return overlay;
       }).finally(() => {
@@ -228,24 +226,37 @@ export class CustomDjangoConsole implements vscode.Disposable {
     });
     this.sessionDisposables.push(
       this.session.onDidData((data) => this.post({ data, type: "terminalData" })),
-      this.session.onDidChange((snapshot) => {
-        this.post({ snapshot, type: "terminalStatus" });
-        if (snapshot.ready && !this.runtimeReady) {
-          this.runtimeReady = true;
-          this.runtimeGeneration += 1;
-          this.runtimeEmitter.fire();
-          void this.updateOverlayPrelude(this.runtimeGeneration);
-          scheduleWorkspaceGeneratedOverlayTabCleanup();
-          this.post({ show: true, type: "measureEditor" });
-        }
-      })
+      this.session.onDidChange((snapshot) => this.handleSessionSnapshot(snapshot))
     );
     this.session.start();
   }
 
+  /** Handles backend readiness changes from the setup terminal. */
+  private handleSessionSnapshot(snapshot: ReturnType<NotebookPtySession["snapshot"]>): void {
+    this.post({ snapshot, type: "terminalStatus" });
+    if (!snapshot.ready && this.runtimeReady) {
+      this.runtimeReady = false;
+      this.runtimeGeneration += 1;
+      this.executionCount = 1; this.lastPythonResult = undefined;
+      this.clearInspectionCache(); this.clearRuntimeRefreshTimer();
+      this.post({ type: "resetPythonCell" });
+      this.overlayPrelude = [];
+      void (this.overlay ? this.overlay.reset() : this.resetOverlayBackingFiles());
+      this.runtimeEmitter.fire();
+      return;
+    }
+    if (!snapshot.ready || this.runtimeReady) { return; }
+    this.runtimeReady = true;
+    this.runtimeGeneration += 1;
+    this.runtimeEmitter.fire();
+    void this.updateOverlayPrelude(this.runtimeGeneration);
+    scheduleWorkspaceGeneratedOverlayTabCleanup();
+    this.post({ show: true, type: "measureEditor" });
+  }
+
   /** Handles messages sent by the custom console webview. */
   private async handleMessage(message: unknown): Promise<void> {
-    const typed = message as { code?: string; cols?: number; data?: string; rect?: unknown; rows?: number; type?: string };
+    const typed = message as { code?: string; cols?: number; data?: string; execution?: number; ok?: boolean; rect?: unknown; rows?: number; text?: string; type?: string };
     if (typed.type === "ready") {
       this.postStatus();
       this.post({ show: this.runtimeReady, type: "measureEditor" });
@@ -257,6 +268,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       }
       return;
     }
+    if (typed.type === "e2eOutputRendered" && typeof typed.text === "string") { this.lastRenderedOutput = { ...typed, execution: Number(typed.execution) || 0, ok: Boolean(typed.ok), text: typed.text }; return; }
     if (typed.type === "showOverlayEditor") {
       if (!this.panel?.visible || !this.runtimeReady) {
         return;
@@ -296,6 +308,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       const execution = this.executionCount++;
       this.post({ execution, type: "pythonStarted" });
       const text = "Backend is not ready. Enter Django shell in the setup terminal first.";
+      this.lastPythonResult = { execution, ok: false, text };
       this.post({ execution, ok: false, text, type: "pythonResult" });
       void this.overlay?.postOutput(text, false);
       return false;
@@ -309,9 +322,11 @@ export class CustomDjangoConsole implements vscode.Disposable {
     const result = await backend.execute(code);
     this.clearInspectionCache();
     const text = executionText(result);
+    this.lastPythonResult = { execution, ok: result.ok, text };
     this.post({ execution, ok: result.ok, text, type: "pythonResult" });
     void this.overlay?.postOutput(text, result.ok);
     this.scheduleRuntimeRefresh();
+    void closeWorkspaceGeneratedOverlayTabs().catch(() => undefined);
     return true;
   }
 
@@ -349,7 +364,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     if (!inspection?.ok || !this.runtimeReady || generation !== this.runtimeGeneration) { return; }
     const lines = runtimePreludeLines(inspection.variables);
     this.overlayPrelude = lines;
-    this.overlay?.updatePrelude(lines);
+    void this.overlay?.updatePrelude(lines);
   }
 
   /** Schedules runtime-dependent UI refresh without blocking rapid shell input. */
@@ -381,7 +396,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private async restartSession(): Promise<void> {
     this.runtimeReady = false;
     this.runtimeGeneration += 1;
-    this.executionCount = 1;
+    this.executionCount = 1; this.lastPythonResult = undefined;
     this.clearInspectionCache();
     this.clearRuntimeRefreshTimer();
     this.post({ type: "resetPythonCell" });
@@ -437,9 +452,7 @@ function autoActivateWorkspaceVenv(): boolean {
 }
 
 /** Returns the workspace root used as the child shell working directory. */
-function workspaceCwd(): string {
-  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-}
+function workspaceCwd(): string { return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd(); }
 
 /** Returns true for common Python continuations without a backend round trip. */
 function isLikelyIncompletePython(source: string): boolean {
@@ -462,38 +475,22 @@ function hasUnclosedBracket(source: string): boolean {
 }
 
 /** Returns the common remote inspection disabled message. */
-function remoteRuntimeMessage(): string {
-  return "Remote runtime inspection is disabled because the backend is only reachable through the interactive terminal.";
-}
+function remoteRuntimeMessage(): string { return "Remote runtime inspection is disabled because the backend is only reachable through the interactive terminal."; }
 
 /** Returns a safe inspection response when remote TCP is unreachable. */
-function remoteRuntimeInspectionDisabled(): BackendRuntimeInspection {
-  return { error: remoteRuntimeMessage(), loadedModuleCount: 0, modules: [], ok: false, variables: [] };
-}
+function remoteRuntimeInspectionDisabled(): BackendRuntimeInspection { return { error: remoteRuntimeMessage(), loadedModuleCount: 0, modules: [], ok: false, variables: [] }; }
 
 /** Returns a safe child response when remote TCP is unreachable. */
-function remoteRuntimeChildrenDisabled(): BackendRuntimeChildren {
-  return { children: [], error: remoteRuntimeMessage(), ok: false };
-}
+function remoteRuntimeChildrenDisabled(): BackendRuntimeChildren { return { children: [], error: remoteRuntimeMessage(), ok: false }; }
 
 /** Formats one backend execution result for display in the custom console. */
-function executionText(result: BackendExecutionResult): string {
-  return [result.stdout, result.stderr, result.result, result.traceback].filter(Boolean).join("\n") || "(no output)";
-}
+function executionText(result: BackendExecutionResult): string { return [result.stdout, result.stderr, result.result, result.traceback].filter(Boolean).join("\n") || "(no output)"; }
 
 /** Returns a compact line count for diagnostics. */
-function lineCount(text: string): number {
-  return text ? text.split(/\r?\n/).length : 0;
-}
+function lineCount(text: string): number { return text ? text.split(/\r?\n/).length : 0; }
 
 /** Returns whether a webview message contains a usable editor anchor rectangle. */
 function isOverlayGeometry(value: unknown): value is WorkbenchOverlayGeometry {
   const rect = value as WorkbenchOverlayGeometry | undefined;
-  return !!rect &&
-    Number.isFinite(rect.left) &&
-    Number.isFinite(rect.top) &&
-    Number.isFinite(rect.width) &&
-    Number.isFinite(rect.height) &&
-    rect.width > 40 &&
-    rect.height > 40;
+  return !!rect && Number.isFinite(rect.left) && Number.isFinite(rect.top) && Number.isFinite(rect.width) && Number.isFinite(rect.height) && rect.width > 40 && rect.height > 40;
 }

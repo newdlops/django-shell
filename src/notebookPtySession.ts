@@ -184,16 +184,7 @@ export class NotebookPtySession implements vscode.Disposable {
 
   /** Returns the latest renderable terminal state. */
   snapshot(): NotebookTerminalSnapshot {
-    return {
-      mode: this.mode,
-      ready: Boolean(this.client),
-      secretPrompt: isSecretPrompt(this.displayText),
-      selectedSettingsModule: this.options.djangoSettingsModule ?? "",
-      sessionId: this.options.sessionId,
-      settingsCandidates: this.options.settingsCandidates ?? [],
-      state: this.state,
-      text: trimTerminalText(this.displayText)
-    };
+    return { mode: this.mode, ready: Boolean(this.client), secretPrompt: isSecretPrompt(this.displayText), selectedSettingsModule: this.options.djangoSettingsModule ?? "", sessionId: this.options.sessionId, settingsCandidates: this.options.settingsCandidates ?? [], state: this.state, text: trimTerminalText(this.displayText) };
   }
 
   /** Processes PTY output, detects prompts, and attaches the backend once. */
@@ -426,6 +417,9 @@ export class NotebookPtySession implements vscode.Disposable {
         this.lastDjangoCommandAt = Date.now();
       }
       this.mode = nextMode;
+      if (previousMode === "django" && nextMode === "shell") {
+        this.detachBackendForShellExit();
+      }
       this.options.diagnosticLogger?.log("terminal.command", {
         command: safeCommand(line, this.displayText),
         djangoCandidate,
@@ -448,6 +442,11 @@ export class NotebookPtySession implements vscode.Disposable {
       sinceDjangoCommandMs: this.lastDjangoCommandAt ? Date.now() - this.lastDjangoCommandAt : undefined,
       sinceSpawnMs: Date.now() - this.spawnedAt
     });
+  }
+
+  /** Drops the attached backend when the user leaves the Python shell. */
+  private detachBackendForShellExit(): void {
+    this.stopKeepalive(); this.client = undefined; this.suppressBackendOutput = false; this.token = ""; this.state = "starting"; this.rejectPtyRequests("Django shell backend detached."); this.fireChange();
   }
 }
 

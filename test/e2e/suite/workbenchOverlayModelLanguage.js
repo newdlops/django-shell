@@ -40,6 +40,7 @@ function fakeWindow(document) {
     getComputedStyle: computedStyle,
     innerHeight: 768,
     innerWidth: 1024,
+    monaco: { Uri: { parse: fakeUri } },
     removeEventListener: () => undefined,
     requestAnimationFrame: (fn) => { fn(); return 0; },
     setInterval: () => 0,
@@ -104,7 +105,8 @@ function fakeModelService(state) {
       return fakeModel(value, uri, languageId);
     },
     getModel: () => null,
-    getModels: () => [seed]
+    getModels: () => [seed],
+    onModelAdded: () => undefined
   };
 }
 

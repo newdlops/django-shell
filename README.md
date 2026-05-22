@@ -83,7 +83,8 @@ Runtime inspection needs the backend socket bridge. If the active environment on
 
 The extension creates generated Python files in `.django-shell/` to let Python language features work against Django shell input:
 
-- `console-cell.py` stores provider-only runtime/source preludes plus user input; the Python cell view shows only user input.
+- `analysis.py` stores provider-only runtime/source preludes plus user input without the shell input marker.
+- `console-cell.py` stores the same prelude plus a protected shell input marker for editor identity; the Python cell view shows only user input.
 
 The extension overwrites these files as implementation details. They should not be edited or committed.
 

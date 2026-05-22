@@ -5,7 +5,7 @@ import * as vscode from "vscode";
 import { DiagnosticLogger } from "./diagnostics";
 import { OverlayMemoryDocument } from "./overlayMemoryDocument";
 import { OverlayPythonFeatureBridge } from "./overlayPythonFeatureBridge";
-import { closeGeneratedOverlayTabs } from "./generatedOverlayTabs";
+import { closeGeneratedOverlayTabs, scheduleGeneratedOverlayTabCleanup } from "./generatedOverlayTabs";
 import { OverlayShellCommandController, registerOverlayShellCommand } from "./overlayShellCommand";
 import { logOverlayRendererPayload } from "./overlayRendererLog";
 import { findInspectorUrlForPid, findMainPid, waitForInspectorUrlForPid } from "./workbenchInspector";
@@ -15,8 +15,8 @@ type PendingReply = (response: CdpResponse) => void; type RunHandler = (code: st
 /** Describes the Python cell editor anchor inside the custom webview viewport. */
 export interface WorkbenchOverlayGeometry { height: number; left: number; top: number; width: number; }
 const BRIDGE_PATH = "/django-shell-overlay";
-const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*" };
-const RENDERER_PATCH_VERSION = 27;
+const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
+const RENDERER_PATCH_VERSION = 40;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -26,6 +26,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   private runHandler: RunHandler | undefined;
   private server: http.Server | undefined;
   private serverPort: number | undefined;
+  private generatedCleanupTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly token = Math.random().toString(36).slice(2) + Date.now().toString(36);
   private ws: WebSocket | undefined;
   private geometry: WorkbenchOverlayGeometry | undefined;
@@ -57,18 +58,19 @@ export class WorkbenchOverlay implements vscode.Disposable {
     if (await this.rendererPatchVersion() !== String(RENDERER_PATCH_VERSION)) { await this.inject(); }
     let report = await this.evalInWorkbench(showExpression(this.geometry));
     if (report === "overlay-not-installed") { await this.inject(); report = await this.evalInWorkbench(showExpression(this.geometry)); }
-    if (report.includes(":pending") && !report.includes("no-webview-host")) {
+    const ctorMatch = /\bctors=(\d+)/.exec(report);
+    if (report.includes(":pending") && !report.includes("no-webview-host") && Number(ctorMatch?.[1] ?? 0) <= 0) {
       const closeWarmup = await this.openWarmupEditor();
       try {
         report = await this.waitForOverlayCapture();
       } finally {
-        await closeWarmup();
+        void closeWarmup().catch(() => undefined);
       }
     }
     this.logger?.log("overlay.show", { ms: Date.now() - started, report });
-    this.logger?.log("overlay.probe", { report: await this.evalInWorkbench("(function(){const r=document.getElementById('django-shell-overlay');const e=r&&r.__djangoShellEditor;const m=e&&e.getModel&&e.getModel();return JSON.stringify({root:!!r,editor:!!e,sync:!!(r&&r.__dsoSyncEditor),enter:!!(r&&r.__dsoEnterEditor),sameEnter:!!(r&&r.__dsoEnterEditor===e),hasRunner:!!window.__dsoInstallEnterRunner,hasSync:!!window.__dsoInstallModelSync,uri:m&&String(m.uri),lines:m&&m.getLineCount&&m.getLineCount(),chars:m&&m.getValue&&m.getValue().length,active:String(document.activeElement&&document.activeElement.className||'').slice(0,80)});})()").catch((error: unknown) => `probe-error:${error instanceof Error ? error.message : String(error)}`) });
-    await closeGeneratedOverlayTabs([this.memoryDocument.analysisUri, this.memoryDocument.editorUri]);
-    await vscode.commands.executeCommand("setContext", "djangoShell.overlayVisible", report.includes(":editor:"));
+    await closeGeneratedOverlayTabs([this.memoryDocument.analysisUri]).catch(() => undefined);
+    scheduleGeneratedOverlayTabCleanup([this.memoryDocument.analysisUri]);
+    void vscode.commands.executeCommand("setContext", "djangoShell.overlayVisible", report.includes(":editor:"));
   }
 
   /** Updates the workbench overlay position from the webview cell anchor. */
@@ -81,13 +83,13 @@ export class WorkbenchOverlay implements vscode.Disposable {
   }
 
   /** Updates editor-only hidden imports without changing raw analysis text. */
-  updatePrelude(importLines: string[]): void {
+  async updatePrelude(importLines: string[]): Promise<void> {
     const nextPrelude = preludeText(importLines);
     if (nextPrelude === this.prelude) {
       return;
     }
     this.prelude = nextPrelude;
-    this.memoryDocument.updatePrelude(this.prelude);
+    await this.memoryDocument.updatePrelude(this.prelude);
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) { return; }
     void this.evalInWorkbench(preludeExpression(this.prelude)).catch((error: unknown) => {
       this.logger?.log("overlay.prelude.error", { error: error instanceof Error ? error.message : String(error) });
@@ -108,10 +110,10 @@ export class WorkbenchOverlay implements vscode.Disposable {
   hide(): void { void vscode.commands.executeCommand("setContext", "djangoShell.overlayVisible", false); if (this.ws?.readyState === WebSocket.OPEN) { void this.evalInWorkbench("window.__djangoShellOverlayHide ? window.__djangoShellOverlayHide() : 'overlay-not-installed'").catch(() => undefined); } }
 
   /** Clears overlay text and generated prelude for a fresh backend session. */
-  async reset(): Promise<void> { this.prelude = ""; await this.memoryDocument.reset(); void vscode.commands.executeCommand("setContext", "djangoShell.overlayVisible", false); if (this.ws?.readyState === WebSocket.OPEN) { await this.evalInWorkbench(resetExpression(this.memoryDocument.fullText())).catch((error: unknown) => { this.logger?.log("overlay.reset.error", { error: error instanceof Error ? error.message : String(error) }); }); } }
+  async reset(): Promise<void> { this.prelude = ""; await this.memoryDocument.reset(); void vscode.commands.executeCommand("setContext", "djangoShell.overlayVisible", false); if (this.ws?.readyState === WebSocket.OPEN) { await this.evalInWorkbench(resetExpression(this.memoryDocument.visibleText())).catch((error: unknown) => { this.logger?.log("overlay.reset.error", { error: error instanceof Error ? error.message : String(error) }); }); } }
 
   /** Asks the renderer-owned overlay editor to run the current cursor execution unit. */
-  async runCurrentInput(): Promise<void> { await this.ensureInjected(); this.logger?.log("overlay.command.rerun.eval", { report: await this.evalInWorkbench("window.__dsoRunCurrentOverlayInput ? window.__dsoRunCurrentOverlayInput() : 'missing-runner'").catch((error: unknown) => `error:${error instanceof Error ? error.message : String(error)}`) }); }
+  async runCurrentInput(): Promise<string> { await this.ensureInjected(); const raw = await this.evalInWorkbench("(function(){const root=document.getElementById('django-shell-overlay');const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(!root||!editor||!model){return JSON.stringify({ok:false,reason:'missing-overlay'});}const payload=root.__dsoCurrentInputPayload?root.__dsoCurrentInputPayload():{code:''};const code=String(payload&&payload.code||'');return JSON.stringify({code,ok:!!code.trim(),reason:code.trim()?undefined:'empty',text:String(model.getValue&&model.getValue()||'')});})()").catch((error: unknown) => JSON.stringify({ ok: false, reason: error instanceof Error ? error.message : String(error) })); const payload = JSON.parse(raw) as { code?: string; ok?: boolean; text?: string }; if (payload.ok && typeof payload.code === "string") { if (typeof payload.text === "string") { await this.memoryDocument.sync(payload.text); } void this.runHandler?.(payload.code).catch((error: unknown) => this.logger?.log("overlay.command.rerun.error", { error: error instanceof Error ? error.message : String(error) })); this.logger?.log("overlay.command.rerun.host", { chars: payload.code.length }); return "host-requested"; } const report = await this.evalInWorkbench("window.__dsoRunCurrentOverlayInput ? window.__dsoRunCurrentOverlayInput() : 'missing-runner'").catch((error: unknown) => `error:${error instanceof Error ? error.message : String(error)}`); this.logger?.log("overlay.command.rerun.eval", { report }); return report; }
   /** Runs the active file-backed overlay input command. */ async acceptInput(): Promise<void> { await this.shellCommands?.acceptInput(); }
   /** Inserts an indented continuation line in the file-backed overlay command. */ async insertNewline(): Promise<void> { await this.shellCommands?.insertNewline(); }
   /** Evaluates a renderer expression for extension host E2E tests. */
@@ -124,7 +126,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
       disposable.dispose();
     }
     this.closeServer();
-    this.closeSocket("dispose");
+    clearTimeout(this.generatedCleanupTimer); this.closeSocket("dispose");
   }
 
   /** Ensures the local bridge and renderer patch are available. */
@@ -145,18 +147,18 @@ export class WorkbenchOverlay implements vscode.Disposable {
   private async inject(): Promise<void> {
     const bridge = await this.ensureServer();
     await this.ensureCdpSocket();
-    const report = await this.evalInWorkbench(patchExpression(bridge.port, bridge.token, this.memoryDocument.editorUri.toString(), this.memoryDocument.fullText(), this.geometry, this.prelude));
+    const report = await this.evalInWorkbench(patchExpression(bridge.port, bridge.token, this.memoryDocument.editorUri.toString(), this.memoryDocument.visibleText(), this.geometry, this.prelude));
     if (!report.includes("django-shell-overlay-shown")) {
       throw new Error(`overlay patch failed: ${report}`);
     }
     this.logger?.log("overlay.inject", { report });
   }
-
   /** Returns the renderer patch version currently installed in the workbench window. */
   private rendererPatchVersion(): Promise<string> {
     return this.evalInWorkbench("String(window.__djangoShellOverlayPatchVersion || '')").catch(() => "");
   }
-
+  /** Debounces generated tab cleanup after overlay input settles. */
+  private scheduleGeneratedCleanup(): void { clearTimeout(this.generatedCleanupTimer); this.generatedCleanupTimer = setTimeout(() => { void closeGeneratedOverlayTabs([this.memoryDocument.analysisUri, this.memoryDocument.editorUri]).catch(() => undefined); }, 450); }
   /** Starts the local HTTP bridge used by the renderer run button. */
   private async ensureServer(): Promise<{ port: number; token: string }> {
     if (this.server && this.serverPort !== undefined) {
@@ -189,7 +191,9 @@ export class WorkbenchOverlay implements vscode.Disposable {
         res.writeHead(204, CORS_HEADERS).end();
         return;
       }
-      if (req.method !== "POST" || req.url !== BRIDGE_PATH || req.headers["x-django-shell-token"] !== this.token) {
+      const requestUrl = new URL(req.url ?? "", "http://127.0.0.1");
+      const requestToken = req.headers["x-django-shell-token"] ?? requestUrl.searchParams.get("token");
+      if (req.method !== "POST" || requestUrl.pathname !== BRIDGE_PATH || requestToken !== this.token) {
         res.writeHead(404, CORS_HEADERS).end();
         return;
       }
@@ -199,11 +203,11 @@ export class WorkbenchOverlay implements vscode.Disposable {
       }
       if (payload?.type === "change" && typeof payload.code === "string") {
         this.logger?.log("overlay.bridge.change", textFields(payload.code));
-        await this.memoryDocument.sync(payload.code);
+        await this.memoryDocument.syncVolatile(payload.code);
       }
       if (payload?.type === "run" && typeof payload.code === "string") {
         this.logger?.log("overlay.bridge.run", textFields(payload.code));
-        await this.memoryDocument.sync(payload.code);
+        await this.memoryDocument.sync(payload.code); this.scheduleGeneratedCleanup();
         const executed = await this.runHandler?.(payload.code) ?? false;
         res.writeHead(200, { ...CORS_HEADERS, "content-type": "application/json" }).end(JSON.stringify({ executed }));
         return;
@@ -281,7 +285,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         resolve({ error: { message: `CDP request timed out: ${method}` }, id });
-      }, 5000);
+      }, 15000);
       this.pending.set(id, (response) => {
         clearTimeout(timer);
         resolve(response);
@@ -330,7 +334,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
     this.ws = undefined;
   }
 
-  /** Opens an existing workspace file briefly so VS Code creates a real editor widget to capture. */
+  /** Opens a temporary Python editor briefly so VS Code creates an editor widget to capture. */
   private async openWarmupEditor(): Promise<() => Promise<void>> {
     const document = await vscode.workspace.openTextDocument({ content: "", language: "python" });
     const uri = document.uri;
@@ -360,7 +364,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
         return report;
       }
     }
-    return report || this.evalInWorkbench(showExpression(this.geometry));
+    return report || "django-shell-overlay-shown:pending:capture-timeout";
   }
 }
 
@@ -377,14 +381,10 @@ async function readRequestBody(req: http.IncomingMessage): Promise<string> {
 }
 
 /** Waits without blocking the extension host event loop. */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 /** Returns compact size fields for text diagnostics. */
-function textFields(text: string): { chars: number; lines: number } {
-  return { chars: text.length, lines: text ? text.split(/\r?\n/).length : 0 };
-}
+function textFields(text: string): { chars: number; lines: number } { return { chars: text.length, lines: text ? text.split(/\r?\n/).length : 0 }; }
 
 /** Returns URI strings for tabs that already existed before warmup. */
 function snapshotTabUris(): Set<string> {
@@ -463,7 +463,7 @@ function patchExpression(port: number, token: string, modelUri: string, initialT
       window.__djangoShellOverlayBridge = { port: ${JSON.stringify(port)}, token: ${JSON.stringify(token)} };
       window.__djangoShellOverlayModelUri = ${JSON.stringify(modelUri)};
       window.__djangoShellOverlayInitialText = ${JSON.stringify(initialText)};
-      window.__djangoShellOverlayUseVisiblePrelude = true;
+      window.__djangoShellOverlayUseVisiblePrelude = false;
       window.__djangoShellOverlayGeometry = ${JSON.stringify(geometry ?? null)};
       window.__djangoShellOverlayPrelude = ${JSON.stringify(prelude)};
       if (!window.__djangoShellOverlayPatched || window.__djangoShellOverlayPatchVersion !== ${RENDERER_PATCH_VERSION}) { try {
@@ -494,6 +494,6 @@ function resetExpression(initialText: string): string { return `(function(){wind
 /** Builds hidden import text for Python analysis without touching disk. */
 function preludeText(importLines: string[]): string {
   const seen = new Set<string>();
-  const lines = importLines.filter((line) => line && !seen.has(line) && seen.add(line)).slice(0, 1000);
+  const lines = importLines.filter((line) => line && !seen.has(line) && seen.add(line)).slice(0, 5000);
   return lines.length ? `# Django shell runtime imports for analysis.\n# ruff: noqa\n${lines.join("\n")}\n\n` : "";
 }

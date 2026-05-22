@@ -2,6 +2,7 @@
 
 import * as vscode from "vscode";
 import { DiagnosticLogger } from "./diagnostics";
+import { closeGeneratedOverlayTabs } from "./generatedOverlayTabs";
 import { OverlayCompletionRequestCache } from "./overlayCompletionRequestCache";
 import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
 
@@ -13,6 +14,7 @@ const SEMANTIC_LEGEND = new vscode.SemanticTokensLegend(SEMANTIC_TOKEN_TYPES);
 export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider, vscode.DefinitionProvider, vscode.DocumentHighlightProvider, vscode.Disposable, vscode.HoverProvider, vscode.ReferenceProvider, vscode.SignatureHelpProvider {
   private readonly disposables: vscode.Disposable[] = [];
   private readonly completionCache: OverlayCompletionRequestCache;
+  private cleanupTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** Stores memory documents used for visible and analysis text. */
   constructor(private readonly documents: OverlayMemoryDocument, private readonly logger?: DiagnosticLogger) { this.completionCache = new OverlayCompletionRequestCache(logger); }
@@ -32,6 +34,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
 
   /** Releases provider registrations. */
   dispose(): void {
+    clearTimeout(this.cleanupTimer);
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
@@ -42,7 +45,9 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     if (!this.isEditorDocument(document)) {
       return undefined;
     }
-    return this.completionCache.provide(document, position, context.triggerCharacter, () => this.loadCompletionItems(document, position, context));
+    const text = document.getText();
+    const result = await this.completionCache.provide(document, position, context.triggerCharacter, () => this.loadCompletionItems(document, position, context));
+    return withDjangoCompletions(result, text, position, this.preludeSource(text));
   }
 
   /** Loads uncached completions through the hidden analysis document. */
@@ -59,8 +64,9 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       analysisPosition,
       context.triggerCharacter
     );
+    this.cleanupGeneratedTabs();
     this.logger?.log("overlay.feature", { feature: "completion", items: completionCount(result), ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
-    return withDjangoCompletions(mapCompletionResult(result, offset, protectedLineCount), text, position, this.documents.analysisText());
+    return withDjangoCompletions(mapCompletionResult(result, offset, protectedLineCount), text, position, this.preludeSource(text));
   }
 
   /** Provides hover through the hidden analysis document. */
@@ -77,9 +83,10 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       this.documents.analysisUri,
       analysisPosition
     );
+    this.cleanupGeneratedTabs();
     this.logger?.log("overlay.feature", { feature: "hover", items: hovers?.length ?? 0, ms: Date.now() - started, offset, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
     const hover = hovers?.[0] ? mapHover(hovers[0], offset) : undefined;
-    return hoverLooksAmbiguous(hover) ? preludeHoverForText(document.getText(), position, this.documents.analysisText()) ?? hover : hover;
+    return hoverLooksAmbiguous(hover) ? preludeHoverForText(document.getText(), position, this.preludeSource(document.getText())) : hover;
   }
 
   /** Provides definitions through the hidden analysis document. */
@@ -96,6 +103,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       this.documents.analysisUri,
       analysisPosition
     );
+    this.cleanupGeneratedTabs();
     this.logger?.log("overlay.feature", { feature: "definition", items: result?.length ?? 0, ms: Date.now() - started, offset, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
     return result as vscode.Definition | vscode.DefinitionLink[];
   }
@@ -114,6 +122,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       this.documents.analysisUri,
       analysisPosition
     );
+    this.cleanupGeneratedTabs();
     const mapped = mapLocations(result ?? [], this.documents.analysisUri, this.documents.editorUri, offset);
     this.logger?.log("overlay.feature", { feature: "references", items: mapped.length, ms: Date.now() - started, offset, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
     return mapped;
@@ -133,6 +142,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       this.documents.analysisUri,
       analysisPosition
     );
+    this.cleanupGeneratedTabs();
     const mapped = (result ?? []).map((item) => new vscode.DocumentHighlight(mapRange(item.range, offset), item.kind));
     this.logger?.log("overlay.feature", { feature: "highlights", items: mapped.length, ms: Date.now() - started, offset, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
     return mapped;
@@ -153,6 +163,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       analysisPosition,
       context.triggerCharacter
     );
+    this.cleanupGeneratedTabs();
     this.logger?.log("overlay.feature", { feature: "signature", items: result?.signatures.length ?? 0, ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
     return result;
   }
@@ -163,7 +174,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       return undefined;
     }
     const started = Date.now();
-    const result = semanticTokensForVisibleText(document.getText(), this.documents.analysisText());
+    const result = semanticTokensForVisibleText(document.getText(), this.preludeSource(document.getText()));
     this.logger?.log("overlay.feature", { feature: "semanticTokens", items: result.count, ms: Date.now() - started, symbols: result.symbols });
     return result.tokens;
   }
@@ -180,23 +191,40 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
 
   /** Converts an editor position to the hidden analysis document position. */
   private analysisPosition(position: vscode.Position, offset: number): vscode.Position {
+    clearTimeout(this.cleanupTimer);
     return position.translate(offset, 0);
   }
 
-  /** Converts an editor range to the hidden analysis document range. */
-  private analysisRange(range: vscode.Range, offset: number): vscode.Range {
-    return new vscode.Range(this.analysisPosition(range.start, offset), this.analysisPosition(range.end, offset));
+  /** Returns the best prelude source for provider-only fallback logic. */
+  private preludeSource(text: string): string {
+    const index = text.indexOf(INPUT_MARKER);
+    return index >= 0 && text.slice(0, index).trim() ? text : this.documents.preludeText();
+  }
+
+  /** Closes tabs that VS Code may expose while resolving hidden provider requests. */
+  private cleanupGeneratedTabs(): void {
+    clearTimeout(this.cleanupTimer);
+    this.cleanupTimer = setTimeout(() => void closeGeneratedOverlayTabs([this.documents.analysisUri]), 150);
   }
 }
 
 /** Returns the provider line offset after detecting the editor-only marker text. */
 function analysisOffsetForText(text: string, inputStartLine: number, lineOffset: number): number {
-  return lineAtText(text, Math.max(0, inputStartLine - 1)).trim() === INPUT_MARKER || text.includes(`${INPUT_MARKER}\n`) ? lineOffset : 0;
+  const markerLine = markerLineForText(text);
+  if (markerLine > 0) { return inputStartLine - markerLine - 2; }
+  if (markerLine === 0) { return lineOffset; }
+  return inputStartLine > 1 ? inputStartLine - 1 : 0;
 }
 
-/** Returns lines protected from completion import edits in the raw analysis document. */
-function protectedLineCountForText(_text: string, _fallback: number): number {
-  return 0;
+/** Returns lines protected from completion import edits in the generated prelude. */
+function protectedLineCountForText(text: string, fallback: number): number {
+  const markerLine = markerLineForText(text);
+  return markerLine > 0 ? markerLine : Math.max(0, fallback - 1);
+}
+
+/** Returns the zero-based marker line in one editor text snapshot. */
+function markerLineForText(text: string): number {
+  return text.split(/\r?\n/).findIndex((line) => line.trim() === INPUT_MARKER);
 }
 
 /** Maps completion ranges back from the analysis document to the visible editor. */
@@ -290,7 +318,7 @@ function hoverLooksAmbiguous(hover: vscode.Hover | undefined): boolean {
   if (!hover) {
     return true;
   }
-  return hover.contents.map((content) => typeof content === "string" ? content : "value" in content ? content.value : "").join("\n").includes("Any");
+  return /\b(?:Any|Unknown)\b/.test(hover.contents.map((content) => typeof content === "string" ? content : "value" in content ? content.value : "").join("\n"));
 }
 
 /** Builds a precise fallback hover for symbols imported by the hidden prelude. */
@@ -419,7 +447,7 @@ function importedTokenType(name: string, moduleImport: boolean): string {
 /** Returns the generated prelude before the visible shell input marker. */
 function preludeText(text: string): string {
   const index = text.indexOf(INPUT_MARKER);
-  return index >= 0 ? text.slice(0, index) : "";
+  return index >= 0 ? text.slice(0, index) : text;
 }
 
 /** Returns visible user text from a generated full analysis document. */

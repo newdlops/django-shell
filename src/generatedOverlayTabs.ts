@@ -2,10 +2,24 @@
 
 import * as vscode from "vscode";
 
+let generatedTabWatcher: vscode.Disposable | undefined;
+const watchedGeneratedUris = new Set<string>();
+let closeQueue: Promise<void> = Promise.resolve();
+
 /** Schedules repeated cleanup for tabs opened asynchronously by the workbench. */
 export function scheduleWorkspaceGeneratedOverlayTabCleanup(): void {
-  for (const delayMs of [0, 100, 300, 800]) {
-    setTimeout(() => void closeWorkspaceGeneratedOverlayTabs(), delayMs);
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd());
+  scheduleGeneratedOverlayTabCleanup([
+    vscode.Uri.joinPath(root, ".django-shell", "analysis.py")
+  ]);
+}
+
+/** Schedules repeated cleanup for specific generated overlay tabs. */
+export function scheduleGeneratedOverlayTabCleanup(uris: vscode.Uri[]): void {
+  rememberGeneratedOverlayUris(uris);
+  ensureGeneratedOverlayTabWatcher();
+  for (const delayMs of [50, 200, 500]) {
+    setTimeout(() => void closeGeneratedOverlayTabs(uris), delayMs);
   }
 }
 
@@ -19,21 +33,21 @@ export function closeWorkspaceGeneratedOverlayTabs(): Promise<void> {
 }
 
 /** Closes visible tabs for generated overlay files while keeping hidden documents open. */
-export async function closeGeneratedOverlayTabs(uris: vscode.Uri[]): Promise<void> {
+export function closeGeneratedOverlayTabs(uris: vscode.Uri[]): Promise<void> {
+  closeQueue = closeQueue.catch(() => undefined).then(() => closeGeneratedOverlayTabsNow(uris));
+  return closeQueue;
+}
+
+/** Serially closes only clean visible tabs for generated overlay files. */
+async function closeGeneratedOverlayTabsNow(uris: vscode.Uri[]): Promise<void> {
   const generated = new Set(uris.map((uri) => uri.toString()));
   const tabs = vscode.window.tabGroups.all.flatMap((group) => group.tabs).filter((tab) => {
     const uri = tabUri(tab);
     return uri ? generated.has(uri.toString()) : false;
   });
-  if (tabs.length) {
-    await vscode.window.tabGroups.close(tabs, true);
-  }
-  const active = generatedActiveDocument(generated);
-  if (active?.isDirty) {
-    await active.save();
-  }
-  if (active) {
-    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+  const cleanTabs = tabs.filter((tab) => !isDirtyGeneratedTab(tab));
+  if (cleanTabs.length) {
+    await vscode.window.tabGroups.close(cleanTabs, true);
   }
 }
 
@@ -43,8 +57,24 @@ function tabUri(tab: vscode.Tab): vscode.Uri | undefined {
   return input?.uri;
 }
 
-/** Returns the active generated overlay document when one is focused. */
-function generatedActiveDocument(generated: Set<string>): vscode.TextDocument | undefined {
-  const active = vscode.window.activeTextEditor?.document;
-  return active && generated.has(active.uri.toString()) ? active : undefined;
+/** Returns whether closing a generated tab would ask the user to save it. */
+function isDirtyGeneratedTab(tab: vscode.Tab): boolean {
+  const uri = tabUri(tab);
+  return !!uri && vscode.workspace.textDocuments.some((document) => document.uri.toString() === uri.toString() && document.isDirty);
+}
+
+/** Remembers generated URIs that should never stay open as workbench tabs. */
+function rememberGeneratedOverlayUris(uris: vscode.Uri[]): void {
+  for (const uri of uris) {
+    watchedGeneratedUris.add(uri.toString());
+  }
+}
+
+/** Installs a tab watcher that closes generated file tabs without touching focus. */
+function ensureGeneratedOverlayTabWatcher(): void {
+  if (generatedTabWatcher) { return; }
+  generatedTabWatcher = vscode.window.tabGroups.onDidChangeTabs(() => {
+    const uris = [...watchedGeneratedUris].map((uri) => vscode.Uri.parse(uri));
+    setTimeout(() => void closeGeneratedOverlayTabs(uris), 0);
+  });
 }
