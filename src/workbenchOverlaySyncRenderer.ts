@@ -250,14 +250,24 @@ export function overlaySyncRendererSource(): string {
       return raw.key === "Enter" || raw.code === "Enter" || raw.keyCode === 13 || event.keyCode === 3;
     }
 
+    /** Returns whether one IntelliSense popup node is currently visible. */
+    function __dsoPopupVisible(node) {
+      if (!node || (node.classList && node.classList.contains("hidden"))) { return false; }
+      const ariaHidden = node.getAttribute && node.getAttribute("aria-hidden");
+      if (ariaHidden === "true") { return false; }
+      const needsVisibleClass = node.classList && (node.classList.contains("suggest-widget") || node.classList.contains("parameter-hints-widget"));
+      if (needsVisibleClass && !node.classList.contains("visible") && ariaHidden !== "false") { return false; }
+      const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+      if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) { return false; }
+      const rect = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+      return !rect || rect.width > 0 || rect.height > 0;
+    }
+
     /** Returns whether any IntelliSense popup is currently visible. */
     function __dsoHasVisiblePopup(selector) {
       const nodes = document.querySelectorAll(selector);
       for (let i = 0; i < nodes.length; i++) {
-        const node = nodes[i];
-        if (node.classList && node.classList.contains("hidden")) { continue; }
-        const rect = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
-        if (!rect || rect.width > 0 || rect.height > 0) { return true; }
+        if (__dsoPopupVisible(nodes[i])) { return true; }
       }
       return false;
     }
@@ -355,13 +365,6 @@ export function overlaySyncRendererSource(): string {
         }
         execute(event, source, true);
       };
-      const command = editor.addCommand ? editor.addCommand(3, function () {
-        if (__dsoSuggestOpen()) { __dsoLog(post, "command.enter.suggest", { source: "command" }); return; }
-        __dsoLog(post, "command.enter", { source: "command" });
-        execute(null, "command", true);
-      }, "!suggestWidgetVisible && !parameterHintsVisible") : null;
-      const shiftCommand = editor.addCommand ? editor.addCommand(1027, function () { __dsoLog(post, "command.shiftEnter", { source: "command" }); __dsoInsertNewline(editor, post, "command"); }) : null;
-      const cmdCommand = editor.addCommand ? editor.addCommand(2051, function () { __dsoLog(post, "command.cmdEnter", { source: "command" }); execute(null, "command-cmd", false); }) : null;
       root.__dsoRunCurrentInput = function () { return execute(null, "host-command-cmd", false) ? "requested" : "empty"; };
       window.__dsoRunCurrentOverlayInput = function () { const activeRoot = document.getElementById("django-shell-overlay"); return activeRoot && activeRoot.__dsoRunCurrentInput ? activeRoot.__dsoRunCurrentInput() : "missing-root"; };
       const keyDisposable = editor.onKeyDown ? editor.onKeyDown(function (event) { run(event, "monaco"); }) : null;
@@ -382,9 +385,6 @@ export function overlaySyncRendererSource(): string {
       root.__dsoEnterEditor = editor;
       root.__dsoEnterCleanup = function () {
         try { keyDisposable && keyDisposable.dispose && keyDisposable.dispose(); } catch (eKeyDispose) {}
-        try { command && editor._standaloneKeybindingService && editor._standaloneKeybindingService.removeDynamicKeybinding && editor._standaloneKeybindingService.removeDynamicKeybinding(command); } catch (eCommandDispose) {}
-        try { shiftCommand && editor._standaloneKeybindingService && editor._standaloneKeybindingService.removeDynamicKeybinding && editor._standaloneKeybindingService.removeDynamicKeybinding(shiftCommand); } catch (eShiftDispose) {}
-        try { cmdCommand && editor._standaloneKeybindingService && editor._standaloneKeybindingService.removeDynamicKeybinding && editor._standaloneKeybindingService.removeDynamicKeybinding(cmdCommand); } catch (eCmdDispose) {}
         window.removeEventListener("keydown", windowListener, true);
         document.removeEventListener("keydown", docListener, true);
         node.removeEventListener("keydown", nodeListener, true);

@@ -23,9 +23,9 @@ async function run() {
   assert.equal(opened.hasPythonIcon, true);
   assert.equal(opened.hasPythonRunButton, false);
   assert.equal(opened.hasSetupAutoMinimize, true);
-  const overlayText = await waitForOverlayText((value) => value.editor.includes("# --- django shell input ---") && value.analysis.includes("# --- django shell input ---"));
+  const overlayText = await waitForOverlayText((value) => value.editor.includes("# --- django shell input ---") && value.analysis === "");
   assert.equal(overlayText.editor.includes("# --- django shell input ---"), true);
-  assert.equal(overlayText.analysis.includes("# --- django shell input ---"), true);
+  assert.equal(overlayText.analysis, "");
   assert.equal(generatedShadowTabOpen(), false);
   await assertPreActivationStaleOverlayFilesCleaned();
 
@@ -58,8 +58,8 @@ async function run() {
   assert.equal(mappedObjects.range.inserting.start.character, 18);
   assert.equal(mappedObjects.textEdit.range.start.character, 18);
   assert.equal(mappedObjects.additionalTextEdits, undefined);
-  assert.equal(bridge.__test.analysisOffsetForText("from app.models import Company\n# --- django shell input ---\nCompany.obj", 2, 1), 0);
-  assert.equal(bridge.__test.analysisOffsetForText("Company.obj", 2, 1), 1);
+  assert.equal(bridge.__test.analysisOffsetForText("from app.models import Company\n# --- django shell input ---\nCompany.obj", 2, 1), 1);
+  assert.equal(bridge.__test.analysisOffsetForText("Company.obj", 2, 1), 0);
   objectItem.additionalTextEdits = [new vscode.TextEdit(new vscode.Range(0, 0, 0, 0), "from app.models import Company\n")];
   assert.equal(bridge.__test.mapCompletionResult([objectItem], 0, 2)[0].additionalTextEdits, undefined);
   const memory = require(path.join(extension.extensionPath, "out", "overlayMemoryDocument.js"));
@@ -224,7 +224,7 @@ async function assertRestartClearsOverlayDocuments() {
   await replaceDocument(uris.editor, stale);
   await replaceDocument(uris.analysis, stale);
   await vscode.commands.executeCommand("djangoShell.e2eRestartKernel");
-  const texts = await waitForOverlayText((value) => value.editor === "# --- django shell input ---\n" && value.analysis === "# --- django shell input ---\n");
+  const texts = await waitForOverlayText((value) => value.editor === "# --- django shell input ---\n" && value.analysis === "");
   assert.equal(texts.editor.includes("old_value"), false);
   assert.equal(texts.analysis.includes("from stale.models import Old"), false);
 }
@@ -350,8 +350,10 @@ function assertOverlayRendererGuards(extension) {
   const document = { activeElement: null, addEventListener: () => undefined, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : null, querySelectorAll: (selector) => state.nodes.filter((node) => selectorMatches(selector, node)), removeEventListener: () => undefined };
   const api = Function("window", "document", "__dsoPost", `${source}\nreturn { applyPrelude: window.__dsoApplyPreludeHiddenArea, enterPayload: __dsoEnterPayload, installEnterRunner: window.__dsoInstallEnterRunner, suggestOpen: __dsoSuggestOpen };`)(window, document, () => undefined);
 
-  state.nodes = [popupNode(["suggest-widget"], { height: 120, width: 240 })];
+  state.nodes = [popupNode(["suggest-widget", "visible"], { height: 120, width: 240 })];
   assert.equal(api.suggestOpen(), true);
+  state.nodes = [popupNode(["suggest-widget"], { height: 120, width: 240 })];
+  assert.equal(api.suggestOpen(), false);
   state.nodes = [popupNode(["suggest-widget", "hidden"], { height: 120, width: 240 })];
   assert.equal(api.suggestOpen(), false);
 

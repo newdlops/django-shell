@@ -461,7 +461,7 @@ export function overlayRendererSource(modelUri: string): string {
         root.className = "django-shell-overlay";
         __dsoBuildOverlay(root);
         root.querySelector("[data-run]").addEventListener("click", function () {
-          __dsoPost({ type: "run", code: __dsoEditorValue(root.__djangoShellEditor) });
+          if (root.__dsoRunCurrentInput) { root.__dsoRunCurrentInput(); return; } __dsoPost({ type: "run", code: __dsoUserText(__dsoEditorValue(root.__djangoShellEditor), root) });
         });
       }
       root.__dsoUseVisiblePrelude = !!window.__djangoShellOverlayUseVisiblePrelude;

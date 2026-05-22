@@ -6,92 +6,74 @@ import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
 
 type RunHandler = (code: string) => Promise<boolean>;
 
-/** Registers the command that turns the overlay Python editor into a shell input. */
-export function registerOverlayShellCommand(documents: OverlayMemoryDocument, runHandler: RunHandler, logger?: DiagnosticLogger): vscode.Disposable {
-  let inputStartLine = documents.inputStartLine();
-  let suppressUntil = 0;
-  const command = vscode.commands.registerCommand("djangoShell.overlayAcceptInput", async () => {
+export interface OverlayShellCommandOptions {
+  registerCommands?: boolean;
+}
+
+/** Owns shell Enter commands and the newline fallback for the overlay document. */
+export class OverlayShellCommandController implements vscode.Disposable {
+  private readonly disposables: vscode.Disposable[] = [];
+  private inputStartLine: number;
+
+  /** Registers optional shell editor commands. */
+  constructor(private readonly documents: OverlayMemoryDocument, private readonly runHandler: RunHandler, private readonly logger?: DiagnosticLogger, options: OverlayShellCommandOptions = {}) {
+    this.inputStartLine = documents.inputStartLine();
+    if (options.registerCommands !== false) {
+      this.disposables.push(vscode.commands.registerCommand("djangoShell.overlayAcceptInput", () => this.acceptInput()));
+      this.disposables.push(vscode.commands.registerCommand("djangoShell.overlayInsertNewline", () => this.insertNewline()));
+    }
+  }
+
+  /** Runs the active file-backed overlay input through the backend when Enter is pressed. */
+  async acceptInput(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document.uri.toString() !== documents.editorUri.toString()) {
-      logger?.log("overlay.command.enter.miss", { active: editor?.document.uri.toString() ?? "" });
+    if (!editor || editor.document.uri.toString() !== this.documents.editorUri.toString()) {
+      this.logger?.log("overlay.command.enter.miss", { active: editor?.document.uri.toString() ?? "" });
       await vscode.commands.executeCommand("type", { text: "\n" });
       return;
     }
-    await documents.sync(editor.document.getText());
-    inputStartLine = documentInputStartLine(editor.document, documents.inputStartLine());
-    let payload = executionPayload(editor.document, editor.selection, inputStartLine);
+    await this.documents.sync(editor.document.getText());
+    this.inputStartLine = documentInputStartLine(editor.document, this.documents.inputStartLine());
+    let payload = executionPayload(editor.document, editor.selection, this.inputStartLine);
     if (!payload.code.trim()) {
-      logger?.log("overlay.command.enter.empty", { inputStartLine: inputStartLine + 1, line: editor.selection.active.line + 1 });
+      this.logger?.log("overlay.command.enter.empty", { inputStartLine: this.inputStartLine + 1, line: editor.selection.active.line + 1 });
       await vscode.commands.executeCommand("type", { text: "\n" });
       return;
     }
-    if (await lintOverlayRange(editor.document, payload.range, logger)) {
-      await documents.sync(editor.document.getText());
-      inputStartLine = documentInputStartLine(editor.document, documents.inputStartLine());
-      payload = executionPayload(editor.document, editor.selection, inputStartLine);
+    if (await lintOverlayRange(editor.document, payload.range, this.logger)) {
+      await this.documents.sync(editor.document.getText());
+      this.inputStartLine = documentInputStartLine(editor.document, this.documents.inputStartLine());
+      payload = executionPayload(editor.document, editor.selection, this.inputStartLine);
     }
-    logger?.log("overlay.command.enter", { chars: payload.code.length, end: payload.end + 1, inputStartLine: inputStartLine + 1, lines: lineCount(payload.code), start: payload.start + 1 });
-    if (!await runHandler(payload.code)) {
-      logger?.log("overlay.command.enter.incomplete", { end: payload.end + 1, inputStartLine: inputStartLine + 1, lines: lineCount(payload.code), start: payload.start + 1 });
-      suppressUntil = Date.now() + 250;
+    this.logger?.log("overlay.command.enter", { chars: payload.code.length, end: payload.end + 1, inputStartLine: this.inputStartLine + 1, lines: lineCount(payload.code), start: payload.start + 1 });
+    if (!await this.runHandler(payload.code)) {
+      this.logger?.log("overlay.command.enter.incomplete", { end: payload.end + 1, inputStartLine: this.inputStartLine + 1, lines: lineCount(payload.code), start: payload.start + 1 });
       await vscode.commands.executeCommand("type", { text: `\n${nextIndent(editor.document, payload.end)}` });
       return;
     }
-    suppressUntil = Date.now() + 250;
     await advanceAfterRun(editor);
-  });
-  const newline = vscode.commands.registerCommand("djangoShell.overlayInsertNewline", async () => {
-    suppressUntil = Date.now() + 250;
+  }
+
+  /** Inserts an indented continuation line in the active file-backed overlay editor. */
+  async insertNewline(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
-    inputStartLine = editor ? documentInputStartLine(editor.document, documents.inputStartLine()) : documents.inputStartLine();
-    logger?.log("overlay.command.newline", { active: editor?.document.uri.toString() ?? "", inputStartLine: inputStartLine + 1 });
-    const indent = editor?.document.uri.toString() === documents.editorUri.toString() ? nextIndent(editor.document, editor.selection.active.line) : "";
+    this.inputStartLine = editor ? documentInputStartLine(editor.document, this.documents.inputStartLine()) : this.documents.inputStartLine();
+    this.logger?.log("overlay.command.newline", { active: editor?.document.uri.toString() ?? "", inputStartLine: this.inputStartLine + 1 });
+    const indent = editor?.document.uri.toString() === this.documents.editorUri.toString() ? nextIndent(editor.document, editor.selection.active.line) : "";
     await vscode.commands.executeCommand("type", { text: `\n${indent}` });
-  });
-  const documentChange = vscode.workspace.onDidChangeTextDocument((event) => {
-    if (event.document.uri.toString() !== documents.editorUri.toString()) {
-      return;
+  }
+
+  /** Releases command and document listeners. */
+  dispose(): void {
+    for (const disposable of this.disposables) {
+      disposable.dispose();
     }
-    const change = event.contentChanges.find((item) => item.text === "\n" || item.text === "\r\n");
-    if (!change) {
-      return;
-    }
-    inputStartLine = documentInputStartLine(event.document, documents.inputStartLine());
-    logger?.log("overlay.document.newline", { inputStartLine: inputStartLine + 1, line: change.range.start.line + 1, suppressed: Date.now() < suppressUntil });
-    if (Date.now() < suppressUntil) {
-      return;
-    }
-    void runFromDocumentChange(event.document, change.range.start.line, inputStartLine, runHandler, logger).then((result) => {
-      if (result.executed) {
-        suppressUntil = Date.now() + 120;
-        const editor = vscode.window.activeTextEditor;
-        if (editor?.document.uri.toString() === documents.editorUri.toString()) {
-          void advanceAfterRun(editor);
-        }
-      } else if (result.incomplete) {
-        void indentInsertedLine(event.document, change.range.start.line);
-      }
-    });
-  });
-  return vscode.Disposable.from(command, newline, documentChange);
+  }
 }
 
-/** Executes the logical shell block before a newline inserted into the overlay document. */
-async function runFromDocumentChange(document: vscode.TextDocument, line: number, inputStartLine: number, runHandler: RunHandler, logger?: DiagnosticLogger): Promise<{ executed: boolean; incomplete: boolean }> {
-  let payload = executionPayload(document, new vscode.Selection(line, 0, line, 0), inputStartLine);
-  if (!payload.code.trim()) {
-    logger?.log("overlay.document.enter.empty", { inputStartLine: inputStartLine + 1, line: line + 1 });
-    return { executed: false, incomplete: false };
-  }
-  if (await lintOverlayRange(document, payload.range, logger)) {
-    payload = executionPayload(document, new vscode.Selection(line, 0, line, 0), inputStartLine);
-  }
-  logger?.log("overlay.document.enter", { chars: payload.code.length, end: payload.end + 1, inputStartLine: inputStartLine + 1, lines: lineCount(payload.code), start: payload.start + 1 });
-  if (!await runHandler(payload.code)) {
-    logger?.log("overlay.document.enter.incomplete", { end: payload.end + 1, inputStartLine: inputStartLine + 1, lines: lineCount(payload.code), start: payload.start + 1 });
-    return { executed: false, incomplete: true };
-  }
-  return { executed: true, incomplete: false };
+/** Registers the command that turns the overlay Python editor into a shell input. */
+export function registerOverlayShellCommand(documents: OverlayMemoryDocument, runHandler: RunHandler, logger?: DiagnosticLogger, options: OverlayShellCommandOptions = {}): OverlayShellCommandController {
+  return new OverlayShellCommandController(documents, runHandler, logger, options);
 }
 
 /** Returns selected source or the logical Python block at the cursor. */
@@ -237,19 +219,6 @@ async function advanceAfterRun(editor: vscode.TextEditor): Promise<void> {
   const position = new vscode.Position(target, 0);
   editor.selection = new vscode.Selection(position, position);
   editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-}
-
-/** Inserts Python block indentation into a newline that VS Code already created. */
-async function indentInsertedLine(document: vscode.TextDocument, sourceLine: number): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  const targetLine = sourceLine + 1;
-  if (!editor || editor.document.uri.toString() !== document.uri.toString() || targetLine >= document.lineCount || document.lineAt(targetLine).text.trim()) {
-    return;
-  }
-  const indent = nextIndent(document, sourceLine);
-  if (indent) {
-    await editor.edit((edit) => edit.insert(new vscode.Position(targetLine, 0), indent));
-  }
 }
 
 /** Returns the indentation that should be used after one Python line. */

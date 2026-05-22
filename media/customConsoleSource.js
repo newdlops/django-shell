@@ -68,9 +68,9 @@ function wirePythonCell() {
     new ResizeObserver(() => scheduleEditorGeometry()).observe(editorAnchor);
     window.addEventListener("resize", scheduleEditorGeometry);
     window.addEventListener("scroll", scheduleEditorGeometry, true);
+    window.addEventListener("visibilitychange", scheduleEditorGeometry);
     window.visualViewport?.addEventListener("resize", scheduleEditorGeometry);
     window.visualViewport?.addEventListener("scroll", scheduleEditorGeometry);
-    setInterval(scheduleEditorGeometry, 600);
     scheduleEditorGeometry();
   }
 }

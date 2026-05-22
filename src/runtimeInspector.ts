@@ -2,7 +2,7 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
-import { BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimeModule, BackendRuntimePathSegment, BackendRuntimeVariable } from "./backendClient";
+import type { BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimeModule, BackendRuntimePathSegment, BackendRuntimeVariable } from "./backendClient";
 import { DiagnosticLogger } from "./diagnostics";
 
 type RuntimeNode = GroupNode | ModuleNode | StatusNode | VariableNode;

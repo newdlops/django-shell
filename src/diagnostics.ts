@@ -3,23 +3,29 @@
 import * as vscode from "vscode";
 
 export type DiagnosticFields = Record<string, boolean | number | string | undefined>;
+type OutputChannelFactory = () => vscode.OutputChannel;
 
 /** Writes structured diagnostic lines to the Django Shell output channel. */
 export class DiagnosticLogger {
   /** Stores the shared output channel used for user-visible diagnostics. */
-  constructor(private readonly output: vscode.OutputChannel) {}
+  constructor(private readonly output: vscode.OutputChannel | OutputChannelFactory) {}
 
   /** Appends one diagnostic event when logging is enabled. */
   log(event: string, fields: DiagnosticFields = {}): void {
     if (!this.enabled()) {
       return;
     }
-    this.output.appendLine(`[${new Date().toISOString()}] ${event} ${formatFields(fields)}`);
+    this.outputChannel().appendLine(`[${new Date().toISOString()}] ${event} ${formatFields(fields)}`);
   }
 
   /** Returns whether diagnostic logging is enabled in workspace settings. */
   private enabled(): boolean {
     return vscode.workspace.getConfiguration("djangoShell").get<boolean>("diagnosticLogging", false);
+  }
+
+  /** Returns the lazily-created output channel used for enabled diagnostics. */
+  private outputChannel(): vscode.OutputChannel {
+    return typeof this.output === "function" ? this.output() : this.output;
   }
 }
 

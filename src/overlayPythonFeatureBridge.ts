@@ -2,18 +2,20 @@
 
 import * as vscode from "vscode";
 import { DiagnosticLogger } from "./diagnostics";
+import { OverlayCompletionRequestCache } from "./overlayCompletionRequestCache";
 import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
 
 const SELECTOR: vscode.DocumentSelector = [{ language: "python", pattern: "**/.django-shell/console-cell.py", scheme: "file" }];
 const SEMANTIC_TOKEN_TYPES = ["namespace", "class", "function", "variable"];
 const SEMANTIC_LEGEND = new vscode.SemanticTokensLegend(SEMANTIC_TOKEN_TYPES);
 
-/** Forwards overlay editor language requests to the hidden prelude analysis document. */
+/** Forwards overlay editor language requests to the raw hidden analysis document. */
 export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider, vscode.DefinitionProvider, vscode.DocumentHighlightProvider, vscode.Disposable, vscode.HoverProvider, vscode.ReferenceProvider, vscode.SignatureHelpProvider {
   private readonly disposables: vscode.Disposable[] = [];
+  private readonly completionCache: OverlayCompletionRequestCache;
 
   /** Stores memory documents used for visible and analysis text. */
-  constructor(private readonly documents: OverlayMemoryDocument, private readonly logger?: DiagnosticLogger) {}
+  constructor(private readonly documents: OverlayMemoryDocument, private readonly logger?: DiagnosticLogger) { this.completionCache = new OverlayCompletionRequestCache(logger); }
 
   /** Registers Python providers for the overlay editor URI. */
   activate(context: vscode.ExtensionContext): void {
@@ -40,12 +42,17 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     if (!this.isEditorDocument(document)) {
       return undefined;
     }
+    return this.completionCache.provide(document, position, context.triggerCharacter, () => this.loadCompletionItems(document, position, context));
+  }
+
+  /** Loads uncached completions through the hidden analysis document. */
+  private async loadCompletionItems(document: vscode.TextDocument, position: vscode.Position, context: vscode.CompletionContext): Promise<vscode.CompletionList | vscode.CompletionItem[] | undefined> {
     const started = Date.now();
     const text = document.getText();
     const offset = this.analysisOffset(document);
     const protectedLineCount = protectedLineCountForText(text, this.documents.inputStartLine());
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.sync(text);
+    await this.documents.syncAnalysis(text);
     const result = await vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>(
       "vscode.executeCompletionItemProvider",
       this.documents.analysisUri,
@@ -64,7 +71,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const started = Date.now();
     const offset = this.analysisOffset(document);
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.sync(document.getText());
+    await this.documents.syncAnalysis(document.getText());
     const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
       "vscode.executeHoverProvider",
       this.documents.analysisUri,
@@ -83,7 +90,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const started = Date.now();
     const offset = this.analysisOffset(document);
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.sync(document.getText());
+    await this.documents.syncAnalysis(document.getText());
     const result = await vscode.commands.executeCommand<Array<vscode.Location | vscode.DefinitionLink>>(
       "vscode.executeDefinitionProvider",
       this.documents.analysisUri,
@@ -101,7 +108,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const started = Date.now();
     const offset = this.analysisOffset(document);
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.sync(document.getText());
+    await this.documents.syncAnalysis(document.getText());
     const result = await vscode.commands.executeCommand<vscode.Location[]>(
       "vscode.executeReferenceProvider",
       this.documents.analysisUri,
@@ -120,7 +127,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const started = Date.now();
     const offset = this.analysisOffset(document);
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.sync(document.getText());
+    await this.documents.syncAnalysis(document.getText());
     const result = await vscode.commands.executeCommand<vscode.DocumentHighlight[]>(
       "vscode.executeDocumentHighlights",
       this.documents.analysisUri,
@@ -128,25 +135,6 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     );
     const mapped = (result ?? []).map((item) => new vscode.DocumentHighlight(mapRange(item.range, offset), item.kind));
     this.logger?.log("overlay.feature", { feature: "highlights", items: mapped.length, ms: Date.now() - started, offset, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
-    return mapped;
-  }
-
-  /** Provides inlay hints through the hidden analysis document. */
-  async provideInlayHints(document: vscode.TextDocument, range: vscode.Range): Promise<vscode.InlayHint[] | undefined> {
-    if (!this.isEditorDocument(document)) {
-      return undefined;
-    }
-    const started = Date.now();
-    const offset = this.analysisOffset(document);
-    const analysisRange = this.analysisRange(range, offset);
-    await this.documents.sync(document.getText());
-    const result = await vscode.commands.executeCommand<vscode.InlayHint[]>(
-      "vscode.executeInlayHintProvider",
-      this.documents.analysisUri,
-      analysisRange
-    );
-    const mapped = mapInlayHints(result ?? [], offset);
-    this.logger?.log("overlay.feature", { feature: "inlayHints", items: mapped.length, ms: Date.now() - started, offset, visibleLine: range.start.line + 1, analysisLine: analysisRange.start.line + 1 });
     return mapped;
   }
 
@@ -158,7 +146,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const started = Date.now();
     const offset = this.analysisOffset(document);
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.sync(document.getText());
+    await this.documents.syncAnalysis(document.getText());
     const result = await vscode.commands.executeCommand<vscode.SignatureHelp>(
       "vscode.executeSignatureHelpProvider",
       this.documents.analysisUri,
@@ -201,15 +189,14 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   }
 }
 
-/** Returns the provider line offset after detecting generated marker text. */
+/** Returns the provider line offset after detecting the editor-only marker text. */
 function analysisOffsetForText(text: string, inputStartLine: number, lineOffset: number): number {
-  return lineAtText(text, Math.max(0, inputStartLine - 1)).trim() === INPUT_MARKER || text.includes(`${INPUT_MARKER}\n`) ? 0 : lineOffset;
+  return lineAtText(text, Math.max(0, inputStartLine - 1)).trim() === INPUT_MARKER || text.includes(`${INPUT_MARKER}\n`) ? lineOffset : 0;
 }
 
-/** Returns lines protected from completion import edits. */
-function protectedLineCountForText(text: string, fallback: number): number {
-  const index = text.indexOf(INPUT_MARKER);
-  return index < 0 ? fallback : text.slice(0, index + INPUT_MARKER.length).split(/\r?\n/).length;
+/** Returns lines protected from completion import edits in the raw analysis document. */
+function protectedLineCountForText(_text: string, _fallback: number): number {
+  return 0;
 }
 
 /** Maps completion ranges back from the analysis document to the visible editor. */
@@ -325,20 +312,6 @@ function mapLocations(locations: vscode.Location[], analysisUri: vscode.Uri, edi
   return locations.map((location) => sameUri(location.uri, analysisUri)
     ? new vscode.Location(editorUri, mapRange(location.range, offset))
     : location);
-}
-
-/** Maps inlay hints from the analysis document back to the visible editor. */
-function mapInlayHints(hints: vscode.InlayHint[], offset: number): vscode.InlayHint[] {
-  return hints
-    .filter((hint) => hint.position.line >= offset)
-    .map((hint) => {
-      const mapped = new vscode.InlayHint(hint.position.translate(-offset, 0), hint.label, hint.kind);
-      mapped.paddingLeft = hint.paddingLeft;
-      mapped.paddingRight = hint.paddingRight;
-      mapped.textEdits = hint.textEdits?.map((edit) => new vscode.TextEdit(mapRange(edit.range, offset), edit.newText));
-      mapped.tooltip = hint.tooltip;
-      return mapped;
-    });
 }
 
 /** Maps a range from the analysis document to the visible editor. */

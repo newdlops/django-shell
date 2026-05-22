@@ -2,28 +2,40 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
-import { BackendExecutionResult, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment } from "./backendClient";
+import type { BackendExecutionResult, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment } from "./backendClient";
+import { webviewHtml } from "./customConsoleHtml";
 import { DiagnosticLogger } from "./diagnostics";
+import { scheduleWorkspaceGeneratedOverlayTabCleanup } from "./generatedOverlayTabs";
 import { NotebookPtySession } from "./notebookPtySession";
+import { resetOverlayBackingFiles } from "./overlayBackingFiles";
 import { runtimePreludeLines } from "./runtimePrelude";
-import { WorkbenchOverlay, WorkbenchOverlayGeometry } from "./workbenchOverlay";
+import type { WorkbenchOverlay, WorkbenchOverlayGeometry } from "./workbenchOverlay";
 
 const VIEW_TYPE = "djangoShell.customConsole";
+
+export interface CustomDjangoConsoleActivationOptions {
+  registerCommands?: boolean;
+}
 
 /** Runs the primary custom Django shell UI backed by the existing backend bridge. */
 export class CustomDjangoConsole implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private readonly runtimeEmitter = new vscode.EventEmitter<void>();
+  private activationContext: vscode.ExtensionContext | undefined;
   private panel: vscode.WebviewPanel | undefined;
   private inspectionCache: BackendRuntimeInspection | undefined;
   private inspectionInFlight: Promise<BackendRuntimeInspection> | undefined;
   private lastEditorGeometry: WorkbenchOverlayGeometry | undefined;
+  private overlay: WorkbenchOverlay | undefined;
+  private overlayBackingReset: Promise<void> | undefined;
+  private overlayPrelude: string[] = [];
+  private overlayPromise: Promise<WorkbenchOverlay> | undefined;
+  private registerOverlayCommands = true;
   private runtimeReady = false;
   private runtimeGeneration = 0;
   private runtimeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   private session: NotebookPtySession | undefined;
   private sessionDisposables: vscode.Disposable[] = [];
-  private readonly overlay: WorkbenchOverlay;
   private executionCount = 1;
 
   readonly onDidChangeRuntime = this.runtimeEmitter.event;
@@ -32,19 +44,24 @@ export class CustomDjangoConsole implements vscode.Disposable {
   constructor(
     private readonly extensionPath: string,
     private readonly logger?: DiagnosticLogger
-  ) {
-    this.overlay = new WorkbenchOverlay(logger);
-  }
+  ) {}
 
   /** Registers the command that opens the custom console frontend. */
-  activate(context: vscode.ExtensionContext): void {
-    this.disposables.push(vscode.commands.registerCommand("djangoShell.openConsole", () => this.openConsole()));
-    this.overlay.activate(context, (code) => this.executePython(code));
+  activate(context: vscode.ExtensionContext, options: CustomDjangoConsoleActivationOptions = {}): void {
+    this.activationContext = context;
+    this.registerOverlayCommands = options.registerCommands !== false;
+    if (this.registerOverlayCommands) {
+      this.disposables.push(vscode.commands.registerCommand("djangoShell.openConsole", () => this.openConsole()));
+    }
     context.subscriptions.push(this);
   }
 
   /** Opens or reveals the custom webview console and starts its backend session. */
   async openConsole(): Promise<void> {
+    if (!this.overlay) {
+      await this.ensureOverlayBackingFilesReset();
+      scheduleWorkspaceGeneratedOverlayTabCleanup();
+    }
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.One);
       this.postStatus();
@@ -62,6 +79,20 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.panel.webview.onDidReceiveMessage((message) => void this.handleMessage(message), undefined, this.disposables);
     this.ensureSession();
   }
+
+  /** Opens the console and shows the overlay editor for command-driven access. */
+  async showOverlayEditor(): Promise<void> {
+    await this.openConsole();
+    await this.showOverlay();
+  }
+
+  /** Runs the current overlay input through the renderer-owned editor command. */
+  async runCurrentOverlayInput(): Promise<void> {
+    const overlay = await this.ensureOverlay();
+    await overlay.runCurrentInput();
+  }
+  /** Accepts Enter from the file-backed overlay command facade. */ async acceptOverlayInput(): Promise<void> { await (await this.ensureOverlay()).acceptInput(); }
+  /** Inserts an indented newline from the file-backed overlay command facade. */ async insertOverlayNewline(): Promise<void> { await (await this.ensureOverlay()).insertNewline(); }
 
   /** Returns safe runtime summaries for the active custom console backend. */
   async inspectActiveRuntime(): Promise<BackendRuntimeInspection> {
@@ -124,8 +155,8 @@ export class CustomDjangoConsole implements vscode.Disposable {
   }
 
   /** Restarts the console through the same path used by the webview restart button. */ async e2eRestartKernel(): Promise<void> { await this.restartSession(); }
-  /** Injects hidden overlay prelude lines for extension host E2E tests. */ e2eSetPrelude(importLines: string[]): void { this.overlay.updatePrelude(importLines); }
-  /** Evaluates an overlay renderer expression for extension host E2E tests. */ async e2eEvaluateOverlay(expression: string): Promise<string> { return this.overlay.e2eEvaluate(expression); }
+  /** Injects hidden overlay prelude lines for extension host E2E tests. */ async e2eSetPrelude(importLines: string[]): Promise<void> { this.overlayPrelude = importLines; (await this.ensureOverlay()).updatePrelude(importLines); }
+  /** Evaluates an overlay renderer expression for extension host E2E tests. */ async e2eEvaluateOverlay(expression: string): Promise<string> { return (await this.ensureOverlay()).e2eEvaluate(expression); }
 
   /** Releases the custom console session and webview resources. */
   dispose(): void {
@@ -135,8 +166,49 @@ export class CustomDjangoConsole implements vscode.Disposable {
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
-    this.overlay.dispose();
+    this.overlay?.dispose();
     this.runtimeEmitter.dispose();
+  }
+
+  /** Loads the CDP-backed workbench overlay only when Python editor features are used. */
+  private async ensureOverlay(): Promise<WorkbenchOverlay> {
+    if (this.overlay) {
+      return this.overlay;
+    }
+    if (!this.activationContext) {
+      throw new Error("Django Shell console has not been activated.");
+    }
+    if (!this.overlayPromise) {
+      this.overlayPromise = import("./workbenchOverlay").then(({ WorkbenchOverlay }) => {
+        const overlay = new WorkbenchOverlay(this.logger);
+        overlay.activate(this.activationContext!, (code) => this.executePython(code), { registerCommands: this.registerOverlayCommands });
+        if (this.lastEditorGeometry) {
+          overlay.updateGeometry(this.lastEditorGeometry);
+        }
+        if (this.overlayPrelude.length) {
+          overlay.updatePrelude(this.overlayPrelude);
+        }
+        this.overlay = overlay;
+        return overlay;
+      }).finally(() => {
+        this.overlayPromise = undefined;
+      });
+    }
+    return this.overlayPromise;
+  }
+
+  /** Clears stale generated overlay files without loading the workbench overlay. */
+  private ensureOverlayBackingFilesReset(): Promise<void> {
+    if (!this.overlayBackingReset) {
+      this.overlayBackingReset = this.resetOverlayBackingFiles();
+    }
+    return this.overlayBackingReset;
+  }
+
+  /** Forces generated overlay backing files back to an empty shell input. */
+  private resetOverlayBackingFiles(): Promise<void> {
+    this.overlayBackingReset = resetOverlayBackingFiles();
+    return this.overlayBackingReset;
   }
 
   /** Starts a backend-capable setup terminal session when one is not already running. */
@@ -163,6 +235,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
           this.runtimeGeneration += 1;
           this.runtimeEmitter.fire();
           void this.updateOverlayPrelude(this.runtimeGeneration);
+          scheduleWorkspaceGeneratedOverlayTabCleanup();
           this.post({ show: true, type: "measureEditor" });
         }
       })
@@ -180,8 +253,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     }
     if (typed.type === "editorGeometry") {
       if (this.panel?.visible && isOverlayGeometry(typed.rect)) {
-        this.lastEditorGeometry = typed.rect;
-        this.overlay.updateGeometry(typed.rect);
+        this.updateOverlayGeometry(typed.rect);
       }
       return;
     }
@@ -190,8 +262,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
         return;
       }
       if (isOverlayGeometry(typed.rect)) {
-        this.lastEditorGeometry = typed.rect;
-        this.overlay.updateGeometry(typed.rect);
+        this.updateOverlayGeometry(typed.rect);
       }
       await this.showOverlay();
       return;
@@ -226,7 +297,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       this.post({ execution, type: "pythonStarted" });
       const text = "Backend is not ready. Enter Django shell in the setup terminal first.";
       this.post({ execution, ok: false, text, type: "pythonResult" });
-      void this.overlay.postOutput(text, false);
+      void this.overlay?.postOutput(text, false);
       return false;
     }
     if (isLikelyIncompletePython(code)) {
@@ -239,7 +310,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.clearInspectionCache();
     const text = executionText(result);
     this.post({ execution, ok: result.ok, text, type: "pythonResult" });
-    void this.overlay.postOutput(text, result.ok);
+    void this.overlay?.postOutput(text, result.ok);
     this.scheduleRuntimeRefresh();
     return true;
   }
@@ -250,10 +321,12 @@ export class CustomDjangoConsole implements vscode.Disposable {
       return;
     }
     try {
-      await this.overlay.show();
+      await (await this.ensureOverlay()).show();
     } catch (error) {
       this.logger?.log("overlay.show.error", { error: error instanceof Error ? error.message : String(error) });
       void vscode.window.showWarningMessage("Django Shell overlay editor could not be opened.");
+    } finally {
+      scheduleWorkspaceGeneratedOverlayTabCleanup();
     }
   }
 
@@ -265,19 +338,18 @@ export class CustomDjangoConsole implements vscode.Disposable {
       if (this.runtimeReady) { void this.updateOverlayPrelude(this.runtimeGeneration); }
       return;
     }
-    this.overlay.hide();
+    this.overlay?.hide();
   }
 
   /** Refreshes hidden runtime imports used by the overlay Python analyzer. */
   private async updateOverlayPrelude(generation = this.runtimeGeneration): Promise<void> {
     const backend = this.session?.backend;
-    if (!backend?.supportsRuntimeInspection()) {
-      return;
-    }
+    if (!backend?.supportsRuntimeInspection()) { return; }
     const inspection = await backend.prelude();
-    if (inspection?.ok && this.runtimeReady && generation === this.runtimeGeneration) {
-      this.overlay.updatePrelude(runtimePreludeLines(inspection.variables));
-    }
+    if (!inspection?.ok || !this.runtimeReady || generation !== this.runtimeGeneration) { return; }
+    const lines = runtimePreludeLines(inspection.variables);
+    this.overlayPrelude = lines;
+    this.overlay?.updatePrelude(lines);
   }
 
   /** Schedules runtime-dependent UI refresh without blocking rapid shell input. */
@@ -313,9 +385,20 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.clearInspectionCache();
     this.clearRuntimeRefreshTimer();
     this.post({ type: "resetPythonCell" });
-    await this.overlay.reset();
+    this.overlayPrelude = [];
+    if (this.overlay) {
+      await this.overlay.reset();
+    } else {
+      await this.resetOverlayBackingFiles();
+    }
     this.session?.restart();
     this.runtimeEmitter.fire();
+  }
+
+  /** Saves the latest webview geometry and forwards it to a loaded overlay. */
+  private updateOverlayGeometry(geometry: WorkbenchOverlayGeometry): void {
+    this.lastEditorGeometry = geometry;
+    this.overlay?.updateGeometry(geometry);
   }
 
   /** Posts the latest session snapshot to the webview. */
@@ -342,7 +425,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.panel = undefined;
     this.runtimeReady = false;
     this.runtimeGeneration += 1;
-    this.overlay.hide();
+    this.overlay?.hide();
     this.clearInspectionCache();
     this.clearRuntimeRefreshTimer();
   }
@@ -413,82 +496,4 @@ function isOverlayGeometry(value: unknown): value is WorkbenchOverlayGeometry {
     Number.isFinite(rect.height) &&
     rect.width > 40 &&
     rect.height > 40;
-}
-
-/** Builds the custom console webview document. */
-function webviewHtml(webview: vscode.Webview, extensionPath: string): string {
-  const nonce = String(Date.now());
-  const pythonIconUri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionPath, "media", "python.svg")));
-  const scriptUri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionPath, "media", "dist", "customConsole.js")));
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'nonce-${nonce}';">
-<title>Django Shell</title>
-<style>
-body{margin:0;font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background)}
-.shell{min-height:100vh;display:grid;grid-template-rows:auto 1fr}
-.topbar{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:12px;height:36px;padding:0 14px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}
-.brand{display:flex;align-items:center;gap:10px;min-width:0}.title{font-weight:600}.kernel{display:inline-flex;align-items:center;gap:6px;max-width:42vw;color:var(--vscode-descriptionForeground);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.statusDot{width:7px;height:7px;border-radius:50%;background:var(--vscode-testing-iconQueued,var(--vscode-descriptionForeground))}.kernel[data-ready="true"] .statusDot{background:var(--vscode-testing-iconPassed,var(--vscode-terminal-ansiGreen))}
-.spacer{flex:1}button{color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0;border-radius:4px;padding:3px 9px;font:inherit}
-button.secondary{color:var(--vscode-foreground);background:var(--vscode-button-secondaryBackground)}
-button.icon{display:inline-grid;place-items:center;width:24px;height:24px;padding:0;border-radius:5px}
-button:hover{background:var(--vscode-button-hoverBackground)}
-button:disabled{opacity:.55;cursor:default}
-.notebook{width:100%;box-sizing:border-box;margin:0;padding:10px 14px 34px}
-.cell{display:grid;grid-template-columns:64px minmax(0,1fr);margin:0 0 8px}
-.cell:focus-within .body,.cell:hover .body{border-color:var(--vscode-focusBorder)}
-.prompt{box-sizing:border-box;padding:8px 10px 0 0;text-align:right;color:var(--vscode-descriptionForeground);font-family:var(--vscode-editor-font-family);font-size:12px;white-space:nowrap}.promptMark{display:inline-block;min-width:38px}
-.body{border:1px solid transparent;background:var(--vscode-notebook-cellEditorBackground,var(--vscode-editor-background));box-shadow:inset 3px 0 0 transparent}.cell:focus-within .body{box-shadow:inset 3px 0 0 var(--vscode-focusBorder)}
-.toolbar{display:flex;align-items:center;gap:7px;height:28px;padding:0 7px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-sideBar-background))}
-.toolbar .label{font-size:12px;color:var(--vscode-descriptionForeground)}.toolbar .grow{flex:1}
-.terminalHost{height:190px;min-height:92px;overflow:hidden;padding:3px 0;background:var(--vscode-terminal-background,var(--vscode-editor-background))}
-.terminalHost .xterm,.terminalHost .xterm-screen,.terminalHost .xterm-viewport{height:100%;background:var(--vscode-terminal-background,var(--vscode-editor-background))!important}
-.setupCell.minimized .terminalHost{height:34px!important;min-height:34px;opacity:.72;pointer-events:none}.setupCell.minimized .cellResize{display:none}.setupCell.minimized .body{border-color:transparent}
-.cellResize{height:9px;cursor:ns-resize;position:relative;background:var(--vscode-notebook-cellEditorBackground,var(--vscode-editor-background))}.cellResize::before{content:"";position:absolute;left:50%;top:4px;width:42px;height:1px;transform:translateX(-50%);background:var(--vscode-panel-border)}.cellResize:hover::before,.cellResize:focus-visible::before{height:2px;background:var(--vscode-focusBorder)}.resizingCell,.resizingCell *{cursor:ns-resize!important;user-select:none}
-.result,.editorLauncher{margin:0;box-sizing:border-box;font-family:var(--vscode-editor-font-family);font-size:var(--vscode-editor-font-size);line-height:1.45;letter-spacing:0;font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0;tab-size:4}
-.editor{display:grid;grid-template-rows:auto}
-.editorLauncher{position:relative;height:clamp(240px,38vh,520px);background:var(--vscode-editor-background)}
-.pythonIcon{display:inline-block;width:20px;height:20px;object-fit:contain}
-.disabled .pythonIcon{opacity:.55}.disabled .editorLauncher{background:var(--vscode-disabledForeground,var(--vscode-editor-background))}
-.editorLock{position:absolute;inset:0;display:none;align-items:center;justify-content:center;gap:8px;color:var(--vscode-descriptionForeground);background:color-mix(in srgb,var(--vscode-editor-background) 86%,transparent);font-size:12px;z-index:1}.disabled .editorLock{display:flex}
-.hint{padding:5px 10px;border-top:1px solid var(--vscode-panel-border);font-size:12px;color:var(--vscode-descriptionForeground)}
-.cellOutput{border-top:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background);max-height:min(46vh,420px);overflow:auto}
-.outputHidden{display:none}
-.outputLabel{padding:6px 10px 0;color:var(--vscode-descriptionForeground);font-family:var(--vscode-editor-font-family);font-size:12px}
-.outputList{display:grid;gap:0;padding:4px 0 8px}.outputItem{border-top:1px solid var(--vscode-panel-border)}
-.outputItemLabel{padding:5px 10px 0;color:var(--vscode-descriptionForeground);font-family:var(--vscode-editor-font-family);font-size:12px}
-.result{margin:0;padding:4px 10px 8px;white-space:pre;overflow:visible;min-width:max-content;background:var(--vscode-editor-background)}
-.result.error{color:var(--vscode-errorForeground)}
-</style>
-</head>
-<body>
-<div class="shell">
-  <header class="topbar"><div class="brand"><span class="title">Django Shell</span><span id="status" class="kernel"><span class="statusDot"></span><span id="statusText">starting</span></span></div><span class="spacer"></span><button id="restart" class="secondary" type="button">Restart Kernel</button></header>
-  <main class="notebook">
-    <section id="setupCell" class="cell setupCell">
-      <div class="prompt"><span class="promptMark">Setup</span></div>
-      <div class="body">
-        <div class="toolbar"><button id="focusTerminal" class="icon" type="button" title="Focus setup input">&gt;</button><span class="label">setup terminal</span><span class="grow"></span></div>
-        <div id="terminal" class="terminalHost"></div>
-        <div class="cellResize" data-resize-target="terminal" role="separator" aria-label="Resize setup terminal" aria-orientation="horizontal" tabindex="0"></div>
-      </div>
-    </section>
-    <section id="pythonCell" class="cell inputCell disabled">
-      <div id="inputPrompt" class="prompt"><span class="promptMark">In&nbsp;[&nbsp;]:</span></div>
-      <div class="body editor">
-        <div class="toolbar"><img class="pythonIcon" src="${pythonIconUri}" alt="" aria-hidden="true"><span class="label">Python</span><span class="grow"></span><button id="clear" class="secondary" type="button">Clear</button></div>
-        <div id="editorAnchor" class="editorLauncher"><div id="editorLock" class="editorLock"><img class="pythonIcon" src="${pythonIconUri}" alt="" aria-hidden="true"><span>Complete setup to enable Python input</span></div></div>
-        <div class="cellResize" data-resize-target="editor" role="separator" aria-label="Resize Python editor" aria-orientation="horizontal" tabindex="0"></div>
-        <div id="currentOutput" class="cellOutput outputHidden"><div id="currentOutputLabel" class="outputLabel">Outputs</div><div id="outputList" class="outputList"></div></div>
-      </div>
-    </section>
-  </main>
-</div>
-<script nonce="${nonce}" type="module" src="${scriptUri}"></script>
-</body>
-</html>`;
 }

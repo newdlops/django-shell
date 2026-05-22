@@ -17,6 +17,15 @@ test("restores v0.0.2 Python analysis defaults globally", () => {
   assert.deepEqual(manifest.contributes.configurationDefaults["[python]"], { "editor.semanticHighlighting.enabled": true });
 });
 
-test("keeps diagnostic logging on by default like v0.0.2", () => {
-  assert.equal(manifest.contributes.configuration.properties["djangoShell.diagnosticLogging"].default, true);
+test("keeps diagnostic logging off by default for lower idle overhead", () => {
+  assert.equal(manifest.contributes.configuration.properties["djangoShell.diagnosticLogging"].default, false);
+});
+
+test("keeps Python cell Enter from interrupting completion UI", () => {
+  const binding = manifest.contributes.keybindings.find((item) => item.command === "djangoShell.overlayAcceptInput");
+  assert.ok(binding);
+  assert.match(binding.when, /resourceFilename == 'console-cell\.py'/);
+  assert.match(binding.when, /suggestWidgetVisible/);
+  assert.match(binding.when, /parameterHintsVisible/);
+  assert.match(binding.when, /inlineSuggestionVisible/);
 });

@@ -5,7 +5,8 @@ import * as vscode from "vscode";
 import { DiagnosticLogger } from "./diagnostics";
 import { OverlayMemoryDocument } from "./overlayMemoryDocument";
 import { OverlayPythonFeatureBridge } from "./overlayPythonFeatureBridge";
-import { registerOverlayShellCommand } from "./overlayShellCommand";
+import { closeGeneratedOverlayTabs } from "./generatedOverlayTabs";
+import { OverlayShellCommandController, registerOverlayShellCommand } from "./overlayShellCommand";
 import { logOverlayRendererPayload } from "./overlayRendererLog";
 import { findInspectorUrlForPid, findMainPid, waitForInspectorUrlForPid } from "./workbenchInspector";
 import { overlayRendererSource } from "./workbenchOverlayRenderer";
@@ -13,11 +14,9 @@ interface CdpResponse { error?: { message?: string }; id?: number; result?: { ex
 type PendingReply = (response: CdpResponse) => void; type RunHandler = (code: string) => Promise<boolean>;
 /** Describes the Python cell editor anchor inside the custom webview viewport. */
 export interface WorkbenchOverlayGeometry { height: number; left: number; top: number; width: number; }
-
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*" };
-const RENDERER_PATCH_VERSION = 26;
-
+const RENDERER_PATCH_VERSION = 27;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -32,19 +31,22 @@ export class WorkbenchOverlay implements vscode.Disposable {
   private geometry: WorkbenchOverlayGeometry | undefined;
   private readonly memoryDocument: OverlayMemoryDocument;
   private readonly featureBridge: OverlayPythonFeatureBridge;
-  private prelude = "";
+  private prelude = ""; private shellCommands: OverlayShellCommandController | undefined;
 
   /** Stores diagnostics used to report renderer overlay setup. */
   constructor(private readonly logger?: DiagnosticLogger) { this.memoryDocument = new OverlayMemoryDocument(logger); this.featureBridge = new OverlayPythonFeatureBridge(this.memoryDocument, logger); }
 
   /** Registers the overlay lifecycle with VS Code. */
-  activate(context: vscode.ExtensionContext, runHandler: RunHandler): void {
+  activate(context: vscode.ExtensionContext, runHandler: RunHandler, options: { registerCommands?: boolean } = {}): void {
     this.runHandler = runHandler;
     this.memoryDocument.activate(context);
     this.featureBridge.activate(context);
-    this.disposables.push(registerOverlayShellCommand(this.memoryDocument, runHandler, this.logger));
-    this.disposables.push(vscode.commands.registerCommand("djangoShell.showOverlayEditor", () => this.show()));
-    this.disposables.push(vscode.commands.registerCommand("djangoShell.overlayRunCurrentInput", () => this.runCurrentInput()));
+    this.shellCommands = registerOverlayShellCommand(this.memoryDocument, runHandler, this.logger, { registerCommands: options.registerCommands !== false });
+    this.disposables.push(this.shellCommands);
+    if (options.registerCommands !== false) {
+      this.disposables.push(vscode.commands.registerCommand("djangoShell.showOverlayEditor", () => this.show()));
+      this.disposables.push(vscode.commands.registerCommand("djangoShell.overlayRunCurrentInput", () => this.runCurrentInput()));
+    }
     context.subscriptions.push(this);
   }
 
@@ -52,6 +54,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   async show(): Promise<void> {
     const started = Date.now();
     await this.ensureInjected();
+    if (await this.rendererPatchVersion() !== String(RENDERER_PATCH_VERSION)) { await this.inject(); }
     let report = await this.evalInWorkbench(showExpression(this.geometry));
     if (report === "overlay-not-installed") { await this.inject(); report = await this.evalInWorkbench(showExpression(this.geometry)); }
     if (report.includes(":pending") && !report.includes("no-webview-host")) {
@@ -64,6 +67,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
     }
     this.logger?.log("overlay.show", { ms: Date.now() - started, report });
     this.logger?.log("overlay.probe", { report: await this.evalInWorkbench("(function(){const r=document.getElementById('django-shell-overlay');const e=r&&r.__djangoShellEditor;const m=e&&e.getModel&&e.getModel();return JSON.stringify({root:!!r,editor:!!e,sync:!!(r&&r.__dsoSyncEditor),enter:!!(r&&r.__dsoEnterEditor),sameEnter:!!(r&&r.__dsoEnterEditor===e),hasRunner:!!window.__dsoInstallEnterRunner,hasSync:!!window.__dsoInstallModelSync,uri:m&&String(m.uri),lines:m&&m.getLineCount&&m.getLineCount(),chars:m&&m.getValue&&m.getValue().length,active:String(document.activeElement&&document.activeElement.className||'').slice(0,80)});})()").catch((error: unknown) => `probe-error:${error instanceof Error ? error.message : String(error)}`) });
+    await closeGeneratedOverlayTabs([this.memoryDocument.analysisUri, this.memoryDocument.editorUri]);
     await vscode.commands.executeCommand("setContext", "djangoShell.overlayVisible", report.includes(":editor:"));
   }
 
@@ -76,7 +80,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
     });
   }
 
-  /** Updates hidden imports used by Python language analysis. */
+  /** Updates editor-only hidden imports without changing raw analysis text. */
   updatePrelude(importLines: string[]): void {
     const nextPrelude = preludeText(importLines);
     if (nextPrelude === this.prelude) {
@@ -108,6 +112,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
 
   /** Asks the renderer-owned overlay editor to run the current cursor execution unit. */
   async runCurrentInput(): Promise<void> { await this.ensureInjected(); this.logger?.log("overlay.command.rerun.eval", { report: await this.evalInWorkbench("window.__dsoRunCurrentOverlayInput ? window.__dsoRunCurrentOverlayInput() : 'missing-runner'").catch((error: unknown) => `error:${error instanceof Error ? error.message : String(error)}`) }); }
+  /** Runs the active file-backed overlay input command. */ async acceptInput(): Promise<void> { await this.shellCommands?.acceptInput(); }
+  /** Inserts an indented continuation line in the file-backed overlay command. */ async insertNewline(): Promise<void> { await this.shellCommands?.insertNewline(); }
   /** Evaluates a renderer expression for extension host E2E tests. */
   async e2eEvaluate(expression: string): Promise<string> { await this.ensureInjected(); return this.evalInWorkbench(expression); }
 
@@ -144,6 +150,11 @@ export class WorkbenchOverlay implements vscode.Disposable {
       throw new Error(`overlay patch failed: ${report}`);
     }
     this.logger?.log("overlay.inject", { report });
+  }
+
+  /** Returns the renderer patch version currently installed in the workbench window. */
+  private rendererPatchVersion(): Promise<string> {
+    return this.evalInWorkbench("String(window.__djangoShellOverlayPatchVersion || '')").catch(() => "");
   }
 
   /** Starts the local HTTP bridge used by the renderer run button. */

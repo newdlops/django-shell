@@ -26,9 +26,9 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     void this.writeAnalysis(false);
   }
 
-  /** Returns how many generated lines are inserted before user code in the analysis document. */
+  /** Returns the editor-to-analysis line delta for a marker-prefixed editor document. */
   lineOffset(): number {
-    return prefixLineCount(this.prelude);
+    return -this.inputStartLine();
   }
 
   /** Returns the zero-based first user-editable line. */
@@ -36,19 +36,19 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     return prefixLineCount(this.prelude);
   }
 
-  /** Returns the full backing document text including hidden imports. */
+  /** Returns the editor backing text including the protected input marker. */
   fullText(): string {
-    return this.analysisText();
+    return this.editorText();
   }
 
-  /** Returns the real editor model text that language extensions analyze. */
+  /** Returns the editor model text that preserves the shell input boundary. */
   editorText(): string {
-    return this.fullText();
+    return backingText(this.prelude, this.text);
   }
 
-  /** Returns the generated analysis text including hidden imports. */
+  /** Returns only the Python cell text used by language analysis. */
   analysisText(): string {
-    return backingText(this.prelude, this.text);
+    return this.text;
   }
 
   /** Synchronizes editor text into the in-memory TextDocument. */
@@ -63,7 +63,19 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     await Promise.all([this.writeEditor(false), this.writeAnalysis(false)]);
   }
 
-  /** Updates hidden import text used for file-scheme language analysis. */
+  /** Synchronizes only the hidden analysis document for latency-sensitive providers. */
+  async syncAnalysis(text: string): Promise<void> {
+    const userText = extractUserText(text, this.prelude);
+    const changed = userText !== this.text;
+    this.logger?.log("overlay.memory.syncAnalysis", { ...textFields(userText), changed, fullLines: textFields(text).lines });
+    if (!changed) {
+      return;
+    }
+    this.text = userText;
+    await this.writeAnalysis(false);
+  }
+
+  /** Updates editor-only hidden import text while analysis stays on user code. */
   updatePrelude(prelude: string): void {
     const changed = prelude !== this.prelude;
     this.logger?.log("overlay.memory.prelude", { ...textFields(prelude), changed, offset: prefixLineCount(prelude) });
@@ -95,7 +107,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     await writeDocument(document, this.editorUri, text);
   }
 
-  /** Writes generated prelude plus user text into the hidden analysis document. */
+  /** Writes only user Python cell text into the hidden analysis document. */
   private async writeAnalysis(mergeLive = true): Promise<void> {
     if (mergeLive && this.editorPromise) {
       this.mergeLiveUserText(await this.editorPromise);
