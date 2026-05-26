@@ -39,6 +39,9 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private executionCount = 1;
   private lastRenderedOutput: Record<string, unknown> | undefined;
   private lastPythonResult: { execution: number; ok: boolean; text: string } | undefined;
+  private panelVisible = false;
+  private preludeRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  private preludeRetryAttempt = 0;
 
   readonly onDidChangeRuntime = this.runtimeEmitter.event;
 
@@ -75,6 +78,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       localResourceRoots: [vscode.Uri.file(path.join(this.extensionPath, "media"))],
       retainContextWhenHidden: true
     });
+    this.panelVisible = this.panel.visible;
     this.panel.webview.html = webviewHtml(this.panel.webview, this.extensionPath);
     this.panel.onDidDispose(() => this.closePanel(), undefined, this.disposables);
     this.panel.onDidChangeViewState((event) => this.handleViewState(event.webviewPanel.visible), undefined, this.disposables);
@@ -239,6 +243,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       this.runtimeGeneration += 1;
       this.executionCount = 1; this.lastPythonResult = undefined;
       this.clearInspectionCache(); this.clearRuntimeRefreshTimer();
+      this.clearPreludeRetryTimer(); this.preludeRetryAttempt = 0;
       this.post({ type: "resetPythonCell" });
       this.overlayPrelude = [];
       void (this.overlay ? this.overlay.reset() : this.resetOverlayBackingFiles());
@@ -248,6 +253,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     if (!snapshot.ready || this.runtimeReady) { return; }
     this.runtimeReady = true;
     this.runtimeGeneration += 1;
+    this.preludeRetryAttempt = 0;
     this.runtimeEmitter.fire();
     void this.updateOverlayPrelude(this.runtimeGeneration);
     scheduleWorkspaceGeneratedOverlayTabCleanup();
@@ -337,6 +343,10 @@ export class CustomDjangoConsole implements vscode.Disposable {
     }
     try {
       await (await this.ensureOverlay()).show();
+      if (this.runtimeReady && this.overlayPrelude.length === 0) {
+        this.preludeRetryAttempt = 0;
+        void this.updateOverlayPrelude(this.runtimeGeneration);
+      }
     } catch (error) {
       this.logger?.log("overlay.show.error", { error: error instanceof Error ? error.message : String(error) });
       void vscode.window.showWarningMessage("Django Shell overlay editor could not be opened.");
@@ -347,8 +357,11 @@ export class CustomDjangoConsole implements vscode.Disposable {
 
   /** Keeps the workbench overlay lifecycle bound to the Django Shell webview tab. */
   private handleViewState(visible: boolean): void {
+    const wasVisible = this.panelVisible;
+    this.panelVisible = visible;
     if (visible) {
       this.postStatus();
+      if (wasVisible) { return; }
       this.post({ show: this.runtimeReady, type: "measureEditor" });
       if (this.runtimeReady) { void this.updateOverlayPrelude(this.runtimeGeneration); }
       return;
@@ -358,13 +371,51 @@ export class CustomDjangoConsole implements vscode.Disposable {
 
   /** Refreshes hidden runtime imports used by the overlay Python analyzer. */
   private async updateOverlayPrelude(generation = this.runtimeGeneration): Promise<void> {
+    if (generation !== this.runtimeGeneration || !this.runtimeReady) { return; }
     const backend = this.session?.backend;
     if (!backend?.supportsRuntimeInspection()) { return; }
-    const inspection = await backend.prelude();
-    if (!inspection?.ok || !this.runtimeReady || generation !== this.runtimeGeneration) { return; }
+    let inspection;
+    try {
+      inspection = await backend.prelude();
+    } catch (error) {
+      this.logger?.log("prelude.error", { error: error instanceof Error ? error.message : String(error) });
+      this.schedulePreludeRetry(generation);
+      return;
+    }
+    if (generation !== this.runtimeGeneration || !this.runtimeReady) { return; }
+    if (!inspection?.ok) {
+      this.schedulePreludeRetry(generation);
+      return;
+    }
     const lines = runtimePreludeLines(inspection.variables);
+    if (lines.length === 0) {
+      this.schedulePreludeRetry(generation);
+    } else {
+      this.preludeRetryAttempt = 0;
+      this.clearPreludeRetryTimer();
+    }
     this.overlayPrelude = lines;
     void this.overlay?.updatePrelude(lines);
+  }
+
+  /** Schedules a bounded prelude retry after an empty or failed runtime inspection. */
+  private schedulePreludeRetry(generation: number): void {
+    if (this.preludeRetryAttempt >= 4) { return; }
+    this.clearPreludeRetryTimer();
+    const delay = Math.min(2000, 250 * Math.pow(2, this.preludeRetryAttempt));
+    this.preludeRetryAttempt += 1;
+    this.preludeRetryTimer = setTimeout(() => {
+      this.preludeRetryTimer = undefined;
+      if (generation !== this.runtimeGeneration || !this.runtimeReady) { return; }
+      void this.updateOverlayPrelude(generation);
+    }, delay);
+  }
+
+  /** Clears any pending prelude retry. */
+  private clearPreludeRetryTimer(): void {
+    if (!this.preludeRetryTimer) { return; }
+    clearTimeout(this.preludeRetryTimer);
+    this.preludeRetryTimer = undefined;
   }
 
   /** Schedules runtime-dependent UI refresh without blocking rapid shell input. */
@@ -396,6 +447,8 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private async restartSession(): Promise<void> {
     this.runtimeReady = false;
     this.runtimeGeneration += 1;
+    this.clearPreludeRetryTimer();
+    this.preludeRetryAttempt = 0;
     this.executionCount = 1; this.lastPythonResult = undefined;
     this.clearInspectionCache();
     this.clearRuntimeRefreshTimer();
@@ -438,11 +491,14 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.session?.dispose();
     this.session = undefined;
     this.panel = undefined;
+    this.panelVisible = false;
     this.runtimeReady = false;
     this.runtimeGeneration += 1;
     this.overlay?.hide();
     this.clearInspectionCache();
     this.clearRuntimeRefreshTimer();
+    this.clearPreludeRetryTimer();
+    this.preludeRetryAttempt = 0;
   }
 }
 

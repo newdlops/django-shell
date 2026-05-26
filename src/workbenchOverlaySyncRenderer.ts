@@ -212,27 +212,43 @@ export function overlaySyncRendererSource(): string {
       };
     }
 
+    /** Returns the contiguous non-blank block above the cursor as one execution unit. */
+    function __dsoMultilinePayload(root, editor) {
+      const model = editor.getModel && editor.getModel();
+      if (!model) { return { code: "", range: null }; }
+      const inputStartLine = (root && root.__dsoInputStartLine) || 1;
+      const position = editor.getPosition && editor.getPosition();
+      const cursorLine = position ? position.lineNumber : model.getLineCount();
+      let endLine = cursorLine;
+      while (endLine >= inputStartLine && !model.getLineContent(endLine).trim()) { endLine--; }
+      if (endLine < inputStartLine) { return { code: "", range: null }; }
+      let startLine = endLine;
+      while (startLine > inputStartLine && model.getLineContent(startLine - 1).trim()) { startLine--; }
+      return {
+        code: model.getValueInRange({ startLineNumber: startLine, startColumn: 1, endLineNumber: endLine, endColumn: model.getLineMaxColumn(endLine) }).trimEnd(),
+        range: { end: endLine, start: startLine }
+      };
+    }
+
     /** Advances the cursor to the next editable shell line after execution. */
     function __dsoAdvanceAfterRun(editor, range, post, source) {
       const model = editor.getModel && editor.getModel();
       if (!model || !range) { return; }
       let lineNumber = model.getLineCount();
-      let insertedLine = false;
-      if (model.getLineContent(lineNumber).trim()) {
-        const endColumn = model.getLineMaxColumn(lineNumber);
-        try {
-          editor.executeEdits("django-shell-enter", [{
-            forceMoveMarkers: true,
-            range: { endColumn: endColumn, endLineNumber: lineNumber, startColumn: endColumn, startLineNumber: lineNumber },
-            text: "\\n"
-          }]);
-          insertedLine = true;
-        } catch (eEdit) {}
-        lineNumber = model.getLineCount();
-      }
+      const lastBlank = !model.getLineContent(lineNumber).trim();
+      const text = lastBlank ? "\\n" : "\\n\\n";
+      const endColumn = model.getLineMaxColumn(lineNumber);
+      try {
+        editor.executeEdits("django-shell-enter", [{
+          forceMoveMarkers: true,
+          range: { endColumn: endColumn, endLineNumber: lineNumber, startColumn: endColumn, startLineNumber: lineNumber },
+          text: text
+        }]);
+      } catch (eEdit) {}
+      lineNumber = model.getLineCount();
       try { editor.setPosition({ column: 1, lineNumber: lineNumber }); } catch (eSetPosition) {}
       try { editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(lineNumber); } catch (eReveal) {}
-      __dsoLog(post, "cursor.advance", { end: range.end, insertedLine: insertedLine, source: source, start: range.start, targetLine: lineNumber });
+      __dsoLog(post, "cursor.advance", { end: range.end, lastBlank: lastBlank, source: source, start: range.start, targetLine: lineNumber });
     }
 
     /** Inserts a newline inside the overlay editor without invoking VS Code global commands. */
@@ -260,6 +276,19 @@ export function overlaySyncRendererSource(): string {
       }
       const trimmed = String(last || "").trimEnd();
       return !!trimmed && (__dsoBlockHeader(trimmed) || /\\\\$/.test(trimmed) || depth > 0);
+    }
+
+    /** Returns true while a REPL-style multi-line block is still being entered. */
+    function __dsoIsBlockBuffering(code) {
+      const lines = String(code || "").split(/\\r?\\n/);
+      let blockOpen = false;
+      let depth = 0;
+      for (let index = 0; index < lines.length; index++) {
+        const line = lines[index];
+        if (line.trim() && __dsoBlockHeader(line)) { blockOpen = true; }
+        depth = Math.max(0, depth + __dsoBracketDelta(line, depth));
+      }
+      return blockOpen || depth > 0;
     }
 
     /** Posts one execution request and returns the extension host decision. */
@@ -351,9 +380,10 @@ export function overlaySyncRendererSource(): string {
       __dsoLog(post, "enter.install", { hasNode: true, sameEditor: root.__dsoEnterEditor === editor });
       const execute = function (event, source, allowContinuation) {
         const inputStartLine = root.__dsoInputStartLine || 1;
-        const payload = __dsoEnterPayload(root, editor);
+        const multilineMode = !!root.__dsoMultilineMode;
+        const payload = multilineMode ? __dsoMultilinePayload(root, editor) : __dsoEnterPayload(root, editor);
         if (!payload.code.trim()) {
-          __dsoLog(post, "enter.empty", { source: source });
+          __dsoLog(post, "enter.empty", { multiline: multilineMode, source: source });
           return false;
         }
         const now = Date.now();
@@ -369,18 +399,34 @@ export function overlaySyncRendererSource(): string {
         if (raw && raw.preventDefault) { raw.preventDefault(); }
         if (raw && raw.stopPropagation) { raw.stopPropagation(); }
         if (raw && raw.stopImmediatePropagation) { raw.stopImmediatePropagation(); }
+        if (allowContinuation !== false) {
+          const model = editor.getModel && editor.getModel();
+          const position = editor.getPosition && editor.getPosition();
+          const cursorLine = model && position ? model.getLineContent(position.lineNumber) : "";
+          const buffering = multilineMode || __dsoIsBlockBuffering(payload.code);
+          if (buffering && cursorLine.trim()) {
+            root.__dsoMultilineMode = true;
+            __dsoLog(post, "enter.block.buffer", { chars: payload.code.length, cursor: position ? position.lineNumber : 0, inputStartLine: inputStartLine, multiline: multilineMode, source: source });
+            __dsoInsertNewline(editor, post, source + "-block-buffer");
+            return true;
+          }
+        }
         if (__dsoLikelyIncompletePython(payload.code)) {
-          __dsoLog(post, "enter.incomplete.local", { chars: payload.code.length, inputStartLine: inputStartLine, source: source });
-          if (allowContinuation !== false) { __dsoInsertNewline(editor, post, source + "-local-incomplete"); }
+          __dsoLog(post, "enter.incomplete.local", { chars: payload.code.length, inputStartLine: inputStartLine, multiline: multilineMode, source: source });
+          if (allowContinuation !== false) {
+            root.__dsoMultilineMode = true;
+            __dsoInsertNewline(editor, post, source + "-local-incomplete");
+          }
           return true;
         }
-        __dsoLog(post, "enter.execute.request", { chars: payload.code.length, end: payload.range ? payload.range.end : 0, inputStartLine: inputStartLine, lines: __dsoLineCount(payload.code), source: source, start: payload.range ? payload.range.start : 0 });
+        __dsoLog(post, "enter.execute.request", { chars: payload.code.length, end: payload.range ? payload.range.end : 0, inputStartLine: inputStartLine, lines: __dsoLineCount(payload.code), multiline: multilineMode, source: source, start: payload.range ? payload.range.start : 0 });
         __dsoRunCode(post, payload.code, root, editor).then(function (outcome) {
           if (outcome && outcome.executed === false) {
             __dsoLog(post, "enter.incomplete", { chars: payload.code.length, inputStartLine: inputStartLine, source: source });
             if (allowContinuation !== false) { __dsoInsertNewline(editor, post, source + "-incomplete"); }
             return;
           }
+          root.__dsoMultilineMode = false;
           __dsoLog(post, "enter.execute", { end: payload.range ? payload.range.end : 0, inputStartLine: inputStartLine, source: source, start: payload.range ? payload.range.start : 0 });
           __dsoAdvanceAfterRun(editor, payload.range, post, source);
         });
@@ -391,26 +437,39 @@ export function overlaySyncRendererSource(): string {
         if (!__dsoIsEnter(event, raw)) { return; }
         const suggest = __dsoSuggestOpen();
         __dsoLog(post, "key.enter", { alt: !!raw.altKey, composing: !!raw.isComposing, ctrl: !!raw.ctrlKey, meta: !!raw.metaKey, shift: !!raw.shiftKey, source: source, suggest: suggest });
-        if (raw.metaKey) {
-          execute(event, source + "-cmd", false);
-          return;
-        }
-        if (raw.ctrlKey || raw.altKey || raw.isComposing || suggest) { return; }
-        if (raw.shiftKey) {
+        if (raw.shiftKey && !raw.metaKey) {
           if (event.preventDefault) { event.preventDefault(); }
           if (event.stopPropagation) { event.stopPropagation(); }
           if (event.stopImmediatePropagation) { event.stopImmediatePropagation(); }
           if (raw.preventDefault) { raw.preventDefault(); }
           if (raw.stopPropagation) { raw.stopPropagation(); }
           if (raw.stopImmediatePropagation) { raw.stopImmediatePropagation(); }
+          root.__dsoMultilineMode = true;
           __dsoInsertNewline(editor, post, source);
           return;
         }
+        if (raw.metaKey) {
+          execute(event, source + "-cmd", false);
+          return;
+        }
+        if (raw.ctrlKey || raw.altKey || raw.isComposing || suggest) { return; }
         execute(event, source, true);
       };
       root.__dsoCurrentInputPayload = function () { return __dsoEnterPayload(root, editor); };
       root.__dsoRunCurrentInput = function () { return execute(null, "host-command-cmd", false) ? "requested" : "empty"; };
       window.__dsoRunCurrentOverlayInput = function () { const activeRoot = document.getElementById("django-shell-overlay"); return activeRoot && activeRoot.__dsoRunCurrentInput ? activeRoot.__dsoRunCurrentInput() : "missing-root"; };
+      try {
+        if (typeof editor.addCommand === "function") {
+          const monacoApi = (globalThis.monaco && globalThis.monaco.KeyMod && globalThis.monaco.KeyCode) ? globalThis.monaco : ((window.monaco && window.monaco.KeyMod && window.monaco.KeyCode) ? window.monaco : null);
+          const shiftMask = monacoApi ? monacoApi.KeyMod.Shift : 1024;
+          const enterKey = monacoApi ? monacoApi.KeyCode.Enter : 3;
+          editor.addCommand(shiftMask | enterKey, function () {
+            root.__dsoMultilineMode = true;
+            __dsoInsertNewline(editor, post, "monaco-command");
+          });
+          __dsoLog(post, "enter.addCommand", { shiftMask: shiftMask, enterKey: enterKey, hasApi: !!monacoApi });
+        }
+      } catch (eAddCommand) { __dsoLog(post, "enter.addCommand.error", { error: String(eAddCommand && eAddCommand.message || eAddCommand) }); }
       const keyDisposable = editor.onKeyDown ? editor.onKeyDown(function (event) { run(event, "monaco"); }) : null;
       const docListener = function (event) { if (node.contains(event.target)) { run(event, "document"); } };
       const nodeListener = function (event) { run(event, "node"); };

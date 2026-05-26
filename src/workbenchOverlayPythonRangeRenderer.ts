@@ -6,9 +6,18 @@ export function overlayPythonRangeRendererSource(): string {
     /** Returns a shell-style prompt label for one visible input line. */
     function __dsoPromptForLine(model, startLine, line) {
       if (line < startLine) { return ""; }
-      const text = model && model.getLineContent ? model.getLineContent(line) : "";
-      const previous = line > startLine && model && model.getLineContent ? model.getLineContent(line - 1) : "";
-      return __dsoIndent(text) > 0 || __dsoBlockHeader(previous) || __dsoBracketDepthBefore(model, startLine, line) > 0 ? "..." : ">>>";
+      if (!model || !model.getLineContent) { return ">>>"; }
+      const floor = __dsoStatementFloor(model, startLine, line);
+      const previous = line > floor ? model.getLineContent(line - 1) : "";
+      return previous.trim() ? "..." : ">>>";
+    }
+
+    /** Returns the first line of the current statement, scoped to the input region. */
+    function __dsoStatementFloor(model, startLine, line) {
+      for (let index = line - 1; index > startLine; index--) {
+        if (!model.getLineContent(index).trim()) { return index + 1; }
+      }
+      return startLine;
     }
 
     /** Returns the first user-editable line after the generated prelude. */
@@ -62,13 +71,21 @@ export function overlayPythonRangeRendererSource(): string {
     function __dsoStatementStart(model, lineNumber, floor) {
       const bracketStart = __dsoBracketStatementStart(model, lineNumber, floor);
       const line = model.getLineContent(bracketStart);
-      const indent = __dsoIndent(line);
       let start = bracketStart;
+      let indent = __dsoIndent(line);
       if (indent > 0 || __dsoCompoundFollower(line)) {
         for (let index = bracketStart - 1; index >= floor; index--) {
           const candidate = model.getLineContent(index);
-          if (candidate.trim() && __dsoIndent(candidate) < indent && __dsoBlockHeader(candidate)) { start = index; break; }
-          if (candidate.trim() && indent === 0 && __dsoIndent(candidate) === 0 && __dsoBlockHeader(candidate)) { start = index; break; }
+          if (!candidate.trim()) { continue; }
+          const candidateIndent = __dsoIndent(candidate);
+          if (candidateIndent >= indent) { continue; }
+          if (__dsoBlockHeader(candidate)) {
+            start = index;
+            indent = candidateIndent;
+            if (indent === 0) { break; }
+            continue;
+          }
+          break;
         }
       }
       return __dsoCompoundPrefixStart(model, start, floor);

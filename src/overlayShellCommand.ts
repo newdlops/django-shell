@@ -126,19 +126,27 @@ function nonBlankCursorLine(document: vscode.TextDocument, lineNumber: number, f
 function statementStart(document: vscode.TextDocument, lineNumber: number, floor: number): number {
   const bracketStart = bracketStatementStart(document, lineNumber, floor);
   const line = document.lineAt(bracketStart).text;
-  const indent = indentation(line);
   let start = bracketStart;
+  let indent = indentation(line);
   if (indent > 0 || isCompoundFollower(line)) {
     for (let index = bracketStart - 1; index >= floor; index -= 1) {
       const candidate = document.lineAt(index).text;
-      if (candidate.trim() && indentation(candidate) < indent && isBlockHeader(candidate)) {
-        start = index;
-        break;
+      if (!candidate.trim()) {
+        continue;
       }
-      if (candidate.trim() && indent === 0 && indentation(candidate) === 0 && isBlockHeader(candidate)) {
-        start = index;
-        break;
+      const candidateIndent = indentation(candidate);
+      if (candidateIndent >= indent) {
+        continue;
       }
+      if (isBlockHeader(candidate)) {
+        start = index;
+        indent = candidateIndent;
+        if (indent === 0) {
+          break;
+        }
+        continue;
+      }
+      break;
     }
   }
   return compoundPrefixStart(document, start, floor);

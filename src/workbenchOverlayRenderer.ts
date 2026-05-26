@@ -453,6 +453,7 @@ export function overlayRendererSource(modelUri: string): string {
     window.__djangoShellOverlayShow = function (geometry) {
       __dsoEnsureStyle();
       let root = document.getElementById("django-shell-overlay");
+      const wasShown = !!(root && root.style.display !== "none" && root.style.visibility !== "hidden" && root.__djangoShellEditor);
       if (!root) {
         root = document.createElement("section");
         root.id = "django-shell-overlay";
@@ -471,7 +472,7 @@ export function overlayRendererSource(modelUri: string): string {
       if (editor && window.__dsoInstallModelSync) { window.__dsoInstallModelSync(root, editor, __dsoEditorValue, __dsoPost); }
       if (editor && window.__dsoInstallEnterRunner) { window.__dsoInstallEnterRunner(root, editor, __dsoPost); }
       root.style.visibility = editor ? "visible" : "hidden";
-      if (editor && editor.focus) { editor.focus(); }
+      if (editor && editor.focus && !wasShown) { editor.focus(); }
       return editor ? "django-shell-overlay-shown:editor:" + __dsoStatus() : "django-shell-overlay-shown:pending:" + __dsoStatus();
     };
     window.__djangoShellOverlaySetGeometry = function (geometry) {
