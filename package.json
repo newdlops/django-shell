@@ -2,7 +2,7 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "publisher": "newdlops",
   "license": "UNLICENSED",
   "icon": "media/icon.png",

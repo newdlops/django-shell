@@ -204,15 +204,10 @@ export function overlaySyncRendererSource(): string {
           range: { end: selection.endLineNumber, start: selection.startLineNumber }
         };
       }
-      const position = editor.getPosition && editor.getPosition();
-      const range = __dsoExecutionRange(root, model, position ? position.lineNumber : 1);
-      return {
-        code: model.getValueInRange({ endColumn: model.getLineMaxColumn(range.end), endLineNumber: range.end, startColumn: 1, startLineNumber: range.start }).trimEnd(),
-        range: range
-      };
+      return __dsoMultilinePayload(root, editor);
     }
 
-    /** Returns the contiguous non-blank block above the cursor as one execution unit. */
+    /** Returns the contiguous non-blank block at the cursor as one execution unit. */
     function __dsoMultilinePayload(root, editor) {
       const model = editor.getModel && editor.getModel();
       if (!model) { return { code: "", range: null }; }
@@ -220,35 +215,39 @@ export function overlaySyncRendererSource(): string {
       const position = editor.getPosition && editor.getPosition();
       const cursorLine = position ? position.lineNumber : model.getLineCount();
       let endLine = cursorLine;
-      while (endLine >= inputStartLine && !model.getLineContent(endLine).trim()) { endLine--; }
-      if (endLine < inputStartLine) { return { code: "", range: null }; }
+      if (!model.getLineContent(endLine).trim()) { endLine--; }
+      if (endLine < inputStartLine || !model.getLineContent(endLine).trim()) { return { code: "", range: null }; }
       let startLine = endLine;
       while (startLine > inputStartLine && model.getLineContent(startLine - 1).trim()) { startLine--; }
+      while (endLine < model.getLineCount() && model.getLineContent(endLine + 1).trim()) { endLine++; }
       return {
         code: model.getValueInRange({ startLineNumber: startLine, startColumn: 1, endLineNumber: endLine, endColumn: model.getLineMaxColumn(endLine) }).trimEnd(),
         range: { end: endLine, start: startLine }
       };
     }
 
-    /** Advances the cursor to the next editable shell line after execution. */
+    /** Preserves the executed cell, then drops the cursor on a fresh prompt below it. */
     function __dsoAdvanceAfterRun(editor, range, post, source) {
       const model = editor.getModel && editor.getModel();
       if (!model || !range) { return; }
-      let lineNumber = model.getLineCount();
-      const lastBlank = !model.getLineContent(lineNumber).trim();
-      const text = lastBlank ? "\\n" : "\\n\\n";
-      const endColumn = model.getLineMaxColumn(lineNumber);
+      let last = model.getLineCount();
+      while (last > 1 && !model.getLineContent(last).trim()) { last--; }
+      if (!model.getLineContent(last).trim()) {
+        try { editor.setPosition({ column: 1, lineNumber: model.getLineCount() }); } catch (eEmpty) {}
+        return;
+      }
+      const toLine = model.getLineCount();
       try {
         editor.executeEdits("django-shell-enter", [{
           forceMoveMarkers: true,
-          range: { endColumn: endColumn, endLineNumber: lineNumber, startColumn: endColumn, startLineNumber: lineNumber },
-          text: text
+          range: { endColumn: model.getLineMaxColumn(toLine), endLineNumber: toLine, startColumn: model.getLineMaxColumn(last), startLineNumber: last },
+          text: "\\n\\n"
         }]);
       } catch (eEdit) {}
-      lineNumber = model.getLineCount();
-      try { editor.setPosition({ column: 1, lineNumber: lineNumber }); } catch (eSetPosition) {}
-      try { editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(lineNumber); } catch (eReveal) {}
-      __dsoLog(post, "cursor.advance", { end: range.end, lastBlank: lastBlank, source: source, start: range.start, targetLine: lineNumber });
+      const target = model.getLineCount();
+      try { editor.setPosition({ column: 1, lineNumber: target }); } catch (eSetPosition) {}
+      try { editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(target); } catch (eReveal) {}
+      __dsoLog(post, "cursor.advance", { cellEnd: last, end: range.end, source: source, start: range.start, targetLine: target });
     }
 
     /** Inserts a newline inside the overlay editor without invoking VS Code global commands. */

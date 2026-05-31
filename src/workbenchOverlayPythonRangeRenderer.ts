@@ -4,11 +4,16 @@
 export function overlayPythonRangeRendererSource(): string {
   return `
     /** Returns a shell-style prompt label for one visible input line. */
-    function __dsoPromptForLine(model, startLine, line) {
+    function __dsoPromptForLine(model, startLine, line, root) {
       if (line < startLine) { return ""; }
       if (!model || !model.getLineContent) { return ">>>"; }
-      const floor = __dsoStatementFloor(model, startLine, line);
-      const previous = line > floor ? model.getLineContent(line - 1) : "";
+      const text = model.getLineContent(line);
+      if (!text.trim()) {
+        if (__dsoIndent(text) > 0) { return "..."; }
+        if (line < model.getLineCount()) { return ""; }
+        return root && root.__dsoMultilineMode ? "..." : ">>>";
+      }
+      const previous = line > startLine ? model.getLineContent(line - 1) : "";
       return previous.trim() ? "..." : ">>>";
     }
 
