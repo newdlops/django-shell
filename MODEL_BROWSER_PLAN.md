@@ -120,6 +120,7 @@ page = list(qs[offset:offset + limit])                 # 단일 SELECT
 - ✅ 검증: 필터/negate/in/isnull/정렬/count 정확, 악성 필드·lookup은 무시(거부), 단위 테스트 추가.
 - **UX 보정**: 펼친 관계 패널이 데이터 셀의 `nowrap`/`overflow:hidden`을 상속하지 않도록 `.detail>td` 오버라이드. 패널은 `position:sticky;left:0`로 뷰포트 좌측 고정. 각 패널에 `✕ close` 헤더 + 트리거 재클릭 토글(닫기 직관화).
 - **높이 보정**: 역참조 칩은 줄바꿈 대신 **1줄 + 가로 스크롤**(`.chiprow` nowrap/overflow-x) — 역참조 많아도 세로로 안 커짐. 펼친 관련 테이블은 `max-height:40vh`.
+- **전송 방식 스위치(원격 지원)**: 모델 브라우저 요청(models/schema/rows/related/count/commit)을 **PTY 폴백 허용**으로 전환 → 소켓이 안 닿는 원격(로컬 VS Code + ssh 터미널)에서도 콘솔이 되면 테이블도 동작. 상단바 **Link: Auto / Socket / Terminal** 셀렉트 + 활성 표시(● socket/● terminal/○). Auto=소켓 우선·실패 시 터미널, Socket=소켓 강제, Terminal=터미널 강제(`BackendClient.setTransportMode`). PTY일 때 페이지 25로 축소(속도/안정). 부트스트랩이 이미 대형 단일 라인을 보내므로 commit 포함 전송 가능, 응답 버퍼 1.25MB.
 - **스크롤바**: 웹뷰가 네이티브 오버레이 스크롤바를 써서 호버 시 콘텐츠를 가리는 문제 → relation 영역(`.chiprow`/`.nestedscroll`)은 스크롤바를 **숨김**(`scrollbar-width:none` + `::-webkit-scrollbar{display:none}`), 트랙패드/Shift+휠로 스크롤. 메인 그리드(`.gridwrap`)만 얇은 스크롤바 유지. (`color-mix` 등 커스텀이 웹뷰에서 불안정해 제거.)
 - **모델 검색 + 트리(인뷰)**: Models 뷰를 TreeView → **WebviewView**(`type:"webview"`)로 전환. 상단 검색 입력 + 그 아래 **접힘/펼침 계층 트리**(app 그룹 → 모델 nested). 그룹 클릭으로 접기/펼치기, 검색 시 매칭 그룹 자동 펼침. 입력 **150ms 디바운스**, 메모리 필터, **렌더 500개 상한**(접힌 app의 모델은 렌더 안 함)으로 수천 개여도 랙 없음. (`modelCatalog.ts`=WebviewViewProvider, `modelCatalogHtml.ts`, `media/modelCatalogSource.js`.) 기존 QuickPick `searchModels` 제거.
 - **관계를 칼럼으로**: 역참조/M2M를 별도 `▶` 행이 아니라 **테이블 칼럼**으로(`relcol`/`relcell`), 각 셀에 칩. 칩 클릭 → 해당 행 아래로 관련 테이블 펼침(닫기/토글 유지). 칼럼이 많아지면 메인 그리드 가로 스크롤로 처리.
@@ -132,8 +133,8 @@ page = list(qs[offset:offset + limit])                 # 단일 SELECT
 - **핀 셀 불투명**: `tr:hover td`가 반투명 `--vscode-list-hoverBackground`로 핀 셀을 덮어 비쳐 보이던 문제 → 핀 셀은 불투명 `editor-background` 기본 + hover 시 틴트를 `background-image` 레이어로 올려 항상 불투명.
 
 ### P3 — 편집 (목표)
-세부는 §6. 인라인 편집 → "변경 사항" 스테이징 → 확인 모달 → 트랜잭션 커밋.
-- P3a: concrete 필드 + FK(id) 편집/저장.
+세부는 §6. 인라인 편집 → "변경 사항" 스테이징 → 트랜잭션 커밋.
+- **P3a ✅ 완료**: concrete 필드 + FK(id) 인라인 편집. **커밋 전까지 서버에 아무 요청/쿼리도 안 보냄**(웹뷰 메모리 스테이징 `pending` Map + dirty 셀). 여러 셀/행 bulk 편집 → **Commit (N)** 한 번에 `commit` kind로 전송 → 백엔드가 전부 `full_clean()` 검증(all-or-nothing) 후 `transaction.atomic()`로 `save(update_fields=...)`. 실패 시 전체 롤백 + 필드별 에러 반환. boolean 문자열 변환, 비편집/PK/auto 필드 거부. 커밋 SQL/ORM은 쿼리 로그에 표시. (프론트: dblclick 인라인 입력, `media/gridEdit.js`; 핀은 `media/gridPin.js`로 분리.) 실제 Django 단위 테스트 추가.
 - P3b: 행 생성, 행 삭제(cascade 미리보기 + 강한 확인).
 - P3c: M2M `set/add/remove`.
 - **완료 기준**: 검증 통과 시에만 저장, 실패 시 필드별 에러 표시, 트랜잭션 원자성, 신호(signals) 발화.

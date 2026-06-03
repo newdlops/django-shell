@@ -93,6 +93,8 @@ def _run_request(namespace, token, request, initial_names):
         return _browse_related(request)
     if request.get("kind") == "count":
         return _browse_count(request)
+    if request.get("kind") == "commit":
+        return _browse_commit(request)
     code = request.get("code")
     if not isinstance(code, str):
         return {"ok": False, "stdout": "", "stderr": "Request code must be a string.", "traceback": ""}
@@ -816,6 +818,96 @@ def _browse_orm_rows(model, order, filters, attnames, pk_attname, keyset_capable
     lines.append(f"    .values({_orm_args(attnames)})")
     end = limit + 1
     lines.append(f"    [{base_offset}:{base_offset + end}]" if (not keyset_capable and base_offset) else f"    [:{end}]")
+    return "\n".join(lines)
+
+
+def _browse_commit(request):
+    """Applies staged cell edits in one atomic transaction; validates everything first (all-or-nothing)."""
+    with _EXECUTION_LOCK:
+        try:
+            from django.core.exceptions import ValidationError
+            from django.db import connection, transaction
+            from django.test.utils import CaptureQueriesContext
+
+            model = _browse_resolve_model(request)
+            changes = request.get("changes")
+            if not isinstance(changes, list) or not changes:
+                return {"error": "No changes to commit.", "ok": False, "results": []}
+            editable = {field.attname: field for field in model._meta.concrete_fields if getattr(field, "editable", False) and not field.primary_key and not _browse_is_auto(field)}
+            field_names = [field.name for field in model._meta.fields]
+            prepared, results, has_error = [], [], False
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                pk = change.get("pk")
+                fields = change.get("fields") if isinstance(change.get("fields"), dict) else {}
+                instance = model._base_manager.filter(pk=pk).first()
+                if instance is None:
+                    results.append({"error": "Row not found.", "ok": False, "pk": pk})
+                    has_error = True
+                    continue
+                applied = []
+                for attname, value in fields.items():
+                    field = editable.get(attname)
+                    if field is None:
+                        continue
+                    setattr(instance, attname, _browse_coerce_edit_value(field, value))
+                    applied.append(field.name)
+                if not applied:
+                    continue
+                try:
+                    instance.full_clean(exclude=[name for name in field_names if name not in applied])
+                except ValidationError as error:
+                    results.append({"fieldErrors": _browse_field_errors(error), "ok": False, "pk": pk})
+                    has_error = True
+                    continue
+                results.append({"ok": True, "pk": pk})
+                prepared.append((instance, applied))
+            if has_error:
+                return {"ok": False, "results": results, "saved": 0}
+            with CaptureQueriesContext(connection) as ctx:
+                with transaction.atomic():
+                    for instance, applied in prepared:
+                        instance.save(update_fields=applied)
+            return {"ok": True, "orm": _browse_orm_commit(model, prepared), "results": results, "saved": len(prepared), "sql": _browse_sql(ctx)}
+        except Exception:
+            return {"error": traceback.format_exc(), "ok": False, "results": []}
+
+
+def _browse_is_auto(field):
+    """Returns whether a field is auto-managed (auto_now/auto_now_add) and so not user-editable."""
+    return bool(getattr(field, "auto_now", False) or getattr(field, "auto_now_add", False))
+
+
+def _browse_coerce_edit_value(field, value):
+    """Coerces an edited cell value to the field's Python type, leaving validation to full_clean."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value == "" and getattr(field, "null", False):
+        return None
+    if field.is_relation:
+        return value if value not in ("", None) else None
+    if isinstance(value, str) and field.get_internal_type() == "BooleanField":
+        return value.strip().lower() in ("true", "1", "t", "yes", "on")
+    try:
+        return field.to_python(value)
+    except Exception:
+        return value
+
+
+def _browse_field_errors(error):
+    """Returns a JSON-safe {field: [messages]} mapping from a ValidationError."""
+    try:
+        return {key: [str(message) for message in messages] for key, messages in error.message_dict.items()}
+    except Exception:
+        return {"__all__": [str(message) for message in getattr(error, "messages", [str(error)])]}
+
+
+def _browse_orm_commit(model, prepared):
+    """Builds a readable ORM expression mirroring the committed saves."""
+    lines = ["with transaction.atomic():"]
+    for instance, applied in prepared:
+        lines.append(f"    {model.__name__}(pk={instance.pk!r}).save(update_fields={applied!r})")
     return "\n".join(lines)
 
 

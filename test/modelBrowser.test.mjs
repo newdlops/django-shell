@@ -131,6 +131,42 @@ test("filters and sorts via allowlists and counts on demand", { skip: !HAS_DJANG
   assert.equal(payload.injected_rows, 5, "unknown field/lookup terms are ignored, never injected");
 });
 
+test("commits staged edits atomically and rolls back the whole batch on a validation error", { skip: !HAS_DJANGO }, () => {
+  const payload = runBackend([
+    "import json",
+    "from django.conf import settings",
+    "settings.configure(DEBUG=False, DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}, INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'], USE_TZ=True)",
+    "import django; django.setup()",
+    "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
+    "from django.contrib.auth.models import User",
+    "u1 = User.objects.create(username='ada', password='x', is_staff=False)",
+    "u2 = User.objects.create(username='bob', password='x', is_staff=False)",
+    "def commit(changes): return mod._run_request({}, 't', {'token': 't', 'kind': 'commit', 'app': 'auth', 'model': 'User', 'changes': changes}, set())",
+    "ok = commit([{'pk': u1.pk, 'fields': {'username': 'ada2', 'is_staff': 'true'}}, {'pk': u2.pk, 'fields': {'first_name': 'Bob'}}])",
+    "u1.refresh_from_db(); u2.refresh_from_db()",
+    "applied = {'username': u1.username, 'is_staff': u1.is_staff, 'first_name': u2.first_name}",
+    "bad = commit([{'pk': u1.pk, 'fields': {'username': ''}}, {'pk': u2.pk, 'fields': {'first_name': 'ROLLBACK'}}])",
+    "u1.refresh_from_db(); u2.refresh_from_db()",
+    "rejected = commit([{'pk': u1.pk, 'fields': {'id': 999, 'bogus': 'x'}}])",
+    "u1.refresh_from_db()",
+    "print(json.dumps({",
+    "  'ok': ok['ok'], 'saved': ok['saved'], 'commit_queries': len(ok['sql']), 'applied': applied,",
+    "  'bad_ok': bad['ok'], 'bad_saved': bad['saved'], 'after_bad': {'u1': u1.username, 'u2': u2.first_name},",
+    "  'bad_results': bad['results'], 'rejected_saved': rejected['saved'], 'pk_unchanged': u1.pk != 999,",
+    "}))"
+  ]);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.saved, 2);
+  assert.ok(payload.commit_queries >= 2, "commit issues queries only at commit time");
+  assert.deepEqual(payload.applied, { username: "ada2", is_staff: true, first_name: "Bob" });
+  assert.equal(payload.bad_ok, false);
+  assert.equal(payload.bad_saved, 0);
+  assert.deepEqual(payload.after_bad, { u1: "ada2", u2: "Bob" }, "failed batch saves nothing (atomic rollback)");
+  assert.ok(payload.bad_results.some((row) => row.fieldErrors && row.fieldErrors.username));
+  assert.equal(payload.rejected_saved, 0, "non-editable/unknown fields are ignored");
+  assert.equal(payload.pk_unchanged, true);
+});
+
 /** Runs Python that loads the backend module as `mod` and prints one JSON line. */
 function runBackend(lines) {
   const header = [

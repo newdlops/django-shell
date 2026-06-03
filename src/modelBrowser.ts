@@ -2,18 +2,23 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
-import type { BackendModelCount, BackendModelFilter, BackendModelList, BackendModelOrder, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCountQuery, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import type { BackendTransport, BackendTransportMode } from "./backendClient";
+import type { BackendCommitResult, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelOrder, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery, ModelCountQuery, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { modelBrowserHtml } from "./modelBrowserHtml";
 import { DiagnosticLogger } from "./diagnostics";
 
 /** Backend access used by the catalog tree and the data browser panel. */
 export interface ModelDataSource {
   listModels(): Promise<BackendModelList>;
+  modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult>;
   modelCount(query: ModelCountQuery): Promise<BackendModelCount>;
   modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows>;
   modelRows(query: ModelRowsQuery): Promise<BackendModelRows>;
   modelSchema(app: string, model: string): Promise<BackendModelSchema>;
+  /** Returns the active transport and the user's selected transport preference. */
+  modelTransportInfo(): { active: BackendTransport; mode: BackendTransportMode };
   readonly onDidChangeRuntime: vscode.Event<void>;
+  setModelTransport(mode: BackendTransportMode): void;
 }
 
 interface ModelTarget {
@@ -24,7 +29,9 @@ interface ModelTarget {
 
 interface IncomingMessage {
   app?: string;
+  changes?: ModelCommitChange[];
   filters?: BackendModelFilter[];
+  mode?: BackendTransportMode;
   model?: string;
   order?: BackendModelOrder[];
   pk?: unknown;
@@ -137,6 +144,8 @@ export class ModelBrowser implements vscode.Disposable {
     }
     this.post({ schema, type: "schema" });
     await this.loadPage(true);
+    const transport = this.source.modelTransportInfo();
+    this.post({ active: transport.active, mode: transport.mode, type: "transport" });
   }
 
   /** Loads one page of rows, resetting the grid or appending to it. */
@@ -178,6 +187,11 @@ export class ModelBrowser implements vscode.Disposable {
       await this.loadPage(true);
     } else if (message.type === "requestCount") {
       await this.requestCount();
+    } else if (message.type === "commitEdits") {
+      await this.commitEdits(message);
+    } else if (message.type === "setTransport" && message.mode) {
+      this.source.setModelTransport(message.mode);
+      await this.loadModel();
     } else if (message.type === "expandRelated") {
       await this.expandRelated(message);
     } else if (message.type === "openModel" && message.app && message.model) {
@@ -192,6 +206,16 @@ export class ModelBrowser implements vscode.Disposable {
     }
     const result = await this.source.modelCount({ app: this.current.app, filters: this.filters, model: this.current.model });
     this.post({ count: result.count, error: result.error, ok: result.ok, orm: result.orm, sql: result.sql, type: "count" });
+  }
+
+  /** Commits staged cell edits in one transaction and returns the result to the webview. */
+  private async commitEdits(message: IncomingMessage): Promise<void> {
+    if (!this.current || !Array.isArray(message.changes) || !message.changes.length) {
+      return;
+    }
+    const result = await this.source.modelCommit({ app: this.current.app, changes: message.changes, model: this.current.model });
+    this.logger?.log("model.browser.commit", { model: `${this.current.app}.${this.current.model}`, ok: result.ok, saved: result.saved });
+    this.post({ result, type: "commit" });
   }
 
   /** Fetches related rows for one source row and returns them to the webview. */

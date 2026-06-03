@@ -22,6 +22,11 @@ body{margin:0;font-family:var(--vscode-font-family);color:var(--vscode-foregroun
 .spacer{flex:1}
 button{color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0;border-radius:4px;padding:3px 9px;font:inherit;cursor:pointer}
 button.secondary{color:var(--vscode-foreground);background:var(--vscode-button-secondaryBackground)}
+.transport{font:inherit;font-size:11px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:4px;padding:2px 4px;cursor:pointer}
+.transportInfo{font-size:11px;color:var(--vscode-descriptionForeground);white-space:nowrap}
+.transportInfo .on{color:var(--vscode-terminal-ansiGreen,var(--vscode-charts-green,#3fb950))}
+.transportInfo .pty{color:var(--vscode-charts-yellow,#cca700)}
+.transportInfo .off{color:var(--vscode-errorForeground)}
 button:hover{background:var(--vscode-button-hoverBackground)}
 button:disabled{opacity:.5;cursor:default}
 .filterbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 12px;border-bottom:1px solid var(--vscode-panel-border)}
@@ -50,6 +55,9 @@ th .coltype{display:block;font-weight:400;color:var(--vscode-descriptionForegrou
 th.relcol{cursor:default;color:var(--vscode-textLink-foreground)}
 td.relcell{vertical-align:middle}
 tr:hover td{background:var(--vscode-list-hoverBackground)}
+td.editable{cursor:text}
+td.dirty{background-color:var(--vscode-inputValidation-warningBackground,rgba(255,196,0,.14))!important;box-shadow:inset 2px 0 0 var(--vscode-inputValidation-warningBorder,var(--vscode-charts-yellow,#cca700))}
+.celledit{width:100%;box-sizing:border-box;font:inherit;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-focusBorder);border-radius:2px;padding:1px 3px;outline:none}
 .cellnull{color:var(--vscode-descriptionForeground);font-style:italic}
 .tag{color:var(--vscode-descriptionForeground)}
 .fk{display:inline-flex;align-items:center;gap:6px}
@@ -98,6 +106,12 @@ tr:hover td{background:var(--vscode-list-hoverBackground)}
     <span class="title" id="title">Model Data</span>
     <span class="subtitle" id="subtitle"></span>
     <span class="spacer"></span>
+    <span id="transportInfo" class="transportInfo" title="Active backend transport"></span>
+    <select id="transport" class="transport" title="How the browser reaches the Django shell">
+      <option value="auto">Link: Auto</option>
+      <option value="tcp">Link: Socket</option>
+      <option value="pty">Link: Terminal</option>
+    </select>
     <button id="logToggle" class="secondary" type="button" title="Toggle the query log (Django ORM + SQL)">Query Log</button>
     <button id="reload" class="secondary" type="button">Reload</button>
   </header>
@@ -109,7 +123,7 @@ tr:hover td{background:var(--vscode-list-hoverBackground)}
     <button id="clearFilter" class="secondary" type="button">Clear</button>
   </div>
   <div class="gridwrap" id="gridwrap"><div class="empty" id="placeholder">Select a model from the Django Shell catalog.</div></div>
-  <footer class="statusbar"><span id="status"></span><span id="countinfo"></span><span class="spacer"></span><button id="count" class="secondary" type="button">Count</button><button id="more" class="secondary" type="button" disabled>Load more</button></footer>
+  <footer class="statusbar"><span id="status"></span><span id="countinfo"></span><span class="spacer"></span><button id="discard" class="secondary" type="button" disabled>Discard</button><button id="commit" type="button" disabled>Commit</button><button id="count" class="secondary" type="button">Count</button><button id="more" class="secondary" type="button" disabled>Load more</button></footer>
   <div class="logpanel" id="logpanel">
     <div class="loghead"><span>Query Log</span><span class="grow"></span><button id="logMode" class="secondary" type="button">View: SQL</button><button id="logClear" class="secondary" type="button">Clear</button></div>
     <div class="logbody mode-sql" id="logbody"></div>

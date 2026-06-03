@@ -4,6 +4,7 @@ import * as net from "net";
 import { BackendEndpoint } from "./backendBootstrap";
 import { DiagnosticLogger } from "./diagnostics";
 import {
+  BackendCommitResult,
   BackendModelCount,
   BackendModelFilter,
   BackendModelList,
@@ -11,10 +12,13 @@ import {
   BackendModelRelatedRows,
   BackendModelRows,
   BackendModelSchema,
+  ModelCommitChange,
+  ModelCommitQuery,
   ModelCountQuery,
   ModelRelatedQuery,
   ModelRowsQuery,
   modelUnsupportedFallback,
+  parseModelCommitResponse,
   parseModelCountResponse,
   parseModelListResponse,
   parseModelRelatedResponse,
@@ -104,6 +108,7 @@ export interface BackendRuntimePathSegment {
 
 export interface BackendRequestPayload {
   app?: string;
+  changes?: ModelCommitChange[];
   code?: string;
   cursor?: unknown;
   filters?: BackendModelFilter[];
@@ -121,11 +126,13 @@ export interface BackendRequestPayload {
 
 export type BackendFallbackTransport = (payload: BackendRequestPayload) => Promise<string>;
 export type BackendTransport = "none" | "pty" | "tcp";
+export type BackendTransportMode = "auto" | "pty" | "tcp";
 
 /** Sends execution requests to the backend running inside the Django shell process. */
 export class BackendClient {
   private activeTransport: BackendTransport = "none";
   private tcpUnavailable = false;
+  private mode: BackendTransportMode = "auto";
 
   /** Stores the socket endpoint and shared authentication token. */
   constructor(
@@ -137,6 +144,17 @@ export class BackendClient {
   /** Returns the transport that most recently completed a backend request. */
   get transport(): BackendTransport {
     return this.activeTransport;
+  }
+
+  /** Returns the user-selected transport preference. */
+  get transportMode(): BackendTransportMode {
+    return this.mode;
+  }
+
+  /** Sets the transport preference; re-enables TCP probing unless terminal is forced. */
+  setTransportMode(mode: BackendTransportMode): void {
+    this.mode = mode;
+    this.tcpUnavailable = mode === "pty" && this.tcpUnavailable;
   }
 
   /** Returns whether expensive runtime tree requests are safe for the active transport. */
@@ -199,6 +217,11 @@ export class BackendClient {
     return this.request({ ...query, kind: "count" }, parseModelCountResponse);
   }
 
+  /** Applies staged cell edits in one atomic transaction and returns per-row results. */
+  modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult> {
+    return this.request({ ...query, kind: "commit" }, parseModelCommitResponse);
+  }
+
   /** Sends one JSON request to the backend and parses the single-line response. */
   private request<T>(
     payload: BackendRequestPayload,
@@ -206,7 +229,7 @@ export class BackendClient {
     log = true
   ): Promise<T> {
     const started = Date.now();
-    if (this.tcpUnavailable && this.fallback) {
+    if (this.mode === "pty" || (this.mode === "auto" && this.tcpUnavailable && this.fallback)) {
       return this.requestFallback(payload, parse, started, undefined, log, false);
     }
     return this.socketRequest(payload).then(
@@ -218,7 +241,17 @@ export class BackendClient {
         }
         return parsed;
       },
-      (error: unknown) => this.requestFallback(payload, parse, started, error, log)
+      (error: unknown) => {
+        if (this.mode === "tcp") {
+          this.activeTransport = "none";
+          const message = error instanceof Error ? error.message : String(error);
+          if (log) {
+            this.logRequest(payload.kind, started, undefined, 0, message, "tcp");
+          }
+          return parse(kindErrorResponse(payload.kind, `Socket transport failed: ${message}`));
+        }
+        return this.requestFallback(payload, parse, started, error, log);
+      }
     );
   }
 
@@ -300,7 +333,7 @@ export class BackendClient {
       this.logRequest(payload.kind, started, undefined, 0, error instanceof Error ? error.message : String(error), "tcp");
     }
     if (!this.fallback) {
-      throw error;
+      return parse(kindErrorResponse(payload.kind, error instanceof Error ? error.message : "Terminal transport is unavailable."));
     }
     this.tcpUnavailable = true;
     if (!isPtyFallbackKind(payload.kind)) {
@@ -341,19 +374,32 @@ function connectHost(host: string): string {
   return host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
 }
 
-/** Returns whether one request kind is small enough for PTY fallback. */
+const PTY_FALLBACK_KINDS = new Set(["children", "complete", "environment", "execute", "inspect", "prelude", "models", "schema", "rows", "related", "count", "commit"]);
+const PTY_PAGE_LIMIT = 25;
+
+/** Returns whether one request kind can be serviced over the interactive PTY fallback. */
 function isPtyFallbackKind(kind: string): boolean {
-  return kind === "children" || kind === "complete" || kind === "environment" || kind === "execute" || kind === "inspect" || kind === "prelude";
+  return PTY_FALLBACK_KINDS.has(kind);
 }
 
-/** Returns a smaller payload variant for terminal fallback transport. */
+/** Returns a smaller payload variant for the slower terminal fallback transport. */
 function ptyFallbackPayload(payload: BackendRequestPayload): BackendRequestPayload {
-  return payload.kind === "inspect" ? { ...payload, lightweight: true } : payload;
+  if (payload.kind === "inspect") {
+    return { ...payload, lightweight: true };
+  }
+  if ((payload.kind === "rows" || payload.kind === "related") && (payload.limit === undefined || payload.limit > PTY_PAGE_LIMIT)) {
+    return { ...payload, limit: PTY_PAGE_LIMIT };
+  }
+  return payload;
 }
 
-/** Returns a safe error response for requests that should not cross PTY fallback. */
+/** Returns a safe error response when a request cannot cross the active transport. */
 function unsupportedPtyFallbackResponse(kind: string): string {
-  const error = "Remote runtime inspection is disabled because the backend is only reachable through the interactive terminal.";
+  return kindErrorResponse(kind, "Remote runtime inspection is disabled because the backend is only reachable through the interactive terminal.");
+}
+
+/** Returns a kind-shaped error response carrying one message. */
+function kindErrorResponse(kind: string, error: string): string {
   const model = modelUnsupportedFallback(kind, error);
   if (model) {
     return model;

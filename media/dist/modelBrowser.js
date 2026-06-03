@@ -140,6 +140,159 @@ function tokenClass(match) {
   return "sql-punct";
 }
 
+// media/gridPin.js
+function togglePin(col, button, state2, gridwrap) {
+  if (state2.pinned.has(col)) {
+    state2.pinned.delete(col);
+    button.classList.remove("active");
+    button.title = "Pin column (freeze left)";
+  } else {
+    state2.pinned.add(col);
+    button.classList.add("active");
+    button.title = "Unpin column";
+  }
+  repaintPins(gridwrap, state2);
+}
+function repaintPins(gridwrap, state2) {
+  const headRow = gridwrap.querySelector("thead tr");
+  const body = gridwrap.querySelector("tbody");
+  if (!headRow) {
+    return;
+  }
+  const lefts = {};
+  let offset = 0;
+  for (let i = 0; i < state2.columns.length; i += 1) {
+    if (state2.pinned.has(state2.columns[i].attname)) {
+      lefts[i] = offset;
+      offset += headRow.children[i] ? headRow.children[i].offsetWidth : 0;
+    }
+  }
+  for (let i = 0; i < state2.columns.length; i += 1) {
+    setPin(headRow.children[i], lefts[i]);
+  }
+  if (body) {
+    for (const row of body.children) {
+      if (row.classList.contains("detail")) {
+        continue;
+      }
+      for (let i = 0; i < state2.columns.length; i += 1) {
+        setPin(row.children[i], lefts[i]);
+      }
+    }
+  }
+}
+function setPin(cell, left) {
+  if (!cell) {
+    return;
+  }
+  if (left === void 0) {
+    cell.classList.remove("pinned");
+    cell.style.left = "";
+    cell.style.position = "";
+    return;
+  }
+  cell.classList.add("pinned");
+  cell.style.position = "sticky";
+  cell.style.left = `${left}px`;
+}
+
+// media/gridEdit.js
+function createEditor(ctx) {
+  const pending = /* @__PURE__ */ new Map();
+  function pendingCount() {
+    let total = 0;
+    for (const entry of pending.values()) {
+      total += Object.keys(entry.fields).length;
+    }
+    return total;
+  }
+  function stage(td, value) {
+    const tr = td.closest("tr");
+    const key = tr.dataset.pk;
+    let entry = pending.get(key);
+    if (!entry) {
+      entry = { fields: {}, pk: tr._pk };
+      pending.set(key, entry);
+    }
+    entry.fields[td.dataset.attname] = value;
+    td.dataset.staged = value;
+    ctx.paintCell(td);
+    ctx.onChange(pendingCount());
+  }
+  function editCell(td) {
+    if (!td.dataset.attname || td.querySelector("input")) {
+      return;
+    }
+    const start = td.dataset.staged !== void 0 ? td.dataset.staged : td._editval ?? "";
+    const input = document.createElement("input");
+    input.className = "celledit";
+    input.value = start;
+    td.textContent = "";
+    td.appendChild(input);
+    input.focus();
+    input.select();
+    let settled = false;
+    const finish = (save) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (save && input.value !== start) {
+        stage(td, input.value);
+      } else {
+        ctx.paintCell(td);
+      }
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        finish(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false);
+      }
+    });
+    input.addEventListener("blur", () => finish(true));
+  }
+  function commitEdits() {
+    if (!pendingCount()) {
+      return;
+    }
+    ctx.post({ changes: [...pending.values()], type: "commitEdits" });
+  }
+  function discardEdits() {
+    if (!pending.size) {
+      return;
+    }
+    pending.clear();
+    ctx.onChange(0);
+    ctx.reload();
+  }
+  function handleResult(result) {
+    const data = result || {};
+    if (data.ok) {
+      pending.clear();
+      ctx.onChange(0);
+      ctx.notify(`Committed ${data.saved} row${data.saved === 1 ? "" : "s"}.`);
+      ctx.reload();
+      return;
+    }
+    ctx.notify(`Commit failed (nothing saved): ${summarize(data)}`);
+  }
+  function summarize(data) {
+    if (data.error) {
+      return data.error.split("\n").pop();
+    }
+    const failed = (data.results || []).filter((row) => !row.ok);
+    return failed.map((row) => `pk=${row.pk} ${row.error || Object.entries(row.fieldErrors || {}).map(([field, messages]) => `${field}: ${messages[0]}`).join("; ")}`).join(" \xB7 ") || "validation error";
+  }
+  function reset() {
+    pending.clear();
+    ctx.onChange(0);
+  }
+  return { commitEdits, discardEdits, editCell, handleResult, pendingCount, reset };
+}
+
 // media/modelBrowserSource.js
 var vscode = acquireVsCodeApi();
 var els = {
@@ -149,12 +302,16 @@ var els = {
   status: document.getElementById("status"),
   countinfo: document.getElementById("countinfo"),
   more: document.getElementById("more"),
+  commit: document.getElementById("commit"),
+  discard: document.getElementById("discard"),
   reload: document.getElementById("reload"),
   addFilter: document.getElementById("addFilter"),
   filterterms: document.getElementById("filterterms"),
   applyFilter: document.getElementById("applyFilter"),
   clearFilter: document.getElementById("clearFilter"),
   count: document.getElementById("count"),
+  transport: document.getElementById("transport"),
+  transportInfo: document.getElementById("transportInfo"),
   logToggle: document.getElementById("logToggle"),
   logpanel: document.getElementById("logpanel"),
   logbody: document.getElementById("logbody"),
@@ -166,6 +323,15 @@ var MAX_LOG_ENTRIES = 200;
 var state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, order: [], model: "", pinned: /* @__PURE__ */ new Set() };
 var pendingRelated = /* @__PURE__ */ new Map();
 var relRequestId = 0;
+var editor = createEditor({
+  post: (message) => vscode.postMessage(message),
+  reload: () => vscode.postMessage({ type: "reload" }),
+  paintCell: (td) => paintCell(td),
+  onChange: (count) => updateEditButtons(count),
+  notify: (text) => {
+    els.status.textContent = text;
+  }
+});
 window.addEventListener("message", (event) => handleMessage(event.data));
 els.reload.addEventListener("click", () => vscode.postMessage({ type: "reload" }));
 els.more.addEventListener("click", () => vscode.postMessage({ type: "loadMore" }));
@@ -173,6 +339,9 @@ els.addFilter.addEventListener("click", () => addFilterTerm());
 els.applyFilter.addEventListener("click", () => applyQuery());
 els.clearFilter.addEventListener("click", () => clearQuery());
 els.count.addEventListener("click", () => vscode.postMessage({ type: "requestCount" }));
+els.commit.addEventListener("click", () => editor.commitEdits());
+els.discard.addEventListener("click", () => editor.discardEdits());
+els.transport.addEventListener("change", () => vscode.postMessage({ type: "setTransport", mode: els.transport.value }));
 els.logToggle.addEventListener("click", () => {
   els.logpanel.hidden = !els.logpanel.hidden;
 });
@@ -200,6 +369,12 @@ function handleMessage(message) {
   } else if (message.type === "count") {
     els.countinfo.textContent = message.ok ? `\xB7 total ${message.count}` : `\xB7 count failed`;
     logSql(`count ${state.model}`, message.sql, message.orm);
+  } else if (message.type === "commit") {
+    logSql(`commit ${state.model}`, message.result && message.result.sql, message.result && message.result.orm);
+    editor.handleResult(message.result);
+  } else if (message.type === "transport") {
+    els.transport.value = message.mode || "auto";
+    els.transportInfo.innerHTML = message.active === "tcp" ? '<span class="on">\u25CF socket</span>' : message.active === "pty" ? '<span class="pty">\u25CF terminal</span>' : '<span class="off">\u25CB not connected</span>';
   } else if (message.type === "error") {
     renderError(message.message);
   }
@@ -230,6 +405,19 @@ function onSchema(schema) {
   els.gridwrap.innerHTML = "";
   els.gridwrap.appendChild(table);
   table.addEventListener("click", onTableClick);
+  table.addEventListener("dblclick", onTableDblClick);
+  editor.reset();
+}
+function onTableDblClick(event) {
+  const td = event.target.closest("td.editable");
+  if (td) {
+    editor.editCell(td);
+  }
+}
+function updateEditButtons(count) {
+  els.commit.textContent = count ? `Commit (${count})` : "Commit";
+  els.commit.disabled = !count;
+  els.discard.disabled = !count;
 }
 function buildHead() {
   const head = el("thead", {});
@@ -280,65 +468,13 @@ function onRows(message) {
   if (!state.rowCount) {
     els.status.textContent = "No rows.";
   }
-  repaintPins();
-}
-function togglePin(col, button) {
-  if (state.pinned.has(col)) {
-    state.pinned.delete(col);
-    button.classList.remove("active");
-    button.title = "Pin column (freeze left)";
-  } else {
-    state.pinned.add(col);
-    button.classList.add("active");
-    button.title = "Unpin column";
-  }
-  repaintPins();
-}
-function repaintPins() {
-  const headRow = els.gridwrap.querySelector("thead tr");
-  const body = document.getElementById("tbody");
-  if (!headRow) {
-    return;
-  }
-  const lefts = {};
-  let offset = 0;
-  for (let i = 0; i < state.columns.length; i += 1) {
-    if (state.pinned.has(state.columns[i].attname)) {
-      lefts[i] = offset;
-      offset += headRow.children[i] ? headRow.children[i].offsetWidth : 0;
-    }
-  }
-  for (let i = 0; i < state.columns.length; i += 1) {
-    setPin(headRow.children[i], lefts[i]);
-  }
-  if (body) {
-    for (const row of body.children) {
-      if (row.classList.contains("detail")) {
-        continue;
-      }
-      for (let i = 0; i < state.columns.length; i += 1) {
-        setPin(row.children[i], lefts[i]);
-      }
-    }
-  }
-}
-function setPin(cell, left) {
-  if (!cell) {
-    return;
-  }
-  if (left === void 0) {
-    cell.classList.remove("pinned");
-    cell.style.left = "";
-    cell.style.position = "";
-    return;
-  }
-  cell.classList.add("pinned");
-  cell.style.position = "sticky";
-  cell.style.left = `${left}px`;
+  repaintPins(els.gridwrap, state);
 }
 function buildRow(row) {
   const pk = rawValue(row[state.pk]);
   const tr = el("tr", {});
+  tr.dataset.pk = String(pk);
+  tr._pk = pk;
   for (const column of state.columns) {
     tr.appendChild(buildCell(row, column, pk));
   }
@@ -351,16 +487,42 @@ function buildRow(row) {
 }
 function buildCell(row, column, pk) {
   const td = el("td", {});
-  const cell = row[column.attname];
+  td._cell = row[column.attname];
+  td._column = column;
+  td._pk = pk;
+  if (column.editable) {
+    td.classList.add("editable");
+    td.dataset.attname = column.attname;
+    td.title = "Double-click to edit";
+    td._editval = cellRawText(td._cell);
+  }
+  paintCell(td);
+  return td;
+}
+function paintCell(td) {
+  const column = td._column;
+  td.textContent = "";
+  if (td.dataset.staged !== void 0) {
+    td.classList.add("dirty");
+    td.appendChild(el("span", {}, td.dataset.staged === "" ? "(empty)" : td.dataset.staged));
+    return;
+  }
+  td.classList.remove("dirty");
+  const cell = td._cell;
   td.appendChild(renderValue(cell));
   if (column.relation && rawValue(cell) !== null && rawValue(cell) !== void 0) {
     const wrap = el("span", { className: "fk" });
-    wrap.appendChild(el("button", { className: "linkbtn", title: "Expand related row", dataset: { act: "fk", rel: column.relation.field, pk: String(pk), val: String(rawValue(cell)) } }, "\u2398"));
+    wrap.appendChild(el("button", { className: "linkbtn", title: "Expand related row", dataset: { act: "fk", rel: column.relation.field, pk: String(td._pk), val: String(rawValue(cell)) } }, "\u2398"));
     wrap.appendChild(el("button", { className: "linkbtn", title: `Open ${column.relation.target}`, dataset: { act: "open", target: column.relation.target } }, "\u2197"));
     td.appendChild(document.createTextNode(" "));
     td.appendChild(wrap);
   }
-  return td;
+}
+function cellRawText(cell) {
+  if (cell === null || cell === void 0) {
+    return "";
+  }
+  return typeof cell === "object" ? cell.v == null ? "" : String(cell.v) : String(cell);
 }
 function renderValue(cell) {
   if (cell === null || cell === void 0) {
@@ -388,7 +550,7 @@ function onTableClick(event) {
   }
   const data = node.dataset;
   if (data.act === "pin") {
-    togglePin(data.col, node);
+    togglePin(data.col, node, state, els.gridwrap);
   } else if (data.act === "sort") {
     toggleSort(data.col);
   } else if (data.act === "open") {

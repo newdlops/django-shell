@@ -1,10 +1,10 @@
 // VS Code extension entrypoint for the Django shell custom console.
 
 import * as vscode from "vscode";
-import type { BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment } from "./backendClient";
+import type { BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransport, BackendTransportMode } from "./backendClient";
 import type { CustomDjangoConsole } from "./customConsole";
 import { DiagnosticLogger } from "./diagnostics";
-import type { BackendModelCount, BackendModelList, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCountQuery, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import type { BackendCommitResult, BackendModelCount, BackendModelList, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitQuery, ModelCountQuery, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { ModelBrowser } from "./modelBrowser";
 import { ModelCatalog } from "./modelCatalog";
 import { NOTEBOOK_TYPE } from "./notebookConstants";
@@ -71,6 +71,22 @@ class LazyRuntimeSource implements vscode.Disposable {
   /** Returns the row count or an idle status without starting a shell. */
   modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
     return this.console?.activeBackend?.modelCount(query) ?? Promise.resolve({ count: null, error: MODEL_IDLE_MESSAGE, ok: false, orm: "", sql: [] });
+  }
+
+  /** Commits staged edits or returns an idle status without starting a shell. */
+  modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult> {
+    return this.console?.activeBackend?.modelCommit(query) ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, ok: false, orm: "", results: [], saved: 0, sql: [] });
+  }
+
+  /** Sets the model browser transport preference on the active backend. */
+  setModelTransport(mode: BackendTransportMode): void {
+    this.console?.activeBackend?.setTransportMode(mode);
+  }
+
+  /** Returns the active transport and selected mode for the model browser. */
+  modelTransportInfo(): { active: BackendTransport; mode: BackendTransportMode } {
+    const backend = this.console?.activeBackend;
+    return { active: backend?.transport ?? "none", mode: backend?.transportMode ?? "auto" };
   }
 
   /** Releases the active runtime event listener. */

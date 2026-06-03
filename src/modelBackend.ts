@@ -134,6 +134,37 @@ export interface ModelCountQuery {
   model: string;
 }
 
+/** One staged row's field edits to commit. */
+export interface ModelCommitChange {
+  fields: Record<string, unknown>;
+  pk: unknown;
+}
+
+/** Parameters for one staged-edit commit. */
+export interface ModelCommitQuery {
+  app: string;
+  changes: ModelCommitChange[];
+  model: string;
+}
+
+/** Per-row outcome of a commit (ok, not-found, or field validation errors). */
+export interface BackendCommitRowResult {
+  error?: string;
+  fieldErrors?: Record<string, string[]>;
+  ok: boolean;
+  pk: unknown;
+}
+
+/** Result of an atomic staged-edit commit. */
+export interface BackendCommitResult {
+  error?: string;
+  ok: boolean;
+  orm: string;
+  results: BackendCommitRowResult[];
+  saved: number;
+  sql: BackendSqlEntry[];
+}
+
 /** Parameters for one related-rows expansion request. */
 export interface ModelRelatedQuery {
   app: string;
@@ -210,6 +241,19 @@ export function parseModelCountResponse(buffer: string): BackendModelCount {
   return { count: typeof parsed.count === "number" ? parsed.count : null, error: parsed.error, ok: Boolean(parsed.ok), orm: typeof parsed.orm === "string" ? parsed.orm : "", sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
 }
 
+/** Parses a backend staged-edit commit response. */
+export function parseModelCommitResponse(buffer: string): BackendCommitResult {
+  const parsed = parseLine<Partial<BackendCommitResult>>(buffer);
+  return {
+    error: parsed.error,
+    ok: Boolean(parsed.ok),
+    orm: typeof parsed.orm === "string" ? parsed.orm : "",
+    results: Array.isArray(parsed.results) ? parsed.results : [],
+    saved: typeof parsed.saved === "number" ? parsed.saved : 0,
+    sql: Array.isArray(parsed.sql) ? parsed.sql : []
+  };
+}
+
 /** Returns a disabled response for a model-browser kind that cannot cross PTY fallback. */
 export function modelUnsupportedFallback(kind: string, error: string): string | undefined {
   if (kind === "models") {
@@ -223,6 +267,9 @@ export function modelUnsupportedFallback(kind: string, error: string): string | 
   }
   if (kind === "count") {
     return `${JSON.stringify({ count: null, error, ok: false })}\n`;
+  }
+  if (kind === "commit") {
+    return `${JSON.stringify({ error, ok: false, results: [], saved: 0 })}\n`;
   }
   return undefined;
 }

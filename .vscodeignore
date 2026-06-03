@@ -19,6 +19,8 @@ test/**
 tsconfig.json
 media/*Source.js
 media/sqlHighlight.js
+media/gridPin.js
+media/gridEdit.js
 media/icon.svg
 node_modules/node-addon-api/**
 node_modules/node-pty/README.md
