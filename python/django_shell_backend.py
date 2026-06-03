@@ -83,6 +83,16 @@ def _run_request(namespace, token, request, initial_names):
         return _inspect_prelude(namespace, initial_names)
     if request.get("kind") == "children":
         return _inspect_children(namespace, request.get("path"))
+    if request.get("kind") == "models":
+        return _browse_models()
+    if request.get("kind") == "schema":
+        return _browse_schema(request)
+    if request.get("kind") == "rows":
+        return _browse_rows(request)
+    if request.get("kind") == "related":
+        return _browse_related(request)
+    if request.get("kind") == "count":
+        return _browse_count(request)
     code = request.get("code")
     if not isinstance(code, str):
         return {"ok": False, "stdout": "", "stderr": "Request code must be a string.", "traceback": ""}
@@ -485,3 +495,365 @@ def _split_last_expression(tree):
 def _print_marker(prefix, payload):
     """Prints a single backend marker line that the extension can parse from PTY output."""
     print(prefix + json.dumps(payload), flush=True)
+
+
+# --- Model data browser ---------------------------------------------------
+# Additive feature: read Django models as tables without triggering N+1.
+# Rows are read with _base_manager.values(*concrete_fields) so foreign keys
+# stay as raw *_id columns (no JOIN). Related rows are fetched only on an
+# explicit, bounded "related" request. None of the existing request kinds,
+# inspection functions, or serialization helpers above are modified.
+
+
+def _browse_models():
+    """Returns the catalog of installed models as browsable tables."""
+    with _EXECUTION_LOCK:
+        try:
+            from django.apps import apps
+
+            items = []
+            for model in apps.get_models():
+                meta = model._meta
+                items.append({"app": meta.app_label, "label": str(meta.verbose_name), "model": meta.object_name, "table": meta.db_table})
+            items.sort(key=lambda item: (item["app"], item["model"]))
+            return {"ok": True, "models": items}
+        except Exception:
+            return {"ok": False, "error": traceback.format_exc(), "models": []}
+
+
+def _browse_schema(request):
+    """Returns columns and expandable relations for one model without querying rows."""
+    with _EXECUTION_LOCK:
+        try:
+            model = _browse_resolve_model(request)
+            meta = model._meta
+            return {"app": meta.app_label, "columns": _browse_columns(model), "label": str(meta.verbose_name), "model": meta.object_name, "ok": True, "pk": meta.pk.attname, "relations": _browse_relations(model), "table": meta.db_table}
+        except Exception:
+            return {"ok": False, "error": traceback.format_exc()}
+
+
+def _browse_rows(request):
+    """Returns one bounded page of rows using concrete columns only (no JOIN, no N+1)."""
+    with _EXECUTION_LOCK:
+        try:
+            model = _browse_resolve_model(request)
+            columns = _browse_columns(model)
+            attnames = [column["attname"] for column in columns]
+            pk_attname = model._meta.pk.attname
+            limit = _browse_limit(request.get("limit"))
+            order = _browse_order(request.get("order"), attnames, pk_attname)
+            keyset_capable = order == [pk_attname]
+            queryset = model._base_manager.all().order_by(*order).filter(_browse_build_filters(model, request.get("filters"), attnames))
+            cursor = request.get("cursor")
+            offset = request.get("offset")
+            base_offset = offset if isinstance(offset, int) and offset > 0 else 0
+            if keyset_capable and cursor is not None:
+                queryset = queryset.filter(**{f"{pk_attname}__gt": cursor})
+            elif not keyset_capable and base_offset:
+                queryset = queryset[base_offset:]
+            with _browse_capture() as ctx:
+                raw = list(queryset.values(*attnames)[: limit + 1])
+            has_more = len(raw) > limit
+            raw = raw[:limit]
+            next_cursor = raw[-1][pk_attname] if keyset_capable and has_more and raw else None
+            next_offset = base_offset + limit if not keyset_capable and has_more else None
+            orm = _browse_orm_rows(model, order, request.get("filters"), attnames, pk_attname, keyset_capable, cursor, base_offset, limit)
+            return {"columns": columns, "hasMore": has_more, "nextCursor": _browse_jsonable(next_cursor), "nextOffset": next_offset, "ok": True, "orm": orm, "pk": pk_attname, "rows": [_browse_serialize_row(row) for row in raw], "sql": _browse_sql(ctx)}
+        except Exception:
+            return {"ok": False, "columns": [], "error": traceback.format_exc(), "rows": []}
+
+
+def _browse_related(request):
+    """Returns related rows for one source row, fetched lazily on explicit expansion."""
+    with _EXECUTION_LOCK:
+        try:
+            model = _browse_resolve_model(request)
+            field = _browse_find_relation(model, request.get("relation"))
+            if field is None:
+                return {"columns": [], "error": "Unknown relation.", "ok": False, "rows": []}
+            target = field.related_model
+            columns = _browse_columns(target)
+            attnames = [column["attname"] for column in columns]
+            source_pk = request.get("pk")
+            limit = _browse_limit(request.get("limit"))
+            with _browse_capture() as ctx:
+                if field.many_to_one or (field.one_to_one and not field.auto_created):
+                    result = _browse_related_single(model, field, target, attnames, columns, source_pk, request.get("value"))
+                else:
+                    result = _browse_related_many(model, field, columns, attnames, source_pk, limit)
+            result["sql"] = _browse_sql(ctx)
+            return result
+        except Exception:
+            return {"columns": [], "error": traceback.format_exc(), "rows": []}
+
+
+def _browse_related_single(model, field, target, attnames, columns, source_pk, value):
+    """Fetches one forward foreign-key or one-to-one related row with at most two queries."""
+    if value is None:
+        value = model._base_manager.filter(pk=source_pk).values_list(field.attname, flat=True).first()
+    raw = list(target._base_manager.filter(pk=value).values(*attnames)[:1]) if value is not None else []
+    orm = f"{target.__name__}._base_manager.filter(pk={value!r}).values({_orm_args(attnames)})[:1]"
+    return {"columns": columns, "hasMore": False, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row) for row in raw], "single": True}
+
+
+def _browse_related_many(model, field, columns, attnames, source_pk, limit):
+    """Fetches a bounded page of reverse foreign-key or many-to-many related rows."""
+    accessor_name = _browse_relation_name(field)
+    orm = f"{model.__name__}._base_manager.get(pk={source_pk!r}).{accessor_name}.all().values({_orm_args(attnames)})[:{limit + 1}]"
+    instance = model._base_manager.filter(pk=source_pk).first()
+    if instance is None:
+        return {"columns": columns, "error": "Source row not found.", "ok": False, "rows": []}
+    try:
+        accessor = getattr(instance, accessor_name)
+    except Exception:
+        return {"columns": columns, "hasMore": False, "ok": True, "orm": orm, "rows": [], "single": bool(field.one_to_one)}
+    if not hasattr(accessor, "all"):
+        raw = list(type(accessor)._base_manager.filter(pk=accessor.pk).values(*attnames)[:1]) if accessor is not None else []
+        return {"columns": columns, "hasMore": False, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row) for row in raw], "single": True}
+    raw = list(accessor.all().values(*attnames)[: limit + 1])
+    has_more = len(raw) > limit
+    return {"columns": columns, "hasMore": has_more, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row) for row in raw[:limit]], "single": False}
+
+
+def _browse_resolve_model(request):
+    """Returns the model class named by an app label and model name."""
+    from django.apps import apps
+
+    return apps.get_model(request.get("app"), request.get("model"))
+
+
+def _browse_columns(model):
+    """Returns concrete (real DB) column descriptors; foreign keys appear as their id column."""
+    columns = []
+    for field in model._meta.concrete_fields:
+        column = {"attname": field.attname, "editable": bool(getattr(field, "editable", False)) and not field.primary_key, "name": field.name, "null": bool(getattr(field, "null", False)), "pk": bool(field.primary_key), "type": type(field).__name__}
+        if field.is_relation and field.related_model is not None:
+            column["relation"] = {"field": field.name, "single": True, "target": _browse_label(field.related_model)}
+        choices = getattr(field, "choices", None)
+        if choices:
+            column["choices"] = [[_browse_jsonable(choice[0]), str(choice[1])] for choice in list(choices)[:200]]
+        columns.append(column)
+    return columns
+
+
+def _browse_relations(model):
+    """Returns expandable relations (reverse FK, M2M, reverse O2O) excluding forward columns."""
+    relations = []
+    for field in model._meta.get_fields():
+        if not field.is_relation or field.related_model is None:
+            continue
+        single = bool(field.one_to_one or field.many_to_one)
+        if single and not field.auto_created:
+            continue
+        name = _browse_relation_name(field)
+        if name is None:
+            continue
+        relations.append({"kind": _browse_relation_kind(field), "name": name, "single": single, "target": _browse_label(field.related_model)})
+    return relations
+
+
+def _browse_find_relation(model, relation):
+    """Resolves a relation request name back to its model field or reverse descriptor."""
+    if not relation:
+        return None
+    for field in model._meta.get_fields():
+        if not field.is_relation:
+            continue
+        if _browse_relation_name(field) == relation or getattr(field, "name", None) == relation:
+            return field
+    return None
+
+
+def _browse_relation_name(field):
+    """Returns the accessor name for reverse relations or the field name for forward ones."""
+    if field.auto_created and not getattr(field, "concrete", False):
+        try:
+            name = field.get_accessor_name()
+        except Exception:
+            return None
+        return name if name and name != "+" else None
+    return field.name
+
+
+def _browse_relation_kind(field):
+    """Returns a compact display kind for one relation field."""
+    if field.many_to_many:
+        return "m2m"
+    if field.one_to_many:
+        return "reverse-fk"
+    if field.one_to_one:
+        return "o2o"
+    return "fk"
+
+
+def _browse_label(model):
+    """Returns an app-qualified model label."""
+    return f"{model._meta.app_label}.{model._meta.object_name}"
+
+
+def _browse_limit(value, default=50, maximum=200):
+    """Returns a bounded page size so a single request cannot starve the shell."""
+    if isinstance(value, int) and value > 0:
+        return min(value, maximum)
+    return default
+
+
+def _browse_order(order, attnames, pk_attname):
+    """Returns a safe order-by list restricted to real columns, defaulting to the primary key."""
+    result = []
+    if isinstance(order, list):
+        for item in order:
+            field = item.get("field") if isinstance(item, dict) else item
+            descending = isinstance(item, dict) and bool(item.get("desc"))
+            if field in attnames:
+                result.append(f"-{field}" if descending else field)
+    return result or [pk_attname]
+
+
+def _browse_serialize_row(row):
+    """Returns one row dict with every cell converted to a JSON-safe representation."""
+    return {key: _browse_cell(value) for key, value in row.items()}
+
+
+def _browse_cell(value):
+    """Returns a JSON-safe representation for one field value without triggering queries."""
+    import base64
+    import datetime
+    import decimal
+    import uuid
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, decimal.Decimal):
+        return {"t": "decimal", "v": str(value)}
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return {"t": "datetime", "v": value.isoformat()}
+    if isinstance(value, datetime.timedelta):
+        return {"t": "duration", "v": str(value)}
+    if isinstance(value, uuid.UUID):
+        return {"t": "uuid", "v": str(value)}
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        return {"len": len(raw), "t": "bytes", "v": base64.b64encode(raw[:64]).decode("ascii")}
+    if isinstance(value, (list, tuple, dict, set, frozenset)):
+        return {"t": "json", "v": _truncate(repr(value), 400)}
+    return {"t": "repr", "v": _truncate(repr(value), 400)}
+
+
+def _browse_jsonable(value):
+    """Returns a JSON-safe scalar for cursors and choice keys."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+_BROWSE_LOOKUPS = frozenset({"exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"})
+
+
+def _browse_count(request):
+    """Returns the row count for the current filter set, computed only on explicit request."""
+    with _EXECUTION_LOCK:
+        try:
+            model = _browse_resolve_model(request)
+            attnames = [field.attname for field in model._meta.concrete_fields]
+            with _browse_capture() as ctx:
+                count = model._base_manager.filter(_browse_build_filters(model, request.get("filters"), attnames)).count()
+            includes, excludes = _browse_orm_clauses(request.get("filters"), set(attnames))
+            count_lines = [f"{model.__name__}._base_manager"]
+            if includes:
+                count_lines.append(f"    .filter({', '.join(includes)})")
+            if excludes:
+                count_lines.append(f"    .exclude({', '.join(excludes)})")
+            count_lines.append("    .count()")
+            return {"count": count, "ok": True, "orm": "\n".join(count_lines), "sql": _browse_sql(ctx)}
+        except Exception:
+            return {"error": traceback.format_exc(), "ok": False}
+
+
+def _browse_capture():
+    """Returns a context manager that records the SQL executed inside it (even when DEBUG is off)."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    return CaptureQueriesContext(connection)
+
+
+def _browse_sql(ctx):
+    """Returns a bounded list of executed SQL statements with their durations."""
+    return [{"sql": query.get("sql", ""), "time": query.get("time", "")} for query in ctx.captured_queries[:50]]
+
+
+def _orm_args(items):
+    """Joins items as a Python argument list for the ORM command log."""
+    return ", ".join(repr(item) for item in items)
+
+
+def _browse_orm_clauses(filters, attnames):
+    """Splits structured filters into Django .filter()/.exclude() kwarg strings for the command log."""
+    includes, excludes = [], []
+    for term in filters or []:
+        if not isinstance(term, dict):
+            continue
+        field = term.get("field")
+        lookup = term.get("lookup") or "exact"
+        if field not in attnames or lookup not in _BROWSE_LOOKUPS:
+            continue
+        key = field if lookup == "exact" else f"{field}__{lookup}"
+        (excludes if term.get("negate") else includes).append(f"{key}={term.get('value')!r}")
+    return includes, excludes
+
+
+def _browse_orm_rows(model, order, filters, attnames, pk_attname, keyset_capable, cursor, base_offset, limit):
+    """Builds a readable Django ORM expression mirroring the executed rows query."""
+    includes, excludes = _browse_orm_clauses(filters, set(attnames))
+    lines = [f"{model.__name__}._base_manager", f"    .order_by({_orm_args(order)})"]
+    if includes:
+        lines.append(f"    .filter({', '.join(includes)})")
+    if excludes:
+        lines.append(f"    .exclude({', '.join(excludes)})")
+    if keyset_capable and cursor is not None:
+        lines.append(f"    .filter({pk_attname}__gt={cursor!r})")
+    lines.append(f"    .values({_orm_args(attnames)})")
+    end = limit + 1
+    lines.append(f"    [{base_offset}:{base_offset + end}]" if (not keyset_capable and base_offset) else f"    [:{end}]")
+    return "\n".join(lines)
+
+
+def _browse_build_filters(model, filters, attnames):
+    """Builds a safe Q filter; field and lookup are allowlisted and values stay ORM-parameterized (no injection)."""
+    from django.db.models import Q
+
+    query = Q()
+    if not isinstance(filters, list):
+        return query
+    allowed = set(attnames)
+    fields = {field.attname: field for field in model._meta.concrete_fields}
+    for term in filters:
+        if not isinstance(term, dict):
+            continue
+        field = term.get("field")
+        lookup = term.get("lookup") or "exact"
+        if field not in allowed or lookup not in _BROWSE_LOOKUPS:
+            continue
+        clause = Q(**{f"{field}__{lookup}": _browse_coerce_filter_value(lookup, term.get("value"), fields.get(field))})
+        query &= ~clause if term.get("negate") else clause
+    return query
+
+
+def _browse_coerce_filter_value(lookup, value, field=None):
+    """Coerces one filter value for lookups and field types that need a specific Python shape."""
+    if lookup == "isnull":
+        if isinstance(value, str):
+            return value.strip().lower() not in ("", "false", "0", "no")
+        return bool(value)
+    if lookup in ("in", "range"):
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(",") if part.strip() != ""]
+        elif isinstance(value, (list, tuple)):
+            parts = list(value)
+        else:
+            parts = [value]
+        return parts[:2] if lookup == "range" else parts
+    if isinstance(value, str) and field is not None and field.get_internal_type() == "BooleanField":
+        return value.strip().lower() in ("true", "1", "t", "yes", "on")
+    return value

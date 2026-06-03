@@ -4,10 +4,15 @@ import * as vscode from "vscode";
 import type { BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment } from "./backendClient";
 import type { CustomDjangoConsole } from "./customConsole";
 import { DiagnosticLogger } from "./diagnostics";
+import type { BackendModelCount, BackendModelList, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCountQuery, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import { ModelBrowser } from "./modelBrowser";
+import { ModelCatalog } from "./modelCatalog";
 import { NOTEBOOK_TYPE } from "./notebookConstants";
 import { DjangoConsoleSerializer } from "./notebookSerializer";
 import { RuntimeInspector } from "./runtimeInspector";
 import type { DjangoNotebookConsole } from "./notebookConsole";
+
+const MODEL_IDLE_MESSAGE = "Open the Django Shell console first.";
 
 type OutputChannelFactory = () => vscode.OutputChannel;
 
@@ -43,6 +48,31 @@ class LazyRuntimeSource implements vscode.Disposable {
     return this.console?.inspectRuntimeChildren(pathSegments) ?? Promise.resolve(runtimeUnavailableChildren());
   }
 
+  /** Returns the model catalog or an idle status without starting a shell. */
+  listModels(): Promise<BackendModelList> {
+    return this.console?.activeBackend?.models() ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, models: [], ok: false });
+  }
+
+  /** Returns model schema or an idle status without starting a shell. */
+  modelSchema(app: string, model: string): Promise<BackendModelSchema> {
+    return this.console?.activeBackend?.modelSchema(app, model) ?? Promise.resolve({ columns: [], error: MODEL_IDLE_MESSAGE, ok: false, relations: [] });
+  }
+
+  /** Returns a page of model rows or an idle status without starting a shell. */
+  modelRows(query: ModelRowsQuery): Promise<BackendModelRows> {
+    return this.console?.activeBackend?.modelRows(query) ?? Promise.resolve({ columns: [], error: MODEL_IDLE_MESSAGE, hasMore: false, nextOffset: null, ok: false, orm: "", rows: [], sql: [] });
+  }
+
+  /** Returns related rows or an idle status without starting a shell. */
+  modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows> {
+    return this.console?.activeBackend?.modelRelated(query) ?? Promise.resolve({ columns: [], error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, orm: "", rows: [], single: false, sql: [] });
+  }
+
+  /** Returns the row count or an idle status without starting a shell. */
+  modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
+    return this.console?.activeBackend?.modelCount(query) ?? Promise.resolve({ count: null, error: MODEL_IDLE_MESSAGE, ok: false, orm: "", sql: [] });
+  }
+
   /** Releases the active runtime event listener. */
   dispose(): void {
     this.consoleSubscription?.dispose();
@@ -59,6 +89,10 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(runtimeSource);
   runtimeInspector.activate(context);
   registerCustomConsoleEntryPoints(context, diagnostics, runtimeSource);
+  const modelBrowser = new ModelBrowser(context.extensionPath, runtimeSource, diagnostics);
+  modelBrowser.activate(context);
+  const modelCatalog = new ModelCatalog(context.extensionPath, runtimeSource, diagnostics);
+  modelCatalog.activate(context);
   if (process.env.DJANGO_SHELL_E2E === "1") {
     context.subscriptions.push(
       vscode.commands.registerCommand("djangoShell.e2eEvaluateOverlay", async (expression: string) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).e2eEvaluateOverlay(expression)),

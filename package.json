@@ -2,7 +2,7 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "publisher": "newdlops",
   "license": "UNLICENSED",
   "icon": "media/icon.png",
@@ -47,13 +47,16 @@
   "activationEvents": [
     "onCommand:djangoShell.acceptInput",
     "onCommand:djangoShell.openConsole",
+    "onCommand:djangoShell.openModelData",
     "onCommand:djangoShell.openNotebookConsoleDeprecated",
     "onCommand:djangoShell.overlayAcceptInput",
     "onCommand:djangoShell.overlayInsertNewline",
     "onCommand:djangoShell.refreshInspector",
+    "onCommand:djangoShell.refreshModelCatalog",
     "onCommand:djangoShell.showOverlayEditor",
     "onCommand:djangoShell.showEnvironment",
     "onNotebook:django-shell-console",
+    "onView:djangoShell.modelCatalog",
     "onView:djangoShell.runtimeInspector",
     "onRenderer:django-shell-terminal-renderer"
   ],
@@ -94,6 +97,18 @@
         "title": "Django Shell: Refresh Runtime Inspector",
         "category": "Django Shell",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "djangoShell.openModelData",
+        "title": "Django Shell: Browse Model Data",
+        "category": "Django Shell",
+        "icon": "$(table)"
+      },
+      {
+        "command": "djangoShell.refreshModelCatalog",
+        "title": "Django Shell: Refresh Model Catalog",
+        "category": "Django Shell",
+        "icon": "$(refresh)"
       }
     ],
     "notebooks": [
@@ -131,6 +146,11 @@
     "views": {
       "djangoShell": [
         {
+          "id": "djangoShell.modelCatalog",
+          "name": "Models",
+          "type": "webview"
+        },
+        {
           "id": "djangoShell.runtimeInspector",
           "name": "Runtime"
         }
@@ -142,6 +162,9 @@
           "command": "djangoShell.openConsole"
         },
         {
+          "command": "djangoShell.openModelData"
+        },
+        {
           "command": "djangoShell.openNotebookConsoleDeprecated"
         },
         {
@@ -149,6 +172,10 @@
         },
         {
           "command": "djangoShell.refreshInspector",
+          "when": "false"
+        },
+        {
+          "command": "djangoShell.refreshModelCatalog",
           "when": "false"
         },
         {
@@ -171,6 +198,16 @@
           "command": "djangoShell.showEnvironment",
           "group": "navigation",
           "when": "view == djangoShell.runtimeInspector"
+        },
+        {
+          "command": "djangoShell.openConsole",
+          "group": "navigation@1",
+          "when": "view == djangoShell.modelCatalog"
+        },
+        {
+          "command": "djangoShell.refreshModelCatalog",
+          "group": "navigation@2",
+          "when": "view == djangoShell.modelCatalog"
         }
       ]
     },
@@ -252,7 +289,9 @@
   },
   "scripts": {
     "build:custom-console": "esbuild media/customConsoleSource.js --bundle --format=esm --loader:.css=text --outfile=media/dist/customConsole.js",
-    "build:renderer": "npm run build:terminal-renderer && npm run build:custom-console",
+    "build:model-browser": "esbuild media/modelBrowserSource.js --bundle --format=esm --outfile=media/dist/modelBrowser.js",
+    "build:model-catalog": "esbuild media/modelCatalogSource.js --bundle --format=esm --outfile=media/dist/modelCatalog.js",
+    "build:renderer": "npm run build:terminal-renderer && npm run build:custom-console && npm run build:model-browser && npm run build:model-catalog",
     "build:terminal-renderer": "esbuild media/terminalRendererSource.js --bundle --format=esm --loader:.css=text --outfile=media/dist/terminalRenderer.js",
     "check:guidelines": "node scripts/check-code-guidelines.mjs",
     "compile": "tsc -p ./ && npm run build:renderer",

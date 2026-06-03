@@ -3,6 +3,24 @@
 import * as net from "net";
 import { BackendEndpoint } from "./backendBootstrap";
 import { DiagnosticLogger } from "./diagnostics";
+import {
+  BackendModelCount,
+  BackendModelFilter,
+  BackendModelList,
+  BackendModelOrder,
+  BackendModelRelatedRows,
+  BackendModelRows,
+  BackendModelSchema,
+  ModelCountQuery,
+  ModelRelatedQuery,
+  ModelRowsQuery,
+  modelUnsupportedFallback,
+  parseModelCountResponse,
+  parseModelListResponse,
+  parseModelRelatedResponse,
+  parseModelRowsResponse,
+  parseModelSchemaResponse
+} from "./modelBackend";
 
 const TCP_CONNECT_TIMEOUT_MS = 1500;
 const TCP_RESPONSE_TIMEOUT_MS = 30000;
@@ -85,10 +103,20 @@ export interface BackendRuntimePathSegment {
 }
 
 export interface BackendRequestPayload {
+  app?: string;
   code?: string;
+  cursor?: unknown;
+  filters?: BackendModelFilter[];
   kind: string;
   lightweight?: boolean;
+  limit?: number;
+  model?: string;
+  offset?: number;
+  order?: BackendModelOrder[];
   path?: BackendRuntimePathSegment[];
+  pk?: unknown;
+  relation?: string;
+  value?: unknown;
 }
 
 export type BackendFallbackTransport = (payload: BackendRequestPayload) => Promise<string>;
@@ -144,6 +172,31 @@ export class BackendClient {
   /** Returns safe child summaries for one inspected runtime value path. */
   children(path: BackendRuntimePathSegment[]): Promise<BackendRuntimeChildren> {
     return this.request({ kind: "children", path }, parseChildrenResponse);
+  }
+
+  /** Returns the catalog of browsable Django models from the attached runtime. */
+  models(): Promise<BackendModelList> {
+    return this.request({ kind: "models" }, parseModelListResponse);
+  }
+
+  /** Returns column and relation metadata for one model without querying rows. */
+  modelSchema(app: string, model: string): Promise<BackendModelSchema> {
+    return this.request({ app, kind: "schema", model }, parseModelSchemaResponse);
+  }
+
+  /** Returns one bounded page of model rows with foreign keys kept as raw ids. */
+  modelRows(query: ModelRowsQuery): Promise<BackendModelRows> {
+    return this.request({ ...query, kind: "rows" }, parseModelRowsResponse);
+  }
+
+  /** Returns related rows for one source row, fetched lazily on explicit expansion. */
+  modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows> {
+    return this.request({ ...query, kind: "related" }, parseModelRelatedResponse);
+  }
+
+  /** Returns the row count for the current filter set, computed on demand. */
+  modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
+    return this.request({ ...query, kind: "count" }, parseModelCountResponse);
   }
 
   /** Sends one JSON request to the backend and parses the single-line response. */
@@ -301,6 +354,10 @@ function ptyFallbackPayload(payload: BackendRequestPayload): BackendRequestPaylo
 /** Returns a safe error response for requests that should not cross PTY fallback. */
 function unsupportedPtyFallbackResponse(kind: string): string {
   const error = "Remote runtime inspection is disabled because the backend is only reachable through the interactive terminal.";
+  const model = modelUnsupportedFallback(kind, error);
+  if (model) {
+    return model;
+  }
   if (kind === "children") {
     return `${JSON.stringify({ children: [], error, ok: false })}\n`;
   }

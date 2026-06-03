@@ -2,7 +2,7 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
-import type { BackendExecutionResult, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment } from "./backendClient";
+import type { BackendClient, BackendExecutionResult, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment } from "./backendClient";
 import { webviewHtml } from "./customConsoleHtml";
 import { DiagnosticLogger } from "./diagnostics";
 import { closeWorkspaceGeneratedOverlayTabs, scheduleWorkspaceGeneratedOverlayTabCleanup } from "./generatedOverlayTabs";
@@ -126,6 +126,8 @@ export class CustomDjangoConsole implements vscode.Disposable {
     }
     return this.session.backend.children(pathSegments);
   }
+
+  /** Returns the active backend client when a Django shell session is attached. */ get activeBackend(): BackendClient | undefined { return this.session?.backend; }
 
   /** Returns a compact state snapshot for extension host E2E tests. */
   e2eSnapshot(): Record<string, unknown> {

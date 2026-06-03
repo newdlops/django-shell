@@ -29,3 +29,15 @@ test("keeps Python cell Enter from interrupting completion UI", () => {
   assert.match(binding.when, /parameterHintsVisible/);
   assert.match(binding.when, /inlineSuggestionVisible/);
 });
+
+test("contributes the additive model data browser command and catalog view", () => {
+  const commands = manifest.contributes.commands.map((item) => item.command);
+  assert.ok(commands.includes("djangoShell.openModelData"));
+  assert.ok(commands.includes("djangoShell.refreshModelCatalog"));
+  const catalog = manifest.contributes.views.djangoShell.find((item) => item.id === "djangoShell.modelCatalog");
+  assert.ok(catalog && catalog.type === "webview", "model catalog is a searchable webview view");
+  const views = manifest.contributes.views.djangoShell.map((item) => item.id);
+  assert.ok(views.includes("djangoShell.runtimeInspector"), "keeps the existing runtime inspector view");
+  assert.ok(manifest.activationEvents.includes("onView:djangoShell.modelCatalog"));
+  assert.ok(manifest.activationEvents.includes("onCommand:djangoShell.openModelData"));
+});

@@ -8,6 +8,7 @@
 AGENTS.md
 DEPLOYMENT.md
 FRONTEND_CHANGE.md
+MODEL_BROWSER_PLAN.md
 django-shell-*.vsix
 log.txt
 other_extension_log.txt
@@ -17,6 +18,7 @@ src/**
 test/**
 tsconfig.json
 media/*Source.js
+media/sqlHighlight.js
 media/icon.svg
 node_modules/node-addon-api/**
 node_modules/node-pty/README.md
