@@ -13,11 +13,14 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   private prelude = "";
   private text = "";
   private writeQueue: Promise<void> = Promise.resolve();
-  readonly analysisUri = overlayFileUri("analysis");
-  readonly editorUri = overlayFileUri("console-cell");
+  readonly analysisUri: vscode.Uri;
+  readonly editorUri: vscode.Uri;
 
-  /** Stores the diagnostic logger used for in-memory document sync tracing. */
-  constructor(private readonly logger?: DiagnosticLogger) {}
+  /** Stores the logger and resolves backing-file URIs (default base names match the console overlay). */
+  constructor(private readonly logger?: DiagnosticLogger, editorName = "console-cell", analysisName = "analysis") {
+    this.editorUri = overlayFileUri(editorName);
+    this.analysisUri = overlayFileUri(analysisName);
+  }
 
   /** Opens the file document so file-only language extensions can attach to it. */
   activate(context: vscode.ExtensionContext): void {

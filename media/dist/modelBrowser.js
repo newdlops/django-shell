@@ -196,9 +196,205 @@ function setPin(cell, left) {
   cell.style.left = `${left}px`;
 }
 
+// media/gridFkPicker.js
+var DEBOUNCE_MS = 200;
+function openFkPicker(td, column, start, host) {
+  const wrap = document.createElement("div");
+  wrap.className = "fkpick";
+  const input = document.createElement("input");
+  input.className = "celledit";
+  input.value = start;
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  const results = document.createElement("div");
+  results.className = "fkresults";
+  results.hidden = true;
+  wrap.appendChild(input);
+  wrap.appendChild(results);
+  td.textContent = "";
+  td.appendChild(wrap);
+  input.focus();
+  input.select();
+  const state2 = { current: 0, highlight: -1, options: [], settled: false, timer: null };
+  function finish(value) {
+    if (state2.settled) {
+      return;
+    }
+    state2.settled = true;
+    if (state2.timer) {
+      clearTimeout(state2.timer);
+    }
+    if (value !== null && value !== start) {
+      host.stage(value);
+    } else {
+      host.done();
+    }
+  }
+  function query(immediate) {
+    if (state2.timer) {
+      clearTimeout(state2.timer);
+    }
+    const run = () => {
+      state2.current = host.allocId();
+      host.post({ q: input.value.trim(), requestId: state2.current, target: column.relation.target, type: "lookupRelated" });
+    };
+    if (immediate) {
+      run();
+    } else {
+      state2.timer = setTimeout(run, DEBOUNCE_MS);
+    }
+  }
+  function render() {
+    results.textContent = "";
+    results.hidden = !state2.options.length;
+    state2.options.forEach((option, index) => {
+      const row = document.createElement("div");
+      row.className = index === state2.highlight ? "fkopt active" : "fkopt";
+      row.textContent = option.label;
+      row.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        finish(String(option.pk));
+      });
+      results.appendChild(row);
+    });
+  }
+  function move(delta) {
+    if (!state2.options.length) {
+      return;
+    }
+    state2.highlight = (state2.highlight + delta + state2.options.length) % state2.options.length;
+    render();
+  }
+  input.addEventListener("input", () => query(false));
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      move(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      move(-1);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      finish(state2.highlight >= 0 ? String(state2.options[state2.highlight].pk) : input.value.trim());
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(null);
+    }
+  });
+  input.addEventListener("blur", () => setTimeout(() => finish(input.value.trim()), 0));
+  query(true);
+  return {
+    /** Renders backend candidates when they answer the latest query. */
+    fill(message) {
+      if (state2.settled || message.requestId !== state2.current) {
+        return;
+      }
+      const result = message.result || {};
+      state2.options = result.ok && Array.isArray(result.rows) ? result.rows : [];
+      state2.highlight = state2.options.length ? 0 : -1;
+      render();
+    }
+  };
+}
+
 // media/gridEdit.js
+function buildControl(column, start) {
+  if (Array.isArray(column.choices) && column.choices.length) {
+    return buildSelect(choiceOptions(column), start);
+  }
+  if (column.type === "BooleanField") {
+    return buildSelect(booleanOptions(column.null), start);
+  }
+  const picker = { DateField: "date", DateTimeField: "datetime-local", TimeField: "time" }[column.type];
+  if (picker) {
+    return buildPicker(picker, column.type, start);
+  }
+  return buildText(start);
+}
+function buildText(start) {
+  const input = document.createElement("input");
+  input.className = "celledit";
+  input.value = start;
+  return { commitOnChange: false, initial: start, input, selectable: true };
+}
+function buildPicker(kind, type, start) {
+  const input = document.createElement("input");
+  input.className = "celledit";
+  input.type = kind;
+  if (kind !== "date") {
+    input.step = "1";
+  }
+  input.value = normalizeTemporal(type, start);
+  return { commitOnChange: false, initial: input.value, input, selectable: false };
+}
+function buildSelect(options, start) {
+  const input = document.createElement("select");
+  input.className = "celledit";
+  let matched = false;
+  for (const [value, label] of options) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    matched = matched || value === start;
+    input.appendChild(option);
+  }
+  if (!matched && start !== "") {
+    const option = document.createElement("option");
+    option.value = start;
+    option.textContent = start;
+    input.appendChild(option);
+  }
+  input.value = start;
+  return { commitOnChange: true, initial: input.value, input, selectable: false };
+}
+function choiceOptions(column) {
+  const options = column.null ? [["", "(null)"]] : [];
+  for (const [value, label] of column.choices) {
+    options.push([String(value), label]);
+  }
+  return options;
+}
+function booleanOptions(nullable) {
+  const options = nullable ? [["", "(null)"]] : [];
+  options.push(["true", "true"], ["false", "false"]);
+  return options;
+}
+function normalizeTemporal(type, raw) {
+  if (!raw) {
+    return "";
+  }
+  if (type === "DateField") {
+    return raw.slice(0, 10);
+  }
+  if (type === "TimeField") {
+    return cleanTime(raw);
+  }
+  if (type === "DateTimeField") {
+    const value = raw.replace(" ", "T");
+    const split = value.indexOf("T");
+    return split < 0 ? value : `${value.slice(0, split + 1)}${cleanTime(value.slice(split + 1))}`;
+  }
+  return raw;
+}
+function cleanTime(time) {
+  return time.replace(/(?:Z|[+-]\d{2}:?\d{2})$/, "").split(".")[0];
+}
+function stagedDisplay(column, staged) {
+  if (staged === "") {
+    return "(empty)";
+  }
+  if (column && Array.isArray(column.choices)) {
+    const match = column.choices.find((choice) => String(choice[0]) === staged);
+    if (match) {
+      return match[1];
+    }
+  }
+  return staged;
+}
 function createEditor(ctx) {
   const pending = /* @__PURE__ */ new Map();
+  let activePicker = null;
+  let lookupSeq = 0;
   function pendingCount() {
     let total = 0;
     for (const entry of pending.values()) {
@@ -219,25 +415,44 @@ function createEditor(ctx) {
     ctx.paintCell(td);
     ctx.onChange(pendingCount());
   }
+  function editForeignKey(td, column, start) {
+    activePicker = openFkPicker(td, column, start, {
+      allocId: () => lookupSeq += 1,
+      done: () => ctx.paintCell(td),
+      post: (message) => ctx.post(message),
+      stage: (value) => stage(td, value)
+    });
+  }
+  function onLookup(message) {
+    if (activePicker) {
+      activePicker.fill(message);
+    }
+  }
   function editCell(td) {
-    if (!td.dataset.attname || td.querySelector("input")) {
+    if (!td.dataset.attname || td.querySelector("input, select")) {
       return;
     }
+    const column = td._column || {};
     const start = td.dataset.staged !== void 0 ? td.dataset.staged : td._editval ?? "";
-    const input = document.createElement("input");
-    input.className = "celledit";
-    input.value = start;
+    if (column.relation) {
+      editForeignKey(td, column, start);
+      return;
+    }
+    const control = buildControl(column, start);
+    const input = control.input;
     td.textContent = "";
     td.appendChild(input);
     input.focus();
-    input.select();
+    if (control.selectable) {
+      input.select();
+    }
     let settled = false;
     const finish = (save) => {
       if (settled) {
         return;
       }
       settled = true;
-      if (save && input.value !== start) {
+      if (save && input.value !== control.initial) {
         stage(td, input.value);
       } else {
         ctx.paintCell(td);
@@ -253,6 +468,9 @@ function createEditor(ctx) {
       }
     });
     input.addEventListener("blur", () => finish(true));
+    if (control.commitOnChange) {
+      input.addEventListener("change", () => finish(true));
+    }
   }
   function commitEdits() {
     if (!pendingCount()) {
@@ -290,42 +508,204 @@ function createEditor(ctx) {
     pending.clear();
     ctx.onChange(0);
   }
-  return { commitEdits, discardEdits, editCell, handleResult, pendingCount, reset };
+  return { commitEdits, discardEdits, editCell, handleResult, onLookup, pendingCount, reset };
+}
+
+// media/gridQuery.js
+function enterQueryMode(post) {
+  const input = document.getElementById("queryinput");
+  const run = () => post({ code: input.value, type: "runQuery" });
+  document.getElementById("querybar").hidden = false;
+  document.getElementById("filterbar").hidden = true;
+  const count = document.getElementById("count");
+  if (count) {
+    count.hidden = true;
+  }
+  document.getElementById("runQuery").addEventListener("click", run);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      run();
+    }
+  });
+}
+
+// media/gridResize.js
+var MIN_WIDTH = 48;
+function freezeLayout(table, state2) {
+  if (table.dataset.fixed === "1") {
+    return;
+  }
+  for (const th of table.tHead.rows[0].cells) {
+    const key = th.dataset.key;
+    const width = state2.widths[key] || Math.round(th.getBoundingClientRect().width);
+    th.style.width = `${width}px`;
+    if (key) {
+      state2.widths[key] = width;
+    }
+  }
+  table.style.tableLayout = "fixed";
+  table.dataset.fixed = "1";
+}
+function applyStoredWidths(table, state2) {
+  let applied = false;
+  for (const th of table.tHead.rows[0].cells) {
+    const width = state2.widths[th.dataset.key];
+    if (width) {
+      th.style.width = `${width}px`;
+      applied = true;
+    }
+  }
+  if (applied) {
+    table.style.tableLayout = "fixed";
+    table.dataset.fixed = "1";
+  }
+}
+function makeResizable(table, state2, onResize) {
+  applyStoredWidths(table, state2);
+  table.tHead.addEventListener("mousedown", (event) => {
+    const handle = event.target.closest(".colresize");
+    if (!handle) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    freezeLayout(table, state2);
+    const th = handle.closest("th");
+    const key = th.dataset.key;
+    const startX = event.clientX;
+    const startWidth = th.getBoundingClientRect().width;
+    document.body.style.cursor = "col-resize";
+    const move = (moveEvent) => {
+      const width = Math.max(MIN_WIDTH, Math.round(startWidth + (moveEvent.clientX - startX)));
+      th.style.width = `${width}px`;
+      if (key) {
+        state2.widths[key] = width;
+      }
+      if (onResize) {
+        onResize();
+      }
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+      document.body.style.cursor = "";
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  });
+}
+
+// media/gridRelated.js
+function rawOf(cell) {
+  return cell !== null && typeof cell === "object" ? cell.v : cell;
+}
+function textOf(cell) {
+  return cell === null || cell === void 0 ? "" : typeof cell === "object" ? cell.v == null ? "" : String(cell.v) : String(cell);
+}
+function paintRelatedCell(td, el2, renderValue2) {
+  const column = td._column;
+  td.textContent = "";
+  if (td.dataset.staged !== void 0) {
+    td.classList.add("dirty");
+    td.appendChild(el2("span", {}, stagedDisplay(column, td.dataset.staged)));
+    return;
+  }
+  td.classList.remove("dirty");
+  td.appendChild(renderValue2(td._cell));
+  if (column.relation && rawOf(td._cell) !== null && rawOf(td._cell) !== void 0) {
+    td.appendChild(document.createTextNode(" "));
+    td.appendChild(el2("button", { className: "linkbtn", dataset: { act: "open", target: column.relation.target }, title: `Open ${column.relation.target}` }, "\u2197"));
+  }
+}
+function buildEditableRelatedTable(result, deps) {
+  const { el: el2, renderValue: renderValue2, post } = deps;
+  const columns = result.columns || [];
+  const pkName = result.pk || "id";
+  const canEdit = Boolean(result.app && result.model && !result.single);
+  const wrap = el2("div", {});
+  let commitBtn = null;
+  const editor2 = canEdit ? createEditor({
+    notify: () => void 0,
+    onChange: (count) => {
+      if (commitBtn) {
+        commitBtn.textContent = count ? `Commit ${result.model} (${count})` : `Commit ${result.model}`;
+        commitBtn.disabled = !count;
+      }
+    },
+    paintCell: (td) => paintRelatedCell(td, el2, renderValue2),
+    post: (message) => {
+      if (message.type === "commitEdits") {
+        post({ app: result.app, changes: message.changes, columns, model: result.model, type: "commitRelated" });
+      }
+    },
+    reload: () => void 0
+  }) : null;
+  if (editor2) {
+    commitBtn = el2("button", { className: "linkbtn", title: "Commit edits to the related model" }, `Commit ${result.model}`);
+    commitBtn.disabled = true;
+    commitBtn.addEventListener("click", () => editor2.commitEdits());
+    const bar = el2("div", { className: "nestedhead" });
+    bar.appendChild(commitBtn);
+    wrap.appendChild(bar);
+  }
+  const table = el2("table", {});
+  const headRow = el2("tr", {});
+  for (const column of columns) {
+    headRow.appendChild(el2("th", {}, column.attname));
+  }
+  table.appendChild(el2("thead", {}, headRow));
+  const tbody = el2("tbody", {});
+  for (const row of result.rows) {
+    const pk = rawOf(row[pkName]);
+    const tr = el2("tr", {});
+    tr.dataset.pk = String(pk);
+    tr._pk = pk;
+    for (const column of columns) {
+      const td = el2("td", {});
+      td._cell = row[column.attname];
+      td._column = column;
+      td._pk = pk;
+      if (canEdit && column.editable && !column.relation) {
+        td.classList.add("editable");
+        td.dataset.attname = column.attname;
+        td._editval = textOf(td._cell);
+        td.title = "Double-click to edit";
+      }
+      paintRelatedCell(td, el2, renderValue2);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  if (editor2) {
+    table.addEventListener("dblclick", (event) => {
+      const td = event.target.closest("td.editable");
+      if (td) {
+        event.stopPropagation();
+        editor2.editCell(td);
+      }
+    });
+  }
+  wrap.appendChild(table);
+  return wrap;
 }
 
 // media/modelBrowserSource.js
 var vscode = acquireVsCodeApi();
-var els = {
-  title: document.getElementById("title"),
-  subtitle: document.getElementById("subtitle"),
-  gridwrap: document.getElementById("gridwrap"),
-  status: document.getElementById("status"),
-  countinfo: document.getElementById("countinfo"),
-  more: document.getElementById("more"),
-  commit: document.getElementById("commit"),
-  discard: document.getElementById("discard"),
-  reload: document.getElementById("reload"),
-  addFilter: document.getElementById("addFilter"),
-  filterterms: document.getElementById("filterterms"),
-  applyFilter: document.getElementById("applyFilter"),
-  clearFilter: document.getElementById("clearFilter"),
-  count: document.getElementById("count"),
-  transport: document.getElementById("transport"),
-  transportInfo: document.getElementById("transportInfo"),
-  logToggle: document.getElementById("logToggle"),
-  logpanel: document.getElementById("logpanel"),
-  logbody: document.getElementById("logbody"),
-  logClear: document.getElementById("logClear"),
-  logMode: document.getElementById("logMode")
-};
+var els = {};
+for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logbody", "logClear", "logMode"]) {
+  els[id] = document.getElementById(id);
+}
 var LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"];
 var MAX_LOG_ENTRIES = 200;
-var state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, order: [], model: "", pinned: /* @__PURE__ */ new Set() };
+var ALL_PAGE_SIZE = 1e9;
+var state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, order: [], model: "", pinned: /* @__PURE__ */ new Set(), widths: {} };
 var pendingRelated = /* @__PURE__ */ new Map();
 var relRequestId = 0;
 var editor = createEditor({
   post: (message) => vscode.postMessage(message),
-  reload: () => vscode.postMessage({ type: "reload" }),
+  reload: () => send({ type: "reload" }),
   paintCell: (td) => paintCell(td),
   onChange: (count) => updateEditButtons(count),
   notify: (text) => {
@@ -333,8 +713,11 @@ var editor = createEditor({
   }
 });
 window.addEventListener("message", (event) => handleMessage(event.data));
-els.reload.addEventListener("click", () => vscode.postMessage({ type: "reload" }));
-els.more.addEventListener("click", () => vscode.postMessage({ type: "loadMore" }));
+els.reload.addEventListener("click", () => send({ type: "reload" }));
+els.more.addEventListener("click", () => send({ type: "loadMore" }));
+if (els.pageSize) {
+  els.pageSize.addEventListener("change", () => send({ type: "reload" }));
+}
 els.addFilter.addEventListener("click", () => addFilterTerm());
 els.applyFilter.addEventListener("click", () => applyQuery());
 els.clearFilter.addEventListener("click", () => clearQuery());
@@ -366,6 +749,8 @@ function handleMessage(message) {
     onRows(message);
   } else if (message.type === "related") {
     onRelated(message);
+  } else if (message.type === "lookup") {
+    editor.onLookup(message);
   } else if (message.type === "count") {
     els.countinfo.textContent = message.ok ? `\xB7 total ${message.count}` : `\xB7 count failed`;
     logSql(`count ${state.model}`, message.sql, message.orm);
@@ -374,7 +759,9 @@ function handleMessage(message) {
     editor.handleResult(message.result);
   } else if (message.type === "transport") {
     els.transport.value = message.mode || "auto";
-    els.transportInfo.innerHTML = message.active === "tcp" ? '<span class="on">\u25CF socket</span>' : message.active === "pty" ? '<span class="pty">\u25CF terminal</span>' : '<span class="off">\u25CB not connected</span>';
+    els.transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">\u25CF ORM cell</span>' : message.active === "tcp" ? '<span class="on">\u25CF socket</span>' : message.active === "pty" ? '<span class="pty">\u25CF terminal</span>' : '<span class="off">\u25CB not connected</span>';
+  } else if (message.type === "queryMode") {
+    enterQueryMode((payload) => send(payload));
   } else if (message.type === "error") {
     renderError(message.message);
   }
@@ -404,6 +791,7 @@ function onSchema(schema) {
   table.appendChild(el("tbody", { id: "tbody" }));
   els.gridwrap.innerHTML = "";
   els.gridwrap.appendChild(table);
+  makeResizable(table, state, () => repaintPins(els.gridwrap, state));
   table.addEventListener("click", onTableClick);
   table.addEventListener("dblclick", onTableDblClick);
   editor.reset();
@@ -423,7 +811,7 @@ function buildHead() {
   const head = el("thead", {});
   const row = el("tr", {});
   for (const column of state.columns) {
-    const th = el("th", { className: "sortable", dataset: { act: "sort", col: column.attname }, title: `Sort by ${column.name} (${column.type})` });
+    const th = el("th", { className: "sortable", dataset: { act: "sort", col: column.attname, key: column.attname }, title: `Sort by ${column.name} (${column.type})` });
     const pinned = state.pinned.has(column.attname);
     th.appendChild(el("button", { className: pinned ? "pinbtn active" : "pinbtn", dataset: { act: "pin", col: column.attname }, title: pinned ? "Unpin column" : "Pin column (freeze left)" }, "\u21E4"));
     th.appendChild(document.createTextNode(column.attname));
@@ -432,13 +820,11 @@ function buildHead() {
     }
     th.appendChild(el("span", { className: "sortarrow", dataset: { arrow: column.attname } }, ""));
     th.appendChild(el("span", { className: "coltype" }, column.relation ? `\u2192 ${column.relation.target}` : column.type));
+    th.appendChild(el("span", { className: "colresize", title: "Drag to resize" }));
     row.appendChild(th);
   }
   for (const relation of state.relations) {
-    const th = el("th", { className: "relcol", title: `${relation.kind} \u2192 ${relation.target}` });
-    th.appendChild(document.createTextNode(relation.name));
-    th.appendChild(el("span", { className: "coltype" }, `${relation.kind} \u2192`));
-    row.appendChild(th);
+    row.appendChild(el("th", { className: "relcol", dataset: { key: `rel:${relation.name}` }, title: `${relation.kind} \u2192 ${relation.target}` }, document.createTextNode(relation.name), el("span", { className: "coltype" }, `${relation.kind} \u2192`), el("span", { className: "colresize", title: "Drag to resize" })));
   }
   head.appendChild(row);
   return head;
@@ -480,7 +866,7 @@ function buildRow(row) {
   }
   for (const relation of state.relations) {
     const td = el("td", { className: "relcell" });
-    td.appendChild(el("button", { className: "chip", dataset: { act: "rel", rel: relation.name, pk: String(pk) }, title: `${relation.kind} \u2192 ${relation.target}` }, `${relation.name} \u2192`));
+    td.appendChild(el("button", { className: "chip", dataset: { act: "rel", rel: relation.name, pk: String(pk), single: String(Boolean(relation.single)) }, title: `${relation.kind} \u2192 ${relation.target}` }, `${relation.name} \u2192`));
     tr.appendChild(td);
   }
   return tr;
@@ -504,7 +890,7 @@ function paintCell(td) {
   td.textContent = "";
   if (td.dataset.staged !== void 0) {
     td.classList.add("dirty");
-    td.appendChild(el("span", {}, td.dataset.staged === "" ? "(empty)" : td.dataset.staged));
+    td.appendChild(el("span", {}, stagedDisplay(column, td.dataset.staged)));
     return;
   }
   td.classList.remove("dirty");
@@ -545,7 +931,7 @@ function renderValue(cell) {
 }
 function onTableClick(event) {
   const node = event.target.closest("[data-act]");
-  if (!node) {
+  if (!node || event.target.closest(".colresize")) {
     return;
   }
   const data = node.dataset;
@@ -557,9 +943,9 @@ function onTableClick(event) {
     const split = data.target.lastIndexOf(".");
     vscode.postMessage({ type: "openModel", app: data.target.slice(0, split), model: data.target.slice(split + 1) });
   } else if (data.act === "fk") {
-    expandInto(node, { relation: data.rel, pk: coerce(data.pk), value: coerce(data.val) });
+    expandInto(node, { relation: data.rel, pk: coerce(data.pk), value: coerce(data.val), single: true });
   } else if (data.act === "rel") {
-    expandInto(node, { relation: data.rel, pk: coerce(data.pk) });
+    expandInto(node, { relation: data.rel, pk: coerce(data.pk), single: data.single === "true" });
   }
 }
 function toggleSort(col) {
@@ -620,7 +1006,15 @@ function collectFilters() {
   return filters;
 }
 function applyQuery() {
-  vscode.postMessage({ type: "applyQuery", filters: collectFilters(), order: state.order });
+  send({ filters: collectFilters(), order: state.order, type: "applyQuery" });
+}
+function pageSizeValue() {
+  const value = els.pageSize ? els.pageSize.value : "50";
+  const parsed = Number(value);
+  return value === "all" ? ALL_PAGE_SIZE : parsed > 0 ? parsed : 50;
+}
+function send(message) {
+  vscode.postMessage({ ...message, pageSize: pageSizeValue() });
 }
 function clearQuery() {
   els.filterterms.innerHTML = "";
@@ -639,7 +1033,7 @@ function expandInto(button, request) {
   pendingRelated.set(requestId, { body, label: request.relation });
   button.dataset.open = "1";
   button._detailRow = row;
-  vscode.postMessage({ type: "expandRelated", requestId, relation: request.relation, pk: request.pk, value: request.value });
+  vscode.postMessage({ type: "expandRelated", requestId, relation: request.relation, pk: request.pk, value: request.value, single: request.single });
 }
 function nestedPanel(title, trigger, body) {
   const head = el("div", { className: "nestedhead" });
@@ -678,30 +1072,7 @@ function onRelated(message) {
     container.appendChild(el("span", { className: "tag" }, "No related rows."));
     return;
   }
-  container.appendChild(buildRelatedTable(result));
-}
-function buildRelatedTable(result) {
-  const columns = result.columns || [];
-  const table = el("table", {});
-  const head = el("thead", {});
-  const headRow = el("tr", {});
-  for (const column of columns) {
-    headRow.appendChild(el("th", {}, column.attname));
-  }
-  head.appendChild(headRow);
-  table.appendChild(head);
-  const body = el("tbody", {});
-  for (const row of result.rows) {
-    const tr = el("tr", {});
-    for (const column of columns) {
-      const td = el("td", {});
-      td.appendChild(renderValue(row[column.attname]));
-      tr.appendChild(td);
-    }
-    body.appendChild(tr);
-  }
-  table.appendChild(body);
-  return table;
+  container.appendChild(buildEditableRelatedTable(result, { el, post: (message2) => vscode.postMessage(message2), renderValue }));
 }
 function detailAnchor(tr) {
   let anchor = tr;

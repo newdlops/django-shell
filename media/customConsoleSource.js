@@ -18,9 +18,12 @@ const inputPrompt = document.getElementById("inputPrompt");
 const inputPromptText = inputPrompt && inputPrompt.querySelector(".promptMark");
 const pythonCell = document.getElementById("pythonCell");
 const statusText = document.getElementById("statusText");
+const transport = document.getElementById("transport");
+const transportInfo = document.getElementById("transportInfo");
 
 let fitAddon;
 let geometryFrame = 0;
+let lastGeometryKey = "";
 let pendingExecution = 0;
 let snapshotWritten = false;
 let e2eSawShellPrompt = false;
@@ -35,6 +38,7 @@ function main() {
   window.addEventListener("message", (event) => handleHostMessage(event.data || {}));
   focusTerminalButton.addEventListener("click", () => terminal.focus());
   document.getElementById("restart").addEventListener("click", () => vscode.postMessage({ type: "restart" }));
+  transport?.addEventListener("change", () => vscode.postMessage({ mode: transport.value, type: "setTransport" }));
   vscode.postMessage({ type: "ready" });
 }
 
@@ -166,6 +170,10 @@ function handleHostMessage(message) {
   if (message.type === "terminalStatus" && message.snapshot) {
     updateStatus(message.snapshot);
   }
+  if (message.type === "transport" && transport) {
+    transport.value = message.mode || "pty";
+    transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">● ORM cell</span>' : message.active === "tcp" ? '<span class="on">● socket</span>' : message.active === "pty" ? '<span class="pty">● terminal</span>' : '<span class="off">○ not connected</span>';
+  }
   if (message.type === "pythonStarted" && Number.isFinite(message.execution)) {
     pendingExecution = message.execution;
     setInputPrompt(`In [${pendingExecution}]:`);
@@ -255,12 +263,18 @@ function scheduleEditorGeometry() {
   });
 }
 
-/** Sends the editor anchor rectangle to the extension host. */
+/** Sends the editor anchor rectangle to the extension host, skipping unchanged rectangles to avoid overlay layout thrash. */
 function sendEditorGeometry() {
   const rect = editorGeometry();
-  if (rect) {
-    vscode.postMessage({ rect, type: "editorGeometry" });
+  if (!rect) {
+    return;
   }
+  const key = `${rect.left}:${rect.top}:${rect.width}:${rect.height}`;
+  if (key === lastGeometryKey) {
+    return;
+  }
+  lastGeometryKey = key;
+  vscode.postMessage({ rect, type: "editorGeometry" });
 }
 
 /** Returns the editor anchor rectangle in webview viewport coordinates. */

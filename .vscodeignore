@@ -1,4 +1,6 @@
+.claude/**
 .codeidx/**
+.django-shell/**
 .git/**
 .gitignore
 .lh/**
@@ -8,8 +10,10 @@
 AGENTS.md
 DEPLOYMENT.md
 FRONTEND_CHANGE.md
+HANDOVER.md
 MODEL_BROWSER_PLAN.md
 django-shell-*.vsix
+Trace-*.json
 log.txt
 other_extension_log.txt
 package-lock.json
@@ -21,6 +25,9 @@ media/*Source.js
 media/sqlHighlight.js
 media/gridPin.js
 media/gridEdit.js
+media/gridFkPicker.js
+media/gridQuery.js
+media/gridResize.js
 media/icon.svg
 node_modules/node-addon-api/**
 node_modules/node-pty/README.md

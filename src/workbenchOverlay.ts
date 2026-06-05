@@ -16,7 +16,7 @@ type PendingReply = (response: CdpResponse) => void; type RunHandler = (code: st
 export interface WorkbenchOverlayGeometry { height: number; left: number; top: number; width: number; }
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
-const RENDERER_PATCH_VERSION = 40;
+const RENDERER_PATCH_VERSION = 42;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -77,9 +77,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
   updateGeometry(geometry: WorkbenchOverlayGeometry): void {
     this.geometry = geometry;
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) { return; }
-    void this.evalInWorkbench(geometryExpression(geometry)).catch((error: unknown) => {
-      this.logger?.log("overlay.geometry.error", { error: error instanceof Error ? error.message : String(error) });
-    });
+    this.logger?.log("overlay.geometry", { height: Math.round(geometry.height), left: Math.round(geometry.left), top: Math.round(geometry.top), width: Math.round(geometry.width) });
+    void this.evalInWorkbench(geometryExpression(geometry)).catch((error: unknown) => { this.logger?.log("overlay.geometry.error", { error: error instanceof Error ? error.message : String(error) }); });
   }
 
   /** Updates editor-only hidden imports without changing raw analysis text. */

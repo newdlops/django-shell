@@ -5,7 +5,7 @@ import path from "node:path";
 import process from "node:process";
 
 const ROOT = process.cwd();
-const MAX_LINES = 500;
+const MAX_LINES = 1000;
 const CODE_EXTENSIONS = new Set([".js", ".mjs", ".ts"]);
 const EXCLUDED_DIRS = new Set([".codeidx", ".django-shell", ".git", ".lh", ".vscode-test", "dist", "node_modules", "out"]);
 const SOURCE_DOC_DIRS = new Set(["scripts", "src"]);

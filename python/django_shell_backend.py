@@ -18,6 +18,7 @@ import types
 
 _READY_PREFIX = "__DJANGO_SHELL_BACKEND_READY__"
 _FAILED_PREFIX = "__DJANGO_SHELL_BACKEND_FAILED__"
+_RESPONSE_PREFIX = "__DJANGO_SHELL_BACKEND_RESPONSE__"
 _STATE = {}
 _EXECUTION_LOCK = threading.Lock()
 
@@ -44,6 +45,8 @@ class _Handler(socketserver.StreamRequestHandler):
 def start(namespace, token):
     """Starts or reuses the backend server for the given interactive shell namespace."""
     try:
+        # Bind workspace models before any initial-name snapshot so they count as pre-existing, not user vars.
+        autoimported = _autoimport_django_namespace(namespace) if _autoimport_enabled() else 0
         server = _STATE.get("server")
         if server is None:
             server = _Server((_bind_host(), 0), _Handler)
@@ -53,9 +56,139 @@ def start(namespace, token):
             threading.Thread(target=server.serve_forever, daemon=True).start()
         server.token = token
         host, port = server.server_address
-        _print_marker(_READY_PREFIX, {"host": _connect_host(host), "port": port, "token": token})
+        try:
+            capture = _pty_install_capture(namespace)
+        except Exception:
+            capture = False
+        _print_marker(_READY_PREFIX, {"autoImported": autoimported, "cellCapture": bool(capture), "host": _connect_host(host), "ipython": _pty_is_ipython(), "port": port, "token": token})
     except Exception:
         _print_marker(_FAILED_PREFIX, {"error": traceback.format_exc()})
+
+
+def _autoimport_enabled():
+    """Returns whether startup should bind workspace Django models into the shell namespace."""
+    return os.environ.get("DJANGO_SHELL_AUTOIMPORT_MODELS") == "1"
+
+
+def _autoimport_django_namespace(namespace):
+    """Binds Django base names and workspace model classes into the live shell namespace at startup, so
+    names the editor resolves from its analysis prelude are actually importable in the shell. Best-effort:
+    every failure is swallowed and never blocks startup, and names already bound are left untouched."""
+    try:
+        import importlib
+        import inspect
+    except Exception:
+        return 0
+    count = _autoimport_base_names(namespace)
+    try:
+        from django.apps import apps
+        if not apps.ready:
+            return count
+    except Exception:
+        return count
+    # Bind every registered model directly first (guaranteed, no import) so models the module scan would miss
+    # still resolve as bare names; the scan then adds managers/enums/etc. for editor-prelude parity.
+    count += _autoimport_bind_models(namespace, apps)
+    for module_name in _autoimport_model_modules(apps):
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        count += _autoimport_module_classes(namespace, module, inspect)
+    return count
+
+
+def _autoimport_bind_models(namespace, apps):
+    """Binds every installed model class by its bare class name straight from the app registry, using the
+    already-loaded class objects (no fresh import). This guarantees that models shell_plus skips, or whose
+    defining module fails a standalone import, still resolve as bare names for ORM browsing. Names already
+    bound win and are left untouched; failures are swallowed per-model so one bad model never blocks the rest."""
+    count = 0
+    try:
+        models = apps.get_models()
+    except Exception:
+        return 0
+    for model in models:
+        try:
+            name = model.__name__
+        except Exception:
+            continue
+        if name and name not in namespace:
+            namespace[name] = model
+            count += 1
+    return count
+
+
+def _autoimport_base_names(namespace):
+    """Binds common Django console names (django, apps, settings, models) when not already present."""
+    count = 0
+    for name, loader in (("django", _load_django), ("apps", _load_apps), ("settings", _load_settings), ("models", _load_models)):
+        if name in namespace:
+            continue
+        try:
+            namespace[name] = loader()
+            count += 1
+        except Exception:
+            pass
+    return count
+
+
+def _load_django():
+    import django
+    return django
+
+
+def _load_apps():
+    from django.apps import apps
+    return apps
+
+
+def _load_settings():
+    from django.conf import settings
+    return settings
+
+
+def _load_models():
+    from django.db import models
+    return models
+
+
+def _autoimport_model_modules(apps):
+    """Returns candidate model module names: every model's defining module plus each app's models module."""
+    modules = set()
+    try:
+        for model in apps.get_models():
+            module = getattr(model, "__module__", None)
+            if module:
+                modules.add(module)
+    except Exception:
+        pass
+    try:
+        for config in apps.get_app_configs():
+            name = getattr(config, "name", None)
+            if name:
+                modules.add(name + ".models")
+    except Exception:
+        pass
+    return sorted(modules)
+
+
+def _autoimport_module_classes(namespace, module, inspect):
+    """Binds every public class defined in one module into the namespace, mirroring the editor prelude's
+    top-level-class scan; imported names and existing bindings are skipped."""
+    count = 0
+    module_name = getattr(module, "__name__", None)
+    for name in dir(module):
+        if name.startswith("_") or name in namespace:
+            continue
+        try:
+            value = getattr(module, name)
+        except Exception:
+            continue
+        if inspect.isclass(value) and getattr(value, "__module__", None) == module_name:
+            namespace[name] = value
+            count += 1
+    return count
 
 
 def _bind_host():
@@ -95,6 +228,10 @@ def _run_request(namespace, token, request, initial_names):
         return _browse_count(request)
     if request.get("kind") == "commit":
         return _browse_commit(request)
+    if request.get("kind") == "lookup":
+        return _browse_lookup(request)
+    if request.get("kind") == "query":
+        return _browse_query(namespace, request)
     code = request.get("code")
     if not isinstance(code, str):
         return {"ok": False, "stdout": "", "stderr": "Request code must be a string.", "traceback": ""}
@@ -439,8 +576,14 @@ def _type_name(value):
 
 def _preview_value(value):
     """Returns a preview that avoids calling arbitrary object repr methods."""
+    import datetime as _datetime
+    import decimal as _decimal
+    import uuid as _uuid
+
     if isinstance(value, (type(None), bool, int, float, complex, str, bytes)):
         return _truncate(repr(value))
+    if isinstance(value, (_decimal.Decimal, _datetime.datetime, _datetime.date, _datetime.time, _datetime.timedelta, _uuid.UUID)):
+        return _truncate(str(value))
     if isinstance(value, (list, tuple, set, frozenset, dict)):
         return f"{type(value).__name__}(len={len(value)})"
     if isinstance(value, types.ModuleType):
@@ -499,6 +642,466 @@ def _print_marker(prefix, payload):
     print(prefix + json.dumps(payload), flush=True)
 
 
+def _pty_is_ipython():
+    """Returns whether the interactive shell is an IPython shell (exposes get_ipython)."""
+    import builtins
+
+    getter = getattr(builtins, "get_ipython", None)
+    try:
+        return bool(getter) and getter() is not None
+    except Exception:
+        return False
+
+
+# Keep a cell response marker under the extension's 1.25 MB PTY read buffer: a larger marker loses its prefix to the
+# buffer's tail-slice and never parses, hanging the serialized PTY request queue. Bounded reads pass through untouched.
+_PTY_MARKER_LIMIT = 1000000
+
+
+def _pty_fit_response(response):
+    """Shrinks an oversized cell response so its marker fits the PTY read buffer (a huge stdout/grid would otherwise jam
+    the serialized PTY queue). Truncates the text fields, caps the SQL log, and KEEPS as many grid rows as fit (marking
+    `truncated`/`hasMore`) instead of dropping the whole table. Only triggers for genuinely huge output."""
+    notice = "\n... truncated by django-shell: output too large for the terminal transport — switch the link to Socket/Auto for large results ..."
+    fitted = dict(response)
+    fitted["sql"] = (fitted.get("sql") or [])[:50]
+    for key in ("stdout", "stderr", "traceback"):
+        value = fitted.get(key)
+        if isinstance(value, str) and len(value) > 40000:
+            fitted[key] = value[:40000] + notice
+    grid = fitted.get("grid")
+    if isinstance(grid, dict) and isinstance(grid.get("rows"), list) and grid["rows"]:
+        rows = grid["rows"]
+        base = len(json.dumps(dict(fitted, grid=dict(grid, rows=[]))))
+        budget = _PTY_MARKER_LIMIT - base - 256
+        sample_count = min(len(rows), 200)
+        per_row = max(1, len(json.dumps(rows[:sample_count])) // sample_count)
+        keep = max(1, min(len(rows), budget // per_row))
+        fitted["grid"] = dict(grid, rows=rows[:keep], hasMore=True, truncated=True) if keep < len(rows) else grid
+    else:
+        fitted["grid"] = None
+    return fitted
+
+
+def _pty_cell_marker(cell_id, response):
+    """Builds a `_djs_cell` response marker line, shrinking it to fit the PTY read buffer when the response is too large."""
+    payload = json.dumps({"id": cell_id, "response": response})
+    if len(payload) > _PTY_MARKER_LIMIT:
+        payload = json.dumps({"id": cell_id, "response": _pty_fit_response(response)})
+    return _RESPONSE_PREFIX + payload
+
+
+def _pty_emit_cell(counter, ok, result_repr, out, err, tb, grid=None, sql=None):
+    """Prints one response marker for a literal code cell run in the interactive shell (grid = ORM-mode rows)."""
+    print(_pty_cell_marker("_djs_cell-%d" % counter, {"grid": grid, "ok": ok, "result": result_repr, "sql": sql or [], "stderr": err, "stdout": out, "traceback": tb}), flush=True)
+
+
+def _pty_orm_inspect(limit=500):
+    """Returns bounded runtime-variable JSON for an ORM-mode inspect cell. Built server-side so the TYPED cell stays tiny
+    (the inlined form was ~1.5 KB → overran the tty input limit and hung over the PTY) and the output is capped to fit the
+    response marker. User variables come first (in full), then capped pre-existing names."""
+    namespace = _STATE["server"].namespace
+    initial = namespace.get("_djs_initial_names", frozenset())
+    items = [(k, v) for k, v in sorted(namespace.items()) if not k.startswith("_")]
+    ordered = [kv for kv in items if kv[0] not in initial] + [kv for kv in items if kv[0] in initial]
+    variables = []
+    for name, value in ordered[: max(0, int(limit))]:
+        try:
+            variables.append(_value_summary(name, value, [{"op": "name", "name": name}], _variable_origin(name, initial)))
+        except Exception:
+            pass
+    return json.dumps({"loadedModuleCount": len(sys.modules), "variables": variables}, default=str)
+
+
+def _pty_safe_getattr(obj, name):
+    """getattr that never raises (a Django RelatedObjectDoesNotExist subclasses AttributeError → None for missing relations)."""
+    try:
+        return getattr(obj, name)
+    except Exception:
+        return None
+
+
+def _pty_is_computed_field(owner, name):
+    """Returns whether owner.name is a computed-field descriptor: @property OR @cached_property (Django's `django.utils.functional.cached_property` and `functools.cached_property` both have type name 'cached_property') — so the drill-down shows computed/derived fields, not just DB columns."""
+    descriptor = getattr(owner, name, None)
+    return isinstance(descriptor, property) or type(descriptor).__name__ == "cached_property"
+
+
+def _pty_orm_children(path_json, limit=200):
+    """Returns bounded child-summary JSON for an ORM-mode drill-down cell. Built server-side (so the typed cell stays tiny)
+    but replicates the rich drill-down: dict/sequence items, manager/queryset rows, and a Django model instance's fields +
+    reverse relations + @property values."""
+    namespace = _STATE["server"].namespace
+    n = max(0, int(limit))
+    try:
+        path = json.loads(path_json)
+        v = _resolve_path(namespace, path)
+        if isinstance(v, dict):
+            src = [("[" + repr(k)[:60] + "]", cv, {"op": "dict", "index": i}) for i, (k, cv) in enumerate(list(v.items())[:n])]
+        elif isinstance(v, (list, tuple, set, frozenset)):
+            src = [("[" + str(i) + "]", cv, {"op": "index", "index": i}) for i, cv in enumerate(list(v)[:n])]
+        elif callable(getattr(v, "all", None)):
+            src = [("[" + str(i) + "]", cv, {"op": "index", "index": i}) for i, cv in enumerate(list(v.all()[:n]))]
+        elif getattr(v, "_meta", None) is not None and not isinstance(v, type):
+            names = [(f.get_accessor_name() if (f.auto_created and not f.concrete) else f.name) for f in v._meta.get_fields()] + [p for p in dir(type(v)) if _pty_is_computed_field(type(v), p)]
+            src = [(nm, _pty_safe_getattr(v, nm), {"op": "attr", "name": nm}) for nm in names if nm and not nm.startswith("_")][:n]
+        else:
+            src = [(a, cv, {"op": "attr", "name": a}) for a, cv in (list(vars(v).items()) if hasattr(v, "__dict__") else []) if not (a.startswith("__") and a.endswith("__"))][:n]
+    except Exception:
+        return json.dumps({"children": [], "error": traceback.format_exc()}, default=str)
+    children = []
+    for nm, cv, seg in src:
+        try:
+            children.append(_value_summary(nm, cv, path + [seg], None))
+        except Exception:
+            pass
+    return json.dumps({"children": children}, default=str)
+
+
+def _pty_sql_begin(state):
+    """Forces a debug cursor and snapshots the query log so a cell's SQL can be captured under any DEBUG setting."""
+    try:
+        from django.db import connection
+
+        state["sql_force"] = connection.force_debug_cursor
+        connection.force_debug_cursor = True
+        state["sql0"] = len(connection.queries_log)
+    except Exception:
+        state["sql0"] = None
+
+
+def _pty_sql_end(state):
+    """Restores the debug-cursor flag and returns the SQL captured since _pty_sql_begin (bounded, best-effort)."""
+    try:
+        from django.db import connection
+
+        if "sql_force" in state:
+            connection.force_debug_cursor = state["sql_force"]
+        if state.get("sql0") is None:
+            return []
+        return [{"sql": query.get("sql", ""), "time": query.get("time", "")} for query in connection.queries[state["sql0"]:state["sql0"] + 200]]
+    except Exception:
+        return []
+
+
+def _pty_tabulate_result(value):
+    """Serializes a cell result into a rich grid for ORM mode (instance QuerySet/instance -> editable
+    columns/relations/rows), reusing the model-browser helpers; any other value (lists/dicts/scalars,
+    e.g. an ORM query console result) is tabulated read-only via _browse_tabulate so the Terminal-mode
+    query console matches the socket path; returns None only for None or on error."""
+    if value is None:
+        return None
+    try:
+        import itertools
+
+        from django.db.models import Model, QuerySet
+        from django.db.models.query import ModelIterable
+
+        if isinstance(value, QuerySet) and value._iterable_class is ModelIterable and not value.query.values_select:
+            model = value.model
+            columns = _browse_columns(model)
+            attnames = [column["attname"] for column in columns]
+            rows = [_browse_serialize_row({attname: getattr(instance, attname, None) for attname in attnames}) for instance in itertools.islice(value, 50001)]
+            return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
+        if isinstance(value, Model):
+            model = type(value)
+            columns = _browse_columns(model)
+            row = _browse_serialize_row({column["attname"]: getattr(value, column["attname"], None) for column in columns})
+            return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [row]}
+        if isinstance(value, QuerySet):
+            payload = _browse_tabulate(list(itertools.islice(value, 50001)), 0, 50000)
+            payload["ok"] = True
+            payload.setdefault("relations", [])
+            return payload
+        payload = _browse_tabulate(value, 0, 50000)
+        payload["ok"] = True
+        payload.setdefault("relations", [])
+        return payload
+    except Exception:
+        return None
+    return None
+
+
+def _pty_install_capture(namespace):
+    """Installs a per-cell capture hook so the extension can type a user's literal code cell (keeping the
+    shell's raw_cell pure) while the cell's output is captured and emitted as a backend response marker.
+    Uses IPython run-cell events when available, otherwise a sys.ps1 hook for the plain Python REPL."""
+    import builtins
+    import sys
+
+    # Snapshot the shell-startup names so ORM-mode inspect cells can tell user variables from pre-existing ones.
+    try:
+        namespace.setdefault("_djs_initial_names", frozenset(namespace.keys()))
+    except Exception:
+        pass
+    getter = getattr(builtins, "get_ipython", None)
+    try:
+        shell = getter() if getter else None
+    except Exception:
+        shell = None
+    if shell is not None:
+        return _pty_install_ipython_capture(shell)
+    return _pty_install_plain_capture(sys)
+
+
+def _pty_install_ipython_capture(shell):
+    """Captures each IPython cell's output via run-cell events and emits a response marker."""
+    import io
+    import sys
+
+    if getattr(shell, "_djs_capture", False):
+        return True
+    try:
+        shell.user_ns.setdefault("_djs_initial_names", frozenset(shell.user_ns.keys()))
+    except Exception:
+        pass
+    state = {"counter": 0, "err": None, "out": None, "save": None, "skip": False, "scrub": False}
+
+    def _pre(info):
+        if str(getattr(info, "raw_cell", "") or "").lstrip().startswith("_djs_rpc("):
+            state["skip"] = True  # plumbing cell: let its own marker print through untouched
+            return
+        state["skip"] = False
+        # Introspection plumbing (inspect/children call a backend helper): capture+emit its marker like a normal cell, but drop it from history afterwards so it stays out of the interactive shell.
+        state["scrub"] = "_djs_backend_module._pty_orm_" in str(getattr(info, "raw_cell", "") or "")
+        state["out"], state["err"] = io.StringIO(), io.StringIO()
+        state["save"] = (sys.stdout, sys.stderr)
+        sys.stdout, sys.stderr = state["out"], state["err"]
+        _pty_sql_begin(state)
+
+    def _post(result):
+        if state.get("skip"):
+            state["skip"] = False
+            return
+        if not state["save"]:
+            return  # _pre never ran: this is the bootstrap cell that registered the hook mid-execution; it captured nothing, and emitting an empty marker here would desync the FIFO response queue (the first ORM read would consume it instead of its own cell's output)
+        sys.stdout, sys.stderr = state["save"]
+        out = state["out"].getvalue() if state["out"] else ""
+        err = state["err"].getvalue() if state["err"] else ""
+        state["out"] = state["err"] = state["save"] = None
+        error = getattr(result, "error_in_exec", None) or getattr(result, "error_before_exec", None)
+        tb = "".join(traceback.format_exception(type(error), error, getattr(error, "__traceback__", None))) if error is not None else ""
+        value = getattr(result, "result", None)
+        result_repr = _truncate(repr(value), 4000) if error is None and value is not None else None
+        grid = _pty_tabulate_result(value) if error is None else None
+        sql = _pty_sql_end(state)
+        state["counter"] += 1
+        _pty_emit_cell(state["counter"], error is None, result_repr, out, err, tb, grid, sql)
+        if state.get("scrub"):
+            state["scrub"] = False
+            try:
+                _pty_history_scrub(None)  # introspection plumbing: keep it out of the interactive shell history (counter/sqlite handled by the scrub)
+            except Exception:
+                pass
+
+    shell.events.register("pre_run_cell", _pre)
+    shell.events.register("post_run_cell", _post)
+    shell._djs_capture = True
+    return True
+
+
+def _pty_install_plain_capture(sys):
+    """Captures each plain-REPL cell's output by teeing stdout/stderr and emitting a marker on every prompt
+    (the REPL calls str(sys.ps1) once per cell boundary). raw_cell stays the user's literal command."""
+    if getattr(sys, "_djs_capture", False):
+        return True
+    real_out = sys.stdout
+    state = {"counter": 0, "first": True, "out": [], "err": [], "result": None}
+
+    class _Tee(object):
+        def __init__(self, real, buf):
+            self._real = real
+            self._buf = buf
+
+        def write(self, text):
+            try:
+                self._buf.append(text)
+            except Exception:
+                pass
+            return self._real.write(text)
+
+        def flush(self):
+            try:
+                self._real.flush()
+            except Exception:
+                pass
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    class _Ps1(object):
+        def __str__(self):
+            out = "".join(state["out"])
+            err = "".join(state["err"])
+            del state["out"][:]
+            del state["err"][:]
+            if state["first"]:
+                state["first"] = False
+                return ">>> "
+            value = state["result"]
+            state["result"] = None
+            if _RESPONSE_PREFIX in out:
+                return ">>> "  # plumbing cell (_djs_rpc): its marker already went through, don't double-emit
+            ok = "Traceback (most recent call last)" not in err
+            grid = _pty_tabulate_result(value) if ok else None
+            state["counter"] += 1
+            # Write straight to the real stream so the marker is not re-captured by the tee.
+            real_out.write(_pty_cell_marker("_djs_cell-%d" % state["counter"], {"grid": grid, "ok": ok, "result": None, "stderr": "" if ok else err, "stdout": out, "traceback": err if not ok else ""}) + "\n")
+            real_out.flush()
+            return ">>> "
+
+    real_displayhook = sys.displayhook
+
+    def _display(value):
+        state["result"] = value  # capture this cell's expression result for ORM-mode grid serialization
+        real_displayhook(value)  # keep default behavior (repr to stdout, bind builtins._)
+
+    sys.stdout = _Tee(real_out, state["out"])
+    sys.stderr = _Tee(sys.stderr, state["err"])
+    sys.displayhook = _display
+    sys.ps1 = _Ps1()
+    sys._djs_capture = True
+    return True
+
+
+def _pty_serve(namespace, token, request_json, request_id, initial_names):
+    """Services one PTY-fallback request, prints the response marker, then keeps the interactive
+    shell history clean: the user's executed ORM (execute/query) stays as a tidy line, while the
+    extension's plumbing (grid/inspect/keepalive/bootstrap) is removed from history and the counter."""
+    try:
+        request = json.loads(request_json)
+    except Exception:
+        request = {}
+    response = _run_request(namespace, token, request, initial_names)
+    if isinstance(response, dict):
+        limit = 750000
+        for key in ("stdout", "stderr", "result", "traceback", "error"):
+            value = response.get(key)
+            if isinstance(value, str) and len(value) > limit:
+                response[key] = value[:limit] + "\n... truncated by django-shell PTY fallback ..."
+    print(_RESPONSE_PREFIX + json.dumps({"id": request_id, "response": response}), flush=True)
+    _pty_history_scrub(_pty_visible_command(request, response))
+
+
+def _pty_visible_command(request, response):
+    """Returns the clean command to leave in shell history for a PTY request: the user's code for
+    execute/query, the reconstructed Django ORM expression for grid reads (rows/related/count/commit),
+    or None for pure metadata/inspection plumbing (schema/models/lookup/inspect/...) which is dropped."""
+    kind = request.get("kind") if isinstance(request, dict) else None
+    if kind in ("execute", "query"):
+        candidate = request.get("code")
+    elif isinstance(response, dict):
+        candidate = response.get("orm")
+    else:
+        candidate = None
+    return candidate if isinstance(candidate, str) and candidate.strip() else None
+
+
+def _pty_history_scrub(visible):
+    """Replaces the just-run RPC line in shell history with the clean executed query, or drops it (best-effort)."""
+    import builtins
+
+    getter = getattr(builtins, "get_ipython", None)
+    try:
+        shell = getter() if getter else None
+    except Exception:
+        shell = None
+    if shell is not None:
+        _pty_scrub_ipython(shell, visible)
+    else:
+        _pty_scrub_readline(visible)
+
+
+def _pty_scrub_ipython(shell, visible):
+    """Scrubs the just-run RPC cell from IPython history. A kept command (visible) is relabelled to the
+    clean query in memory and on disk; pure plumbing is dropped from memory, the execution counter, and
+    the SQLite history so the freed (session, line) cannot later collide when the counter reuses it."""
+    try:
+        history = shell.history_manager
+        line_num = int(shell.execution_count)
+        last_is_rpc = bool(getattr(history, "input_hist_raw", None)) and _pty_is_rpc_line(history.input_hist_raw[-1])
+    except Exception:
+        return
+    if not last_is_rpc:
+        return
+    if visible:
+        for attr in ("input_hist_parsed", "input_hist_raw"):
+            sequence = getattr(history, attr, None)
+            if sequence:
+                sequence[-1] = visible
+        _pty_rewrite_ipython_db(history, line_num, visible)
+        return
+    # Dropping plumbing requires freeing its on-disk (session, line) first; if that fails, leave the line
+    # in place rather than rolling the counter back into a duplicate that corrupts IPython history logging.
+    if not _pty_forget_ipython_db(history, line_num):
+        return
+    for attr in ("input_hist_parsed", "input_hist_raw"):
+        sequence = getattr(history, attr, None)
+        if sequence and _pty_is_rpc_line(sequence[-1]):
+            sequence.pop()
+    try:
+        shell.execution_count = max(1, int(shell.execution_count) - 1)
+    except Exception:
+        pass
+
+
+def _pty_forget_ipython_db(history, line_num):
+    """Erases a dropped plumbing line from IPython's SQLite history (pending write caches plus the input
+    and output tables) so its (session, line) is free to reuse. Returns True only when the on-disk row is
+    gone, letting the caller roll the counter back without risking the unique-key clash that the
+    'Session/line number was not unique in database' error reports."""
+    try:
+        with history.db_input_cache_lock:
+            history.db_input_cache[:] = [row for row in history.db_input_cache if row[0] != line_num]
+        with history.db_output_cache_lock:
+            history.db_output_cache[:] = [row for row in history.db_output_cache if row[0] != line_num]
+        session = int(history.session_number)
+        connection = history.db
+        with connection:
+            connection.execute("DELETE FROM history WHERE session=? AND line=?", (session, line_num))
+            connection.execute("DELETE FROM output_history WHERE session=? AND line=?", (session, line_num))
+        return True
+    except Exception:
+        return False
+
+
+def _pty_rewrite_ipython_db(history, line_num, visible):
+    """Flushes pending history then rewrites a kept line's stored source to the clean query so a later
+    session's %history matches the in-memory display. The live pre_run_cell hook still sees the originally
+    typed cell, which is why ORM mode types real ORM instead of relying on this after-the-fact rewrite."""
+    try:
+        history.writeout_cache()
+    except Exception:
+        pass
+    try:
+        session = int(history.session_number)
+        connection = history.db
+        with connection:
+            connection.execute("UPDATE history SET source=?, source_raw=? WHERE session=? AND line=?", (visible, visible, session, line_num))
+    except Exception:
+        pass
+
+
+def _pty_scrub_readline(visible):
+    """Removes the RPC line from readline history; reinserts the clean query for the plain Python REPL."""
+    try:
+        import readline
+
+        count = readline.get_current_history_length()
+        if count > 0 and _pty_is_rpc_line(readline.get_history_item(count)):
+            readline.remove_history_item(count - 1)
+            if visible:
+                readline.add_history(visible)
+    except Exception:
+        pass
+
+
+def _pty_is_rpc_line(line):
+    """Returns whether a history line is django-shell RPC/bootstrap plumbing (never a user command)."""
+    text = str(line or "").lstrip()
+    return text.startswith("_djs_rpc(") or (text.startswith("exec(") and "_djs_" in text)
+
+
 # --- Model data browser ---------------------------------------------------
 # Additive feature: read Django models as tables without triggering N+1.
 # Rows are read with _base_manager.values(*concrete_fields) so foreign keys
@@ -542,7 +1145,7 @@ def _browse_rows(request):
             columns = _browse_columns(model)
             attnames = [column["attname"] for column in columns]
             pk_attname = model._meta.pk.attname
-            limit = _browse_limit(request.get("limit"))
+            limit = _browse_limit(request.get("limit"), maximum=None)
             order = _browse_order(request.get("order"), attnames, pk_attname)
             keyset_capable = order == [pk_attname]
             queryset = model._base_manager.all().order_by(*order).filter(_browse_build_filters(model, request.get("filters"), attnames))
@@ -694,9 +1297,11 @@ def _browse_label(model):
 
 
 def _browse_limit(value, default=50, maximum=200):
-    """Returns a bounded page size so a single request cannot starve the shell."""
+    """Returns a page size; bounded by maximum, or user-driven and uncapped when maximum is None."""
+    if isinstance(value, bool):
+        return default
     if isinstance(value, int) and value > 0:
-        return min(value, maximum)
+        return value if maximum is None else min(value, maximum)
     return default
 
 
@@ -739,7 +1344,12 @@ def _browse_cell(value):
         return {"len": len(raw), "t": "bytes", "v": base64.b64encode(raw[:64]).decode("ascii")}
     if isinstance(value, (list, tuple, dict, set, frozenset)):
         return {"t": "json", "v": _truncate(repr(value), 400)}
-    return {"t": "repr", "v": _truncate(repr(value), 400)}
+    # File/Image fields and other value-objects: show the stored value (e.g. the file path / str()), not the "<FieldFile: ...>" object ref.
+    try:
+        text = str(value)
+    except Exception:
+        text = repr(value)
+    return {"t": "repr", "v": _truncate(text, 400)}
 
 
 def _browse_jsonable(value):
@@ -909,6 +1519,188 @@ def _browse_orm_commit(model, prepared):
     for instance, applied in prepared:
         lines.append(f"    {model.__name__}(pk={instance.pk!r}).save(update_fields={applied!r})")
     return "\n".join(lines)
+
+
+_BROWSE_TEXT_TYPES = frozenset({"CharField", "TextField", "SlugField", "EmailField", "URLField", "FilePathField"})
+_BROWSE_INT_PK_TYPES = frozenset({"AutoField", "BigAutoField", "SmallAutoField", "IntegerField", "BigIntegerField", "SmallIntegerField", "PositiveIntegerField", "PositiveSmallIntegerField", "PositiveBigIntegerField"})
+
+
+def _browse_lookup(request):
+    """Searches a target model for foreign-key picker candidates: one bounded SELECT, no __str__/joins."""
+    with _EXECUTION_LOCK:
+        try:
+            model = _browse_resolve_model(request)
+            if model is None:
+                return {"error": "Unknown model.", "ok": False, "rows": []}
+            pk_attname = model._meta.pk.attname
+            exclude = request.get("exclude") if isinstance(request.get("exclude"), list) else []
+            text_fields = _browse_text_fields(model, exclude)
+            label_fields = text_fields[:2]
+            value_fields = list(dict.fromkeys([pk_attname, *label_fields]))
+            limit = _browse_limit(request.get("limit"), default=20, maximum=50)
+            query = (request.get("q") or "").strip()
+            queryset = model._base_manager.all().order_by(pk_attname)
+            if query:
+                queryset = queryset.filter(_browse_lookup_filter(model, query, text_fields, pk_attname))
+            with _browse_capture() as ctx:
+                raw = list(queryset.values(*value_fields)[: limit + 1])
+            rows = [_browse_lookup_row(item, pk_attname, label_fields) for item in raw[:limit]]
+            return {"hasMore": len(raw) > limit, "ok": True, "rows": rows, "sql": _browse_sql(ctx)}
+        except Exception:
+            return {"error": traceback.format_exc(), "ok": False, "rows": []}
+
+
+def _browse_text_fields(model, exclude=()):
+    """Returns concrete text-field attnames for FK search and labels; every field is exposed unless its
+    name contains a caller-supplied exclude substring (default: none, so all are shown)."""
+    patterns = [str(item).lower() for item in exclude if item]
+    fields = []
+    for field in model._meta.concrete_fields:
+        if field.is_relation or field.get_internal_type() not in _BROWSE_TEXT_TYPES:
+            continue
+        lowered = field.attname.lower()
+        if any(pattern in lowered for pattern in patterns):
+            continue
+        fields.append(field.attname)
+    return fields
+
+
+def _browse_lookup_filter(model, query, text_fields, pk_attname):
+    """Builds an OR query across text fields (icontains) plus an exact primary-key match when applicable."""
+    from django.db.models import Q
+
+    condition = Q()
+    for attname in text_fields:
+        condition |= Q(**{f"{attname}__icontains": query})
+    if model._meta.pk.get_internal_type() in _BROWSE_INT_PK_TYPES:
+        if query.isdigit():
+            condition |= Q(**{pk_attname: int(query)})
+    else:
+        condition |= Q(**{f"{pk_attname}__icontains": query})
+    return condition
+
+
+def _browse_lookup_row(item, pk_attname, label_fields):
+    """Builds one {pk, label} candidate from a .values() dict without invoking __str__."""
+    pk = item.get(pk_attname)
+    parts = [_truncate(str(item.get(attname)), 80) for attname in label_fields if item.get(attname) not in (None, "")]
+    label = f"#{pk}" + (" · " + " · ".join(parts) if parts else "")
+    return {"label": label, "pk": _browse_jsonable(pk)}
+
+
+def _browse_query(namespace, request):
+    """Evaluates user-written ORM code in the live shell namespace and tabulates the final
+    expression's value into grid rows. Multi-line code is allowed (last expression is tabulated);
+    assignments/imports mutate the shell namespace, exactly like the interactive shell."""
+    code = request.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return {"columns": [], "editable": False, "error": "Query code must be a non-empty string.", "hasMore": False, "ok": False, "rows": []}
+    limit = _browse_limit(request.get("limit"), maximum=None)
+    offset = request.get("offset")
+    offset = offset if isinstance(offset, int) and offset > 0 else 0
+    with _EXECUTION_LOCK:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                value = _browse_eval_last(namespace, code)
+                with _browse_capture() as ctx:
+                    payload = _browse_tabulate(value, offset, limit)
+                payload.update({"ok": True, "orm": code, "sql": _browse_sql(ctx), "stderr": stderr.getvalue(), "stdout": stdout.getvalue()})
+                return payload
+            except Exception:
+                return {"columns": [], "editable": False, "error": traceback.format_exc(), "hasMore": False, "ok": False, "rows": [], "stderr": stderr.getvalue(), "stdout": stdout.getvalue()}
+
+
+def _browse_eval_last(namespace, code):
+    """Runs leading statements then returns the value of the final expression (no pprint, no `_`)."""
+    tree = ast.parse(code, filename="<django-shell-query>", mode="exec")
+    body, expression = _split_last_expression(tree)
+    if body:
+        tree.body = body
+        ast.fix_missing_locations(tree)
+        exec(compile(tree, "<django-shell-query>", "exec"), namespace)
+    if expression is None:
+        if not body:
+            exec(compile(tree, "<django-shell-query>", "exec"), namespace)
+        raise ValueError("The last line must be an expression to tabulate (for example a QuerySet).")
+    expr = ast.Expression(expression.value)
+    ast.fix_missing_locations(expr)
+    return eval(compile(expr, "<django-shell-query>", "eval"), namespace)
+
+
+def _browse_tabulate(value, offset, limit):
+    """Turns an evaluated value into {columns, rows, hasMore, pk?, editable, model?, app?}; bounded, no __str__."""
+    import itertools
+
+    from django.db.models import Model, QuerySet
+    from django.db.models.query import ModelIterable
+
+    if isinstance(value, QuerySet):
+        if value._iterable_class is ModelIterable and not value.query.values_select:
+            try:
+                return _browse_tabulate_instances(value, value.model, offset, limit)
+            except TypeError:
+                pass  # already-sliced / un-sliceable queryset → fall through to bounded read-only
+        else:
+            return _browse_tabulate_dicts(value, offset, limit)
+    if isinstance(value, Model):
+        return _browse_tabulate_single(value)
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__iter__"):
+        return {"columns": [{"attname": "value", "editable": False, "name": "value", "null": True, "pk": False, "type": ""}], "editable": False, "hasMore": False, "rows": [{"value": _browse_cell(value)}]}
+    items = list(itertools.islice(value, offset, offset + limit + 1))
+    return _browse_tabulate_items(items, limit)
+
+
+def _browse_tabulate_instances(queryset, model, offset, limit):
+    """Tabulates a model-instance QuerySet as editable rows via a single bounded .values() SELECT."""
+    columns = _browse_columns(model)
+    attnames = [column["attname"] for column in columns]
+    raw = list(queryset[offset:offset + limit + 1].values(*attnames))
+    return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": len(raw) > limit, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [_browse_serialize_row(row) for row in raw[:limit]]}
+
+
+def _browse_tabulate_dicts(queryset, offset, limit):
+    """Tabulates a .values()/.values_list() QuerySet as read-only rows."""
+    names = list(queryset.query.values_select) + list(getattr(queryset.query, "annotation_select", {}))
+    flat = queryset._iterable_class.__name__ == "FlatValuesListIterable"
+    valued = queryset._iterable_class.__name__ in ("ValuesListIterable", "FlatValuesListIterable")
+    raw = list(queryset[offset:offset + limit + 1])
+    if not names and raw:
+        names = list(raw[0].keys()) if isinstance(raw[0], dict) else [f"col{index}" for index in range(len(raw[0]))]
+    if flat:
+        names = names[:1] or ["value"]
+        rows = [{names[0]: _browse_cell(item)} for item in raw[:limit]]
+    elif valued:
+        rows = [_browse_serialize_row(dict(zip(names, item))) for item in raw[:limit]]
+    else:
+        rows = [_browse_serialize_row(item) for item in raw[:limit]]
+    return {"columns": [{"attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": ""} for name in names], "editable": False, "hasMore": len(raw) > limit, "rows": rows}
+
+
+def _browse_tabulate_single(instance):
+    """Tabulates one model instance as a single editable row (attname getattr, never __str__)."""
+    model = type(instance)
+    columns = _browse_columns(model)
+    row = {column["attname"]: _browse_cell(getattr(instance, column["attname"], None)) for column in columns}
+    return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": False, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [row]}
+
+
+def _browse_tabulate_items(items, limit):
+    """Tabulates a bounded plain list/iterable (read-only): instances by attname, dicts by key, else a value column."""
+    from django.db.models import Model
+
+    has_more = len(items) > limit
+    items = items[:limit]
+    if items and all(isinstance(item, Model) and type(item) is type(items[0]) for item in items):
+        model = type(items[0])
+        columns = _browse_columns(model)
+        rows = [{column["attname"]: _browse_cell(getattr(item, column["attname"], None)) for column in columns} for item in items]
+        return {"columns": columns, "editable": False, "hasMore": has_more, "rows": rows}
+    if items and all(isinstance(item, dict) for item in items):
+        names = list(dict.fromkeys(key for item in items for key in item))
+        return {"columns": [{"attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": ""} for name in names], "editable": False, "hasMore": has_more, "rows": [_browse_serialize_row(item) for item in items]}
+    return {"columns": [{"attname": "value", "editable": False, "name": "value", "null": True, "pk": False, "type": ""}], "editable": False, "hasMore": has_more, "rows": [{"value": _browse_cell(item)} for item in items]}
 
 
 def _browse_build_filters(model, filters, attnames):

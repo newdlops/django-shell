@@ -17,7 +17,7 @@ const GENERATED_FILE_MARKERS = [
   "# Django workspace imports for editor analysis.",
   "# Generated Django shell imports for editor analysis."
 ];
-const GENERATED_WORKSPACE_FILE_PATTERN = /^(?:analysis|console-cell|django_shell_console_cell_\d+|django_shell_console_prelude)\.py$/;
+const GENERATED_WORKSPACE_FILE_PATTERN = /^(?:analysis|console-cell|query-analysis|query-cell|django_shell_console_cell_\d+|django_shell_console_prelude)\.py$/;
 const ignoredShadowRoots = new Set<string>();
 
 /** Removes the older nested shadow directory that skewed project-root detection. */

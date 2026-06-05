@@ -9,6 +9,10 @@ django_shell_console_cell_*.py
 django_shell_console_prelude.py
 __pycache__/
 *.vsix
+*.log
+log.txt
+other_extension_log.txt
+Trace-*.json
 .DS_Store
 .codeidx
 .zoek-rs

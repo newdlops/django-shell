@@ -10,7 +10,8 @@ let closeQueue: Promise<void> = Promise.resolve();
 export function scheduleWorkspaceGeneratedOverlayTabCleanup(): void {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd());
   scheduleGeneratedOverlayTabCleanup([
-    vscode.Uri.joinPath(root, ".django-shell", "analysis.py")
+    vscode.Uri.joinPath(root, ".django-shell", "analysis.py"),
+    vscode.Uri.joinPath(root, ".django-shell", "query-analysis.py")
   ]);
 }
 
@@ -28,7 +29,9 @@ export function closeWorkspaceGeneratedOverlayTabs(): Promise<void> {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd());
   return closeGeneratedOverlayTabs([
     vscode.Uri.joinPath(root, ".django-shell", "analysis.py"),
-    vscode.Uri.joinPath(root, ".django-shell", "console-cell.py")
+    vscode.Uri.joinPath(root, ".django-shell", "console-cell.py"),
+    vscode.Uri.joinPath(root, ".django-shell", "query-analysis.py"),
+    vscode.Uri.joinPath(root, ".django-shell", "query-cell.py")
   ]);
 }
 

@@ -33,6 +33,9 @@ button:disabled{opacity:.55;cursor:default}
 .body{border:1px solid transparent;background:var(--vscode-notebook-cellEditorBackground,var(--vscode-editor-background));box-shadow:inset 3px 0 0 transparent}.cell:focus-within .body{box-shadow:inset 3px 0 0 var(--vscode-focusBorder)}
 .toolbar{display:flex;align-items:center;gap:7px;height:28px;padding:0 7px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-sideBar-background))}
 .toolbar .label{font-size:12px;color:var(--vscode-descriptionForeground)}.toolbar .grow{flex:1}
+.transport{font:inherit;font-size:11px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:4px;padding:2px 4px;cursor:pointer}
+.transportInfo{font-size:11px;color:var(--vscode-descriptionForeground);white-space:nowrap}
+.transportInfo .on{color:var(--vscode-terminal-ansiGreen,var(--vscode-charts-green,#3fb950))}.transportInfo .pty{color:var(--vscode-charts-yellow,#cca700)}.transportInfo .off{color:var(--vscode-errorForeground)}
 .terminalHost{height:190px;min-height:92px;overflow:hidden;padding:3px 0;background:var(--vscode-terminal-background,var(--vscode-editor-background))}
 .terminalHost .xterm,.terminalHost .xterm-screen,.terminalHost .xterm-viewport{height:100%;background:var(--vscode-terminal-background,var(--vscode-editor-background))!important}
 .setupCell.minimized .terminalHost{height:34px!important;min-height:34px;opacity:.72;pointer-events:none}.setupCell.minimized .cellResize{display:none}.setupCell.minimized .body{border-color:transparent}
@@ -68,7 +71,7 @@ button:disabled{opacity:.55;cursor:default}
     <section id="pythonCell" class="cell inputCell disabled">
       <div id="inputPrompt" class="prompt"><span class="promptMark">In&nbsp;[&nbsp;]:</span></div>
       <div class="body editor">
-        <div class="toolbar"><img class="pythonIcon" src="${pythonIconUri}" alt="" aria-hidden="true"><span class="label">Python</span><span class="grow"></span><button id="clear" class="secondary" type="button">Clear</button></div>
+        <div class="toolbar"><img class="pythonIcon" src="${pythonIconUri}" alt="" aria-hidden="true"><span class="label">Python</span><span class="grow"></span><span id="transportInfo" class="transportInfo" title="Active backend transport"></span><select id="transport" class="transport" title="How the console reaches the Django shell"><option value="auto">Link: Auto</option><option value="tcp">Link: Socket</option><option value="pty">Link: Terminal</option><option value="orm">Link: ORM</option></select><button id="clear" class="secondary" type="button">Clear</button></div>
         <div id="editorAnchor" class="editorLauncher"><div id="editorLock" class="editorLock"><img class="pythonIcon" src="${pythonIconUri}" alt="" aria-hidden="true"><span>Complete setup to enable Python input</span></div></div>
         <div class="cellResize" data-resize-target="editor" role="separator" aria-label="Resize Python editor" aria-orientation="horizontal" tabindex="0"></div>
         <div id="currentOutput" class="cellOutput outputHidden"><div id="currentOutputLabel" class="outputLabel">Outputs</div><div id="outputList" class="outputList"></div></div>

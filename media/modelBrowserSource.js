@@ -2,52 +2,40 @@
 
 import { appendLogEntry } from "./sqlHighlight.js";
 import { repaintPins, togglePin } from "./gridPin.js";
-import { createEditor } from "./gridEdit.js";
+import { createEditor, stagedDisplay } from "./gridEdit.js";
+import { enterQueryMode } from "./gridQuery.js";
+import { makeResizable } from "./gridResize.js";
+import { buildEditableRelatedTable } from "./gridRelated.js";
 
 const vscode = acquireVsCodeApi();
 
-const els = {
-  title: document.getElementById("title"),
-  subtitle: document.getElementById("subtitle"),
-  gridwrap: document.getElementById("gridwrap"),
-  status: document.getElementById("status"),
-  countinfo: document.getElementById("countinfo"),
-  more: document.getElementById("more"),
-  commit: document.getElementById("commit"),
-  discard: document.getElementById("discard"),
-  reload: document.getElementById("reload"),
-  addFilter: document.getElementById("addFilter"),
-  filterterms: document.getElementById("filterterms"),
-  applyFilter: document.getElementById("applyFilter"),
-  clearFilter: document.getElementById("clearFilter"),
-  count: document.getElementById("count"),
-  transport: document.getElementById("transport"),
-  transportInfo: document.getElementById("transportInfo"),
-  logToggle: document.getElementById("logToggle"),
-  logpanel: document.getElementById("logpanel"),
-  logbody: document.getElementById("logbody"),
-  logClear: document.getElementById("logClear"),
-  logMode: document.getElementById("logMode")
-};
+const els = {};
+for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logbody", "logClear", "logMode"]) {
+  els[id] = document.getElementById(id);
+}
 
 const LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"];
 const MAX_LOG_ENTRIES = 200;
+const ALL_PAGE_SIZE = 1000000000;
 
-const state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, order: [], model: "", pinned: new Set() };
+const state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, order: [], model: "", pinned: new Set(), widths: {} };
 const pendingRelated = new Map();
 let relRequestId = 0;
 
 const editor = createEditor({
   post: (message) => vscode.postMessage(message),
-  reload: () => vscode.postMessage({ type: "reload" }),
+  reload: () => send({ type: "reload" }),
   paintCell: (td) => paintCell(td),
   onChange: (count) => updateEditButtons(count),
   notify: (text) => { els.status.textContent = text; }
 });
 
 window.addEventListener("message", (event) => handleMessage(event.data));
-els.reload.addEventListener("click", () => vscode.postMessage({ type: "reload" }));
-els.more.addEventListener("click", () => vscode.postMessage({ type: "loadMore" }));
+els.reload.addEventListener("click", () => send({ type: "reload" }));
+els.more.addEventListener("click", () => send({ type: "loadMore" }));
+if (els.pageSize) {
+  els.pageSize.addEventListener("change", () => send({ type: "reload" }));
+}
 els.addFilter.addEventListener("click", () => addFilterTerm());
 els.applyFilter.addEventListener("click", () => applyQuery());
 els.clearFilter.addEventListener("click", () => clearQuery());
@@ -76,6 +64,8 @@ function handleMessage(message) {
     onRows(message);
   } else if (message.type === "related") {
     onRelated(message);
+  } else if (message.type === "lookup") {
+    editor.onLookup(message);
   } else if (message.type === "count") {
     els.countinfo.textContent = message.ok ? `· total ${message.count}` : `· count failed`;
     logSql(`count ${state.model}`, message.sql, message.orm);
@@ -84,7 +74,9 @@ function handleMessage(message) {
     editor.handleResult(message.result);
   } else if (message.type === "transport") {
     els.transport.value = message.mode || "auto";
-    els.transportInfo.innerHTML = message.active === "tcp" ? '<span class="on">● socket</span>' : message.active === "pty" ? '<span class="pty">● terminal</span>' : '<span class="off">○ not connected</span>';
+    els.transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">● ORM cell</span>' : message.active === "tcp" ? '<span class="on">● socket</span>' : message.active === "pty" ? '<span class="pty">● terminal</span>' : '<span class="off">○ not connected</span>';
+  } else if (message.type === "queryMode") {
+    enterQueryMode((payload) => send(payload));
   } else if (message.type === "error") {
     renderError(message.message);
   }
@@ -116,6 +108,7 @@ function onSchema(schema) {
   table.appendChild(el("tbody", { id: "tbody" }));
   els.gridwrap.innerHTML = "";
   els.gridwrap.appendChild(table);
+  makeResizable(table, state, () => repaintPins(els.gridwrap, state));
   table.addEventListener("click", onTableClick);
   table.addEventListener("dblclick", onTableDblClick);
   editor.reset();
@@ -138,7 +131,7 @@ function buildHead() {
   const head = el("thead", {});
   const row = el("tr", {});
   for (const column of state.columns) {
-    const th = el("th", { className: "sortable", dataset: { act: "sort", col: column.attname }, title: `Sort by ${column.name} (${column.type})` });
+    const th = el("th", { className: "sortable", dataset: { act: "sort", col: column.attname, key: column.attname }, title: `Sort by ${column.name} (${column.type})` });
     const pinned = state.pinned.has(column.attname);
     th.appendChild(el("button", { className: pinned ? "pinbtn active" : "pinbtn", dataset: { act: "pin", col: column.attname }, title: pinned ? "Unpin column" : "Pin column (freeze left)" }, "⇤"));
     th.appendChild(document.createTextNode(column.attname));
@@ -147,13 +140,11 @@ function buildHead() {
     }
     th.appendChild(el("span", { className: "sortarrow", dataset: { arrow: column.attname } }, ""));
     th.appendChild(el("span", { className: "coltype" }, column.relation ? `→ ${column.relation.target}` : column.type));
+    th.appendChild(el("span", { className: "colresize", title: "Drag to resize" }));
     row.appendChild(th);
   }
   for (const relation of state.relations) {
-    const th = el("th", { className: "relcol", title: `${relation.kind} → ${relation.target}` });
-    th.appendChild(document.createTextNode(relation.name));
-    th.appendChild(el("span", { className: "coltype" }, `${relation.kind} →`));
-    row.appendChild(th);
+    row.appendChild(el("th", { className: "relcol", dataset: { key: `rel:${relation.name}` }, title: `${relation.kind} → ${relation.target}` }, document.createTextNode(relation.name), el("span", { className: "coltype" }, `${relation.kind} →`), el("span", { className: "colresize", title: "Drag to resize" })));
   }
   head.appendChild(row);
   return head;
@@ -197,7 +188,7 @@ function buildRow(row) {
   }
   for (const relation of state.relations) {
     const td = el("td", { className: "relcell" });
-    td.appendChild(el("button", { className: "chip", dataset: { act: "rel", rel: relation.name, pk: String(pk) }, title: `${relation.kind} → ${relation.target}` }, `${relation.name} →`));
+    td.appendChild(el("button", { className: "chip", dataset: { act: "rel", rel: relation.name, pk: String(pk), single: String(Boolean(relation.single)) }, title: `${relation.kind} → ${relation.target}` }, `${relation.name} →`));
     tr.appendChild(td);
   }
   return tr;
@@ -223,7 +214,7 @@ function paintCell(td) {
   td.textContent = "";
   if (td.dataset.staged !== undefined) {
     td.classList.add("dirty");
-    td.appendChild(el("span", {}, td.dataset.staged === "" ? "(empty)" : td.dataset.staged));
+    td.appendChild(el("span", {}, stagedDisplay(column, td.dataset.staged)));
     return;
   }
   td.classList.remove("dirty");
@@ -267,7 +258,7 @@ function renderValue(cell) {
 
 function onTableClick(event) {
   const node = event.target.closest("[data-act]");
-  if (!node) {
+  if (!node || event.target.closest(".colresize")) {
     return;
   }
   const data = node.dataset;
@@ -279,9 +270,9 @@ function onTableClick(event) {
     const split = data.target.lastIndexOf(".");
     vscode.postMessage({ type: "openModel", app: data.target.slice(0, split), model: data.target.slice(split + 1) });
   } else if (data.act === "fk") {
-    expandInto(node, { relation: data.rel, pk: coerce(data.pk), value: coerce(data.val) });
+    expandInto(node, { relation: data.rel, pk: coerce(data.pk), value: coerce(data.val), single: true });
   } else if (data.act === "rel") {
-    expandInto(node, { relation: data.rel, pk: coerce(data.pk) });
+    expandInto(node, { relation: data.rel, pk: coerce(data.pk), single: data.single === "true" });
   }
 }
 
@@ -347,7 +338,17 @@ function collectFilters() {
 }
 
 function applyQuery() {
-  vscode.postMessage({ type: "applyQuery", filters: collectFilters(), order: state.order });
+  send({ filters: collectFilters(), order: state.order, type: "applyQuery" });
+}
+
+function pageSizeValue() {
+  const value = els.pageSize ? els.pageSize.value : "50";
+  const parsed = Number(value);
+  return value === "all" ? ALL_PAGE_SIZE : (parsed > 0 ? parsed : 50);
+}
+
+function send(message) {
+  vscode.postMessage({ ...message, pageSize: pageSizeValue() });
 }
 
 function clearQuery() {
@@ -368,7 +369,7 @@ function expandInto(button, request) {
   pendingRelated.set(requestId, { body, label: request.relation });
   button.dataset.open = "1";
   button._detailRow = row;
-  vscode.postMessage({ type: "expandRelated", requestId, relation: request.relation, pk: request.pk, value: request.value });
+  vscode.postMessage({ type: "expandRelated", requestId, relation: request.relation, pk: request.pk, value: request.value, single: request.single });
 }
 
 function nestedPanel(title, trigger, body) {
@@ -410,31 +411,7 @@ function onRelated(message) {
     container.appendChild(el("span", { className: "tag" }, "No related rows."));
     return;
   }
-  container.appendChild(buildRelatedTable(result));
-}
-
-function buildRelatedTable(result) {
-  const columns = result.columns || [];
-  const table = el("table", {});
-  const head = el("thead", {});
-  const headRow = el("tr", {});
-  for (const column of columns) {
-    headRow.appendChild(el("th", {}, column.attname));
-  }
-  head.appendChild(headRow);
-  table.appendChild(head);
-  const body = el("tbody", {});
-  for (const row of result.rows) {
-    const tr = el("tr", {});
-    for (const column of columns) {
-      const td = el("td", {});
-      td.appendChild(renderValue(row[column.attname]));
-      tr.appendChild(td);
-    }
-    body.appendChild(tr);
-  }
-  table.appendChild(body);
-  return table;
+  container.appendChild(buildEditableRelatedTable(result, { el, post: (message) => vscode.postMessage(message), renderValue }));
 }
 
 function detailAnchor(tr) {

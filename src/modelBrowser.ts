@@ -1,17 +1,19 @@
-// Webview panel that browses Django model rows with lazy foreign-key expansion.
+// Webview panels that browse Django model rows with lazy foreign-key expansion (one panel per tab).
 
 import * as path from "path";
 import * as vscode from "vscode";
 import type { BackendTransport, BackendTransportMode } from "./backendClient";
-import type { BackendCommitResult, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelOrder, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery, ModelCountQuery, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import type { BackendCommitResult, BackendModelColumn, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { modelBrowserHtml } from "./modelBrowserHtml";
 import { DiagnosticLogger } from "./diagnostics";
 
-/** Backend access used by the catalog tree and the data browser panel. */
+/** Backend access used by the catalog tree and the data browser panels. */
 export interface ModelDataSource {
   listModels(): Promise<BackendModelList>;
   modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult>;
   modelCount(query: ModelCountQuery): Promise<BackendModelCount>;
+  modelLookup(query: ModelLookupQuery): Promise<BackendModelLookup>;
+  modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery>;
   modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows>;
   modelRows(query: ModelRowsQuery): Promise<BackendModelRows>;
   modelSchema(app: string, model: string): Promise<BackendModelSchema>;
@@ -30,13 +32,18 @@ interface ModelTarget {
 interface IncomingMessage {
   app?: string;
   changes?: ModelCommitChange[];
+  columns?: BackendModelColumn[];
   filters?: BackendModelFilter[];
   mode?: BackendTransportMode;
   model?: string;
   order?: BackendModelOrder[];
+  pageSize?: number;
   pk?: unknown;
+  q?: string;
   relation?: string;
   requestId?: number;
+  single?: boolean;
+  target?: string;
   type: string;
   value?: unknown;
 }
@@ -44,16 +51,10 @@ interface IncomingMessage {
 const VIEW_TYPE = "djangoShell.modelBrowser";
 const PAGE_SIZE = 50;
 
-/** Opens and drives a single reusable webview panel for browsing model data. */
+/** Opens model-data browser tabs; each open creates an independent panel with its own state. */
 export class ModelBrowser implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
-  private panel: vscode.WebviewPanel | undefined;
-  private panelReady = false;
-  private current: ModelTarget | undefined;
-  private filters: BackendModelFilter[] = [];
-  private order: BackendModelOrder[] = [];
-  private nextCursor: unknown;
-  private nextOffset: number | null = null;
+  private readonly panels = new Set<ModelBrowserPanel>();
 
   /** Stores the extension path and the model data source. */
   constructor(private readonly extensionPath: string, private readonly source: ModelDataSource, private readonly logger?: DiagnosticLogger) {}
@@ -62,32 +63,36 @@ export class ModelBrowser implements vscode.Disposable {
   activate(context: vscode.ExtensionContext): void {
     this.disposables.push(
       vscode.commands.registerCommand("djangoShell.openModelData", (target?: ModelTarget) => this.openModel(target)),
-      this.source.onDidChangeRuntime(() => this.handleRuntimeChange())
+      this.source.onDidChangeRuntime(() => this.refreshPanels())
     );
     context.subscriptions.push(this);
   }
 
-  /** Releases the panel and command registrations. */
+  /** Releases every open panel and the command registrations. */
   dispose(): void {
-    this.panel?.dispose();
+    for (const panel of [...this.panels]) {
+      panel.dispose();
+    }
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
   }
 
-  /** Opens the browser for one model, prompting for a model when none was provided. */
+  /** Opens a new browser tab for one model, prompting for a model when none was provided. */
   async openModel(target?: ModelTarget): Promise<void> {
     const resolved = target?.app && target?.model ? target : await this.pickModel();
     if (!resolved) {
       return;
     }
-    this.current = resolved;
-    this.filters = [];
-    this.order = [];
-    this.ensurePanel();
-    this.panel?.reveal(this.panel.viewColumn ?? vscode.ViewColumn.Active);
-    if (this.panelReady) {
-      await this.loadModel();
+    const panel = new ModelBrowserPanel(this.extensionPath, this.source, resolved, (next) => void this.openModel(next), this.logger);
+    this.panels.add(panel);
+    panel.onDidDispose(() => this.panels.delete(panel));
+  }
+
+  /** Reloads every open panel after the attached runtime changes. */
+  private refreshPanels(): void {
+    for (const panel of this.panels) {
+      panel.refresh();
     }
   }
 
@@ -104,79 +109,133 @@ export class ModelBrowser implements vscode.Disposable {
     );
     return picked ? { app: picked.info.app, label: picked.info.label, model: picked.info.model } : undefined;
   }
+}
 
-  /** Creates the webview panel once and wires its message and dispose handlers. */
-  private ensurePanel(): void {
-    if (this.panel) {
-      return;
-    }
-    this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Model Data", vscode.ViewColumn.Active, {
+/** Drives one model-data browser webview panel and its own filter/sort/pagination/edit state. */
+class ModelBrowserPanel {
+  private readonly panel: vscode.WebviewPanel;
+  private readonly disposables: vscode.Disposable[] = [];
+  private readonly disposeHandlers: Array<() => void> = [];
+  private panelReady = false;
+  private disposed = false;
+  private filters: BackendModelFilter[] = [];
+  private order: BackendModelOrder[] = [];
+  private nextCursor: unknown;
+  private nextOffset: number | null = null;
+  private pageSize = PAGE_SIZE;
+  private columns: BackendModelColumn[] = [];
+
+  /** Creates the webview panel for one model target and wires its message and dispose handlers. */
+  constructor(
+    extensionPath: string,
+    private readonly source: ModelDataSource,
+    private readonly target: ModelTarget,
+    private readonly openAnother: (target: ModelTarget) => void,
+    private readonly logger?: DiagnosticLogger
+  ) {
+    this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, `${target.model} — data`, vscode.ViewColumn.Active, {
       enableScripts: true,
-      localResourceRoots: [vscode.Uri.file(path.join(this.extensionPath, "media"))],
+      localResourceRoots: [vscode.Uri.file(path.join(extensionPath, "media"))],
       retainContextWhenHidden: true
     });
-    this.panel.webview.html = modelBrowserHtml(this.panel.webview, this.extensionPath);
-    this.panel.onDidDispose(() => this.closePanel(), undefined, this.disposables);
+    this.panel.webview.html = modelBrowserHtml(this.panel.webview, extensionPath);
+    this.panel.onDidDispose(() => this.handleDispose(), undefined, this.disposables);
     this.panel.webview.onDidReceiveMessage((message: IncomingMessage) => void this.handleMessage(message), undefined, this.disposables);
   }
 
-  /** Clears panel state when the webview is closed. */
-  private closePanel(): void {
-    this.panel = undefined;
-    this.panelReady = false;
+  /** Registers a callback fired when this panel is closed. */
+  onDidDispose(handler: () => void): void {
+    this.disposeHandlers.push(handler);
   }
 
-  /** Loads schema and the first row page for the current model. */
+  /** Closes the underlying panel. */
+  dispose(): void {
+    this.panel.dispose();
+  }
+
+  /** Reloads the panel when the attached runtime changes. */
+  refresh(): void {
+    if (this.panelReady) {
+      void this.loadModel();
+    }
+  }
+
+  /** Releases listeners and notifies the owner when the panel is closed. */
+  private handleDispose(): void {
+    this.disposed = true;
+    for (const disposable of this.disposables) {
+      disposable.dispose();
+    }
+    for (const handler of this.disposeHandlers) {
+      handler();
+    }
+  }
+
+  /** Returns whether the active transport reconstructs reads as readable ORM cells (no schema RPC): ORM or Terminal mode. */
+  private reconstructsViaOrmCell(): boolean {
+    const mode = this.source.modelTransportInfo().mode;
+    return mode === "orm" || mode === "pty";
+  }
+
+  /** Loads schema and the first row page for this panel's model. */
   private async loadModel(): Promise<void> {
-    if (!this.current || !this.panel) {
+    if (this.disposed) {
       return;
     }
-    const target = this.current;
-    this.panel.title = `${target.model} — data`;
-    this.post({ label: target.label, model: `${target.app}.${target.model}`, type: "loading" });
-    const schema = await this.source.modelSchema(target.app, target.model);
-    if (this.current !== target) {
-      return;
+    this.panel.title = `${this.target.model} — data`;
+    this.post({ label: this.target.label, model: `${this.target.app}.${this.target.model}`, type: "loading" });
+    if (this.reconstructsViaOrmCell()) {
+      // ORM and Terminal modes type the read as a literal cell (no schema RPC); the head is synthesized from the first page.
+      await this.loadPage(true);
+    } else {
+      const schema = await this.source.modelSchema(this.target.app, this.target.model);
+      if (this.disposed) {
+        return;
+      }
+      if (!schema.ok) {
+        this.post({ message: schema.error ?? "Could not load model schema.", type: "error" });
+        return;
+      }
+      this.post({ schema, type: "schema" });
+      await this.loadPage(true);
     }
-    if (!schema.ok) {
-      this.post({ message: schema.error ?? "Could not load model schema.", type: "error" });
-      return;
-    }
-    this.post({ schema, type: "schema" });
-    await this.loadPage(true);
     const transport = this.source.modelTransportInfo();
     this.post({ active: transport.active, mode: transport.mode, type: "transport" });
   }
 
   /** Loads one page of rows, resetting the grid or appending to it. */
   private async loadPage(reset: boolean): Promise<void> {
-    if (!this.current) {
-      return;
-    }
-    const target = this.current;
-    const query: ModelRowsQuery = { app: target.app, filters: this.filters, limit: PAGE_SIZE, model: target.model, order: this.order };
+    const query: ModelRowsQuery = { app: this.target.app, columns: this.columns, filters: this.filters, limit: this.pageSize, model: this.target.model, order: this.order };
     if (!reset && this.nextCursor !== undefined && this.nextCursor !== null) {
       query.cursor = this.nextCursor;
     } else if (!reset && this.nextOffset !== null) {
       query.offset = this.nextOffset;
     }
     const rows = await this.source.modelRows(query);
-    if (this.current !== target) {
+    if (this.disposed) {
       return;
     }
     this.nextCursor = rows.ok ? rows.nextCursor : undefined;
     this.nextOffset = rows.ok ? rows.nextOffset : null;
-    this.logger?.log("model.browser.rows", { append: !reset, model: `${target.app}.${target.model}`, ok: rows.ok, rows: rows.rows.length });
+    if (rows.ok && rows.columns.length) {
+      this.columns = rows.columns;
+    }
+    if (reset && rows.ok && this.reconstructsViaOrmCell()) {
+      // ORM and Terminal modes have no schema RPC: build the grid head from the page's own columns/relations.
+      this.post({ schema: { app: this.target.app, columns: rows.columns, label: this.target.label ?? "", model: this.target.model, ok: true, pk: rows.pk ?? "id", relations: rows.relations ?? [], table: "" }, type: "schema" });
+    }
+    this.logger?.log("model.browser.rows", { append: !reset, model: `${this.target.app}.${this.target.model}`, ok: rows.ok, rows: rows.rows.length });
     this.post({ append: !reset, rows, type: "rows" });
   }
 
   /** Routes one message from the webview to its handler. */
   private async handleMessage(message: IncomingMessage): Promise<void> {
+    if (typeof message.pageSize === "number" && message.pageSize > 0) {
+      this.pageSize = message.pageSize;
+    }
     if (message.type === "ready") {
       this.panelReady = true;
-      if (this.current) {
-        await this.loadModel();
-      }
+      await this.loadModel();
     } else if (message.type === "reload") {
       await this.loadModel();
     } else if (message.type === "loadMore") {
@@ -189,54 +248,76 @@ export class ModelBrowser implements vscode.Disposable {
       await this.requestCount();
     } else if (message.type === "commitEdits") {
       await this.commitEdits(message);
+    } else if (message.type === "commitRelated") {
+      await this.commitRelated(message);
     } else if (message.type === "setTransport" && message.mode) {
       this.source.setModelTransport(message.mode);
       await this.loadModel();
     } else if (message.type === "expandRelated") {
       await this.expandRelated(message);
+    } else if (message.type === "lookupRelated") {
+      await this.lookupRelated(message);
     } else if (message.type === "openModel" && message.app && message.model) {
-      await this.openModel({ app: message.app, model: message.model });
+      this.openAnother({ app: message.app, model: message.model });
     }
   }
 
   /** Computes and returns the total row count for the current filter set. */
   private async requestCount(): Promise<void> {
-    if (!this.current) {
-      return;
-    }
-    const result = await this.source.modelCount({ app: this.current.app, filters: this.filters, model: this.current.model });
+    const result = await this.source.modelCount({ app: this.target.app, columns: this.columns, filters: this.filters, model: this.target.model });
     this.post({ count: result.count, error: result.error, ok: result.ok, orm: result.orm, sql: result.sql, type: "count" });
   }
 
   /** Commits staged cell edits in one transaction and returns the result to the webview. */
   private async commitEdits(message: IncomingMessage): Promise<void> {
-    if (!this.current || !Array.isArray(message.changes) || !message.changes.length) {
+    if (!Array.isArray(message.changes) || !message.changes.length) {
       return;
     }
-    const result = await this.source.modelCommit({ app: this.current.app, changes: message.changes, model: this.current.model });
-    this.logger?.log("model.browser.commit", { model: `${this.current.app}.${this.current.model}`, ok: result.ok, saved: result.saved });
+    const result = await this.source.modelCommit({ app: this.target.app, changes: message.changes, columns: this.columns, model: this.target.model });
+    this.logger?.log("model.browser.commit", { model: `${this.target.app}.${this.target.model}`, ok: result.ok, saved: result.saved });
+    this.post({ result, type: "commit" });
+  }
+
+  /** Commits staged edits made inside an expanded related table against that related model. */
+  private async commitRelated(message: IncomingMessage): Promise<void> {
+    if (!message.app || !message.model || !Array.isArray(message.changes) || !message.changes.length) {
+      return;
+    }
+    const result = await this.source.modelCommit({ app: message.app, changes: message.changes, columns: Array.isArray(message.columns) ? message.columns : [], model: message.model });
+    this.logger?.log("model.browser.commit.related", { model: `${message.app}.${message.model}`, ok: result.ok, saved: result.saved });
     this.post({ result, type: "commit" });
   }
 
   /** Fetches related rows for one source row and returns them to the webview. */
   private async expandRelated(message: IncomingMessage): Promise<void> {
-    if (!this.current || !message.relation || message.pk === undefined) {
+    if (!message.relation || message.pk === undefined) {
       return;
     }
-    const query: ModelRelatedQuery = { app: this.current.app, limit: PAGE_SIZE, model: this.current.model, pk: message.pk, relation: message.relation, value: message.value };
+    const query: ModelRelatedQuery = { app: this.target.app, limit: PAGE_SIZE, model: this.target.model, pk: message.pk, relation: message.relation, single: message.single, value: message.value };
     const result = await this.source.modelRelated(query);
     this.post({ requestId: message.requestId, result, type: "related" });
   }
 
-  /** Reloads the open panel when the attached runtime changes. */
-  private handleRuntimeChange(): void {
-    if (this.panel && this.current) {
-      void this.loadModel();
+  /** Searches the target model for foreign-key picker candidates and returns them to the webview. */
+  private async lookupRelated(message: IncomingMessage): Promise<void> {
+    const target = message.target;
+    if (!target) {
+      return;
     }
+    const split = target.lastIndexOf(".");
+    if (split < 0) {
+      return;
+    }
+    const configured = vscode.workspace.getConfiguration("djangoShell").get<string[]>("modelBrowser.lookupExcludeFields", []);
+    const exclude = Array.isArray(configured) ? configured.filter((item) => typeof item === "string" && item.trim()) : [];
+    const result = await this.source.modelLookup({ app: target.slice(0, split), exclude, model: target.slice(split + 1), q: typeof message.q === "string" ? message.q : "" });
+    this.post({ requestId: message.requestId, result, type: "lookup" });
   }
 
-  /** Posts one message to the webview when a panel is open. */
+  /** Posts one message to the webview unless the panel has been closed. */
   private post(message: Record<string, unknown>): void {
-    void this.panel?.webview.postMessage(message);
+    if (!this.disposed) {
+      void this.panel.webview.postMessage(message);
+    }
   }
 }

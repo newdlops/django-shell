@@ -18,8 +18,8 @@ export class DiagnosticLogger {
     this.outputChannel().appendLine(`[${new Date().toISOString()}] ${event} ${formatFields(fields)}`);
   }
 
-  /** Returns whether diagnostic logging is enabled in workspace settings. */
-  private enabled(): boolean {
+  /** Returns whether diagnostic logging is enabled in workspace settings (public so hot paths can skip work). */
+  enabled(): boolean {
     return vscode.workspace.getConfiguration("djangoShell").get<boolean>("diagnosticLogging", false);
   }
 

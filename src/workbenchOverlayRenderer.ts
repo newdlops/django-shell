@@ -2,6 +2,7 @@
 import { overlaySyncRendererSource } from "./workbenchOverlaySyncRenderer";
 import { overlayWidgetRendererSource } from "./workbenchOverlayWidgetRenderer";
 import { overlayCleanupRendererSource } from "./workbenchOverlayCleanupRenderer";
+import { overlayFrameRendererSource } from "./workbenchOverlayFrameRenderer";
 /** Builds the JavaScript injected into the focused VS Code workbench window. */
 export function overlayRendererSource(modelUri: string): string {
   return `
@@ -230,11 +231,15 @@ export function overlayRendererSource(modelUri: string): string {
         const caps = window.__dsoCaptures || {};
         const factory = __dsoFactory();
         const root = document.getElementById("django-shell-overlay");
+        const consoleRects = __dsoConsoleGroups();
+        const boundFrame = root && root.__dsoFrame;
         return "widgets=" + ((caps.widgets || []).length) +
           " insts=" + ((caps.insts || []).length) +
           " modelSvcs=" + ((caps.modelSvcs || []).length) +
           " ctors=" + ((caps.ctors || []).length) +
           " factory=" + !!factory +
+          " consoleGroups=" + consoleRects.length +
+          " consoleFrame=" + (boundFrame && consoleRects.length && __dsoFrameIsConsole(boundFrame, consoleRects) ? 1 : 0) +
           " editorError=" + String(root && root.__dsoLastEditorError || "").slice(0, 120) +
           " widgetError=" + String(root && root.__dsoLastWidgetError || "").slice(0, 120) +
           " captureError=" + String(window.__dsoCaptureStartError || "");
@@ -325,44 +330,7 @@ export function overlayRendererSource(modelUri: string): string {
       try { if (editor && editor.getValue) { return editor.getValue(); } } catch (eGetValue) {}
       return "";
     }
-    /** Finds the visible VS Code webview frame that contains the custom console tab. */
-    function __dsoFindWebviewFrame() {
-      const frames = document.querySelectorAll("iframe.webview,.webview iframe,iframe[src^='vscode-webview'],iframe[id*='webview'],webview");
-      let best = null;
-      let bestArea = 0;
-      for (let i = 0; i < frames.length; i++) {
-        const style = window.getComputedStyle(frames[i]);
-        const rect = frames[i].getBoundingClientRect();
-        const width = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0));
-        const height = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0));
-        const area = style.display === "none" || style.visibility === "hidden" ? 0 : width * height;
-        if (area > bestArea) {
-          best = frames[i];
-          bestArea = area;
-        }
-      }
-      return bestArea > 4000 ? best : null;
-    }
-    /** Finds the workbench DOM host that owns the custom console webview frame. */
-    function __dsoFindWebviewHost(frame) {
-      if (!frame) { return null; }
-      const closest = frame.closest(".webview");
-      return closest && closest !== frame ? closest : frame.parentElement;
-    }
-
-    /** Ensures the overlay root is a child of the custom console webview host. */
-    function __dsoAttachRoot(root) {
-      const frame = __dsoFindWebviewFrame();
-      const host = __dsoFindWebviewHost(frame);
-      if (!frame || !host) { return null; }
-      if (window.getComputedStyle(host).position === "static") {
-        host.style.position = "relative";
-      }
-      if (root.parentElement !== host) {
-        host.appendChild(root);
-      }
-      return { frame: frame, host: host };
-    }
+    ${overlayFrameRendererSource()}
     /** Returns a finite number or a fallback value. */
     function __dsoFinite(value, fallback) {
       const number = Number(value);
@@ -405,13 +373,15 @@ export function overlayRendererSource(modelUri: string): string {
       window.__djangoShellOverlayGeometry = geometry || window.__djangoShellOverlayGeometry || null;
       const rect = __dsoResolvedGeometry(root, window.__djangoShellOverlayGeometry);
       if (!rect) { return false; }
-      root.style.left = rect.left + "px";
-      root.style.top = rect.top + "px";
-      root.style.width = rect.width + "px";
-      root.style.height = rect.height + "px";
-      root.style.right = "";
-      root.style.bottom = "";
-      __dsoLayoutOverlayEditor(root);
+      const sizeKey = rect.width + ":" + rect.height;
+      const key = rect.left + ":" + rect.top + ":" + sizeKey;
+      if (root.__dsoLastRectKey === key) { return true; }
+      const sizeChanged = root.__dsoLastSizeKey !== sizeKey;
+      root.__dsoLastRectKey = key; root.__dsoLastSizeKey = sizeKey;
+      root.style.left = rect.left + "px"; root.style.top = rect.top + "px";
+      root.style.width = rect.width + "px"; root.style.height = rect.height + "px";
+      root.style.right = ""; root.style.bottom = "";
+      if (sizeChanged) { __dsoLayoutOverlayEditor(root); }
       return true;
     }
     /** Installs the overlay CSS once per workbench window. */

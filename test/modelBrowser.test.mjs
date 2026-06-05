@@ -45,13 +45,13 @@ test("returns graceful errors for unknown models without Django configured", { s
   const payload = runBackend([
     "import json",
     "out = {}",
-    "for kind in ('models', 'schema', 'rows', 'related'):",
-    "    resp = mod._run_request({}, 't', {'token': 't', 'kind': kind, 'app': 'x', 'model': 'Y', 'relation': 'z'}, set())",
+    "for kind in ('models', 'schema', 'rows', 'related', 'lookup', 'query'):",
+    "    resp = mod._run_request({}, 't', {'token': 't', 'kind': kind, 'app': 'x', 'model': 'Y', 'relation': 'z', 'q': 'a', 'code': '1/0'}, set())",
     "    json.dumps(resp)",
     "    out[kind] = bool(resp.get('ok'))",
     "print(json.dumps(out))"
   ]);
-  for (const kind of ["models", "schema", "rows", "related"]) {
+  for (const kind of ["models", "schema", "rows", "related", "lookup", "query"]) {
     assert.equal(payload[kind], false, `${kind} should fail gracefully`);
   }
 });
@@ -165,6 +165,104 @@ test("commits staged edits atomically and rolls back the whole batch on a valida
   assert.ok(payload.bad_results.some((row) => row.fieldErrors && row.fieldErrors.username));
   assert.equal(payload.rejected_saved, 0, "non-editable/unknown fields are ignored");
   assert.equal(payload.pk_unchanged, true);
+});
+
+test("looks up foreign-key candidates by text and pk in one query, exposing all fields unless excluded", { skip: !HAS_DJANGO }, () => {
+  const payload = runBackend([
+    "import json",
+    "from django.conf import settings",
+    "settings.configure(DEBUG=True, DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}, INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'], USE_TZ=True)",
+    "import django; django.setup()",
+    "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
+    "from django.contrib.auth.models import User; from django.db import connection, reset_queries",
+    "ada = User.objects.create(username='ada', password='topsecret', first_name='Ada')",
+    "[User.objects.create(username=f'user{i}', password='x') for i in range(3)]",
+    "def call(**kw): return mod._run_request({}, 't', {'token': 't', 'kind': 'lookup', 'app': 'auth', 'model': 'User', **kw}, set())",
+    "reset_queries()",
+    "by_text = call(q='ada')",
+    "text_queries = len(connection.queries)",
+    "by_pk = call(q=str(ada.pk))",
+    "empty = call(q='', limit=2)",
+    "masked = call(q='ada', exclude=['password'])",
+    "print(json.dumps({",
+    "  'text_queries': text_queries, 'ok': by_text['ok'], 'text_pk': by_text['rows'][0]['pk'] == ada.pk,",
+    "  'default_exposes_all': any('topsecret' in r['label'] for r in by_text['rows']),",
+    "  'pk_in': ada.pk in [r['pk'] for r in by_pk['rows']],",
+    "  'masked_hidden': all('topsecret' not in r['label'] for r in masked['rows']),",
+    "  'masked_keeps_text': any('ada' in r['label'] for r in masked['rows']),",
+    "  'empty_len': len(empty['rows']), 'empty_more': empty['hasMore'],",
+    "}))"
+  ]);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.text_queries, 1, "a lookup must be a single SELECT");
+  assert.equal(payload.text_pk, true);
+  assert.equal(payload.default_exposes_all, true, "by default every text field is exposed (no built-in masking)");
+  assert.equal(payload.pk_in, true, "a numeric query matches the primary key");
+  assert.equal(payload.masked_hidden, true, "fields named in exclude are dropped from search and labels");
+  assert.equal(payload.masked_keeps_text, true, "non-excluded text fields still label the candidate");
+  assert.equal(payload.empty_len, 2, "empty query returns a bounded first page");
+  assert.equal(payload.empty_more, true, "hasMore signals more candidates beyond the page");
+});
+
+test("tabulates custom ORM query results, editable only for single-model instance querysets", { skip: !HAS_DJANGO }, () => {
+  const payload = runBackend([
+    "import json",
+    "from django.conf import settings",
+    "settings.configure(DEBUG=True, DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}, INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'], USE_TZ=True)",
+    "import django; django.setup()",
+    "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
+    "from django.contrib.auth.models import User; from django.db import connection, reset_queries",
+    "[User.objects.create(username=f'user{i}', password='x', is_staff=(i % 2 == 0)) for i in range(4)]",
+    "ns = {'User': User}",
+    "def call(code, **kw): return mod._run_request(ns, 't', {'token': 't', 'kind': 'query', 'code': code, **kw}, set())",
+    "reset_queries()",
+    "qs = call('User.objects.all()')",
+    "qs_queries = len(connection.queries)",
+    "paged = call('User.objects.all()', limit=2)",
+    "vals = call(\"User.objects.values('id', 'username')\")",
+    "flat = call(\"User.objects.values_list('username', flat=True)\")",
+    "multi = call('staff = User.objects.filter(is_staff=True)\\nstaff')",
+    "reuse = call('staff.count()')",
+    "boom = call('1/0')",
+    "scalar = call('User.objects.count()')",
+    "print(json.dumps({",
+    "  'qs_ok': qs['ok'], 'qs_editable': qs['editable'], 'qs_model': qs.get('model'), 'qs_app': qs.get('app'), 'qs_pk': qs.get('pk'),",
+    "  'qs_relations': [r['name'] for r in qs.get('relations', [])],",
+    "  'paged_rows': len(paged['rows']), 'paged_more': paged['hasMore'],",
+    "  'qs_cols': 'username' in [c['attname'] for c in qs['columns']], 'qs_rows': len(qs['rows']), 'qs_queries': qs_queries,",
+    "  'vals_ok': vals['ok'], 'vals_editable': vals['editable'], 'vals_cols': [c['attname'] for c in vals['columns']],",
+    "  'flat_cols': [c['attname'] for c in flat['columns']], 'flat_rows': len(flat['rows']),",
+    "  'multi_ok': multi['ok'], 'multi_rows': len(multi['rows']), 'multi_editable': multi['editable'],",
+    "  'reuse_ok': reuse['ok'], 'reuse_value': reuse['rows'][0]['value'] if reuse['rows'] else None,",
+    "  'boom_ok': boom['ok'], 'boom_err': bool(boom.get('error')),",
+    "  'scalar_cols': [c['attname'] for c in scalar['columns']], 'scalar_value': scalar['rows'][0]['value'],",
+    "}))"
+  ]);
+  assert.equal(payload.qs_ok, true);
+  assert.equal(payload.qs_editable, true);
+  assert.equal(payload.qs_model, "User");
+  assert.equal(payload.qs_app, "auth");
+  assert.equal(payload.qs_pk, "id");
+  assert.equal(payload.qs_cols, true);
+  assert.equal(payload.qs_rows, 4);
+  assert.equal(payload.qs_queries, 1, "instance queryset tabulation is a single SELECT");
+  assert.ok(payload.qs_relations.includes("groups"), "instance queryset results expose reverse/M2M relations like the model browser");
+  assert.equal(payload.paged_rows, 2, "the requested page size is honored");
+  assert.equal(payload.paged_more, true, "hasMore signals additional rows beyond the page");
+  assert.equal(payload.vals_ok, true);
+  assert.equal(payload.vals_editable, false, ".values() result is read-only");
+  assert.deepEqual(payload.vals_cols, ["id", "username"]);
+  assert.deepEqual(payload.flat_cols, ["username"], "values_list(flat=True) becomes one column");
+  assert.equal(payload.flat_rows, 4);
+  assert.equal(payload.multi_ok, true);
+  assert.equal(payload.multi_rows, 2, "multi-line code tabulates the final expression");
+  assert.equal(payload.multi_editable, true);
+  assert.equal(payload.reuse_ok, true, "assignments from earlier queries persist in the namespace");
+  assert.equal(payload.reuse_value, 2);
+  assert.equal(payload.boom_ok, false);
+  assert.equal(payload.boom_err, true, "a failing expression returns an error, not a crash");
+  assert.deepEqual(payload.scalar_cols, ["value"]);
+  assert.equal(payload.scalar_value, 4, "a scalar result becomes a single value cell");
 });
 
 /** Runs Python that loads the backend module as `mod` and prints one JSON line. */

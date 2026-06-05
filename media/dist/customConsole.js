@@ -9439,8 +9439,11 @@ var inputPrompt = document.getElementById("inputPrompt");
 var inputPromptText = inputPrompt && inputPrompt.querySelector(".promptMark");
 var pythonCell = document.getElementById("pythonCell");
 var statusText = document.getElementById("statusText");
+var transport = document.getElementById("transport");
+var transportInfo = document.getElementById("transportInfo");
 var fitAddon;
 var geometryFrame = 0;
+var lastGeometryKey = "";
 var pendingExecution = 0;
 var snapshotWritten = false;
 var e2eSawShellPrompt = false;
@@ -9453,6 +9456,7 @@ function main() {
   window.addEventListener("message", (event) => handleHostMessage(event.data || {}));
   focusTerminalButton.addEventListener("click", () => terminal.focus());
   document.getElementById("restart").addEventListener("click", () => vscode.postMessage({ type: "restart" }));
+  transport?.addEventListener("change", () => vscode.postMessage({ mode: transport.value, type: "setTransport" }));
   vscode.postMessage({ type: "ready" });
 }
 function mountTerminal() {
@@ -9564,6 +9568,10 @@ function handleHostMessage(message) {
   if (message.type === "terminalStatus" && message.snapshot) {
     updateStatus(message.snapshot);
   }
+  if (message.type === "transport" && transport) {
+    transport.value = message.mode || "pty";
+    transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">\u25CF ORM cell</span>' : message.active === "tcp" ? '<span class="on">\u25CF socket</span>' : message.active === "pty" ? '<span class="pty">\u25CF terminal</span>' : '<span class="off">\u25CB not connected</span>';
+  }
   if (message.type === "pythonStarted" && Number.isFinite(message.execution)) {
     pendingExecution = message.execution;
     setInputPrompt(`In [${pendingExecution}]:`);
@@ -9642,9 +9650,15 @@ function scheduleEditorGeometry() {
 }
 function sendEditorGeometry() {
   const rect = editorGeometry();
-  if (rect) {
-    vscode.postMessage({ rect, type: "editorGeometry" });
+  if (!rect) {
+    return;
   }
+  const key = `${rect.left}:${rect.top}:${rect.width}:${rect.height}`;
+  if (key === lastGeometryKey) {
+    return;
+  }
+  lastGeometryKey = key;
+  vscode.postMessage({ rect, type: "editorGeometry" });
 }
 function editorGeometry() {
   if (!editorAnchor) {

@@ -4,8 +4,9 @@ import * as vscode from "vscode";
 import type { BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransport, BackendTransportMode } from "./backendClient";
 import type { CustomDjangoConsole } from "./customConsole";
 import { DiagnosticLogger } from "./diagnostics";
-import type { BackendCommitResult, BackendModelCount, BackendModelList, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitQuery, ModelCountQuery, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import type { BackendCommitResult, BackendModelCount, BackendModelList, BackendModelLookup, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { ModelBrowser } from "./modelBrowser";
+import { ModelQueryConsole } from "./modelQueryConsole";
 import { ModelCatalog } from "./modelCatalog";
 import { NOTEBOOK_TYPE } from "./notebookConstants";
 import { DjangoConsoleSerializer } from "./notebookSerializer";
@@ -68,6 +69,11 @@ class LazyRuntimeSource implements vscode.Disposable {
     return this.console?.activeBackend?.modelRelated(query) ?? Promise.resolve({ columns: [], error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, orm: "", rows: [], single: false, sql: [] });
   }
 
+  /** Returns foreign-key picker candidates or an idle status without starting a shell. */
+  modelLookup(query: ModelLookupQuery): Promise<BackendModelLookup> {
+    return this.console?.activeBackend?.modelLookup(query) ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, rows: [], sql: [] });
+  }
+
   /** Returns the row count or an idle status without starting a shell. */
   modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
     return this.console?.activeBackend?.modelCount(query) ?? Promise.resolve({ count: null, error: MODEL_IDLE_MESSAGE, ok: false, orm: "", sql: [] });
@@ -76,6 +82,11 @@ class LazyRuntimeSource implements vscode.Disposable {
   /** Commits staged edits or returns an idle status without starting a shell. */
   modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult> {
     return this.console?.activeBackend?.modelCommit(query) ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, ok: false, orm: "", results: [], saved: 0, sql: [] });
+  }
+
+  /** Runs a custom ORM query or returns an idle status without starting a shell. */
+  modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery> {
+    return this.console?.activeBackend?.modelQuery(query) ?? Promise.resolve({ columns: [], editable: false, error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, orm: "", relations: [], rows: [], sql: [] });
   }
 
   /** Sets the model browser transport preference on the active backend. */
@@ -100,6 +111,11 @@ class LazyRuntimeSource implements vscode.Disposable {
 export function activate(context: vscode.ExtensionContext): void {
   const output = lazyOutputChannel(context);
   const diagnostics = new DiagnosticLogger(output);
+  if (diagnostics.enabled()) {
+    const channel = output();
+    channel.appendLine(`[${new Date().toISOString()}] diagnostics.active — logging the shell session (shell.out), backend requests, and overlay activity. Set djangoShell.diagnosticLogging=false to disable.`);
+    channel.show(true);
+  }
   const runtimeSource = new LazyRuntimeSource();
   const runtimeInspector = new RuntimeInspector(runtimeSource, diagnostics);
   context.subscriptions.push(runtimeSource);
@@ -107,6 +123,8 @@ export function activate(context: vscode.ExtensionContext): void {
   registerCustomConsoleEntryPoints(context, diagnostics, runtimeSource);
   const modelBrowser = new ModelBrowser(context.extensionPath, runtimeSource, diagnostics);
   modelBrowser.activate(context);
+  const modelQueryConsole = new ModelQueryConsole(context.extensionPath, runtimeSource, diagnostics);
+  modelQueryConsole.activate(context);
   const modelCatalog = new ModelCatalog(context.extensionPath, runtimeSource, diagnostics);
   modelCatalog.activate(context);
   if (process.env.DJANGO_SHELL_E2E === "1") {
@@ -121,8 +139,16 @@ export function activate(context: vscode.ExtensionContext): void {
   }
   registerDeprecatedNotebookEntryPoints(context, diagnostics);
   context.subscriptions.push(
-    vscode.commands.registerCommand("djangoShell.showEnvironment", () => showEnvironment(output()))
+    vscode.commands.registerCommand("djangoShell.showEnvironment", () => showEnvironment(output())),
+    vscode.commands.registerCommand("djangoShell.showDiagnostics", () => showDiagnostics(output()))
   );
+}
+
+/** Enables diagnostic logging and reveals the Django Shell output channel for troubleshooting. */
+async function showDiagnostics(channel: vscode.OutputChannel): Promise<void> {
+  await vscode.workspace.getConfiguration("djangoShell").update("diagnosticLogging", true, vscode.ConfigurationTarget.Global);
+  channel.appendLine(`[${new Date().toISOString()}] diagnostics.enabled — logging overlay geometry/show, backend requests, and PTY cells (set djangoShell.diagnosticLogging=false to stop)`);
+  channel.show(true);
 }
 
 /** Removes generated file-backed provider artifacts when VS Code unloads the extension. */

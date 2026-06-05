@@ -2,6 +2,7 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
+import type { BackendModelList } from "./modelBackend";
 import type { ModelDataSource } from "./modelBrowser";
 import { modelCatalogHtml } from "./modelCatalogHtml";
 import { DiagnosticLogger } from "./diagnostics";
@@ -13,11 +14,15 @@ interface CatalogMessage {
 }
 
 const VIEW_ID = "djangoShell.modelCatalog";
+const CATALOG_LOAD_RETRIES = 4;
+const CATALOG_RETRY_BASE_MS = 500;
 
 /** Renders a searchable, filterable list of models that opens the data browser on selection. */
 export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private view: vscode.WebviewView | undefined;
+  private loadToken = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** Stores the extension path and the model data source. */
   constructor(private readonly extensionPath: string, private readonly source: ModelDataSource, private readonly logger?: DiagnosticLogger) {}
@@ -26,8 +31,8 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
   activate(context: vscode.ExtensionContext): void {
     this.disposables.push(
       vscode.window.registerWebviewViewProvider(VIEW_ID, this, { webviewOptions: { retainContextWhenHidden: true } }),
-      vscode.commands.registerCommand("djangoShell.refreshModelCatalog", () => this.postModels()),
-      this.source.onDidChangeRuntime(() => this.postModels())
+      vscode.commands.registerCommand("djangoShell.refreshModelCatalog", () => this.refresh()),
+      this.source.onDidChangeRuntime(() => this.refresh())
     );
     context.subscriptions.push(this);
   }
@@ -41,8 +46,9 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
     view.onDidDispose(() => { this.view = undefined; }, undefined, this.disposables);
   }
 
-  /** Releases provider listeners. */
+  /** Releases provider listeners and any pending retry. */
   dispose(): void {
+    this.clearRetry();
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
@@ -51,20 +57,46 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
   /** Routes one message from the catalog webview. */
   private async handleMessage(message: CatalogMessage): Promise<void> {
     if (message.type === "ready") {
-      await this.postModels();
+      this.refresh();
     } else if (message.type === "open" && message.app && message.model) {
       await vscode.commands.executeCommand("djangoShell.openModelData", { app: message.app, model: message.model });
     }
   }
 
-  /** Loads the model catalog and posts it to the webview. */
-  private async postModels(): Promise<void> {
-    if (!this.view) {
+  /** Reloads the catalog, superseding any in-flight load or pending retry. */
+  private refresh(): void {
+    this.loadToken += 1;
+    this.clearRetry();
+    void this.load(this.loadToken, 0);
+  }
+
+  /** Loads the catalog and posts it; a just-started shell may not serve the first introspection cleanly, so a failed load retries briefly until the runtime settles. */
+  private async load(token: number, attempt: number): Promise<void> {
+    if (!this.view || token !== this.loadToken) {
       return;
     }
     const started = Date.now();
-    const list = await this.source.listModels();
-    this.logger?.log("model.catalog.load", { models: list.models.length, ms: Date.now() - started, ok: list.ok });
+    let list: BackendModelList;
+    try {
+      list = await this.source.listModels();
+    } catch (error) {
+      list = { error: error instanceof Error ? error.message : String(error), models: [], ok: false };
+    }
+    if (!this.view || token !== this.loadToken) {
+      return;
+    }
+    this.logger?.log("model.catalog.load", { attempt, models: list.models.length, ms: Date.now() - started, ok: list.ok });
     void this.view.webview.postMessage({ error: list.error, models: list.models, ok: list.ok, type: "models" });
+    if (!list.ok && attempt < CATALOG_LOAD_RETRIES) {
+      this.retryTimer = setTimeout(() => { this.retryTimer = undefined; void this.load(token, attempt + 1); }, CATALOG_RETRY_BASE_MS * (attempt + 1));
+    }
+  }
+
+  /** Cancels any scheduled catalog reload. */
+  private clearRetry(): void {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
   }
 }

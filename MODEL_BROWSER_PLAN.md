@@ -3,7 +3,7 @@
 Django Shell 익스텐션에 **모델을 테이블처럼 조회·필터·편집하는 데이터 브라우저**를 추가한다.
 SQL 클라이언트(DBeaver/TablePlus)와 유사한 경험을 라이브 Django ORM 위에서 제공한다.
 
-> **상태 (2026-06-03):** 확정 결정 — manager 기본값 `_base_manager`, 편집은 ORM `save()` 레벨. **P1(읽기 전용 뷰어)·P2(필터/정렬/count) 구현 완료**(실제 Django 검증: 단일 SELECT·FK=id·keyset·관계 lazy·필터 injection 불가·boolean 문자열 변환·count 일관성). **P3(편집) 미착수 — 다음 단계.**
+> **상태 (2026-06-04):** 확정 결정 — manager 기본값 `_base_manager`, 편집은 ORM `save()` 레벨. **P1(읽기 전용 뷰어)·P2(필터/정렬/count) 구현 완료**(실제 Django 검증: 단일 SELECT·FK=id·keyset·관계 lazy·필터 injection 불가·boolean 문자열 변환·count 일관성). **P3a(인라인 편집) 완료**(§5 참조). **편집 UX 개선 완료** — 셀 편집기를 필드 타입별 입력 컨트롤로 교체(§6.1) + FK 검색 피커(신규 `lookup` kind). **커스텀 ORM 쿼리 콘솔 완료**(§6.2) — 별도 패널에서 사용자 ORM 코드 결과를 그리드로 렌더(신규 `query` kind, 가능 시 편집). **다음: P3b(행 생성/삭제)·P3c(M2M).**
 >
 > **부트스트랩 정정:** 백엔드는 단일 `.py` 소스를 인라인 압축·임베드해 실행하므로(`backendBootstrap.inlineBackendBootstrap`) 별도 파이썬 모듈은 셸에서 import되지 않는다. 따라서 모델 브라우저 백엔드 로직은 `python/django_shell_backend.py`에 새 함수 + 새 `kind` 분기로 추가했다(기존 함수/분기 불변 → 여전히 additive).
 
@@ -67,6 +67,8 @@ src/modelCatalog.ts  (트리)  ─┤→ BackendClient (신규 메서드)
 | `schema` | `{app, model}` | 컬럼(타입/null/editable/choices) + 관계(FK/O2O/M2M/reverse) | `_meta`만, 쿼리 0회 |
 | `rows` | `{app, model, limit, cursor?/offset?, order?, filters?}` | `{columns, rows, nextCursor, count?}` | `.values()` JOIN 없음 |
 | `related` | `{app, model, pk, relation, limit, cursor?}` | 관련 행 페이지 | 펼침 시 1회, bounded |
+| `lookup` | `{app, model, q, limit?, exclude?}` | `{ok, rows:[{pk, label}], hasMore}` | FK 검색 피커. 단일 SELECT, `__str__`/JOIN 없음 |
+| `query` | `{code, limit?, offset?}` | `{ok, columns, rows, hasMore, editable, model?, app?, pk?, orm, sql, error?}` | 커스텀 ORM 콘솔. 셸 네임스페이스에서 멀티라인 eval → 마지막 표현식 테이블화 |
 | `mutate` | `{op, app, model, pk?, changes, expected?}` | `{ok, row?, error?, validation?}` | P3. 트랜잭션 |
 
 ### 3.1 N+1 차단 — 행 조회 핵심
@@ -135,6 +137,29 @@ page = list(qs[offset:offset + limit])                 # 단일 SELECT
 ### P3 — 편집 (목표)
 세부는 §6. 인라인 편집 → "변경 사항" 스테이징 → 트랜잭션 커밋.
 - **P3a ✅ 완료**: concrete 필드 + FK(id) 인라인 편집. **커밋 전까지 서버에 아무 요청/쿼리도 안 보냄**(웹뷰 메모리 스테이징 `pending` Map + dirty 셀). 여러 셀/행 bulk 편집 → **Commit (N)** 한 번에 `commit` kind로 전송 → 백엔드가 전부 `full_clean()` 검증(all-or-nothing) 후 `transaction.atomic()`로 `save(update_fields=...)`. 실패 시 전체 롤백 + 필드별 에러 반환. boolean 문자열 변환, 비편집/PK/auto 필드 거부. 커밋 SQL/ORM은 쿼리 로그에 표시. (프론트: dblclick 인라인 입력, `media/gridEdit.js`; 핀은 `media/gridPin.js`로 분리.) 실제 Django 단위 테스트 추가.
+
+#### 6.1 편집 UX — 필드 타입별 입력 컨트롤 (✅ 완료)
+모든 셀이 textinput이던 것을 필드 타입에 맞는 입력기로 교체. 백엔드 스키마가 이미 `type`/`choices`/`null`을 보내므로 **대부분 프론트 변경**(`media/gridEdit.js`):
+- **choices(이넘)** → `<select>` 드롭다운(`[value,label]` + nullable이면 `(null)`), 선택 즉시 스테이징. 스테이징된 choice 셀은 값(key) 대신 **라벨**로 표시(`stagedDisplay`).
+- **BooleanField** → `true`/`false` 드롭다운(nullable이면 `(null)`).
+- **Date/DateTime/Time** → 네이티브 `<input type=date|datetime-local|time>`. `normalizeTemporal`이 저장된 ISO 값(타임존/마이크로초 제거, 공백→`T`)을 입력기가 받는 형태로 정규화.
+- 그 외 → 기존 텍스트 입력 유지. Enter/blur 커밋, Esc 취소, 드롭다운은 change 시 커밋.
+- **FK 검색 피커** (`media/gridFkPicker.js` + 신규 `lookup` kind): FK 셀 더블클릭 시 raw-id 입력 대신 **검색 입력 + 라이브 후보 드롭다운**. 입력 디바운스(200ms) → `lookupRelated` → 패널이 `lookup` 호출 → 후보 `[{pk,label}]` 반환. ↑/↓ + Enter 또는 클릭으로 선택 → pk를 `<field>_id` attname에 스테이징(기존 커밋 경로 그대로). raw id 직접 입력도 가능. 백엔드 `_browse_lookup`은 텍스트 필드 `icontains` OR + 숫자면 pk exact, **단일 `.values()` SELECT**(JOIN/`__str__` 없음), 라벨 `#<pk> · <텍스트필드>`. FK lookup은 키 입력마다 발생하므로 **SQL 로그에는 안 남김**(노이즈 방지).
+  - **민감 필드**: 기본은 **모든 텍스트 필드 노출**(하드코딩 제외 없음). 유저 설정 `djangoShell.modelBrowser.lookupExcludeFields`(string[], 기본 `[]`)의 부분문자열(대소문자 무시)에 매칭되는 필드만 검색/라벨에서 제외 → 패널이 설정을 읽어 `lookup` 요청의 `exclude`로 전달.
+
+#### 6.2 커스텀 ORM 쿼리 콘솔 (✅ 완료)
+사용자가 작성한 Django ORM 코드의 결과를 **기존 그리드 UI로** 렌더링하는 **별도 webview 패널**. 명령 `djangoShell.runModelQuery`("Run ORM Query")로 진입 — **Models 뷰 타이틀의 ▶ 버튼**(`view/title` 메뉴)으로도 진입(발견성). 컨트롤러 `src/modelQueryConsole.ts`(신규)는 `modelBrowserHtml`을 재사용해 동일 번들 로드 → `{type:"queryMode"}`로 그리드를 쿼리 모드로 전환(쿼리바 표시, 필터/Count 숨김; `media/gridQuery.js`).
+- **실행**: 신규 백엔드 kind `query` → `_browse_query(namespace, request)`. `_browse_eval_last`가 `_split_last_expression`+exec/eval(=`_execute_code` 패턴)으로 **라이브 셸 네임스페이스**에서 멀티라인 평가 → 마지막 표현식 값. `_browse_tabulate`가 결과 타입 분석: 인스턴스 QuerySet(단일 모델·pk → `editable`, `.values()` 단일 SELECT, FK=`_id`), `.values()`/`.values_list(flat)`(읽기전용), 단일 인스턴스(편집 가능), list/제너레이터(`itertools.islice` bound, 읽기전용), 스칼라(단일 `value` 컬럼). 전부 `limit+1` bound, `_browse_cell` 직렬화(암묵적 `__str__` 없음), `orm`=코드 원문, `sql`=`_browse_capture`.
+- **렌더**: 패널이 결과를 `schema`(relations:[]) + `rows` 메시지로 합성 전송 → 기존 `onSchema`/`onRows`/`buildCell`/`createEditor`가 **무수정** 렌더. offset 페이지네이션(`loadMore`), Reload=lastCode 재실행.
+- **편집**: 결과가 `editable`(+`app`/`model`)이면 기존 인라인 편집/Commit 그대로 → 패널이 `commitEdits`에 쿼리 결과의 app/model 부착해 `commit` kind 재사용(모델 비종속). 그 외 읽기전용.
+- **안전/주의**: 이건 *명시적 사용자 eval*(셸 도구 특성) — 그리드의 "암묵적 eval/`__str__` 금지" 원칙과 별개. 멀티라인 할당/임포트는 셸 네임스페이스에 반영(=콘솔과 동일, 의도적). `namespace["_"]`는 미설정. PTY 폴백 등록(터미널에서도 동작).
+
+#### 6.4 페이지 크기 선택 + 쿼리 결과 관계 (✅ 완료)
+- **페이지네이션 설정**: 하단바에 rows-per-page `<select>`(50/100/500/1000/5000/10000/all). 웹뷰가 선택값을 모든 로드 메시지(reload/loadMore/applyQuery/runQuery)에 `pageSize`로 첨부 → 패널이 `limit`으로 사용. 백엔드 `_browse_limit(..., maximum=None)`으로 rows/query는 캡 해제(related/lookup은 캡 유지). "all"=거대 sentinel(1e9) → 슬라이스로 전체 로드, PTY에선 25로 자동 축소.
+- **쿼리 결과 FK 역참조**: 인스턴스 QuerySet/단일 인스턴스 tabulation에 `_browse_relations(model)` 포함 → 쿼리 콘솔도 모델 브라우저처럼 역참조 FK/M2M를 펼침 칼럼으로 표시. 쿼리 패널이 `expandRelated`(결과의 app/model 사용) + `openModel`(→ `openModelData` 명령) 처리.
+
+#### 6.3 멀티탭 (✅ 완료)
+모델 그리드·쿼리 콘솔 모두 **매 open마다 독립 패널(탭)** 생성으로 전환. 기존 단일-재사용 패널을 **매니저 + per-tab 패널** 구조로 리팩터: `ModelBrowser`(명령 등록·패널 집합) + `ModelBrowserPanel`(패널 1개의 filters/order/cursor/offset/편집 상태), `ModelQueryConsole` + `ModelQueryPanel`(lastCode/offset/editTarget). 각 패널은 `disposed` 가드 + `onDidDispose`로 매니저 집합에서 자가 제거, FK "open ↗"은 **새 탭**으로 열림(`openAnother`). 런타임 변경 시 열린 모든 탭을 reload/재실행. 여러 모델·여러 커스텀 조인을 동시에 비교 가능.
 - P3b: 행 생성, 행 삭제(cascade 미리보기 + 강한 확인).
 - P3c: M2M `set/add/remove`.
 - **완료 기준**: 검증 통과 시에만 저장, 실패 시 필드별 에러 표시, 트랜잭션 원자성, 신호(signals) 발화.

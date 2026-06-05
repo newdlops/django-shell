@@ -2,7 +2,7 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
-import type { BackendClient, BackendExecutionResult, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment } from "./backendClient";
+import type { BackendClient, BackendExecutionResult, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransportMode } from "./backendClient";
 import { webviewHtml } from "./customConsoleHtml";
 import { DiagnosticLogger } from "./diagnostics";
 import { closeWorkspaceGeneratedOverlayTabs, scheduleWorkspaceGeneratedOverlayTabCleanup } from "./generatedOverlayTabs";
@@ -40,6 +40,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private lastRenderedOutput: Record<string, unknown> | undefined;
   private lastPythonResult: { execution: number; ok: boolean; text: string } | undefined;
   private panelVisible = false;
+  private selectedTransport: BackendTransportMode | undefined;
   private preludeRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private preludeRetryAttempt = 0;
 
@@ -250,24 +251,32 @@ export class CustomDjangoConsole implements vscode.Disposable {
       this.overlayPrelude = [];
       void (this.overlay ? this.overlay.reset() : this.resetOverlayBackingFiles());
       this.runtimeEmitter.fire();
+      this.postTransport();
       return;
     }
     if (!snapshot.ready || this.runtimeReady) { return; }
     this.runtimeReady = true;
+    if (this.selectedTransport) { this.session?.backend?.setTransportMode(this.selectedTransport); }
     this.runtimeGeneration += 1;
     this.preludeRetryAttempt = 0;
     this.runtimeEmitter.fire();
     void this.updateOverlayPrelude(this.runtimeGeneration);
     scheduleWorkspaceGeneratedOverlayTabCleanup();
     this.post({ show: true, type: "measureEditor" });
+    this.postTransport();
   }
 
   /** Handles messages sent by the custom console webview. */
   private async handleMessage(message: unknown): Promise<void> {
-    const typed = message as { code?: string; cols?: number; data?: string; execution?: number; ok?: boolean; rect?: unknown; rows?: number; text?: string; type?: string };
+    const typed = message as { code?: string; cols?: number; data?: string; execution?: number; mode?: string; ok?: boolean; rect?: unknown; rows?: number; text?: string; type?: string };
     if (typed.type === "ready") {
       this.postStatus();
+      this.postTransport();
       this.post({ show: this.runtimeReady, type: "measureEditor" });
+      return;
+    }
+    if (typed.type === "setTransport" && typeof typed.mode === "string") {
+      this.applyTransport(typed.mode as BackendTransportMode);
       return;
     }
     if (typed.type === "editorGeometry") {
@@ -333,6 +342,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.lastPythonResult = { execution, ok: result.ok, text };
     this.post({ execution, ok: result.ok, text, type: "pythonResult" });
     void this.overlay?.postOutput(text, result.ok);
+    this.postTransport();
     this.scheduleRuntimeRefresh();
     void closeWorkspaceGeneratedOverlayTabs().catch(() => undefined);
     return true;
@@ -477,6 +487,26 @@ export class CustomDjangoConsole implements vscode.Disposable {
     if (snapshot) {
       this.post({ snapshot, type: "terminalStatus" });
     }
+  }
+
+  /** Posts the active connection transport and selected mode so the Python cell selector stays in sync. */
+  private postTransport(): void {
+    const backend = this.session?.backend;
+    const setting = vscode.workspace.getConfiguration("djangoShell").get<string>("modelBrowser.transport", "pty");
+    const fallback = ["auto", "tcp", "pty", "orm"].includes(setting) ? (setting as BackendTransportMode) : "pty";
+    const mode = backend?.transportMode ?? this.selectedTransport ?? fallback;
+    this.post({ active: backend?.transport ?? "none", mode, type: "transport" });
+  }
+
+  /** Applies a user-selected connection transport to the live backend and remembers it for reattach. */
+  private applyTransport(mode: BackendTransportMode): void {
+    if (!["auto", "tcp", "pty", "orm"].includes(mode)) {
+      return;
+    }
+    this.selectedTransport = mode;
+    this.session?.backend?.setTransportMode(mode);
+    this.logger?.log("console.transport", { active: this.session?.backend?.transport ?? "none", mode });
+    this.postTransport();
   }
 
   /** Posts one message to the active webview when it is still open. */

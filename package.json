@@ -2,7 +2,7 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "0.0.8",
+  "version": "0.0.901",
   "publisher": "newdlops",
   "license": "UNLICENSED",
   "icon": "media/icon.png",
@@ -53,8 +53,10 @@
     "onCommand:djangoShell.overlayInsertNewline",
     "onCommand:djangoShell.refreshInspector",
     "onCommand:djangoShell.refreshModelCatalog",
+    "onCommand:djangoShell.runModelQuery",
     "onCommand:djangoShell.showOverlayEditor",
     "onCommand:djangoShell.showEnvironment",
+    "onCommand:djangoShell.showDiagnostics",
     "onNotebook:django-shell-console",
     "onView:djangoShell.modelCatalog",
     "onView:djangoShell.runtimeInspector",
@@ -93,6 +95,12 @@
         "icon": "$(info)"
       },
       {
+        "command": "djangoShell.showDiagnostics",
+        "title": "Django Shell: Show Diagnostics Log",
+        "category": "Django Shell",
+        "icon": "$(output)"
+      },
+      {
         "command": "djangoShell.refreshInspector",
         "title": "Django Shell: Refresh Runtime Inspector",
         "category": "Django Shell",
@@ -103,6 +111,12 @@
         "title": "Django Shell: Browse Model Data",
         "category": "Django Shell",
         "icon": "$(table)"
+      },
+      {
+        "command": "djangoShell.runModelQuery",
+        "title": "Django Shell: Run ORM Query",
+        "category": "Django Shell",
+        "icon": "$(play)"
       },
       {
         "command": "djangoShell.refreshModelCatalog",
@@ -165,6 +179,9 @@
           "command": "djangoShell.openModelData"
         },
         {
+          "command": "djangoShell.runModelQuery"
+        },
+        {
           "command": "djangoShell.openNotebookConsoleDeprecated"
         },
         {
@@ -205,8 +222,13 @@
           "when": "view == djangoShell.modelCatalog"
         },
         {
-          "command": "djangoShell.refreshModelCatalog",
+          "command": "djangoShell.runModelQuery",
           "group": "navigation@2",
+          "when": "view == djangoShell.modelCatalog"
+        },
+        {
+          "command": "djangoShell.refreshModelCatalog",
+          "group": "navigation@3",
           "when": "view == djangoShell.modelCatalog"
         }
       ]
@@ -254,6 +276,11 @@
           "default": true,
           "description": "When true, Django console setup terminals prepend a workspace .venv or venv to PATH and set VIRTUAL_ENV."
         },
+        "djangoShell.autoImportModels": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true (default), the Django shell binds your workspace's model classes (and django/apps/settings/models) into the shell namespace at startup, like shell_plus, so names visible in the editor analysis prelude are actually importable. Set to false to keep a plain `manage.py shell` namespace."
+        },
         "djangoShell.enableCodeActions": {
           "type": "boolean",
           "default": false,
@@ -271,8 +298,28 @@
         },
         "djangoShell.diagnosticLogging": {
           "type": "boolean",
-          "default": false,
-          "description": "When true, Django Shell writes runtime, source analysis, and editor bridge timing diagnostics to its output channel."
+          "default": true,
+          "description": "When true (default), Django Shell logs the shell session, backend requests, and overlay activity to its 'Django Shell' output channel for diagnosis. Set to false to disable."
+        },
+        "djangoShell.modelBrowser.lookupExcludeFields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Field-name substrings to hide from the model browser's foreign-key picker search and labels (case-insensitive, e.g. `password`, `token`). By default every text field is shown; add entries here to keep sensitive values out of the picker."
+        },
+        "djangoShell.modelBrowser.transport": {
+          "type": "string",
+          "enum": ["auto", "tcp", "pty", "orm"],
+          "enumDescriptions": [
+            "Auto: prefer the loopback socket, fall back to the terminal — nothing is typed into the shell when the socket is reachable.",
+            "Socket: prefer the loopback socket (nothing typed); falls back to the terminal only when the socket is unreachable, e.g. a remote SSH/kubectl shell.",
+            "Terminal: force the terminal transport (compact `_djs_rpc(...)` lines, scrubbed from history).",
+            "ORM: run model-browser reads as your own literal Django ORM cells in the shell so a live pre_run_cell audit logs Django ORM, not RPC plumbing (execute still uses the socket when reachable). Requires shell_plus/IPython."
+          ],
+          "default": "pty",
+          "markdownDescription": "Default transport for the model data browser. **Terminal** (default) routes every read through the interactive shell (compact `_djs_rpc`/ORM cells, scrubbed from history) and works everywhere — including remote SSH/kubectl shells where the loopback socket is unreachable; **Auto** prefers the loopback socket and falls back to the terminal — nothing is typed into the shell when the socket is reachable; **Socket** prefers the socket but also falls back to the terminal when it is unreachable (e.g. a remote shell); **ORM** types each model-browser read as your own Django ORM cell so a server-side `pre_run_cell` audit shows ORM (requires shell_plus/IPython). Switchable per-panel from the `Link:` selector."
         }
       }
     },

@@ -23,13 +23,19 @@ body{margin:0;font-family:var(--vscode-font-family);color:var(--vscode-foregroun
 button{color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0;border-radius:4px;padding:3px 9px;font:inherit;cursor:pointer}
 button.secondary{color:var(--vscode-foreground);background:var(--vscode-button-secondaryBackground)}
 .transport{font:inherit;font-size:11px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:4px;padding:2px 4px;cursor:pointer}
+.pagesize{display:inline-flex;align-items:center;font-size:12px;color:var(--vscode-descriptionForeground);white-space:nowrap}
 .transportInfo{font-size:11px;color:var(--vscode-descriptionForeground);white-space:nowrap}
 .transportInfo .on{color:var(--vscode-terminal-ansiGreen,var(--vscode-charts-green,#3fb950))}
 .transportInfo .pty{color:var(--vscode-charts-yellow,#cca700)}
 .transportInfo .off{color:var(--vscode-errorForeground)}
 button:hover{background:var(--vscode-button-hoverBackground)}
 button:disabled{opacity:.5;cursor:default}
-.filterbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 12px;border-bottom:1px solid var(--vscode-panel-border)}
+.filterbar{grid-row:2;display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 12px;border-bottom:1px solid var(--vscode-panel-border)}
+.filterbar[hidden]{display:none}
+.querybar{grid-row:2;display:flex;gap:8px;align-items:flex-start;padding:6px 12px;border-bottom:1px solid var(--vscode-panel-border)}
+.querybar[hidden]{display:none}
+.queryinput{flex:1;min-height:46px;resize:vertical;font-family:var(--vscode-editor-font-family);font-size:12px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,var(--vscode-panel-border));border-radius:3px;padding:4px 6px;outline:none}
+.queryinput:focus{border-color:var(--vscode-focusBorder)}
 .filterbar .grow{flex:1}
 .terms{display:flex;flex-wrap:wrap;gap:6px}
 .term{display:inline-flex;align-items:center;gap:4px;padding:2px 4px;border:1px solid var(--vscode-panel-border);border-radius:6px}
@@ -43,6 +49,8 @@ th .sortarrow{margin-left:4px;color:var(--vscode-textLink-foreground)}
 table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;font-family:var(--vscode-editor-font-family);font-size:12px;border-left:1px solid var(--vscode-panel-border)}
 th,td{border-right:1px solid var(--vscode-panel-border);border-bottom:1px solid var(--vscode-panel-border);padding:3px 8px;text-align:left;white-space:nowrap;max-width:380px;overflow:hidden;text-overflow:ellipsis;vertical-align:top}
 th{position:sticky;top:0;background-color:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));z-index:2;cursor:pointer}
+.colresize{position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize;user-select:none;z-index:4}
+.colresize:hover{background:var(--vscode-focusBorder)}
 .pinned{position:sticky;z-index:1;background-color:var(--vscode-editor-background)}
 th.pinned{z-index:3;background-color:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));box-shadow:1px 0 0 var(--vscode-panel-border)}
 td.pinned{background-color:var(--vscode-editor-background);box-shadow:1px 0 0 var(--vscode-panel-border)}
@@ -58,6 +66,11 @@ tr:hover td{background:var(--vscode-list-hoverBackground)}
 td.editable{cursor:text}
 td.dirty{background-color:var(--vscode-inputValidation-warningBackground,rgba(255,196,0,.14))!important;box-shadow:inset 2px 0 0 var(--vscode-inputValidation-warningBorder,var(--vscode-charts-yellow,#cca700))}
 .celledit{width:100%;box-sizing:border-box;font:inherit;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-focusBorder);border-radius:2px;padding:1px 3px;outline:none}
+.fkpick{position:relative}
+td:has(.fkpick){overflow:visible}
+.fkresults{position:absolute;left:0;top:100%;z-index:30;min-width:100%;max-width:360px;max-height:240px;overflow-y:auto;background:var(--vscode-editorWidget-background,var(--vscode-editor-background));border:1px solid var(--vscode-editorWidget-border,var(--vscode-focusBorder));border-radius:2px;box-shadow:0 2px 8px rgba(0,0,0,.35)}
+.fkopt{padding:2px 6px;white-space:nowrap;cursor:pointer}
+.fkopt.active,.fkopt:hover{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}
 .cellnull{color:var(--vscode-descriptionForeground);font-style:italic}
 .tag{color:var(--vscode-descriptionForeground)}
 .fk{display:inline-flex;align-items:center;gap:6px}
@@ -111,10 +124,15 @@ td.dirty{background-color:var(--vscode-inputValidation-warningBackground,rgba(25
       <option value="auto">Link: Auto</option>
       <option value="tcp">Link: Socket</option>
       <option value="pty">Link: Terminal</option>
+      <option value="orm">Link: ORM</option>
     </select>
     <button id="logToggle" class="secondary" type="button" title="Toggle the query log (Django ORM + SQL)">Query Log</button>
     <button id="reload" class="secondary" type="button">Reload</button>
   </header>
+  <div class="querybar" id="querybar" hidden>
+    <textarea id="queryinput" class="queryinput" rows="3" spellcheck="false" placeholder="User.objects.filter(is_active=True)   —   Ctrl/Cmd+Enter to run"></textarea>
+    <button id="runQuery" type="button">Run</button>
+  </div>
   <div class="filterbar" id="filterbar">
     <button id="addFilter" class="secondary" type="button">+ Filter</button>
     <span class="terms" id="filterterms"></span>
@@ -123,7 +141,7 @@ td.dirty{background-color:var(--vscode-inputValidation-warningBackground,rgba(25
     <button id="clearFilter" class="secondary" type="button">Clear</button>
   </div>
   <div class="gridwrap" id="gridwrap"><div class="empty" id="placeholder">Select a model from the Django Shell catalog.</div></div>
-  <footer class="statusbar"><span id="status"></span><span id="countinfo"></span><span class="spacer"></span><button id="discard" class="secondary" type="button" disabled>Discard</button><button id="commit" type="button" disabled>Commit</button><button id="count" class="secondary" type="button">Count</button><button id="more" class="secondary" type="button" disabled>Load more</button></footer>
+  <footer class="statusbar"><span id="status"></span><span id="countinfo"></span><span class="spacer"></span><button id="discard" class="secondary" type="button" disabled>Discard</button><button id="commit" type="button" disabled>Commit</button><button id="count" class="secondary" type="button">Count</button><label class="pagesize">Rows&nbsp;<select id="pageSize" class="transport" title="Rows per page"><option value="50">50</option><option value="100">100</option><option value="500">500</option><option value="1000">1000</option><option value="5000">5000</option><option value="10000">10000</option><option value="all">all (not recommended)</option></select></label><button id="more" class="secondary" type="button" disabled>Load more</button></footer>
   <div class="logpanel" id="logpanel">
     <div class="loghead"><span>Query Log</span><span class="grow"></span><button id="logMode" class="secondary" type="button">View: SQL</button><button id="logClear" class="secondary" type="button">Clear</button></div>
     <div class="logbody mode-sql" id="logbody"></div>

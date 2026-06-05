@@ -1,12 +1,12 @@
 // Python feature bridge for the Django shell overlay editor.
 
+import * as path from "path";
 import * as vscode from "vscode";
 import { DiagnosticLogger } from "./diagnostics";
 import { closeGeneratedOverlayTabs } from "./generatedOverlayTabs";
 import { OverlayCompletionRequestCache } from "./overlayCompletionRequestCache";
 import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
 
-const SELECTOR: vscode.DocumentSelector = [{ language: "python", pattern: "**/.django-shell/console-cell.py", scheme: "file" }];
 const SEMANTIC_TOKEN_TYPES = ["namespace", "class", "function", "variable"];
 const SEMANTIC_LEGEND = new vscode.SemanticTokensLegend(SEMANTIC_TOKEN_TYPES);
 
@@ -19,15 +19,17 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   /** Stores memory documents used for visible and analysis text. */
   constructor(private readonly documents: OverlayMemoryDocument, private readonly logger?: DiagnosticLogger) { this.completionCache = new OverlayCompletionRequestCache(logger); }
 
-  /** Registers Python providers for the overlay editor URI. */
+  /** Registers Python providers for this instance's overlay editor file (console-cell.py or query-cell.py). */
   activate(context: vscode.ExtensionContext): void {
+    const file = path.basename(this.documents.editorUri.fsPath);
+    const selector: vscode.DocumentSelector = [{ language: "python", pattern: `**/.django-shell/${file}`, scheme: "file" }];
     this.disposables.push(
-      vscode.languages.registerCompletionItemProvider(SELECTOR, this, ".", "'", "\""),
-      vscode.languages.registerHoverProvider(SELECTOR, this),
-      vscode.languages.registerDefinitionProvider(SELECTOR, this),
-      vscode.languages.registerReferenceProvider(SELECTOR, this),
-      vscode.languages.registerDocumentHighlightProvider(SELECTOR, this),
-      vscode.languages.registerSignatureHelpProvider(SELECTOR, this, "(", ",")
+      vscode.languages.registerCompletionItemProvider(selector, this, ".", "'", "\""),
+      vscode.languages.registerHoverProvider(selector, this),
+      vscode.languages.registerDefinitionProvider(selector, this),
+      vscode.languages.registerReferenceProvider(selector, this),
+      vscode.languages.registerDocumentHighlightProvider(selector, this),
+      vscode.languages.registerSignatureHelpProvider(selector, this, "(", ",")
     );
     context.subscriptions.push(this);
   }

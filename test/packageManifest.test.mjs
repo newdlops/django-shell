@@ -17,8 +17,8 @@ test("restores v0.0.2 Python analysis defaults globally", () => {
   assert.deepEqual(manifest.contributes.configurationDefaults["[python]"], { "editor.semanticHighlighting.enabled": true });
 });
 
-test("keeps diagnostic logging off by default for lower idle overhead", () => {
-  assert.equal(manifest.contributes.configuration.properties["djangoShell.diagnosticLogging"].default, false);
+test("enables diagnostic logging by default so the shell session is captured for troubleshooting", () => {
+  assert.equal(manifest.contributes.configuration.properties["djangoShell.diagnosticLogging"].default, true);
 });
 
 test("keeps Python cell Enter from interrupting completion UI", () => {
