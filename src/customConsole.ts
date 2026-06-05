@@ -117,15 +117,15 @@ export class CustomDjangoConsole implements vscode.Disposable {
     return this.inspectionInFlight;
   }
 
-  /** Returns safe child summaries for one runtime object path. */
-  async inspectRuntimeChildren(pathSegments: BackendRuntimePathSegment[]): Promise<BackendRuntimeChildren> {
+  /** Returns safe child summaries for one runtime object path (kind routes pure-expression vs helper drill-down in ORM mode). */
+  async inspectRuntimeChildren(pathSegments: BackendRuntimePathSegment[], kind?: string): Promise<BackendRuntimeChildren> {
     if (!this.session?.backend) {
       return { children: [], error: "Open the Django Shell console and enter Django shell first.", ok: false };
     }
     if (!this.session.backend.supportsRuntimeInspection()) {
       return remoteRuntimeChildrenDisabled();
     }
-    return this.session.backend.children(pathSegments);
+    return this.session.backend.children(pathSegments, kind);
   }
 
   /** Returns the active backend client when a Django shell session is attached. */ get activeBackend(): BackendClient | undefined { return this.session?.backend; }
@@ -256,7 +256,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     }
     if (!snapshot.ready || this.runtimeReady) { return; }
     this.runtimeReady = true;
-    if (this.selectedTransport) { this.session?.backend?.setTransportMode(this.selectedTransport); }
+    this.session?.backend?.setTransportMode(this.selectedTransport ?? this.modelTransportSetting());
     this.runtimeGeneration += 1;
     this.preludeRetryAttempt = 0;
     this.runtimeEmitter.fire();
@@ -492,10 +492,14 @@ export class CustomDjangoConsole implements vscode.Disposable {
   /** Posts the active connection transport and selected mode so the Python cell selector stays in sync. */
   private postTransport(): void {
     const backend = this.session?.backend;
-    const setting = vscode.workspace.getConfiguration("djangoShell").get<string>("modelBrowser.transport", "pty");
-    const fallback = ["auto", "tcp", "pty", "orm"].includes(setting) ? (setting as BackendTransportMode) : "pty";
-    const mode = backend?.transportMode ?? this.selectedTransport ?? fallback;
+    const mode = backend?.transportMode ?? this.selectedTransport ?? this.modelTransportSetting();
     this.post({ active: backend?.transport ?? "none", mode, type: "transport" });
+  }
+
+  /** Returns the configured default model-browser transport, validated (defaults to ORM). */
+  private modelTransportSetting(): BackendTransportMode {
+    const setting = vscode.workspace.getConfiguration("djangoShell").get<string>("modelBrowser.transport", "orm");
+    return ["auto", "tcp", "pty", "orm"].includes(setting) ? (setting as BackendTransportMode) : "orm";
   }
 
   /** Applies a user-selected connection transport to the live backend and remembers it for reattach. */

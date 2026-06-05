@@ -159,24 +159,25 @@ function repaintPins(gridwrap, state2) {
   if (!headRow) {
     return;
   }
+  const lead = headRow.children[0] && headRow.children[0].classList.contains("rownum") ? 1 : 0;
   const lefts = {};
-  let offset = 0;
+  let offset = lead && headRow.children[0] ? headRow.children[0].offsetWidth : 0;
   for (let i = 0; i < state2.columns.length; i += 1) {
     if (state2.pinned.has(state2.columns[i].attname)) {
       lefts[i] = offset;
-      offset += headRow.children[i] ? headRow.children[i].offsetWidth : 0;
+      offset += headRow.children[i + lead] ? headRow.children[i + lead].offsetWidth : 0;
     }
   }
   for (let i = 0; i < state2.columns.length; i += 1) {
-    setPin(headRow.children[i], lefts[i]);
+    setPin(headRow.children[i + lead], lefts[i]);
   }
   if (body) {
     for (const row of body.children) {
-      if (row.classList.contains("detail")) {
+      if (!row.dataset.pk) {
         continue;
       }
       for (let i = 0; i < state2.columns.length; i += 1) {
-        setPin(row.children[i], lefts[i]);
+        setPin(row.children[i + lead], lefts[i]);
       }
     }
   }
@@ -415,6 +416,19 @@ function createEditor(ctx) {
     ctx.paintCell(td);
     ctx.onChange(pendingCount());
   }
+  function applyStaged(tr) {
+    const entry = pending.get(tr.dataset.pk);
+    if (!entry) {
+      return;
+    }
+    for (const td of tr.children) {
+      const attname = td.dataset && td.dataset.attname;
+      if (attname && Object.prototype.hasOwnProperty.call(entry.fields, attname)) {
+        td.dataset.staged = entry.fields[attname];
+        ctx.paintCell(td);
+      }
+    }
+  }
   function editForeignKey(td, column, start) {
     activePicker = openFkPicker(td, column, start, {
       allocId: () => lookupSeq += 1,
@@ -508,7 +522,7 @@ function createEditor(ctx) {
     pending.clear();
     ctx.onChange(0);
   }
-  return { commitEdits, discardEdits, editCell, handleResult, onLookup, pendingCount, reset };
+  return { applyStaged, commitEdits, discardEdits, editCell, handleResult, onLookup, pendingCount, reset };
 }
 
 // media/gridQuery.js
@@ -691,16 +705,148 @@ function buildEditableRelatedTable(result, deps) {
   return wrap;
 }
 
+// media/gridVirtual.js
+var OVERSCAN = 12;
+var RENDER_ALL_MAX = 80;
+var DEFAULT_ROW_H = 24;
+function createVirtualRows(ctx) {
+  let rows = [];
+  let rowH = DEFAULT_ROW_H;
+  let measured = false;
+  let renderedFirst = 0;
+  let renderedEnd = 0;
+  function isEditing() {
+    const active = document.activeElement;
+    return Boolean(active && ctx.scroller.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
+  }
+  function spacer(height) {
+    const tr = document.createElement("tr");
+    tr.className = "vspacer";
+    const td = document.createElement("td");
+    td.colSpan = ctx.columnSpan();
+    td.style.cssText = `padding:0;border:0;height:${Math.max(0, Math.round(height))}px`;
+    tr.appendChild(td);
+    return tr;
+  }
+  function windowRange() {
+    const top = ctx.scroller.scrollTop;
+    const viewH = ctx.scroller.clientHeight || 0;
+    const first = Math.max(0, Math.floor(top / rowH) - OVERSCAN);
+    const count = Math.ceil(viewH / rowH) + OVERSCAN * 2;
+    return { end: Math.min(rows.length, first + count), first };
+  }
+  function paintWindow(first, end) {
+    const body = ctx.getBody();
+    if (!body) {
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    if (first > 0) {
+      frag.appendChild(spacer(first * rowH));
+    }
+    for (let i = first; i < end; i += 1) {
+      frag.appendChild(ctx.buildRow(rows[i], i));
+    }
+    if (end < rows.length) {
+      frag.appendChild(spacer((rows.length - end) * rowH));
+    }
+    body.replaceChildren(frag);
+    renderedFirst = first;
+    renderedEnd = end;
+    if (!measured) {
+      measure(body);
+    }
+    afterRender();
+  }
+  function paintAll() {
+    const body = ctx.getBody();
+    if (!body) {
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < rows.length; i += 1) {
+      frag.appendChild(ctx.buildRow(rows[i], i));
+    }
+    body.replaceChildren(frag);
+    renderedFirst = 0;
+    renderedEnd = rows.length;
+    afterRender();
+  }
+  function measure(body) {
+    const sample = body.querySelector("tr[data-pk]");
+    const height = sample ? sample.offsetHeight : 0;
+    measured = true;
+    if (height > 4 && Math.abs(height - rowH) > 1) {
+      rowH = height;
+      render();
+    }
+  }
+  function afterRender() {
+    if (ctx.onRender) {
+      ctx.onRender();
+    }
+  }
+  function render() {
+    if (rows.length <= RENDER_ALL_MAX) {
+      paintAll();
+    } else {
+      const range = windowRange();
+      paintWindow(range.first, range.end);
+    }
+  }
+  function onScroll() {
+    if (rows.length <= RENDER_ALL_MAX || isEditing()) {
+      return;
+    }
+    const top = ctx.scroller.scrollTop;
+    const viewH = ctx.scroller.clientHeight || 0;
+    const needFirst = Math.floor(top / rowH);
+    const needEnd = Math.ceil((top + viewH) / rowH);
+    if (needFirst < renderedFirst || needEnd > renderedEnd) {
+      const range = windowRange();
+      paintWindow(range.first, range.end);
+    }
+  }
+  ctx.scroller.addEventListener("scroll", onScroll, { passive: true });
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => {
+      if (rows.length > RENDER_ALL_MAX) {
+        render();
+      }
+    }).observe(ctx.scroller);
+  }
+  return {
+    /** Replaces (or appends to) the row data and renders; a fresh (non-append) load resets the scroll. */
+    setRows(next, append) {
+      rows = append ? rows.concat(next || []) : (next || []).slice();
+      if (!append) {
+        measured = false;
+        ctx.scroller.scrollTop = 0;
+      }
+      render();
+      return rows.length;
+    },
+    /** Re-renders the current window in place (use after external row-data mutations). */
+    refresh() {
+      render();
+    },
+    /** Total rows currently held by the controller. */
+    count() {
+      return rows.length;
+    }
+  };
+}
+
 // media/modelBrowserSource.js
 var vscode = acquireVsCodeApi();
 var els = {};
-for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logbody", "logClear", "logMode"]) {
+for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode"]) {
   els[id] = document.getElementById(id);
 }
 var LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"];
 var MAX_LOG_ENTRIES = 200;
 var ALL_PAGE_SIZE = 1e9;
-var state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, order: [], model: "", pinned: /* @__PURE__ */ new Set(), widths: {} };
+var state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, order: [], model: "", pinned: /* @__PURE__ */ new Set(), widths: {}, computed: {}, computedActive: /* @__PURE__ */ new Set() };
 var pendingRelated = /* @__PURE__ */ new Map();
 var relRequestId = 0;
 var editor = createEditor({
@@ -711,6 +857,17 @@ var editor = createEditor({
   notify: (text) => {
     els.status.textContent = text;
   }
+});
+var virtual = createVirtualRows({
+  scroller: els.gridwrap,
+  getBody: () => document.getElementById("tbody"),
+  columnSpan: () => totalColumnCount(),
+  buildRow: (row, index) => {
+    const tr = buildRow(row, index);
+    editor.applyStaged(tr);
+    return tr;
+  },
+  onRender: () => repaintPins(els.gridwrap, state)
 });
 window.addEventListener("message", (event) => handleMessage(event.data));
 els.reload.addEventListener("click", () => send({ type: "reload" }));
@@ -736,6 +893,7 @@ els.logMode.addEventListener("click", () => {
   els.logbody.classList.toggle("mode-sql", !showOrm);
   els.logMode.textContent = showOrm ? "View: Django ORM" : "View: SQL";
 });
+setupLogResize();
 vscode.postMessage({ type: "ready" });
 function handleMessage(message) {
   if (!message || typeof message.type !== "string") {
@@ -751,6 +909,8 @@ function handleMessage(message) {
     onRelated(message);
   } else if (message.type === "lookup") {
     editor.onLookup(message);
+  } else if (message.type === "computed") {
+    onComputed(message);
   } else if (message.type === "count") {
     els.countinfo.textContent = message.ok ? `\xB7 total ${message.count}` : `\xB7 count failed`;
     logSql(`count ${state.model}`, message.sql, message.orm);
@@ -781,6 +941,8 @@ function onSchema(schema) {
   state.rowCount = 0;
   state.order = [];
   state.pinned = /* @__PURE__ */ new Set();
+  state.computed = {};
+  state.computedActive = /* @__PURE__ */ new Set();
   state.model = `${schema.app}.${schema.model}`;
   els.title.textContent = `${schema.app}.${schema.model}`;
   els.subtitle.textContent = `${schema.label || ""} \xB7 ${schema.table || ""}`;
@@ -807,24 +969,39 @@ function updateEditButtons(count) {
   els.commit.disabled = !count;
   els.discard.disabled = !count;
 }
+function relationKindLabel(kind) {
+  return { "fk": "FK", "m2m": "m2m", "o2o": "o2o", "reverse-fk": "reverseFK" }[kind] || kind;
+}
+function relationModelName(target) {
+  return String(target || "").split(".").pop();
+}
 function buildHead() {
   const head = el("thead", {});
   const row = el("tr", {});
+  row.appendChild(el("th", { className: "rownum", title: "Row number" }, "#"));
   for (const column of state.columns) {
-    const th = el("th", { className: "sortable", dataset: { act: "sort", col: column.attname, key: column.attname }, title: `Sort by ${column.name} (${column.type})` });
+    const sortable = !column.computed;
+    const th = el("th", { className: column.computed ? "computed" : "sortable", dataset: sortable ? { act: "sort", col: column.attname, key: column.attname } : { key: column.attname }, title: sortable ? `Sort by ${column.name} (${column.type})` : `${column.name} (computed @property \u2014 read-only)` });
     const pinned = state.pinned.has(column.attname);
     th.appendChild(el("button", { className: pinned ? "pinbtn active" : "pinbtn", dataset: { act: "pin", col: column.attname }, title: pinned ? "Unpin column" : "Pin column (freeze left)" }, "\u21E4"));
+    if (column.computed) {
+      const loading = state.computedActive.has(column.attname);
+      const cost = column.annotated ? "DB annotation \u2014 single query" : "per-row @property \u2014 N+1";
+      th.appendChild(el("button", { className: loading ? "loadbtn active" : "loadbtn", dataset: { act: "loadComputed", field: column.attname }, title: `${loading ? "Reload" : "Load"} this column for loaded rows (${cost})` }, loading ? "\u25BC" : "\u25B7"));
+    }
     th.appendChild(document.createTextNode(column.attname));
     if (column.pk) {
       th.appendChild(el("span", { className: "pkmark", title: "primary key" }, "\u25C6"));
     }
-    th.appendChild(el("span", { className: "sortarrow", dataset: { arrow: column.attname } }, ""));
-    th.appendChild(el("span", { className: "coltype" }, column.relation ? `\u2192 ${column.relation.target}` : column.type));
+    if (sortable) {
+      th.appendChild(el("span", { className: "sortarrow", dataset: { arrow: column.attname } }, ""));
+    }
+    th.appendChild(el("span", { className: "coltype" }, column.relation ? `\u2192 ${column.relation.target}` : column.computed ? column.annotated ? "@property \xB7 1 query" : "@property" : column.type));
     th.appendChild(el("span", { className: "colresize", title: "Drag to resize" }));
     row.appendChild(th);
   }
   for (const relation of state.relations) {
-    row.appendChild(el("th", { className: "relcol", dataset: { key: `rel:${relation.name}` }, title: `${relation.kind} \u2192 ${relation.target}` }, document.createTextNode(relation.name), el("span", { className: "coltype" }, `${relation.kind} \u2192`), el("span", { className: "colresize", title: "Drag to resize" })));
+    row.appendChild(el("th", { className: "relcol", dataset: { key: `rel:${relation.name}` }, title: `${relationKindLabel(relation.kind)} \u2192 ${relation.target}` }, document.createTextNode(relation.name), el("span", { className: "coltype" }, `${relationKindLabel(relation.kind)} (${relationModelName(relation.target)})`), el("span", { className: "colresize", title: "Drag to resize" })));
   }
   head.appendChild(row);
   return head;
@@ -835,32 +1012,23 @@ function onRows(message) {
     renderError(rows.error || "Could not load rows.");
     return;
   }
-  const body = document.getElementById("tbody");
-  if (!body) {
-    return;
-  }
-  if (!message.append) {
-    body.innerHTML = "";
-    state.rowCount = 0;
-  }
   logSql(`rows ${state.model}`, rows.sql, rows.orm);
-  for (const row of rows.rows) {
-    body.appendChild(buildRow(row));
-    state.rowCount += 1;
+  state.rowCount = virtual.setRows(rows.rows || [], Boolean(message.append));
+  if (message.append) {
+    for (const field of state.computedActive) {
+      vscode.postMessage({ type: "loadComputed", field });
+    }
   }
   state.hasMore = Boolean(rows.hasMore);
   els.more.disabled = !state.hasMore;
-  els.status.textContent = `${state.rowCount} row${state.rowCount === 1 ? "" : "s"} loaded${state.hasMore ? " \xB7 more available" : ""}`;
-  if (!state.rowCount) {
-    els.status.textContent = "No rows.";
-  }
-  repaintPins(els.gridwrap, state);
+  els.status.textContent = state.rowCount ? `${state.rowCount} row${state.rowCount === 1 ? "" : "s"} loaded${state.hasMore ? " \xB7 more available" : ""}` : "No rows.";
 }
-function buildRow(row) {
+function buildRow(row, index) {
   const pk = rawValue(row[state.pk]);
   const tr = el("tr", {});
   tr.dataset.pk = String(pk);
   tr._pk = pk;
+  tr.appendChild(el("td", { className: "rownum", title: "Row number" }, String((index ?? 0) + 1)));
   for (const column of state.columns) {
     tr.appendChild(buildCell(row, column, pk));
   }
@@ -873,9 +1041,14 @@ function buildRow(row) {
 }
 function buildCell(row, column, pk) {
   const td = el("td", {});
-  td._cell = row[column.attname];
   td._column = column;
   td._pk = pk;
+  if (column.computed) {
+    td.classList.add("computed");
+    paintComputedCell(td, column, pk);
+    return td;
+  }
+  td._cell = row[column.attname];
   if (column.editable) {
     td.classList.add("editable");
     td.dataset.attname = column.attname;
@@ -884,6 +1057,22 @@ function buildCell(row, column, pk) {
   }
   paintCell(td);
   return td;
+}
+function paintComputedCell(td, column, pk) {
+  const store = state.computed[column.attname];
+  const key = String(pk);
+  td.textContent = "";
+  if (store && Object.prototype.hasOwnProperty.call(store, key)) {
+    td._cell = store[key];
+    td.appendChild(renderValue(store[key]));
+    td.title = "Computed @property (read-only)";
+  } else if (state.computedActive.has(column.attname)) {
+    td.appendChild(el("span", { className: "cellnull" }, "\u2026"));
+    td.title = "Loading @property\u2026";
+  } else {
+    td.appendChild(el("span", { className: "cellnull" }, "\xB7"));
+    td.title = "Computed @property \u2014 click \u25B7 in the header to load (lazy)";
+  }
 }
 function paintCell(td) {
   const column = td._column;
@@ -937,6 +1126,8 @@ function onTableClick(event) {
   const data = node.dataset;
   if (data.act === "pin") {
     togglePin(data.col, node, state, els.gridwrap);
+  } else if (data.act === "loadComputed") {
+    toggleComputed(data.field, node);
   } else if (data.act === "sort") {
     toggleSort(data.col);
   } else if (data.act === "open") {
@@ -960,6 +1151,38 @@ function toggleSort(col) {
   updateSortArrows();
   applyQuery();
 }
+function toggleComputed(field, button) {
+  const active = !state.computedActive.has(field);
+  if (active) {
+    state.computedActive.add(field);
+    vscode.postMessage({ type: "loadComputed", field });
+  } else {
+    state.computedActive.delete(field);
+    delete state.computed[field];
+  }
+  if (button) {
+    button.classList.toggle("active", active);
+    button.textContent = active ? "\u25BC" : "\u25B7";
+    button.title = active ? "Reload computed values for loaded rows" : "Load this @property for loaded rows (lazy \u2014 not auto-computed)";
+  }
+  virtual.refresh();
+}
+function onComputed(message) {
+  if (!state.computedActive.has(message.field)) {
+    return;
+  }
+  if (!message.ok) {
+    els.status.textContent = `Could not compute ${message.field}: ${message.error ? String(message.error).split("\n").pop() : "failed"}`;
+    return;
+  }
+  state.computed[message.field] = message.values || {};
+  virtual.refresh();
+  if (typeof message.queryCount === "number") {
+    const rows = typeof message.rowCount === "number" ? message.rowCount : Object.keys(message.values || {}).length;
+    const shape = message.queryCount > rows ? " \xB7 N+1 (per-row property queries)" : message.queryCount <= 2 ? " \xB7 batched" : "";
+    els.status.textContent = `${message.field}: ${rows} rows \xB7 ${message.queryCount} SQL queries${shape}`;
+  }
+}
 function updateSortArrows() {
   const arrows = {};
   for (const term of state.order) {
@@ -976,6 +1199,9 @@ function addFilterTerm() {
   const term = el("span", { className: "term" });
   const field = el("select", { dataset: { role: "field" } });
   for (const column of state.columns) {
+    if (column.computed) {
+      continue;
+    }
     field.appendChild(el("option", { value: column.attname }, column.attname));
   }
   const lookup = el("select", { dataset: { role: "lookup" } });
@@ -1081,9 +1307,12 @@ function detailAnchor(tr) {
   }
   return anchor;
 }
+function totalColumnCount() {
+  return 1 + state.columns.length + state.relations.length;
+}
 function insertDetailRow(afterRow, content) {
   const tr = el("tr", { className: "detail" });
-  const td = el("td", { colSpan: state.columns.length + state.relations.length });
+  const td = el("td", { colSpan: totalColumnCount() });
   const box = el("div", { className: "nested" });
   box.appendChild(content);
   td.appendChild(box);
@@ -1111,6 +1340,45 @@ function coerce(text) {
     return Number(text);
   }
   return text;
+}
+function setupLogResize() {
+  const handle = els.logresize;
+  const panel = els.logpanel;
+  if (!handle || !panel) {
+    return;
+  }
+  const saved = (vscode.getState() || {}).logHeight;
+  if (saved) {
+    document.documentElement.style.setProperty("--log-h", `${clampLogHeight(saved)}px`);
+  }
+  handle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = panel.offsetHeight;
+    handle.classList.add("dragging");
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    const move = (moveEvent) => {
+      const next = clampLogHeight(startHeight + (startY - moveEvent.clientY));
+      document.documentElement.style.setProperty("--log-h", `${next}px`);
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+      handle.classList.remove("dragging");
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      persistLogHeight(panel.offsetHeight);
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  });
+}
+function clampLogHeight(value) {
+  return Math.max(72, Math.min(value, Math.max(120, window.innerHeight - 160)));
+}
+function persistLogHeight(height) {
+  vscode.setState({ ...vscode.getState() || {}, logHeight: Math.round(height) });
 }
 function el(tag, props, ...children) {
   const node = document.createElement(tag);

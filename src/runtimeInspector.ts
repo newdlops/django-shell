@@ -35,7 +35,7 @@ interface VariableNode {
 
 interface RuntimeInspectionSource {
   inspectActiveRuntime(): Promise<BackendRuntimeInspection>;
-  inspectRuntimeChildren(path: BackendRuntimePathSegment[]): Promise<BackendRuntimeChildren>;
+  inspectRuntimeChildren(path: BackendRuntimePathSegment[], kind?: string): Promise<BackendRuntimeChildren>;
   readonly onDidChangeRuntime: vscode.Event<void>;
 }
 
@@ -222,7 +222,7 @@ export class RuntimeInspector implements vscode.TreeDataProvider<RuntimeNode>, v
     if (!variable.path || !variable.hasChildren) {
       return [];
     }
-    const result = await this.source.inspectRuntimeChildren(variable.path);
+    const result = await this.source.inspectRuntimeChildren(variable.path, variable.kind);
     this.logger?.log("runtime.inspector.children", {
       children: result.children.length,
       ok: result.ok,

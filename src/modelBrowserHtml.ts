@@ -55,15 +55,24 @@ th{position:sticky;top:0;background-color:var(--vscode-editorGroupHeader-tabsBac
 th.pinned{z-index:3;background-color:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));box-shadow:1px 0 0 var(--vscode-panel-border)}
 td.pinned{background-color:var(--vscode-editor-background);box-shadow:1px 0 0 var(--vscode-panel-border)}
 tr:hover td.pinned{background-color:var(--vscode-editor-background);background-image:linear-gradient(var(--vscode-list-hoverBackground),var(--vscode-list-hoverBackground))}
+th.rownum,td.rownum{position:sticky;left:0;min-width:46px;padding:3px 6px;text-align:right;color:var(--vscode-descriptionForeground);user-select:none;font-variant-numeric:tabular-nums;box-shadow:1px 0 0 var(--vscode-panel-border)}
+th.rownum{z-index:5;background-color:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));cursor:default}
+td.rownum{z-index:2;background-color:var(--vscode-editor-background);cursor:default}
+tr:hover td.rownum{background-image:linear-gradient(var(--vscode-list-hoverBackground),var(--vscode-list-hoverBackground))}
 .pinbtn{background:none;border:0;color:var(--vscode-descriptionForeground);cursor:pointer;padding:0 4px 0 0;margin:0;font:inherit;opacity:.45}
 .pinbtn:hover{opacity:1;color:var(--vscode-foreground)}
 .pinbtn.active{opacity:1;color:var(--vscode-focusBorder)}
+.loadbtn{background:none;border:0;color:var(--vscode-descriptionForeground);cursor:pointer;padding:0 4px 0 0;margin:0;font:inherit;opacity:.6}
+.loadbtn:hover{opacity:1;color:var(--vscode-textLink-foreground)}
+.loadbtn.active{opacity:1;color:var(--vscode-charts-green,var(--vscode-textLink-foreground))}
 th .pkmark{color:var(--vscode-charts-yellow,var(--vscode-descriptionForeground));margin-left:4px}
 th .coltype{display:block;font-weight:400;color:var(--vscode-descriptionForeground);font-size:10px}
 th.relcol{cursor:default;color:var(--vscode-textLink-foreground)}
 td.relcell{vertical-align:middle}
 tr:hover td{background:var(--vscode-list-hoverBackground)}
 td.editable{cursor:text}
+th.computed{cursor:default;color:var(--vscode-descriptionForeground)}
+td.computed{color:var(--vscode-descriptionForeground);font-style:italic}
 td.dirty{background-color:var(--vscode-inputValidation-warningBackground,rgba(255,196,0,.14))!important;box-shadow:inset 2px 0 0 var(--vscode-inputValidation-warningBorder,var(--vscode-charts-yellow,#cca700))}
 .celledit{width:100%;box-sizing:border-box;font:inherit;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-focusBorder);border-radius:2px;padding:1px 3px;outline:none}
 .fkpick{position:relative}
@@ -88,8 +97,10 @@ td:has(.fkpick){overflow:visible}
 .gridwrap::-webkit-scrollbar-corner,.logbody::-webkit-scrollbar-corner{background:transparent}
 .gridwrap::-webkit-scrollbar-thumb,.logbody::-webkit-scrollbar-thumb{background:var(--vscode-scrollbarSlider-background);border-radius:5px}
 .gridwrap::-webkit-scrollbar-thumb:hover,.logbody::-webkit-scrollbar-thumb:hover{background:var(--vscode-scrollbarSlider-hoverBackground)}
-.logpanel{display:flex;flex-direction:column;min-height:0;height:220px;border-top:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background)}
+.logpanel{display:flex;flex-direction:column;min-height:0;height:var(--log-h,220px);border-top:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background)}
 .logpanel[hidden]{display:none}
+.logresize{flex:0 0 auto;height:6px;margin-top:-3px;cursor:row-resize;background:transparent}
+.logresize:hover,.logresize.dragging{background:var(--vscode-sash-hoverBorder,var(--vscode-focusBorder))}
 .loghead{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:4px 12px;border-bottom:1px solid var(--vscode-panel-border);font-size:12px;color:var(--vscode-descriptionForeground)}
 .loghead .grow{flex:1}
 .logbody{flex:1;min-height:0;overflow:auto;padding:2px 0}
@@ -143,6 +154,7 @@ td:has(.fkpick){overflow:visible}
   <div class="gridwrap" id="gridwrap"><div class="empty" id="placeholder">Select a model from the Django Shell catalog.</div></div>
   <footer class="statusbar"><span id="status"></span><span id="countinfo"></span><span class="spacer"></span><button id="discard" class="secondary" type="button" disabled>Discard</button><button id="commit" type="button" disabled>Commit</button><button id="count" class="secondary" type="button">Count</button><label class="pagesize">Rows&nbsp;<select id="pageSize" class="transport" title="Rows per page"><option value="50">50</option><option value="100">100</option><option value="500">500</option><option value="1000">1000</option><option value="5000">5000</option><option value="10000">10000</option><option value="all">all (not recommended)</option></select></label><button id="more" class="secondary" type="button" disabled>Load more</button></footer>
   <div class="logpanel" id="logpanel">
+    <div class="logresize" id="logresize" title="Drag to resize the query log"></div>
     <div class="loghead"><span>Query Log</span><span class="grow"></span><button id="logMode" class="secondary" type="button">View: SQL</button><button id="logClear" class="secondary" type="button">Clear</button></div>
     <div class="logbody mode-sql" id="logbody"></div>
   </div>

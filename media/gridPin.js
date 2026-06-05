@@ -14,31 +14,32 @@ export function togglePin(col, button, state, gridwrap) {
   repaintPins(gridwrap, state);
 }
 
-/** Recomputes cumulative left offsets and applies sticky positioning to pinned columns. */
+/** Recomputes cumulative left offsets and applies sticky positioning to pinned columns (offset past the row-number gutter). */
 export function repaintPins(gridwrap, state) {
   const headRow = gridwrap.querySelector("thead tr");
   const body = gridwrap.querySelector("tbody");
   if (!headRow) {
     return;
   }
+  const lead = headRow.children[0] && headRow.children[0].classList.contains("rownum") ? 1 : 0;
   const lefts = {};
-  let offset = 0;
+  let offset = lead && headRow.children[0] ? headRow.children[0].offsetWidth : 0;
   for (let i = 0; i < state.columns.length; i += 1) {
     if (state.pinned.has(state.columns[i].attname)) {
       lefts[i] = offset;
-      offset += headRow.children[i] ? headRow.children[i].offsetWidth : 0;
+      offset += headRow.children[i + lead] ? headRow.children[i + lead].offsetWidth : 0;
     }
   }
   for (let i = 0; i < state.columns.length; i += 1) {
-    setPin(headRow.children[i], lefts[i]);
+    setPin(headRow.children[i + lead], lefts[i]);
   }
   if (body) {
     for (const row of body.children) {
-      if (row.classList.contains("detail")) {
+      if (!row.dataset.pk) {
         continue;
       }
       for (let i = 0; i < state.columns.length; i += 1) {
-        setPin(row.children[i], lefts[i]);
+        setPin(row.children[i + lead], lefts[i]);
       }
     }
   }

@@ -60,6 +60,10 @@ def start(namespace, token):
             capture = _pty_install_capture(namespace)
         except Exception:
             capture = False
+        # Wire the namespace helpers here (not in the typed bootstrap) so the bootstrap command stays short — well under the
+        # tty canonical-input line limit — and the audit line carries no `_djs_rpc` lambda.
+        namespace["_djs_backend_initial_names"] = server.initial_names
+        namespace["_djs_rpc"] = lambda _djs_r, _djs_i: _pty_serve(namespace, token, _djs_r, _djs_i, namespace.get("_djs_backend_initial_names", set()))
         _print_marker(_READY_PREFIX, {"autoImported": autoimported, "cellCapture": bool(capture), "host": _connect_host(host), "ipython": _pty_is_ipython(), "port": port, "token": token})
     except Exception:
         _print_marker(_FAILED_PREFIX, {"error": traceback.format_exc()})
@@ -230,6 +234,8 @@ def _run_request(namespace, token, request, initial_names):
         return _browse_commit(request)
     if request.get("kind") == "lookup":
         return _browse_lookup(request)
+    if request.get("kind") == "computed":
+        return _browse_computed(request)
     if request.get("kind") == "query":
         return _browse_query(namespace, request)
     code = request.get("code")
@@ -455,10 +461,14 @@ def _resolve_child(value, segment):
     """Resolves one safe child path segment."""
     op = segment.get("op")
     if op == "attr":
+        name = segment["name"]
         mapping = _attribute_mapping(value, evaluate_values=True)
-        if mapping is None:
-            raise ValueError("Object does not expose a safe attribute dictionary.")
-        return mapping[segment["name"]]
+        if isinstance(mapping, dict) and name in mapping:
+            return mapping[name]
+        # Django relation descriptors (FK / reverse FK / M2M managers) and computed fields are listed as drill-down children
+        # (via _meta in _browse_children_of) but are NOT in the safe attribute mapping (vars/dataclass/property); resolve them
+        # directly so drilling into a relation works the same as the pure-expression path. _pty_safe_getattr never raises.
+        return _pty_safe_getattr(value, name)
     if op == "index":
         return list(value)[segment["index"]]
     if op == "dict":
@@ -664,11 +674,17 @@ def _pty_fit_response(response):
     `truncated`/`hasMore`) instead of dropping the whole table. Only triggers for genuinely huge output."""
     notice = "\n... truncated by django-shell: output too large for the terminal transport — switch the link to Socket/Auto for large results ..."
     fitted = dict(response)
-    fitted["sql"] = (fitted.get("sql") or [])[:50]
+    # Cap the SQL log to 50 queries AND truncate each query's text: a single cell can run megabytes of SQL (e.g. a @property
+    # with deeply nested subqueries), which alone could overrun the marker and force stdout truncation that corrupts a read
+    # cell's parseable JSON. Bound it BEFORE the stdout/grid budget so the parseable payload survives.
+    fitted["sql"] = [dict(entry, sql=_truncate(str(entry.get("sql", "")), 2000)) if isinstance(entry, dict) else entry for entry in (fitted.get("sql") or [])[:50]]
     for key in ("stdout", "stderr", "traceback"):
         value = fitted.get(key)
         if isinstance(value, str) and len(value) > 40000:
             fitted[key] = value[:40000] + notice
+    inspect = fitted.get("inspect")
+    if isinstance(inspect, dict) and isinstance(inspect.get("children"), list) and len(inspect["children"]) > 50:
+        fitted["inspect"] = dict(inspect, children=inspect["children"][:50], truncated=True)  # defensive: bounded children already fit, but never let inspect jam the marker
     grid = fitted.get("grid")
     if isinstance(grid, dict) and isinstance(grid.get("rows"), list) and grid["rows"]:
         rows = grid["rows"]
@@ -691,9 +707,9 @@ def _pty_cell_marker(cell_id, response):
     return _RESPONSE_PREFIX + payload
 
 
-def _pty_emit_cell(counter, ok, result_repr, out, err, tb, grid=None, sql=None):
-    """Prints one response marker for a literal code cell run in the interactive shell (grid = ORM-mode rows)."""
-    print(_pty_cell_marker("_djs_cell-%d" % counter, {"grid": grid, "ok": ok, "result": result_repr, "sql": sql or [], "stderr": err, "stdout": out, "traceback": tb}), flush=True)
+def _pty_emit_cell(counter, ok, result_repr, out, err, tb, grid=None, sql=None, inspect=None):
+    """Prints one response marker for a literal code cell run in the interactive shell (grid = ORM-mode rows; inspect = pure-expression drill-down child summaries)."""
+    print(_pty_cell_marker("_djs_cell-%d" % counter, {"grid": grid, "inspect": inspect, "ok": ok, "result": result_repr, "sql": sql or [], "stderr": err, "stdout": out, "traceback": tb}), flush=True)
 
 
 def _pty_orm_inspect(limit=500):
@@ -727,34 +743,48 @@ def _pty_is_computed_field(owner, name):
     return isinstance(descriptor, property) or type(descriptor).__name__ == "cached_property"
 
 
-def _pty_orm_children(path_json, limit=200):
-    """Returns bounded child-summary JSON for an ORM-mode drill-down cell. Built server-side (so the typed cell stays tiny)
-    but replicates the rich drill-down: dict/sequence items, manager/queryset rows, and a Django model instance's fields +
-    reverse relations + @property values."""
-    namespace = _STATE["server"].namespace
-    n = max(0, int(limit))
-    try:
-        path = json.loads(path_json)
-        v = _resolve_path(namespace, path)
-        if isinstance(v, dict):
-            src = [("[" + repr(k)[:60] + "]", cv, {"op": "dict", "index": i}) for i, (k, cv) in enumerate(list(v.items())[:n])]
-        elif isinstance(v, (list, tuple, set, frozenset)):
-            src = [("[" + str(i) + "]", cv, {"op": "index", "index": i}) for i, cv in enumerate(list(v)[:n])]
-        elif callable(getattr(v, "all", None)):
-            src = [("[" + str(i) + "]", cv, {"op": "index", "index": i}) for i, cv in enumerate(list(v.all()[:n]))]
-        elif getattr(v, "_meta", None) is not None and not isinstance(v, type):
-            names = [(f.get_accessor_name() if (f.auto_created and not f.concrete) else f.name) for f in v._meta.get_fields()] + [p for p in dir(type(v)) if _pty_is_computed_field(type(v), p)]
-            src = [(nm, _pty_safe_getattr(v, nm), {"op": "attr", "name": nm}) for nm in names if nm and not nm.startswith("_")][:n]
-        else:
-            src = [(a, cv, {"op": "attr", "name": a}) for a, cv in (list(vars(v).items()) if hasattr(v, "__dict__") else []) if not (a.startswith("__") and a.endswith("__"))][:n]
-    except Exception:
-        return json.dumps({"children": [], "error": traceback.format_exc()}, default=str)
+def _browse_children_of(value, base_path, n):
+    """Builds bounded child summaries for an ALREADY-RESOLVED object (rich drill-down: dict/sequence items, manager/queryset
+    rows, a Django model instance's fields + reverse relations + @property values, else __dict__ attrs). Each child's path is
+    base_path + [segment]; pass base_path=[] (relative) when the result object came from a bare expression typed by the
+    extension (which prepends the path it asked for), or the resolved path when called from the path-resolving helper."""
+    v = value
+    if isinstance(v, dict):
+        src = [("[" + repr(k)[:60] + "]", cv, {"op": "dict", "index": i}) for i, (k, cv) in enumerate(list(v.items())[:n])]
+    elif isinstance(v, (list, tuple, set, frozenset)):
+        src = [("[" + str(i) + "]", cv, {"op": "index", "index": i}) for i, cv in enumerate(list(v)[:n])]
+    elif callable(getattr(v, "all", None)):
+        src = [("[" + str(i) + "]", cv, {"op": "index", "index": i}) for i, cv in enumerate(list(v.all()[:n]))]
+    elif getattr(v, "_meta", None) is not None and not isinstance(v, type):
+        names = [(f.get_accessor_name() if (f.auto_created and not f.concrete) else f.name) for f in v._meta.get_fields()] + [p for p in dir(type(v)) if _pty_is_computed_field(type(v), p)]
+        src = [(nm, _pty_safe_getattr(v, nm), {"op": "attr", "name": nm}) for nm in names if nm and not nm.startswith("_")][:n]
+    else:
+        src = [(a, cv, {"op": "attr", "name": a}) for a, cv in (list(vars(v).items()) if hasattr(v, "__dict__") else []) if not (a.startswith("__") and a.endswith("__"))][:n]
     children = []
     for nm, cv, seg in src:
         try:
-            children.append(_value_summary(nm, cv, path + [seg], None))
+            children.append(_value_summary(nm, cv, base_path + [seg], None))
         except Exception:
             pass
+    return children
+
+
+def _pty_is_name_chain(raw):
+    """Returns whether a typed cell is a bare name or dotted attribute chain (`a`, `a.b.c`) — the cells the extension types for a pure-expression inspector drill-down. Used to gate the hook's inspect-children computation so heavy console/grid cells (calls/subscripts) are never inspected."""
+    stripped = (raw or "").strip()
+    parts = [part.strip() for part in stripped.split(".")]
+    return bool(stripped) and all(part.isidentifier() and not keyword.iskeyword(part) for part in parts)
+
+
+def _pty_orm_children(path_json, limit=200):
+    """Returns bounded child-summary JSON for an ORM-mode drill-down cell (fallback for collection/index/dict paths that have
+    no clean Python expression). Built server-side (so the typed cell stays tiny); resolves the path then reuses _browse_children_of."""
+    namespace = _STATE["server"].namespace
+    try:
+        path = json.loads(path_json)
+        children = _browse_children_of(_resolve_path(namespace, path), path, max(0, int(limit)))
+    except Exception:
+        return json.dumps({"children": [], "error": traceback.format_exc()}, default=str)
     return json.dumps({"children": children}, default=str)
 
 
@@ -799,15 +829,14 @@ def _pty_tabulate_result(value):
 
         if isinstance(value, QuerySet) and value._iterable_class is ModelIterable and not value.query.values_select:
             model = value.model
-            columns = _browse_columns(model)
-            attnames = [column["attname"] for column in columns]
-            rows = [_browse_serialize_row({attname: getattr(instance, attname, None) for attname in attnames}) for instance in itertools.islice(value, 50001)]
-            return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
+            concrete_names = [column["attname"] for column in _browse_columns(model)]
+            rows = [_browse_serialize_row({attname: getattr(instance, attname, None) for attname in concrete_names}) for instance in itertools.islice(value, 50001)]
+            return {"app": model._meta.app_label, "columns": _browse_columns(model) + _browse_computed_columns(model), "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
         if isinstance(value, Model):
             model = type(value)
-            columns = _browse_columns(model)
-            row = _browse_serialize_row({column["attname"]: getattr(value, column["attname"], None) for column in columns})
-            return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [row]}
+            concrete_names = [column["attname"] for column in _browse_columns(model)]
+            row = _browse_serialize_row({attname: getattr(value, attname, None) for attname in concrete_names})
+            return {"app": model._meta.app_label, "columns": _browse_columns(model) + _browse_computed_columns(model), "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [row]}
         if isinstance(value, QuerySet):
             payload = _browse_tabulate(list(itertools.islice(value, 50001)), 0, 50000)
             payload["ok"] = True
@@ -862,8 +891,9 @@ def _pty_install_ipython_capture(shell):
             state["skip"] = True  # plumbing cell: let its own marker print through untouched
             return
         state["skip"] = False
+        state["raw"] = str(getattr(info, "raw_cell", "") or "")
         # Introspection plumbing (inspect/children call a backend helper): capture+emit its marker like a normal cell, but drop it from history afterwards so it stays out of the interactive shell.
-        state["scrub"] = "_djs_backend_module._pty_orm_" in str(getattr(info, "raw_cell", "") or "")
+        state["scrub"] = "_djs_backend_module._pty_orm_" in state["raw"]
         state["out"], state["err"] = io.StringIO(), io.StringIO()
         state["save"] = (sys.stdout, sys.stderr)
         sys.stdout, sys.stderr = state["out"], state["err"]
@@ -884,9 +914,16 @@ def _pty_install_ipython_capture(shell):
         value = getattr(result, "result", None)
         result_repr = _truncate(repr(value), 4000) if error is None and value is not None else None
         grid = _pty_tabulate_result(value) if error is None else None
+        inspect = None
+        if error is None and value is not None and _pty_is_name_chain(state.get("raw")):
+            # Pure-expression inspector drill-down: the extension typed a bare `a`/`a.b.c` (audit shows clean Python, no _djs_backend_module plumbing); surface this object's child tree from the result so the inspector renders without a helper call. Relative paths; the extension prepends the path it asked for.
+            try:
+                inspect = {"children": _browse_children_of(value, [], 200)}
+            except Exception:
+                inspect = None
         sql = _pty_sql_end(state)
         state["counter"] += 1
-        _pty_emit_cell(state["counter"], error is None, result_repr, out, err, tb, grid, sql)
+        _pty_emit_cell(state["counter"], error is None, result_repr, out, err, tb, grid, sql, inspect)
         if state.get("scrub"):
             state["scrub"] = False
             try:
@@ -1132,7 +1169,7 @@ def _browse_schema(request):
         try:
             model = _browse_resolve_model(request)
             meta = model._meta
-            return {"app": meta.app_label, "columns": _browse_columns(model), "label": str(meta.verbose_name), "model": meta.object_name, "ok": True, "pk": meta.pk.attname, "relations": _browse_relations(model), "table": meta.db_table}
+            return {"app": meta.app_label, "columns": _browse_columns(model) + _browse_computed_columns(model), "label": str(meta.verbose_name), "model": meta.object_name, "ok": True, "pk": meta.pk.attname, "relations": _browse_relations(model), "table": meta.db_table}
         except Exception:
             return {"ok": False, "error": traceback.format_exc()}
 
@@ -1142,8 +1179,8 @@ def _browse_rows(request):
     with _EXECUTION_LOCK:
         try:
             model = _browse_resolve_model(request)
-            columns = _browse_columns(model)
-            attnames = [column["attname"] for column in columns]
+            columns = _browse_columns(model) + _browse_computed_columns(model)
+            attnames = [column["attname"] for column in _browse_columns(model)]
             pk_attname = model._meta.pk.attname
             limit = _browse_limit(request.get("limit"), maximum=None)
             order = _browse_order(request.get("order"), attnames, pk_attname)
@@ -1241,6 +1278,63 @@ def _browse_columns(model):
     return columns
 
 
+def _browse_declared_annotations(model):
+    """Returns the model's declared {computed_field: DB-annotation expression} map (from a `djshell_annotations` dict or classmethod). A @property is arbitrary Python (can't be auto-translated to SQL), so a model opts a computed column into a SINGLE annotated query — instead of per-row @property N+1 — by declaring its equivalent ORM expression here. Empty on absence/error."""
+    source = getattr(model, "djshell_annotations", None)
+    if source is None:
+        return {}
+    try:
+        mapping = source() if callable(source) else source
+        return mapping if isinstance(mapping, dict) else {}
+    except Exception:
+        return {}
+
+
+def _browse_computed_columns(model):
+    """Returns read-only column descriptors for a model's @property / @cached_property attributes (computed, not DB-backed); `annotated=True` marks the ones the model declares a DB annotation for (loaded in one query, not per-row)."""
+    reserved = {field.attname for field in model._meta.concrete_fields}
+    reserved.update(field.name for field in model._meta.get_fields())
+    reserved.add("pk")
+    declared = set(_browse_declared_annotations(model))
+    columns = []
+    for name in sorted(dir(model)):
+        if len(columns) >= 40:
+            break
+        if name.startswith("_") or name in reserved or not _pty_is_computed_field(model, name):
+            continue
+        columns.append({"annotated": name in declared, "attname": name, "computed": True, "editable": False, "name": name, "null": True, "pk": False, "type": "property"})
+    return columns
+
+
+def _browse_computed(request):
+    """Lazily computes ONE @property over the current filter/order page — the opt-in replacement for eager-loading. The user activates a single column, so only that property runs (no N+1 across every property, no multi-model JOIN explosion), bounded to the loaded rows. Restricted to actual @property/@cached_property names; each value read via safe getattr so a throwing property yields null, not a failure. Returns {pk: cell}."""
+    with _EXECUTION_LOCK:
+        try:
+            model = _browse_resolve_model(request)
+            field = request.get("field")
+            if not isinstance(field, str) or not field.isidentifier() or not _pty_is_computed_field(model, field):
+                return {"ok": False, "error": "not a computed field", "values": {}}
+            attnames = [column["attname"] for column in _browse_columns(model)]
+            order = _browse_order(request.get("order"), attnames, model._meta.pk.attname)
+            limit = _browse_limit(request.get("limit"), maximum=None)
+            queryset = model._base_manager.all().order_by(*order).filter(_browse_build_filters(model, request.get("filters"), attnames))
+            # Capture only the query COUNT (never the SQL text — serializing it bloated the marker and corrupted the parseable
+            # JSON; see the SQL-heavy @property bugfix). queryCount makes the cost verifiable: ≈ 1 with a declared annotation
+            # (single SQL query), >> rowCount for a per-row @property (N+1).
+            annotations = _browse_declared_annotations(model)
+            if field in annotations:
+                # The model declared a DB annotation for this field → compute it in ONE SQL query instead of per-row Python.
+                with _browse_capture() as ctx:
+                    rows = list(queryset.annotate(__djs=annotations[field]).values_list("pk", "__djs")[:limit])
+                values = {_browse_jsonable(pk): _browse_cell(value) for pk, value in rows}
+                return {"annotated": True, "field": field, "ok": True, "queryCount": len(ctx.captured_queries), "rowCount": len(values), "values": values}
+            with _browse_capture() as ctx:
+                values = {_browse_jsonable(obj.pk): _browse_cell(_pty_safe_getattr(obj, field)) for obj in queryset[:limit]}
+            return {"field": field, "ok": True, "queryCount": len(ctx.captured_queries), "rowCount": len(values), "values": values}
+        except Exception:
+            return {"ok": False, "error": traceback.format_exc(), "values": {}}
+
+
 def _browse_relations(model):
     """Returns expandable relations (reverse FK, M2M, reverse O2O) excluding forward columns."""
     relations = []
@@ -1270,13 +1364,13 @@ def _browse_find_relation(model, relation):
 
 
 def _browse_relation_name(field):
-    """Returns the accessor name for reverse relations or the field name for forward ones."""
+    """Returns the accessor name for reverse relations or the field name for forward ones (None for hidden relations whose related_name ends in '+', which have no usable accessor)."""
     if field.auto_created and not getattr(field, "concrete", False):
         try:
             name = field.get_accessor_name()
         except Exception:
             return None
-        return name if name and name != "+" else None
+        return name if name and not name.endswith("+") else None
     return field.name
 
 

@@ -144,6 +144,21 @@ export function createEditor(ctx) {
     ctx.onChange(pendingCount());
   }
 
+  /** Re-applies any staged edits to a freshly (re)built row's cells, so windowed re-renders keep dirty values. */
+  function applyStaged(tr) {
+    const entry = pending.get(tr.dataset.pk);
+    if (!entry) {
+      return;
+    }
+    for (const td of tr.children) {
+      const attname = td.dataset && td.dataset.attname;
+      if (attname && Object.prototype.hasOwnProperty.call(entry.fields, attname)) {
+        td.dataset.staged = entry.fields[attname];
+        ctx.paintCell(td);
+      }
+    }
+  }
+
   /** Opens a live searchable picker for an editable foreign-key cell, staging the chosen pk. */
   function editForeignKey(td, column, start) {
     activePicker = openFkPicker(td, column, start, {
@@ -253,5 +268,5 @@ export function createEditor(ctx) {
     ctx.onChange(0);
   }
 
-  return { commitEdits, discardEdits, editCell, handleResult, onLookup, pendingCount, reset };
+  return { applyStaged, commitEdits, discardEdits, editCell, handleResult, onLookup, pendingCount, reset };
 }

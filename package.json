@@ -318,8 +318,8 @@
             "Terminal: force the terminal transport (compact `_djs_rpc(...)` lines, scrubbed from history).",
             "ORM: run model-browser reads as your own literal Django ORM cells in the shell so a live pre_run_cell audit logs Django ORM, not RPC plumbing (execute still uses the socket when reachable). Requires shell_plus/IPython."
           ],
-          "default": "pty",
-          "markdownDescription": "Default transport for the model data browser. **Terminal** (default) routes every read through the interactive shell (compact `_djs_rpc`/ORM cells, scrubbed from history) and works everywhere — including remote SSH/kubectl shells where the loopback socket is unreachable; **Auto** prefers the loopback socket and falls back to the terminal — nothing is typed into the shell when the socket is reachable; **Socket** prefers the socket but also falls back to the terminal when it is unreachable (e.g. a remote shell); **ORM** types each model-browser read as your own Django ORM cell so a server-side `pre_run_cell` audit shows ORM (requires shell_plus/IPython). Switchable per-panel from the `Link:` selector."
+          "default": "orm",
+          "markdownDescription": "Default transport for the model data browser. **ORM** (default) runs each model-browser read as your own literal Django ORM cell in the shell so a live `pre_run_cell` audit logs Django ORM, not RPC plumbing (requires shell_plus/IPython); **Terminal** routes reads through the interactive shell as compact `_djs_rpc`/ORM cells scrubbed from history and works everywhere — including remote SSH/kubectl shells where the loopback socket is unreachable; **Auto** prefers the loopback socket and falls back to the terminal — nothing is typed into the shell when the socket is reachable; **Socket** prefers the socket but also falls back to the terminal when it is unreachable (e.g. a remote shell). Switchable per-panel from the `Link:` selector."
         }
       }
     },

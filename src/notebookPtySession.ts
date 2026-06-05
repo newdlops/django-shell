@@ -5,7 +5,7 @@ import * as pty from "node-pty";
 import * as vscode from "vscode";
 import { SerializedAsyncQueue } from "./asyncQueue";
 import { BackendClient, BackendRequestPayload, BackendTransportMode } from "./backendClient";
-import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BackendBootstrapCommand, backendBootstrapPayload, buildBackendBootstrapCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendReadyMarker, parseBackendResponseMarker } from "./backendBootstrap";
+import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BackendBootstrapCommand, backendBootstrapPayload, buildBackendBootstrapCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendReadyMarker, parseBackendResponseMarker } from "./backendBootstrap";
 import { buildPtyBackendRequest, buildPtyExecuteCell, firstPathEntry, isSecretPrompt, safeCommand, trimTerminalText } from "./notebookPtyText";
 import { DiagnosticLogger } from "./diagnostics";
 import { buildShellEnv } from "./env";
@@ -281,9 +281,10 @@ export class NotebookPtySession implements vscode.Disposable {
       });
       return;
     }
-    // The env/disk bootstrap raised before start() (no marker): payload not forwarded and the local runtime path is
-    // absent — a remote shell (SSH, kubectl/docker exec). Arm a one-time inline retry that embeds the source.
-    if (this.token && !this.bootstrapRetried && /Traceback \(most recent call last\)/.test(this.outputTail)) {
+    // The env/disk bootstrap could load neither the spawn-env payload nor a local runtime file — a remote shell (SSH,
+    // kubectl/docker exec). It signalled this cleanly (no traceback in the audit) OR, for any other unexpected bootstrap
+    // error, raised a traceback. Either way, arm a one-time inline retry that embeds the source.
+    if (this.token && !this.bootstrapRetried && (parseBackendNeedsInline(this.outputTail) || /Traceback \(most recent call last\)/.test(this.outputTail))) {
       this.bootstrapRetryPending = true;
     }
     // Send the large inline payload only once the shell is back at a ready prompt — typing ~24KB while the failure

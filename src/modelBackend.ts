@@ -24,8 +24,10 @@ export interface BackendModelColumnRelation {
 
 /** One concrete column descriptor for a model. */
 export interface BackendModelColumn {
+  annotated?: boolean;
   attname: string;
   choices?: Array<[unknown, string]>;
+  computed?: boolean;
   editable: boolean;
   name: string;
   null: boolean;
@@ -230,6 +232,27 @@ export interface ModelRelatedQuery {
   relation: string;
   single?: boolean;
   value?: unknown;
+}
+
+/** Parameters for one lazy computed-field (@property) fetch over the current filter/order page. */
+export interface ModelComputedQuery {
+  app: string;
+  columns?: BackendModelColumn[];
+  field: string;
+  filters?: BackendModelFilter[];
+  limit?: number;
+  model: string;
+  order?: BackendModelOrder[];
+}
+
+/** Result of a lazy computed-field fetch: each loaded row's pk mapped to that property's cell value. */
+export interface BackendModelComputed {
+  error?: string;
+  field?: string;
+  ok: boolean;
+  queryCount?: number;
+  rowCount?: number;
+  values: Record<string, BackendModelCell>;
 }
 
 /** Returns the first response line parsed as JSON. */
@@ -452,6 +475,24 @@ export function parseOrmQueryResponse(buffer: string, limit: number, offset: num
 export function parseModelLookupResponse(buffer: string): BackendModelLookup {
   const parsed = parseLine<Partial<BackendModelLookup>>(buffer);
   return { error: parsed.error, hasMore: Boolean(parsed.hasMore), ok: Boolean(parsed.ok), rows: Array.isArray(parsed.rows) ? parsed.rows : [], sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
+}
+
+/** Parses a socket computed-field response ({pk: cell} values for one @property). */
+export function parseModelComputedResponse(buffer: string): BackendModelComputed {
+  const parsed = parseLine<Partial<BackendModelComputed>>(buffer);
+  return { error: parsed.error, field: parsed.field, ok: Boolean(parsed.ok), queryCount: parsed.queryCount, rowCount: parsed.rowCount, values: parsed.values && typeof parsed.values === "object" ? parsed.values : {} };
+}
+
+/** Parses an ORM-mode computed-field response: the helper printed {field, ok, values} JSON to stdout. */
+export function parseOrmComputedResponse(buffer: string): BackendModelComputed {
+  const parsed = parseLine<{ ok?: boolean; stderr?: string; stdout?: string; traceback?: string }>(buffer);
+  // The cell is now a readable ORM comprehension printing a bare {pk: value} dict (no wrapper); a raising property errors the
+  // cell, so the real reason surfaces via the cell traceback (parsed.ok === false → ormError).
+  const values = ormStdoutJson<Record<string, BackendModelCell>>(parsed.stdout);
+  if (parsed.ok === false || !values || typeof values !== "object" || Array.isArray(values)) {
+    return { error: ormError(parsed, "Computed field failed in ORM mode."), ok: false, values: {} };
+  }
+  return { ok: true, values };
 }
 
 /** Returns a disabled response for a model-browser kind that cannot cross PTY fallback. */

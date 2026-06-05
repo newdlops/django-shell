@@ -7,12 +7,20 @@ import { ensureIgnoredShadowDirectory } from "./filePythonShadow";
 
 export const INPUT_MARKER = "# --- django shell input ---";
 
+// Debounce (ms) for returning the analysis backing document to a clean (saved) state after live-analysis edits.
+// syncAnalysis() edits the OPEN doc via applyEdit on every keystroke-driven language request but, unlike the
+// session-boundary writes, never saves it — so the hidden doc sat dirty at rest and VS Code prompted to save
+// analysis.py on window reload / exit. The exit prompt fires before deactivate cleanup can run, so the doc must be
+// kept clean during normal operation: a short debounced save flushes it clean once typing pauses.
+const ANALYSIS_CLEAN_SAVE_DELAY_MS = 300;
+
 /** Maintains a Python TextDocument whose edits stay in memory after creation. */
 export class OverlayMemoryDocument implements vscode.Disposable {
   private analysisPromise: Promise<vscode.TextDocument> | undefined;
   private prelude = "";
   private text = "";
   private writeQueue: Promise<void> = Promise.resolve();
+  private cleanSaveTimer: ReturnType<typeof setTimeout> | undefined;
   readonly analysisUri: vscode.Uri;
   readonly editorUri: vscode.Uri;
 
@@ -96,6 +104,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     }
     this.text = userText;
     await this.enqueueWrite(async () => { await this.writeAnalysis(); });
+    this.scheduleAnalysisCleanSave();
   }
 
   /** Updates editor-only hidden import text while analysis stays on user code. */
@@ -131,6 +140,17 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     if (document?.isDirty) { await document.save(); }
   }
 
+  /** Debounces a save of the analysis doc so live-typing edits do not leave it dirty at rest (no exit save prompt). */
+  private scheduleAnalysisCleanSave(): void {
+    if (this.cleanSaveTimer) {
+      clearTimeout(this.cleanSaveTimer);
+    }
+    this.cleanSaveTimer = setTimeout(() => {
+      this.cleanSaveTimer = undefined;
+      void this.enqueueWrite(() => this.saveOpenDocuments());
+    }, ANALYSIS_CLEAN_SAVE_DELAY_MS);
+  }
+
   /** Persists the current generated document state without depending on visible editor tabs. */
   private async persistGeneratedFiles(): Promise<void> {
     await Promise.all([
@@ -154,8 +174,8 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     await writeDocument(document, this.analysisUri, text, persistOnFailure);
   }
 
-  /** Releases provider event resources. */
-  dispose(): void {}
+  /** Releases provider event resources and cancels any pending debounced clean-save. */
+  dispose(): void { if (this.cleanSaveTimer) { clearTimeout(this.cleanSaveTimer); } }
 
   /** Opens the generated analysis file document once for language providers. */
   private async ensureAnalysisOpen(): Promise<vscode.TextDocument> {

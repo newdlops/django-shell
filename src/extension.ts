@@ -4,7 +4,7 @@ import * as vscode from "vscode";
 import type { BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransport, BackendTransportMode } from "./backendClient";
 import type { CustomDjangoConsole } from "./customConsole";
 import { DiagnosticLogger } from "./diagnostics";
-import type { BackendCommitResult, BackendModelCount, BackendModelList, BackendModelLookup, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import type { BackendCommitResult, BackendModelComputed, BackendModelCount, BackendModelList, BackendModelLookup, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { ModelBrowser } from "./modelBrowser";
 import { ModelQueryConsole } from "./modelQueryConsole";
 import { ModelCatalog } from "./modelCatalog";
@@ -45,8 +45,8 @@ class LazyRuntimeSource implements vscode.Disposable {
   }
 
   /** Returns child runtime data or an idle status without starting a shell. */
-  inspectRuntimeChildren(pathSegments: BackendRuntimePathSegment[]): Promise<BackendRuntimeChildren> {
-    return this.console?.inspectRuntimeChildren(pathSegments) ?? Promise.resolve(runtimeUnavailableChildren());
+  inspectRuntimeChildren(pathSegments: BackendRuntimePathSegment[], kind?: string): Promise<BackendRuntimeChildren> {
+    return this.console?.inspectRuntimeChildren(pathSegments, kind) ?? Promise.resolve(runtimeUnavailableChildren());
   }
 
   /** Returns the model catalog or an idle status without starting a shell. */
@@ -67,6 +67,11 @@ class LazyRuntimeSource implements vscode.Disposable {
   /** Returns related rows or an idle status without starting a shell. */
   modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows> {
     return this.console?.activeBackend?.modelRelated(query) ?? Promise.resolve({ columns: [], error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, orm: "", rows: [], single: false, sql: [] });
+  }
+
+  /** Returns one @property column's values for loaded rows, or an idle status without starting a shell. */
+  modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed> {
+    return this.console?.activeBackend?.modelComputed(query) ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, ok: false, values: {} });
   }
 
   /** Returns foreign-key picker candidates or an idle status without starting a shell. */

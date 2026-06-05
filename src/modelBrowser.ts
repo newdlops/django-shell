@@ -3,7 +3,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import type { BackendTransport, BackendTransportMode } from "./backendClient";
-import type { BackendCommitResult, BackendModelColumn, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import type { BackendCommitResult, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { modelBrowserHtml } from "./modelBrowserHtml";
 import { DiagnosticLogger } from "./diagnostics";
 
@@ -11,6 +11,7 @@ import { DiagnosticLogger } from "./diagnostics";
 export interface ModelDataSource {
   listModels(): Promise<BackendModelList>;
   modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult>;
+  modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed>;
   modelCount(query: ModelCountQuery): Promise<BackendModelCount>;
   modelLookup(query: ModelLookupQuery): Promise<BackendModelLookup>;
   modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery>;
@@ -33,6 +34,7 @@ interface IncomingMessage {
   app?: string;
   changes?: ModelCommitChange[];
   columns?: BackendModelColumn[];
+  field?: string;
   filters?: BackendModelFilter[];
   mode?: BackendTransportMode;
   model?: string;
@@ -124,6 +126,7 @@ class ModelBrowserPanel {
   private nextOffset: number | null = null;
   private pageSize = PAGE_SIZE;
   private columns: BackendModelColumn[] = [];
+  private loadedRowCount = 0;
 
   /** Creates the webview panel for one model target and wires its message and dispose handlers. */
   constructor(
@@ -217,6 +220,7 @@ class ModelBrowserPanel {
     }
     this.nextCursor = rows.ok ? rows.nextCursor : undefined;
     this.nextOffset = rows.ok ? rows.nextOffset : null;
+    this.loadedRowCount = (reset ? 0 : this.loadedRowCount) + (rows.ok ? rows.rows.length : 0);
     if (rows.ok && rows.columns.length) {
       this.columns = rows.columns;
     }
@@ -246,6 +250,8 @@ class ModelBrowserPanel {
       await this.loadPage(true);
     } else if (message.type === "requestCount") {
       await this.requestCount();
+    } else if (message.type === "loadComputed" && typeof message.field === "string") {
+      await this.loadComputed(message.field);
     } else if (message.type === "commitEdits") {
       await this.commitEdits(message);
     } else if (message.type === "commitRelated") {
@@ -260,6 +266,16 @@ class ModelBrowserPanel {
     } else if (message.type === "openModel" && message.app && message.model) {
       this.openAnother({ app: message.app, model: message.model });
     }
+  }
+
+  /** Lazily fetches one @property column's values for the currently-loaded rows (user activated the column). */
+  private async loadComputed(field: string): Promise<void> {
+    const result = await this.source.modelComputed({ app: this.target.app, columns: this.columns, field, filters: this.filters, limit: Math.max(this.loadedRowCount, 1), model: this.target.model, order: this.order });
+    if (this.disposed) {
+      return;
+    }
+    this.logger?.log("model.browser.computed", { field, model: `${this.target.app}.${this.target.model}`, ok: result.ok, queries: result.queryCount, rows: result.rowCount });
+    this.post({ error: result.error, field, ok: result.ok, queryCount: result.queryCount, rowCount: result.rowCount, type: "computed", values: result.values });
   }
 
   /** Computes and returns the total row count for the current filter set. */

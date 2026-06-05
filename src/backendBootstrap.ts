@@ -5,6 +5,10 @@ import { deflateSync } from "zlib";
 export const BACKEND_READY_PREFIX = "__DJANGO_SHELL_BACKEND_READY__";
 export const BACKEND_FAILED_PREFIX = "__DJANGO_SHELL_BACKEND_FAILED__";
 export const BACKEND_RESPONSE_PREFIX = "__DJANGO_SHELL_BACKEND_RESPONSE__";
+// Printed by the env/disk bootstrap when it can load NEITHER the spawn-env payload NOR a local runtime file — i.e. a remote
+// shell (SSH, kubectl/docker exec). A CLEAN signal (no FileNotFoundError traceback in the server pre_run_cell audit) that
+// tells the extension to retry with the inline bootstrap that embeds the source.
+export const BACKEND_NEEDS_INLINE_PREFIX = "__DJANGO_SHELL_BACKEND_NEEDS_INLINE__";
 
 export interface BackendEndpoint {
   autoImported?: number;
@@ -46,19 +50,16 @@ export function buildBackendBootstrap(runtimePath: string, token: string): strin
   return buildBackendBootstrapCommand(runtimePath, token).command;
 }
 
-/** Builds the short bootstrap command: loads backend source from the spawn env payload (else the on-disk runtime file), so the typed cell carries no large blob into the shell-audit log. */
+/** Builds the short bootstrap command: loads backend source from the spawn env payload (else the on-disk runtime file), so the typed cell carries no large blob into the shell-audit log. On a remote shell (no env payload AND no local file) it prints a clean NEEDS_INLINE signal instead of raising FileNotFoundError, so the audit stays clean and the inline retry is armed. */
 export function buildBackendBootstrapCommand(runtimePath: string, token: string): BackendBootstrapCommand {
+  const load = backendLoadStatements(token);
   const python = [
     "import os as _djs_o,types as _djs_t,base64 as _djs_b,zlib as _djs_z",
-    '_djs_m=_djs_t.ModuleType("django_shell_backend")',
-    `_djs_e=_djs_o.environ.get(${pythonString(BACKEND_PAYLOAD_ENV)})`,
-    `_djs_src=(_djs_z.decompress(_djs_b.b64decode(_djs_e)).decode("utf-8") if _djs_e else open(${pythonString(runtimePath)},encoding="utf-8").read())`,
-    'exec(compile(_djs_src,"<django-shell-backend>","exec"),_djs_m.__dict__)',
-    `_djs_m.start(globals(), ${pythonString(token)})`,
-    'globals()["_djs_backend_module"]=_djs_m',
-    'globals()["_djs_backend_initial_names"]=_djs_m._STATE["server"].initial_names',
-    rpcDefinition(token)
-  ].join("; ");
+    `_djs_e=_djs_o.environ.get(${pythonString(BACKEND_PAYLOAD_ENV)}); _djs_p=${pythonString(runtimePath)}`,
+    `_djs_src=_djs_z.decompress(_djs_b.b64decode(_djs_e)).decode("utf-8") if _djs_e else (open(_djs_p,encoding="utf-8").read() if _djs_o.path.exists(_djs_p) else None)`,
+    `if _djs_src is None: print(${pythonString(BACKEND_NEEDS_INLINE_PREFIX)})`,
+    `else: ${load}`
+  ].join("\n");
   const command = `exec(${pythonString(python)})\r`;
   return { bytes: command.length, command, mode: "env" };
 }
@@ -71,22 +72,20 @@ export function buildInlineBackendBootstrapCommand(runtimePath: string, token: s
   }
   const python = [
     "import types as _djs_t,base64 as _djs_b,zlib as _djs_z",
-    '_djs_m=_djs_t.ModuleType("django_shell_backend")',
     `_djs_src=_djs_z.decompress(_djs_b.b64decode(${pythonString(payload)})).decode("utf-8")`,
-    'exec(compile(_djs_src,"<django-shell-backend>","exec"),_djs_m.__dict__)',
-    `_djs_m.start(globals(), ${pythonString(token)})`,
-    'globals()["_djs_backend_module"]=_djs_m',
-    'globals()["_djs_backend_initial_names"]=_djs_m._STATE["server"].initial_names',
-    rpcDefinition(token)
+    backendLoadStatements(token)
   ].join("; ");
   const command = `exec(${pythonString(python)})\r`;
   return { bytes: command.length, command, mode: "inline" };
 }
 
-/** Defines the short `_djs_rpc(request, id)` PTY helper and scrubs the bootstrap line from shell history. */
-function rpcDefinition(token: string): string {
+/** The shared `_djs_src`-loading tail: build the module, run start() (which wires `_djs_rpc`/initial names into the namespace), expose the module, and scrub the bootstrap line from history (kept LAST so IPython does not re-record it). */
+function backendLoadStatements(token: string): string {
   return [
-    `globals()["_djs_rpc"]=(lambda _djs_r,_djs_i: _djs_m._pty_serve(globals(), ${pythonString(token)}, _djs_r, _djs_i, globals().get("_djs_backend_initial_names", set())))`,
+    '_djs_m=_djs_t.ModuleType("django_shell_backend")',
+    'exec(compile(_djs_src,"<django-shell-backend>","exec"),_djs_m.__dict__)',
+    `_djs_m.start(globals(), ${pythonString(token)})`,
+    'globals()["_djs_backend_module"]=_djs_m',
     "_djs_m._pty_history_scrub(None)"
   ].join("; ");
 }
@@ -100,6 +99,11 @@ export function parseBackendReadyMarker(output: string): BackendEndpoint | undef
 export function parseBackendFailedMarker(output: string): string | undefined {
   const payload = parseMarkerJson<{ error?: string }>(output, BACKEND_FAILED_PREFIX);
   return payload?.error;
+}
+
+/** Returns whether the env/disk bootstrap signalled it needs the inline (source-embedded) bootstrap — a remote shell. */
+export function parseBackendNeedsInline(output: string): boolean {
+  return output.lastIndexOf(BACKEND_NEEDS_INLINE_PREFIX) >= 0;
 }
 
 /** Parses a PTY backend response marker from terminal output. */

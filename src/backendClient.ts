@@ -4,14 +4,14 @@ import * as net from "net";
 import { BackendEndpoint } from "./backendBootstrap";
 import { DiagnosticLogger } from "./diagnostics";
 import {
-  BackendCommitResult, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder,
+  BackendCommitResult, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder,
   BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery,
-  ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery, modelUnsupportedFallback,
-  parseModelCommitResponse, parseModelCountResponse, parseModelListResponse, parseModelLookupResponse, parseModelQueryResponse,
-  parseModelRelatedResponse, parseModelRowsResponse, parseModelSchemaResponse, parseOrmCommitResponse, parseOrmCountResponse,
+  ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery, modelUnsupportedFallback,
+  parseModelCommitResponse, parseModelComputedResponse, parseModelCountResponse, parseModelListResponse, parseModelLookupResponse, parseModelQueryResponse,
+  parseModelRelatedResponse, parseModelRowsResponse, parseModelSchemaResponse, parseOrmCommitResponse, parseOrmComputedResponse, parseOrmCountResponse,
   ormStdoutJson, parseOrmGridResponse, parseOrmLookupResponse, parseOrmModelsResponse, parseOrmQueryResponse, parseOrmRelatedResponse
 } from "./modelBackend";
-import { buildChildrenOrm, buildCommitOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, buildRowsOrm } from "./modelOrm";
+import { buildChildrenOrm, buildCommitOrm, buildComputedOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, buildRowsOrm } from "./modelOrm";
 
 const TCP_CONNECT_TIMEOUT_MS = 1500;
 const TCP_RESPONSE_TIMEOUT_MS = 30000;
@@ -24,6 +24,7 @@ const PTY_CELL_LIMIT = 900;
 // ("all" = 1e9) overruns it and the table can't tabulate. "all" therefore loads this many at a time (+ Load more); the
 // socket transport (Auto/Socket) has no marker limit and can fetch more at once.
 const ORM_PTY_ROW_CAP = 2000;
+const INSPECT_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface BackendExecutionResult {
   ok: boolean;
@@ -132,7 +133,7 @@ export type BackendTransportMode = "auto" | "orm" | "pty" | "tcp";
 export class BackendClient {
   private activeTransport: BackendTransport = "none";
   private tcpUnavailable = false;
-  private mode: BackendTransportMode = "pty";
+  private mode: BackendTransportMode = "orm";
 
   /** Stores the socket endpoint and shared authentication token. */
   constructor(
@@ -199,10 +200,14 @@ export class BackendClient {
     return this.request({ kind: "environment" }, parseEnvironmentResponse);
   }
 
-  /** Returns safe child summaries for one inspected runtime value path. */
-  children(path: BackendRuntimePathSegment[]): Promise<BackendRuntimeChildren> {
-    const cell = this.reconstructsViaOrmCell ? buildChildrenOrm(path) : "";
-    if (cell && cell.length <= PTY_CELL_LIMIT) { return this.ormCell(cell, parseOrmChildrenResponse); }
+  /** Returns safe child summaries for one inspected runtime value path; an `object`-kind node with a name+attribute path is typed as a PURE expression (`a.b.c`) so the audit shows clean Python, not `_djs_orm_*` plumbing — the capture hook surfaces this object's children from the result. Collections/index/dict paths keep the readable helper cell. */
+  children(path: BackendRuntimePathSegment[], kind?: string): Promise<BackendRuntimeChildren> {
+    if (this.reconstructsViaOrmCell) {
+      const expression = kind === "object" ? reconstructInspectExpression(path) : null;
+      if (expression) { return this.ormCell(expression, (buffer) => parseOrmInspectChildren(buffer, path)); }
+      const cell = buildChildrenOrm(path);
+      if (cell.length <= PTY_CELL_LIMIT) { return this.ormCell(cell, parseOrmChildrenResponse); }
+    }
     return this.request({ kind: "children", path }, parseChildrenResponse);
   }
 
@@ -251,6 +256,15 @@ export class BackendClient {
       return this.ormCell(buildLookupOrm(query.app, query.model, query.q, query.exclude ?? [], limit), (buffer) => parseOrmLookupResponse(buffer, limit));
     }
     return this.request({ ...query, kind: "lookup" }, parseModelLookupResponse);
+  }
+
+  /** Lazily computes ONE @property over the current filter/order page (user-activated column), returning {pk: cell}. */
+  modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed> {
+    const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
+    if (this.reconstructsViaOrmCell) {
+      return this.ormCell(buildComputedOrm(query.app, query.model, query.field, query.filters, query.order, limit, query.columns), parseOrmComputedResponse);
+    }
+    return this.request({ ...query, kind: "computed", limit }, parseModelComputedResponse);
   }
 
   /** Evaluates user-written ORM code and returns its tabulated result for the grid. */
@@ -508,6 +522,30 @@ function parseOrmChildrenResponse(buffer: string): BackendRuntimeChildren {
   const { data, error, ok } = ormCellJson<{ children?: BackendRuntimeVariable[] }>(buffer);
   if (!ok || !data || !Array.isArray(data.children)) { return { children: [], error: error || "Children unavailable in ORM mode.", ok: false }; }
   return { children: data.children, ok: true };
+}
+
+/** Reconstructs a pure Python expression for a name + attribute-chain path (`a`, `a.b.c`); returns null for any non-attr segment (index/dict) or non-identifier name, so those keep the helper cell. */
+function reconstructInspectExpression(path: BackendRuntimePathSegment[]): string | null {
+  const root = path[0];
+  if (!root || root.op !== "name" || !INSPECT_IDENTIFIER.test(root.name ?? "")) { return null; }
+  let expression = root.name as string;
+  for (let i = 1; i < path.length; i += 1) {
+    const segment = path[i];
+    if (segment.op !== "attr" || !INSPECT_IDENTIFIER.test(segment.name ?? "")) { return null; }
+    expression += `.${segment.name}`;
+  }
+  return expression;
+}
+
+/** Parses a pure-expression drill-down: child summaries come from the capture hook's `inspect` marker field (NOT stdout) with paths RELATIVE to the result object, so the requested path is prepended to make them absolute. */
+function parseOrmInspectChildren(buffer: string, path: BackendRuntimePathSegment[]): BackendRuntimeChildren {
+  const marker = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as { inspect?: { children?: BackendRuntimeVariable[] }; ok?: boolean; stderr?: string; traceback?: string };
+  if (marker.ok === false || !marker.inspect || !Array.isArray(marker.inspect.children)) {
+    const error = (marker.traceback || marker.stderr || "").trim().split(/\r?\n/).filter(Boolean).pop();
+    return { children: [], error: error || "Children unavailable in ORM mode.", ok: false };
+  }
+  const children = marker.inspect.children.map((child) => ({ ...child, path: [...path, ...(Array.isArray(child.path) ? child.path : [])] }));
+  return { children, ok: true };
 }
 
 /** Parses a backend runtime environment response. */

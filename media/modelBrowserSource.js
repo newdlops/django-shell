@@ -6,11 +6,12 @@ import { createEditor, stagedDisplay } from "./gridEdit.js";
 import { enterQueryMode } from "./gridQuery.js";
 import { makeResizable } from "./gridResize.js";
 import { buildEditableRelatedTable } from "./gridRelated.js";
+import { createVirtualRows } from "./gridVirtual.js";
 
 const vscode = acquireVsCodeApi();
 
 const els = {};
-for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logbody", "logClear", "logMode"]) {
+for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode"]) {
   els[id] = document.getElementById(id);
 }
 
@@ -18,7 +19,7 @@ const LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", 
 const MAX_LOG_ENTRIES = 200;
 const ALL_PAGE_SIZE = 1000000000;
 
-const state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, order: [], model: "", pinned: new Set(), widths: {} };
+const state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, order: [], model: "", pinned: new Set(), widths: {}, computed: {}, computedActive: new Set() };
 const pendingRelated = new Map();
 let relRequestId = 0;
 
@@ -28,6 +29,14 @@ const editor = createEditor({
   paintCell: (td) => paintCell(td),
   onChange: (count) => updateEditButtons(count),
   notify: (text) => { els.status.textContent = text; }
+});
+
+const virtual = createVirtualRows({
+  scroller: els.gridwrap,
+  getBody: () => document.getElementById("tbody"),
+  columnSpan: () => totalColumnCount(),
+  buildRow: (row, index) => { const tr = buildRow(row, index); editor.applyStaged(tr); return tr; },
+  onRender: () => repaintPins(els.gridwrap, state)
 });
 
 window.addEventListener("message", (event) => handleMessage(event.data));
@@ -50,6 +59,7 @@ els.logMode.addEventListener("click", () => {
   els.logbody.classList.toggle("mode-sql", !showOrm);
   els.logMode.textContent = showOrm ? "View: Django ORM" : "View: SQL";
 });
+setupLogResize();
 vscode.postMessage({ type: "ready" });
 
 function handleMessage(message) {
@@ -66,6 +76,8 @@ function handleMessage(message) {
     onRelated(message);
   } else if (message.type === "lookup") {
     editor.onLookup(message);
+  } else if (message.type === "computed") {
+    onComputed(message);
   } else if (message.type === "count") {
     els.countinfo.textContent = message.ok ? `· total ${message.count}` : `· count failed`;
     logSql(`count ${state.model}`, message.sql, message.orm);
@@ -98,6 +110,8 @@ function onSchema(schema) {
   state.rowCount = 0;
   state.order = [];
   state.pinned = new Set();
+  state.computed = {};
+  state.computedActive = new Set();
   state.model = `${schema.app}.${schema.model}`;
   els.title.textContent = `${schema.app}.${schema.model}`;
   els.subtitle.textContent = `${schema.label || ""} · ${schema.table || ""}`;
@@ -127,24 +141,43 @@ function updateEditButtons(count) {
   els.discard.disabled = !count;
 }
 
+/** Maps a backend relation kind code to a compact header label (reverse-fk → reverseFK). */
+function relationKindLabel(kind) {
+  return { "fk": "FK", "m2m": "m2m", "o2o": "o2o", "reverse-fk": "reverseFK" }[kind] || kind;
+}
+
+/** Returns the bare model name from an app-qualified relation target label (app.Model → Model). */
+function relationModelName(target) {
+  return String(target || "").split(".").pop();
+}
+
 function buildHead() {
   const head = el("thead", {});
   const row = el("tr", {});
+  row.appendChild(el("th", { className: "rownum", title: "Row number" }, "#"));
   for (const column of state.columns) {
-    const th = el("th", { className: "sortable", dataset: { act: "sort", col: column.attname, key: column.attname }, title: `Sort by ${column.name} (${column.type})` });
+    const sortable = !column.computed;
+    const th = el("th", { className: column.computed ? "computed" : "sortable", dataset: sortable ? { act: "sort", col: column.attname, key: column.attname } : { key: column.attname }, title: sortable ? `Sort by ${column.name} (${column.type})` : `${column.name} (computed @property — read-only)` });
     const pinned = state.pinned.has(column.attname);
     th.appendChild(el("button", { className: pinned ? "pinbtn active" : "pinbtn", dataset: { act: "pin", col: column.attname }, title: pinned ? "Unpin column" : "Pin column (freeze left)" }, "⇤"));
+    if (column.computed) {
+      const loading = state.computedActive.has(column.attname);
+      const cost = column.annotated ? "DB annotation — single query" : "per-row @property — N+1";
+      th.appendChild(el("button", { className: loading ? "loadbtn active" : "loadbtn", dataset: { act: "loadComputed", field: column.attname }, title: `${loading ? "Reload" : "Load"} this column for loaded rows (${cost})` }, loading ? "▼" : "▷"));
+    }
     th.appendChild(document.createTextNode(column.attname));
     if (column.pk) {
       th.appendChild(el("span", { className: "pkmark", title: "primary key" }, "◆"));
     }
-    th.appendChild(el("span", { className: "sortarrow", dataset: { arrow: column.attname } }, ""));
-    th.appendChild(el("span", { className: "coltype" }, column.relation ? `→ ${column.relation.target}` : column.type));
+    if (sortable) {
+      th.appendChild(el("span", { className: "sortarrow", dataset: { arrow: column.attname } }, ""));
+    }
+    th.appendChild(el("span", { className: "coltype" }, column.relation ? `→ ${column.relation.target}` : column.computed ? (column.annotated ? "@property · 1 query" : "@property") : column.type));
     th.appendChild(el("span", { className: "colresize", title: "Drag to resize" }));
     row.appendChild(th);
   }
   for (const relation of state.relations) {
-    row.appendChild(el("th", { className: "relcol", dataset: { key: `rel:${relation.name}` }, title: `${relation.kind} → ${relation.target}` }, document.createTextNode(relation.name), el("span", { className: "coltype" }, `${relation.kind} →`), el("span", { className: "colresize", title: "Drag to resize" })));
+    row.appendChild(el("th", { className: "relcol", dataset: { key: `rel:${relation.name}` }, title: `${relationKindLabel(relation.kind)} → ${relation.target}` }, document.createTextNode(relation.name), el("span", { className: "coltype" }, `${relationKindLabel(relation.kind)} (${relationModelName(relation.target)})`), el("span", { className: "colresize", title: "Drag to resize" })));
   }
   head.appendChild(row);
   return head;
@@ -156,33 +189,24 @@ function onRows(message) {
     renderError(rows.error || "Could not load rows.");
     return;
   }
-  const body = document.getElementById("tbody");
-  if (!body) {
-    return;
-  }
-  if (!message.append) {
-    body.innerHTML = "";
-    state.rowCount = 0;
-  }
   logSql(`rows ${state.model}`, rows.sql, rows.orm);
-  for (const row of rows.rows) {
-    body.appendChild(buildRow(row));
-    state.rowCount += 1;
+  state.rowCount = virtual.setRows(rows.rows || [], Boolean(message.append));
+  if (message.append) {
+    for (const field of state.computedActive) {
+      vscode.postMessage({ type: "loadComputed", field });
+    }
   }
   state.hasMore = Boolean(rows.hasMore);
   els.more.disabled = !state.hasMore;
-  els.status.textContent = `${state.rowCount} row${state.rowCount === 1 ? "" : "s"} loaded${state.hasMore ? " · more available" : ""}`;
-  if (!state.rowCount) {
-    els.status.textContent = "No rows.";
-  }
-  repaintPins(els.gridwrap, state);
+  els.status.textContent = state.rowCount ? `${state.rowCount} row${state.rowCount === 1 ? "" : "s"} loaded${state.hasMore ? " · more available" : ""}` : "No rows.";
 }
 
-function buildRow(row) {
+function buildRow(row, index) {
   const pk = rawValue(row[state.pk]);
   const tr = el("tr", {});
   tr.dataset.pk = String(pk);
   tr._pk = pk;
+  tr.appendChild(el("td", { className: "rownum", title: "Row number" }, String((index ?? 0) + 1)));
   for (const column of state.columns) {
     tr.appendChild(buildCell(row, column, pk));
   }
@@ -196,9 +220,14 @@ function buildRow(row) {
 
 function buildCell(row, column, pk) {
   const td = el("td", {});
-  td._cell = row[column.attname];
   td._column = column;
   td._pk = pk;
+  if (column.computed) {
+    td.classList.add("computed");
+    paintComputedCell(td, column, pk);
+    return td;
+  }
+  td._cell = row[column.attname];
   if (column.editable) {
     td.classList.add("editable");
     td.dataset.attname = column.attname;
@@ -207,6 +236,24 @@ function buildCell(row, column, pk) {
   }
   paintCell(td);
   return td;
+}
+
+/** Renders a lazy @property cell from the computed store: the value if loaded, a spinner if its column is loading, else a muted placeholder prompting activation. */
+function paintComputedCell(td, column, pk) {
+  const store = state.computed[column.attname];
+  const key = String(pk);
+  td.textContent = "";
+  if (store && Object.prototype.hasOwnProperty.call(store, key)) {
+    td._cell = store[key];
+    td.appendChild(renderValue(store[key]));
+    td.title = "Computed @property (read-only)";
+  } else if (state.computedActive.has(column.attname)) {
+    td.appendChild(el("span", { className: "cellnull" }, "…"));
+    td.title = "Loading @property…";
+  } else {
+    td.appendChild(el("span", { className: "cellnull" }, "·"));
+    td.title = "Computed @property — click ▷ in the header to load (lazy)";
+  }
 }
 
 function paintCell(td) {
@@ -264,6 +311,8 @@ function onTableClick(event) {
   const data = node.dataset;
   if (data.act === "pin") {
     togglePin(data.col, node, state, els.gridwrap);
+  } else if (data.act === "loadComputed") {
+    toggleComputed(data.field, node);
   } else if (data.act === "sort") {
     toggleSort(data.col);
   } else if (data.act === "open") {
@@ -289,6 +338,42 @@ function toggleSort(col) {
   applyQuery();
 }
 
+/** Activates (loads) or deactivates a lazy @property column, updating its header button in place and repainting cells. */
+function toggleComputed(field, button) {
+  const active = !state.computedActive.has(field);
+  if (active) {
+    state.computedActive.add(field);
+    vscode.postMessage({ type: "loadComputed", field });
+  } else {
+    state.computedActive.delete(field);
+    delete state.computed[field];
+  }
+  if (button) {
+    button.classList.toggle("active", active);
+    button.textContent = active ? "▼" : "▷";
+    button.title = active ? "Reload computed values for loaded rows" : "Load this @property for loaded rows (lazy — not auto-computed)";
+  }
+  virtual.refresh();
+}
+
+/** Stores a fetched @property column's values (pk→cell) and repaints, ignoring late responses for a since-deactivated column. */
+function onComputed(message) {
+  if (!state.computedActive.has(message.field)) {
+    return;
+  }
+  if (!message.ok) {
+    els.status.textContent = `Could not compute ${message.field}: ${message.error ? String(message.error).split("\n").pop() : "failed"}`;
+    return;
+  }
+  state.computed[message.field] = message.values || {};
+  virtual.refresh();
+  if (typeof message.queryCount === "number") {
+    const rows = typeof message.rowCount === "number" ? message.rowCount : Object.keys(message.values || {}).length;
+    const shape = message.queryCount > rows ? " · N+1 (per-row property queries)" : message.queryCount <= 2 ? " · batched" : "";
+    els.status.textContent = `${message.field}: ${rows} rows · ${message.queryCount} SQL queries${shape}`;
+  }
+}
+
 function updateSortArrows() {
   const arrows = {};
   for (const term of state.order) {
@@ -306,6 +391,9 @@ function addFilterTerm() {
   const term = el("span", { className: "term" });
   const field = el("select", { dataset: { role: "field" } });
   for (const column of state.columns) {
+    if (column.computed) {
+      continue; // @property columns aren't DB fields — they can't be used in a .filter()/.order_by() (FieldError)
+    }
     field.appendChild(el("option", { value: column.attname }, column.attname));
   }
   const lookup = el("select", { dataset: { role: "lookup" } });
@@ -422,9 +510,14 @@ function detailAnchor(tr) {
   return anchor;
 }
 
+/** Returns the grid's total column count including the leading row-number gutter (for full-width spacer/detail cells). */
+function totalColumnCount() {
+  return 1 + state.columns.length + state.relations.length;
+}
+
 function insertDetailRow(afterRow, content) {
   const tr = el("tr", { className: "detail" });
-  const td = el("td", { colSpan: state.columns.length + state.relations.length });
+  const td = el("td", { colSpan: totalColumnCount() });
   const box = el("div", { className: "nested" });
   box.appendChild(content);
   td.appendChild(box);
@@ -456,6 +549,51 @@ function coerce(text) {
     return Number(text);
   }
   return text;
+}
+
+/** Wires the drag handle that resizes the query-log panel against the table, restoring any saved height. */
+function setupLogResize() {
+  const handle = els.logresize;
+  const panel = els.logpanel;
+  if (!handle || !panel) {
+    return;
+  }
+  const saved = (vscode.getState() || {}).logHeight;
+  if (saved) {
+    document.documentElement.style.setProperty("--log-h", `${clampLogHeight(saved)}px`);
+  }
+  handle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = panel.offsetHeight;
+    handle.classList.add("dragging");
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    const move = (moveEvent) => {
+      const next = clampLogHeight(startHeight + (startY - moveEvent.clientY));
+      document.documentElement.style.setProperty("--log-h", `${next}px`);
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+      handle.classList.remove("dragging");
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      persistLogHeight(panel.offsetHeight);
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  });
+}
+
+/** Clamps a candidate log-panel height so neither the log nor the table above it can collapse. */
+function clampLogHeight(value) {
+  return Math.max(72, Math.min(value, Math.max(120, window.innerHeight - 160)));
+}
+
+/** Persists the chosen log-panel height in webview state so it survives reloads. */
+function persistLogHeight(height) {
+  vscode.setState({ ...(vscode.getState() || {}), logHeight: Math.round(height) });
 }
 
 function el(tag, props, ...children) {

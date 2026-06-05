@@ -26,9 +26,14 @@ function pyStr(value: unknown): string {
   return JSON.stringify(String(value ?? ""));
 }
 
-/** Returns a comma-separated `order_by()` argument list from grid sort terms (defaults to the pk). */
-function orderArgs(order: BackendModelOrder[] | undefined): string {
-  const terms = (order ?? []).filter((term) => term && IDENTIFIER.test(String(term.field))).map((term) => `'${term.desc ? "-" : ""}${term.field}'`);
+/** Returns the set of DB-orderable/filterable column attnames — CONCRETE fields only. @property (computed) columns are NOT DB fields, so using them in `.order_by()`/`.filter()` raises Django's `FieldError: Cannot resolve keyword ... into field`. */
+function concreteAttnames(columns: BackendModelColumn[] | undefined): Set<string> {
+  return new Set((columns ?? []).filter((column) => !column.computed).map((column) => column.attname));
+}
+
+/** Returns a comma-separated `order_by()` argument list from grid sort terms, restricted to concrete columns (defaults to the pk). */
+function orderArgs(order: BackendModelOrder[] | undefined, attnames: Set<string>): string {
+  const terms = (order ?? []).filter((term) => term && attnames.has(String(term.field))).map((term) => `'${term.desc ? "-" : ""}${term.field}'`);
   return terms.length ? terms.join(", ") : "'pk'";
 }
 
@@ -69,19 +74,37 @@ export interface OrmRowsParams {
   order?: BackendModelOrder[];
 }
 
-/** Builds `Model._base_manager.filter(...).order_by(...)[offset:offset+limit+1]` (extra row = "has more"). */
+/** Builds `Model._base_manager.filter(...).order_by(...)[offset:offset+limit+1]` (extra row = "has more"). @property columns are NOT computed here (concrete only) — they load lazily per-column via buildComputedOrm, so a property joining many models never delays the base page. */
 export function buildRowsOrm(params: OrmRowsParams): string {
   const offset = Number.isInteger(params.offset) && (params.offset as number) > 0 ? (params.offset as number) : 0;
   const limit = Number.isInteger(params.limit) && params.limit > 0 ? params.limit : 50;
-  const attnames = new Set((params.columns ?? []).map((column) => column.attname));
+  const attnames = concreteAttnames(params.columns);
   const chain = filterChain(params.filters, attnames);
-  return `${modelRef(params.app, params.model)}._base_manager${chain}.order_by(${orderArgs(params.order)})[${offset}:${offset + limit + 1}]`;
+  return `${modelRef(params.app, params.model)}._base_manager${chain}.order_by(${orderArgs(params.order, attnames)})[${offset}:${offset + limit + 1}]`;
+}
+
+/** Builds a lazy single-@property fetch as a READABLE ORM comprehension — `print(json.dumps({str(o.pk): getattr(o, "field", None) for o in Model._base_manager.filter(...).order_by(...)[0:N]}))` — so the server audit shows real ORM + the per-row property access (which makes its N+1 nature self-evident), NOT opaque `_djs_backend_module` plumbing. getattr(...,None) keeps a missing attr from breaking the page; values are JSON-encoded (default=str) since _browse_cell can't be used without re-introducing the backend module. */
+export function buildComputedOrm(app: string | undefined, model: string, field: string, filters: BackendModelFilter[] | undefined, order: BackendModelOrder[] | undefined, limit: number, columns: BackendModelColumn[] | undefined): string {
+  const attnames = concreteAttnames(columns);
+  const cap = Number.isInteger(limit) && limit > 0 ? limit : 50;
+  const ref = modelRef(app, model);
+  const chain = filterChain(filters, attnames);
+  const tail = `${chain}.order_by(${orderArgs(order, attnames)})[0:${cap}]`;
+  if ((columns ?? []).some((column) => column.attname === field && column.annotated)) {
+    // The model declares a DB annotation for this field → ONE annotated query (no per-row @property N+1). The audit shows real
+    // ORM (annotate + values_list); a `lambda __m:` binds the model so the (long, self-contained) modelRef appears once —
+    // keeping the typed cell well under the tty input limit. Resolves `djshell_annotations` as a dict OR classmethod.
+    const expression = `(__m.djshell_annotations() if callable(__m.djshell_annotations) else __m.djshell_annotations)[${pyStr(field)}]`;
+    const body = `{str(__k): __v for __k, __v in __m._base_manager.annotate(__djs=${expression})${tail}.values_list("pk", "__djs")}`;
+    return `print(__import__("json").dumps((lambda __m: ${body})(${ref}), default=str))`;
+  }
+  const access = IDENTIFIER.test(field) ? `__o.${field}` : `getattr(__o, ${pyStr(field)}, None)`;
+  return `print(__import__("json").dumps({str(__o.pk): ${access} for __o in ${ref}._base_manager${tail}}, default=str))`;
 }
 
 /** Builds the row-count ORM `Model._base_manager.filter(...).count()` for the current filter set. */
 export function buildCountOrm(app: string | undefined, model: string, filters: BackendModelFilter[] | undefined, columns: BackendModelColumn[] | undefined): string {
-  const attnames = new Set((columns ?? []).map((column) => column.attname));
-  return `${modelRef(app, model)}._base_manager${filterChain(filters, attnames)}.count()`;
+  return `${modelRef(app, model)}._base_manager${filterChain(filters, concreteAttnames(columns))}.count()`;
 }
 
 /** Builds a readable introspection cell that prints the installed-model catalog as JSON (ORM mode has no schema RPC). */
