@@ -238,7 +238,7 @@ export class BackendClient {
       const requested = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
       const limit = Math.min(requested, ORM_PTY_ROW_CAP); // the PTY marker can't carry an unbounded "all" page
       const offset = typeof query.offset === "number" && query.offset > 0 ? query.offset : 0;
-      return this.ormCell(buildRowsOrm({ app: query.app, columns: query.columns, filters: query.filters, limit, model: query.model, offset, order: query.order }), (buffer) => parseOrmGridResponse(buffer, limit, offset));
+      return this.ormCell(buildRowsOrm({ app: query.app, columns: query.columns, filters: query.filters, limit, model: query.model, offset, order: query.order, relations: query.relations }), (buffer) => parseOrmGridResponse(buffer, limit, offset));
     }
     return this.request({ ...query, kind: "rows" }, parseModelRowsResponse);
   }
@@ -272,7 +272,7 @@ export class BackendClient {
   modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed> {
     const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
     if (this.reconstructsViaOrmCell) {
-      return this.ormCell(buildComputedOrm(query.app, query.model, query.field, query.filters, query.order, limit, query.columns), parseOrmComputedResponse);
+      return this.ormCell(buildComputedOrm(query.app, query.model, query.field, query.filters, query.order, limit, query.columns, query.relations), parseOrmComputedResponse);
     }
     return this.request({ ...query, kind: "computed", limit }, parseModelComputedResponse);
   }
@@ -290,7 +290,7 @@ export class BackendClient {
 
   /** Returns the row count for the current filter set, computed on demand. */
   modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
-    if (this.reconstructsViaOrmCell) { return this.ormCell(buildCountOrm(query.app, query.model, query.filters, query.columns), parseOrmCountResponse); }
+    if (this.reconstructsViaOrmCell) { return this.ormCell(buildCountOrm(query.app, query.model, query.filters, query.columns, query.relations), parseOrmCountResponse); }
     return this.request({ ...query, kind: "count" }, parseModelCountResponse);
   }
 

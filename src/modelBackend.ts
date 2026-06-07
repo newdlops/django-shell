@@ -132,6 +132,7 @@ export interface ModelRowsQuery {
   model: string;
   offset?: number;
   order?: BackendModelOrder[];
+  relations?: BackendModelRelation[];
 }
 
 /** Parameters for one row count request. */
@@ -140,6 +141,7 @@ export interface ModelCountQuery {
   columns?: BackendModelColumn[];
   filters?: BackendModelFilter[];
   model: string;
+  relations?: BackendModelRelation[];
 }
 
 /** One staged row's field edits to commit. */
@@ -243,6 +245,7 @@ export interface ModelComputedQuery {
   limit?: number;
   model: string;
   order?: BackendModelOrder[];
+  relations?: BackendModelRelation[];
 }
 
 /** Result of a lazy computed-field fetch: each loaded row's pk mapped to that property's cell value. */

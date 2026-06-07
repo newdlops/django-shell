@@ -11,15 +11,16 @@ import { createVirtualRows } from "./gridVirtual.js";
 const vscode = acquireVsCodeApi();
 
 const els = {};
-for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode"]) {
+for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "activefilters", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode"]) {
   els[id] = document.getElementById(id);
 }
 
 const LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"];
+const REL_FILTER_PREFIX = "rel:";
 const MAX_LOG_ENTRIES = 200;
 const ALL_PAGE_SIZE = 1000000000;
 
-const state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, order: [], model: "", pinned: new Set(), widths: {}, computed: {}, computedActive: new Set() };
+const state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, filters: [], order: [], model: "", pinned: new Set(), widths: {}, computed: {}, computedActive: new Set() };
 const pendingRelated = new Map();
 let relRequestId = 0;
 
@@ -115,7 +116,8 @@ function onSchema(schema) {
   state.model = `${schema.app}.${schema.model}`;
   els.title.textContent = `${schema.app}.${schema.model}`;
   els.subtitle.textContent = `${schema.label || ""} · ${schema.table || ""}`;
-  els.filterterms.innerHTML = "";
+  syncFilterTerms(state.filters);
+  renderFilterSummary();
   els.countinfo.textContent = "";
   const table = el("table", {});
   table.appendChild(buildHead());
@@ -190,6 +192,17 @@ function onRows(message) {
     return;
   }
   logSql(`rows ${state.model}`, rows.sql, rows.orm);
+  if (Array.isArray(message.filters)) {
+    state.filters = message.filters;
+  }
+  if (Array.isArray(message.order)) {
+    state.order = message.order;
+  }
+  if (!message.append) {
+    syncFilterTerms(state.filters);
+  }
+  updateSortArrows();
+  renderFilterSummary();
   state.rowCount = virtual.setRows(rows.rows || [], Boolean(message.append));
   if (message.append) {
     for (const field of state.computedActive) {
@@ -198,7 +211,8 @@ function onRows(message) {
   }
   state.hasMore = Boolean(rows.hasMore);
   els.more.disabled = !state.hasMore;
-  els.status.textContent = state.rowCount ? `${state.rowCount} row${state.rowCount === 1 ? "" : "s"} loaded${state.hasMore ? " · more available" : ""}` : "No rows.";
+  const filterText = state.filters.length ? ` · ${state.filters.length} filter${state.filters.length === 1 ? "" : "s"}` : "";
+  els.status.textContent = state.rowCount ? `${state.rowCount} row${state.rowCount === 1 ? "" : "s"} loaded${state.hasMore ? " · more available" : ""}${filterText}` : `No rows${filterText}.`;
 }
 
 function buildRow(row, index) {
@@ -384,33 +398,79 @@ function updateSortArrows() {
   }
 }
 
-function addFilterTerm() {
-  if (!state.columns.length) {
+function addFilterTerm(initial = {}) {
+  const options = filterFieldOptions();
+  if (!options.length) {
     return;
   }
   const term = el("span", { className: "term" });
   const field = el("select", { dataset: { role: "field" } });
-  for (const column of state.columns) {
-    if (column.computed) {
-      continue; // @property columns aren't DB fields — they can't be used in a .filter()/.order_by() (FieldError)
-    }
-    field.appendChild(el("option", { value: column.attname }, column.attname));
+  for (const option of options) {
+    field.appendChild(el("option", { title: option.title, value: option.value }, option.label));
   }
+  field.value = options.some((option) => option.value === initial.field) ? initial.field : options[0].value;
   const lookup = el("select", { dataset: { role: "lookup" } });
-  for (const name of LOOKUPS) {
-    lookup.appendChild(el("option", { value: name }, name));
-  }
   const value = el("input", { dataset: { role: "value" }, title: "Value (in/range: comma-separated; isnull: true/false)" });
-  const negate = el("input", { dataset: { role: "negate" }, type: "checkbox" });
+  const negate = el("input", { checked: Boolean(initial.negate), dataset: { role: "negate" }, type: "checkbox" });
   const negwrap = el("label", { className: "neg" }, negate, "not");
   const remove = el("button", { className: "linkbtn", dataset: { role: "remove" }, title: "Remove filter" }, "✕");
   remove.addEventListener("click", () => term.remove());
+  field.addEventListener("change", () => refreshLookupOptions(term));
   term.appendChild(field);
   term.appendChild(lookup);
   term.appendChild(value);
   term.appendChild(negwrap);
   term.appendChild(remove);
   els.filterterms.appendChild(term);
+  refreshLookupOptions(term, initial.lookup);
+  value.value = initial.value === undefined || initial.value === null ? value.value : String(initial.value);
+}
+
+function filterFieldOptions() {
+  const options = [];
+  for (const column of state.columns) {
+    if (column.computed && column.annotated) {
+      options.push({ label: `${column.attname} (@property · DB)`, title: "Filter through a declared ORM annotation", value: column.attname });
+    } else if (column.computed) {
+      options.push({ label: `${column.attname} (@property · Python)`, title: "Filter by evaluating this Python property across candidate rows", value: column.attname });
+    } else if (!column.computed) {
+      options.push({ label: column.attname, title: column.type || column.name, value: column.attname });
+    }
+  }
+  for (const relation of state.relations) {
+    options.push({ label: `${relation.name} (${relationKindLabel(relation.kind)} exists)`, title: `Filter by related-row existence: ${relation.target}`, value: `${REL_FILTER_PREFIX}${relation.name}` });
+  }
+  return options;
+}
+
+function refreshLookupOptions(term, preferred) {
+  const lookup = term.querySelector("[data-role=lookup]");
+  const value = term.querySelector("[data-role=value]");
+  const names = lookupOptionsFor(term.querySelector("[data-role=field]").value);
+  lookup.innerHTML = "";
+  for (const name of names) {
+    lookup.appendChild(el("option", { value: name }, name));
+  }
+  lookup.value = names.includes(preferred) ? preferred : names[0];
+  if (names.length === 1 && names[0] === "isnull") {
+    value.placeholder = "false = has value";
+    if (value.value === "") {
+      value.value = "false";
+    }
+  } else {
+    value.placeholder = "";
+  }
+}
+
+function lookupOptionsFor(field) {
+  return String(field || "").startsWith(REL_FILTER_PREFIX) ? ["isnull"] : LOOKUPS;
+}
+
+function syncFilterTerms(filters) {
+  els.filterterms.innerHTML = "";
+  for (const filter of filters || []) {
+    addFilterTerm(filter);
+  }
 }
 
 function collectFilters() {
@@ -426,7 +486,9 @@ function collectFilters() {
 }
 
 function applyQuery() {
-  send({ filters: collectFilters(), order: state.order, type: "applyQuery" });
+  state.filters = collectFilters();
+  renderFilterSummary();
+  send({ filters: state.filters, order: state.order, type: "applyQuery" });
 }
 
 function pageSizeValue() {
@@ -441,9 +503,41 @@ function send(message) {
 
 function clearQuery() {
   els.filterterms.innerHTML = "";
+  state.filters = [];
   state.order = [];
   updateSortArrows();
+  renderFilterSummary();
   applyQuery();
+}
+
+function renderFilterSummary() {
+  if (!els.activefilters) {
+    return;
+  }
+  els.activefilters.innerHTML = "";
+  if (!state.filters.length) {
+    els.activefilters.appendChild(el("span", { className: "tag" }, "No filters"));
+    return;
+  }
+  els.activefilters.appendChild(el("span", { className: "tag" }, "Applied"));
+  for (const filter of state.filters) {
+    els.activefilters.appendChild(el("span", { className: "filterchip", title: "Currently applied filter" }, describeFilter(filter)));
+  }
+}
+
+function describeFilter(filter) {
+  const field = filterFieldLabel(filter.field);
+  const value = filter.lookup === "isnull" ? String(filter.value).toLowerCase() : String(filter.value ?? "");
+  return `${filter.negate ? "not " : ""}${field} ${filter.lookup} ${value}`;
+}
+
+function filterFieldLabel(field) {
+  const text = String(field || "");
+  if (text.startsWith(REL_FILTER_PREFIX)) {
+    return `${text.slice(REL_FILTER_PREFIX.length)} exists`;
+  }
+  const column = state.columns.find((item) => item.attname === text);
+  return column?.computed ? `${text} @property` : text;
 }
 
 function expandInto(button, request) {

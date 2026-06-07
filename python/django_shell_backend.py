@@ -1657,16 +1657,20 @@ def _browse_rows(request):
             limit = _browse_limit(request.get("limit"), maximum=None)
             order = _browse_order(request.get("order"), attnames, pk_attname)
             keyset_capable = order == [pk_attname]
-            queryset = model._base_manager.all().order_by(*order).filter(_browse_build_filters(model, request.get("filters"), attnames))
+            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all().order_by(*order), model, request.get("filters"), attnames)
             cursor = request.get("cursor")
             offset = request.get("offset")
             base_offset = offset if isinstance(offset, int) and offset > 0 else 0
             if keyset_capable and cursor is not None:
                 queryset = queryset.filter(**{f"{pk_attname}__gt": cursor})
-            elif not keyset_capable and base_offset:
+            elif not keyset_capable and base_offset and not property_terms:
                 queryset = queryset[base_offset:]
             with _browse_capture() as ctx:
-                raw = list(queryset.values(*attnames)[: limit + 1])
+                if property_terms:
+                    objects = list(_browse_islice(_browse_python_filter_iter(queryset, property_terms), base_offset, base_offset + limit + 1))
+                    raw = [{attname: getattr(obj, attname, None) for attname in attnames} for obj in objects]
+                else:
+                    raw = list(queryset.values(*attnames)[: limit + 1])
             has_more = len(raw) > limit
             raw = raw[:limit]
             next_cursor = raw[-1][pk_attname] if keyset_capable and has_more and raw else None
@@ -1789,19 +1793,24 @@ def _browse_computed(request):
             attnames = [column["attname"] for column in _browse_columns(model)]
             order = _browse_order(request.get("order"), attnames, model._meta.pk.attname)
             limit = _browse_limit(request.get("limit"), maximum=None)
-            queryset = model._base_manager.all().order_by(*order).filter(_browse_build_filters(model, request.get("filters"), attnames))
+            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all().order_by(*order), model, request.get("filters"), attnames)
             # Capture only the query COUNT (never the SQL text — serializing it bloated the marker and corrupted the parseable
             # JSON; see the SQL-heavy @property bugfix). queryCount makes the cost verifiable: ≈ 1 with a declared annotation
             # (single SQL query), >> rowCount for a per-row @property (N+1).
             annotations = _browse_declared_annotations(model)
             if field in annotations:
                 # The model declared a DB annotation for this field → compute it in ONE SQL query instead of per-row Python.
+                if property_terms:
+                    with _browse_capture() as ctx:
+                        values = {_browse_jsonable(obj.pk): _browse_cell(_pty_safe_getattr(obj, field)) for obj in _browse_islice(_browse_python_filter_iter(queryset, property_terms), 0, limit)}
+                    return {"field": field, "ok": True, "queryCount": len(ctx.captured_queries), "rowCount": len(values), "values": values}
                 with _browse_capture() as ctx:
                     rows = list(queryset.annotate(__djs=annotations[field]).values_list("pk", "__djs")[:limit])
                 values = {_browse_jsonable(pk): _browse_cell(value) for pk, value in rows}
                 return {"annotated": True, "field": field, "ok": True, "queryCount": len(ctx.captured_queries), "rowCount": len(values), "values": values}
             with _browse_capture() as ctx:
-                values = {_browse_jsonable(obj.pk): _browse_cell(_pty_safe_getattr(obj, field)) for obj in queryset[:limit]}
+                source = _browse_python_filter_iter(queryset, property_terms) if property_terms else queryset[:limit]
+                values = {_browse_jsonable(obj.pk): _browse_cell(_pty_safe_getattr(obj, field)) for obj in _browse_islice(source, 0, limit)}
             return {"field": field, "ok": True, "queryCount": len(ctx.captured_queries), "rowCount": len(values), "values": values}
         except Exception:
             return {"ok": False, "error": traceback.format_exc(), "values": {}}
@@ -1935,13 +1944,18 @@ def _browse_count(request):
             model = _browse_resolve_model(request)
             attnames = [field.attname for field in model._meta.concrete_fields]
             with _browse_capture() as ctx:
-                count = model._base_manager.filter(_browse_build_filters(model, request.get("filters"), attnames)).count()
-            includes, excludes = _browse_orm_clauses(request.get("filters"), set(attnames))
+                queryset, property_terms = _browse_apply_db_filters(model._base_manager.all(), model, request.get("filters"), attnames)
+                count = sum(1 for _ in _browse_python_filter_iter(queryset, property_terms)) if property_terms else queryset.count()
+            includes, excludes, annotations, distinct = _browse_orm_clauses(model, request.get("filters"), set(attnames))
             count_lines = [f"{model.__name__}._base_manager"]
+            if annotations:
+                count_lines.append(f"    .annotate({', '.join(annotations)})")
             if includes:
                 count_lines.append(f"    .filter({', '.join(includes)})")
             if excludes:
                 count_lines.append(f"    .exclude({', '.join(excludes)})")
+            if distinct:
+                count_lines.append("    .distinct()")
             count_lines.append("    .count()")
             return {"count": count, "ok": True, "orm": "\n".join(count_lines), "sql": _browse_sql(ctx)}
         except Exception:
@@ -1966,29 +1980,41 @@ def _orm_args(items):
     return ", ".join(repr(item) for item in items)
 
 
-def _browse_orm_clauses(filters, attnames):
+def _browse_orm_clauses(model, filters, attnames):
     """Splits structured filters into Django .filter()/.exclude() kwarg strings for the command log."""
     includes, excludes = [], []
+    annotations = []
+    distinct = False
+    declared = _browse_declared_annotations(model)
     for term in filters or []:
-        if not isinstance(term, dict):
+        parsed = _browse_filter_term(model, term, attnames, declared)
+        if parsed is None:
             continue
-        field = term.get("field")
-        lookup = term.get("lookup") or "exact"
-        if field not in attnames or lookup not in _BROWSE_LOOKUPS:
+        key, lookup, value, annotation, needs_distinct, property_name = parsed
+        if property_name is not None:
+            lookup_key = property_name if lookup == "exact" else f"{property_name}__{lookup}"
+            (excludes if term.get("negate") else includes).append(f"{lookup_key}={value!r}  # Python @property")
             continue
-        key = field if lookup == "exact" else f"{field}__{lookup}"
-        (excludes if term.get("negate") else includes).append(f"{key}={term.get('value')!r}")
-    return includes, excludes
+        if annotation is not None:
+            annotations.append(f"{annotation[0]}=<annotation>")
+        distinct = distinct or needs_distinct
+        lookup_key = key if lookup == "exact" else f"{key}__{lookup}"
+        (excludes if term.get("negate") else includes).append(f"{lookup_key}={value!r}")
+    return includes, excludes, annotations, distinct
 
 
 def _browse_orm_rows(model, order, filters, attnames, pk_attname, keyset_capable, cursor, base_offset, limit):
     """Builds a readable Django ORM expression mirroring the executed rows query."""
-    includes, excludes = _browse_orm_clauses(filters, set(attnames))
+    includes, excludes, annotations, distinct = _browse_orm_clauses(model, filters, set(attnames))
     lines = [f"{model.__name__}._base_manager", f"    .order_by({_orm_args(order)})"]
+    if annotations:
+        lines.append(f"    .annotate({', '.join(annotations)})")
     if includes:
         lines.append(f"    .filter({', '.join(includes)})")
     if excludes:
         lines.append(f"    .exclude({', '.join(excludes)})")
+    if distinct:
+        lines.append("    .distinct()")
     if keyset_capable and cursor is not None:
         lines.append(f"    .filter({pk_attname}__gt={cursor!r})")
     lines.append(f"    .values({_orm_args(attnames)})")
@@ -2262,7 +2288,7 @@ def _browse_tabulate_items(items, limit):
         model = type(items[0])
         columns = _browse_columns(model)
         rows = [{column["attname"]: _browse_cell(getattr(item, column["attname"], None)) for column in columns} for item in items]
-        return {"columns": columns, "editable": False, "hasMore": has_more, "rows": rows}
+        return {"app": model._meta.app_label, "columns": columns + _browse_computed_columns(model), "editable": True, "hasMore": has_more, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
     if items and all(isinstance(item, dict) for item in items):
         names = list(dict.fromkeys(key for item in items for key in item))
         return {"columns": [{"attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": ""} for name in names], "editable": False, "hasMore": has_more, "rows": [_browse_serialize_row(item) for item in items]}
@@ -2271,23 +2297,160 @@ def _browse_tabulate_items(items, limit):
 
 def _browse_build_filters(model, filters, attnames):
     """Builds a safe Q filter; field and lookup are allowlisted and values stay ORM-parameterized (no injection)."""
+    return _browse_filter_parts(model, filters, attnames)[0]
+
+
+def _browse_apply_filters(queryset, model, filters, attnames):
+    """Applies safe concrete, annotated-property, and relation-existence filters to a queryset."""
+    queryset, property_terms = _browse_apply_db_filters(queryset, model, filters, attnames)
+    return _browse_python_filter_iter(queryset, property_terms) if property_terms else queryset
+
+
+def _browse_apply_db_filters(queryset, model, filters, attnames):
+    """Applies filters that can be represented by Django ORM and returns deferred Python property terms."""
+    query, annotations, distinct, property_terms = _browse_filter_parts(model, filters, attnames)
+    if annotations:
+        queryset = queryset.annotate(**annotations)
+    queryset = queryset.filter(query)
+    return (queryset.distinct() if distinct else queryset), property_terms
+
+
+def _browse_filter_parts(model, filters, attnames):
+    """Returns a Q object plus required annotations/distinct flag for safe table filters."""
     from django.db.models import Q
 
     query = Q()
+    annotations = {}
+    distinct = False
+    property_terms = []
     if not isinstance(filters, list):
-        return query
-    allowed = set(attnames)
-    fields = {field.attname: field for field in model._meta.concrete_fields}
+        return query, annotations, distinct, property_terms
+    declared = _browse_declared_annotations(model)
     for term in filters:
-        if not isinstance(term, dict):
+        parsed = _browse_filter_term(model, term, set(attnames), declared)
+        if parsed is None:
             continue
-        field = term.get("field")
-        lookup = term.get("lookup") or "exact"
-        if field not in allowed or lookup not in _BROWSE_LOOKUPS:
+        key, lookup, value, annotation, needs_distinct, property_name = parsed
+        if property_name is not None:
+            property_terms.append({"field": property_name, "lookup": lookup, "negate": bool(term.get("negate")), "value": value})
             continue
-        clause = Q(**{f"{field}__{lookup}": _browse_coerce_filter_value(lookup, term.get("value"), fields.get(field))})
+        if annotation is not None:
+            annotations[annotation[0]] = annotation[1]
+        distinct = distinct or needs_distinct
+        clause = Q(**{f"{key}__{lookup}": value})
         query &= ~clause if term.get("negate") else clause
-    return query
+    return query, annotations, distinct, property_terms
+
+
+def _browse_filter_term(model, term, attnames, declared):
+    """Parses one structured table filter term into a safe ORM lookup key."""
+    if not isinstance(term, dict):
+        return None
+    field = term.get("field")
+    lookup = term.get("lookup") or "exact"
+    if not isinstance(field, str) or lookup not in _BROWSE_LOOKUPS:
+        return None
+    fields = {field.attname: field for field in model._meta.concrete_fields}
+    annotation = None
+    needs_distinct = False
+    if field in attnames:
+        key = field
+        value = _browse_coerce_filter_value(lookup, term.get("value"), fields.get(field))
+    elif field in declared and field.isidentifier():
+        key = _browse_annotation_alias(field)
+        annotation = (key, declared[field])
+        value = _browse_coerce_filter_value(lookup, term.get("value"))
+    elif field.isidentifier() and _pty_is_computed_field(model, field):
+        return None, lookup, _browse_coerce_filter_value(lookup, term.get("value")), None, False, field
+    elif field.startswith("rel:") and lookup == "isnull":
+        relation = _browse_find_relation(model, field[4:])
+        name = _browse_relation_name(relation) if relation is not None else None
+        if not name:
+            return None
+        key = name
+        value = _browse_coerce_filter_value(lookup, term.get("value"))
+        needs_distinct = bool(relation.one_to_many or relation.many_to_many)
+    else:
+        return None
+    return key, lookup, value, annotation, needs_distinct, None
+
+
+def _browse_annotation_alias(field):
+    """Returns a safe annotation alias for one declared computed-property filter."""
+    return f"djs_{field}"
+
+
+def _browse_python_filter_iter(queryset, terms):
+    """Yields objects whose unannotated @property values match every Python-side filter term."""
+    if not terms:
+        return iter(queryset)
+    return (obj for obj in queryset if all(_browse_property_filter_match(obj, term) for term in terms))
+
+
+def _browse_property_filter_match(obj, term):
+    """Returns whether one object matches one Python-side @property filter term."""
+    value = _pty_safe_getattr(obj, term.get("field"))
+    matched = _browse_property_lookup_match(value, term.get("lookup"), term.get("value"))
+    return not matched if term.get("negate") else matched
+
+
+def _browse_property_lookup_match(value, lookup, expected):
+    """Applies one supported lookup to a Python @property value."""
+    if lookup == "isnull":
+        return (value is None) == bool(expected)
+    if value is None:
+        return False
+    if lookup == "exact":
+        return value == expected
+    if lookup == "iexact":
+        return str(value).lower() == str(expected).lower()
+    if lookup == "contains":
+        return str(expected) in str(value)
+    if lookup == "icontains":
+        return str(expected).lower() in str(value).lower()
+    if lookup in ("gt", "gte", "lt", "lte"):
+        return _browse_compare(value, expected, lookup)
+    if lookup == "startswith":
+        return str(value).startswith(str(expected))
+    if lookup == "istartswith":
+        return str(value).lower().startswith(str(expected).lower())
+    if lookup == "endswith":
+        return str(value).endswith(str(expected))
+    if lookup == "iendswith":
+        return str(value).lower().endswith(str(expected).lower())
+    if lookup == "in":
+        return value in expected if isinstance(expected, (list, tuple, set, frozenset)) else False
+    if lookup == "range":
+        return isinstance(expected, (list, tuple)) and len(expected) >= 2 and _browse_compare(expected[0], value, "lte") and _browse_compare(value, expected[1], "lte")
+    if lookup == "date":
+        actual = value.date() if callable(getattr(value, "date", None)) else value
+        return str(actual) == str(expected)
+    if lookup in ("year", "month", "day"):
+        return getattr(value, lookup, None) == expected
+    return False
+
+
+def _browse_compare(left, right, lookup):
+    """Compares two property filter values, returning False on incompatible types."""
+    try:
+        if lookup == "gt":
+            return left > right
+        if lookup == "gte":
+            return left >= right
+        if lookup == "lt":
+            return left < right
+        if lookup == "lte":
+            return left <= right
+    except Exception:
+        return False
+    return False
+
+
+def _browse_islice(iterable, start, stop):
+    """Returns an iterator slice for querysets, lists, and generators."""
+    import itertools
+
+    return itertools.islice(iterable, start, stop)
 
 
 def _browse_coerce_filter_value(lookup, value, field=None):
@@ -2306,4 +2469,8 @@ def _browse_coerce_filter_value(lookup, value, field=None):
         return parts[:2] if lookup == "range" else parts
     if isinstance(value, str) and field is not None and field.get_internal_type() == "BooleanField":
         return value.strip().lower() in ("true", "1", "t", "yes", "on")
+    if isinstance(value, str) and field is None and value.strip().lower() in ("true", "false", "1", "0", "t", "yes", "no", "on", "off"):
+        return value.strip().lower() in ("true", "1", "t", "yes", "on")
+    if isinstance(value, str) and field is None and value.strip().replace(".", "", 1).lstrip("-").isdigit():
+        return float(value.strip()) if "." in value.strip() else int(value.strip())
     return value

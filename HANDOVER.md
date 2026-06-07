@@ -230,13 +230,15 @@ reads the capture hook's grid rows, not stdout JSON; a raising property errors t
 "Computed field failed in ORM mode." hid it — and was caused by capturing the property's huge SQL
 into the response, blowing the marker; `_browse_computed` no longer captures SQL text).
 
-### Never filter/sort by a computed column
-A property can't resolve to a DB field → `FieldError: Cannot resolve keyword '…' into field`.
-`concreteAttnames(columns)` (drops `computed`) feeds **both** `filterChain` and `orderArgs` in
-`buildRowsOrm`/`buildComputedOrm`/`buildCountOrm`. The socket path was already concrete-only
-(`_browse_columns`/`concrete_fields`). The filter-field dropdown (`addFilterTerm`) omits computed
-columns, and computed headers are non-sortable. **If you still see this FieldError, you're on the
-stale installed build — rebuild.**
+### Filtering computed columns
+A property still can't resolve to a DB field, so computed columns remain **non-sortable**. Filtering
+is now split:
+- annotation-backed properties use `.annotate(...).filter(...)` and stay DB-side;
+- ordinary properties need **no model-code changes** and are filtered Python-side, after DB filters
+  and before pagination (`_browse_python_filter_iter` / `pythonFilterCell`). This is exact but can
+  scan many rows and can run property N+1 work; the UI labels these fields as `@property · Python`.
+Relation filters are existence-only (`rel:name isnull true/false`) and M2M/reverse-FK filters add
+`.distinct()`.
 
 ---
 

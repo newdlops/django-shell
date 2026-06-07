@@ -38,6 +38,8 @@ button:disabled{opacity:.5;cursor:default}
 .queryinput:focus{border-color:var(--vscode-focusBorder)}
 .filterbar .grow{flex:1}
 .terms{display:flex;flex-wrap:wrap;gap:6px}
+.activefilters{display:flex;align-items:center;gap:4px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:11px}
+.filterchip{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border:1px solid var(--vscode-panel-border);border-radius:10px;background:var(--vscode-editor-inactiveSelectionBackground,transparent);color:var(--vscode-foreground)}
 .term{display:inline-flex;align-items:center;gap:4px;padding:2px 4px;border:1px solid var(--vscode-panel-border);border-radius:6px}
 .term select,.term input{font:inherit;font-size:11px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:3px;padding:1px 3px}
 .term input{width:120px}
@@ -147,6 +149,7 @@ td:has(.fkpick){overflow:visible}
   <div class="filterbar" id="filterbar">
     <button id="addFilter" class="secondary" type="button">+ Filter</button>
     <span class="terms" id="filterterms"></span>
+    <span class="activefilters" id="activefilters"></span>
     <span class="grow"></span>
     <button id="applyFilter" type="button">Apply</button>
     <button id="clearFilter" class="secondary" type="button">Clear</button>

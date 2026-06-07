@@ -93,12 +93,37 @@ test("binds app-registry model names for ORM cells even when model autoimport is
   assert.equal(payload.plainCell, false);
 });
 
+test("parses unannotated property filters as Python-side predicates without model annotations", { skip: !PYTHON }, () => {
+  const payload = runBackend([
+    "import json",
+    "class Field:",
+    "    attname = 'id'",
+    "    def get_internal_type(self):",
+    "        return 'IntegerField'",
+    "class Meta:",
+    "    concrete_fields = [Field()]",
+    "class Company:",
+    "    _meta = Meta()",
+    "    @property",
+    "    def display_name(self):",
+    "        return 'Acme'",
+    "parsed = mod._browse_filter_term(Company, {'field': 'display_name', 'lookup': 'icontains', 'value': 'ac'}, {'id'}, {})",
+    "obj = Company()",
+    "print(json.dumps({'property': parsed[-1], 'match': mod._browse_property_filter_match(obj, {'field': 'display_name', 'lookup': 'icontains', 'value': 'ac', 'negate': False})}))"
+  ]);
+
+  assert.equal(payload.property, "display_name");
+  assert.equal(payload.match, true);
+});
+
 test("builds visible ORM cells with bare model names, not app-registry plumbing", () => {
   const columns = [
     { attname: "name", computed: false, type: "CharField" },
     { attname: "is_active", computed: false, type: "BooleanField" },
-    { attname: "has_paid_subscription", annotated: false, computed: true, type: "property" }
+    { attname: "has_paid_subscription", annotated: false, computed: true, type: "property" },
+    { attname: "staff_alias", annotated: true, computed: true, type: "property" }
   ];
+  const relations = [{ kind: "m2m", name: "members", single: false, target: "db.Member" }];
   const cells = [
     buildRowsOrm({ app: "db", columns, filters: [{ field: "name", lookup: "icontains", value: "acme" }], limit: 50, model: "Company", order: [{ desc: true, field: "name" }] }),
     buildComputedOrm("db", "Company", "has_paid_subscription", undefined, undefined, 50, columns),
@@ -107,9 +132,14 @@ test("builds visible ORM cells with bare model names, not app-registry plumbing"
     ormBuilders.buildRelatedOrm("db", "Company", 7, "members", 10),
     ormBuilders.buildCommitOrm("db", "Company", [{ pk: 7, fields: { name: "Acme" } }], columns)
   ];
+  const pythonPropertyCell = buildRowsOrm({ app: "db", columns, filters: [{ field: "has_paid_subscription", lookup: "exact", value: "true" }], limit: 50, model: "Company" });
 
   assert.equal(cells[0], 'Company._base_manager.filter(**{"name__icontains": "acme"}).order_by(\'-name\')[0:51]');
-  for (const cell of cells) {
+  assert.match(pythonPropertyCell, /import itertools as _it/);
+  assert.match(pythonPropertyCell, /getattr\(__o, "has_paid_subscription", None\)/);
+  assert.match(buildRowsOrm({ app: "db", columns, filters: [{ field: "staff_alias", lookup: "exact", value: "true" }, { field: "rel:members", lookup: "isnull", value: "false" }], limit: 50, model: "Company", relations }), /annotate\(djs_staff_alias=/);
+  assert.match(buildRowsOrm({ app: "db", columns, filters: [{ field: "staff_alias", lookup: "exact", value: "true" }, { field: "rel:members", lookup: "isnull", value: "false" }], limit: 50, model: "Company", relations }), /\.filter\(\*\*\{"djs_staff_alias__exact": True\}\)\.filter\(\*\*\{"members__isnull": False\}\)\.distinct\(\)/);
+  for (const cell of [...cells, pythonPropertyCell]) {
     assert.match(cell, /\bCompany\._base_manager\b/);
     assert.doesNotMatch(cell, SUPPORT_LAYER_CELL);
   }
@@ -261,19 +291,27 @@ test("filters and sorts via allowlists and counts on demand", { skip: !HAS_DJANG
     "settings.configure(DEBUG=True, DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}, INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'], USE_TZ=True)",
     "import django; django.setup()",
     "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
-    "from django.contrib.auth.models import User; from django.db import connection, reset_queries",
+    "from django.contrib.auth.models import User, Group; from django.db import connection, reset_queries; from django.db.models import F",
     "[User.objects.create(username=f'user{i}', password='x', is_staff=(i % 2 == 0)) for i in range(5)]",
+    "group = Group.objects.create(name='ops')",
+    "User.objects.get(username='user1').groups.add(group)",
+    "User.djshell_annotations = {'staff_alias': F('is_staff')}",
     "def call(kind, **kw): return mod._run_request({}, 't', {'token': 't', 'kind': kind, **kw}, set())",
     "reset_queries()",
     "staff = call('rows', app='auth', model='User', filters=[{'field': 'is_staff', 'lookup': 'exact', 'value': True}])",
     "staff_queries = len(connection.queries)",
     "count = call('count', app='auth', model='User', filters=[{'field': 'is_staff', 'lookup': 'exact', 'value': True}])",
+    "annotated = call('rows', app='auth', model='User', filters=[{'field': 'staff_alias', 'lookup': 'exact', 'value': True}])",
+    "has_group = call('rows', app='auth', model='User', filters=[{'field': 'rel:groups', 'lookup': 'isnull', 'value': False}])",
+    "no_group = call('count', app='auth', model='User', filters=[{'field': 'rel:groups', 'lookup': 'isnull', 'value': True}])",
     "icontains = call('rows', app='auth', model='User', filters=[{'field': 'username', 'lookup': 'icontains', 'value': 'user1'}])",
     "negate = call('rows', app='auth', model='User', filters=[{'field': 'is_staff', 'lookup': 'exact', 'value': True, 'negate': True}])",
     "sorted_desc = call('rows', app='auth', model='User', order=[{'field': 'username', 'desc': True}], limit=2)",
     "injected = call('rows', app='auth', model='User', filters=[{'field': 'evil; DROP', 'lookup': 'exact', 'value': 1}, {'field': 'username', 'lookup': 'badlookup', 'value': 'x'}])",
     "print(json.dumps({",
     "  'staff_queries': staff_queries, 'staff_count': len(staff['rows']), 'count': count['count'],",
+    "  'annotated': sorted(r['username'] for r in annotated['rows']),",
+    "  'has_group': [r['username'] for r in has_group['rows']], 'no_group_count': no_group['count'],",
     "  'icontains': [r['username'] for r in icontains['rows']],",
     "  'negate': sorted(r['username'] for r in negate['rows']),",
     "  'sorted_desc': [r['username'] for r in sorted_desc['rows']], 'sorted_offset': sorted_desc['nextOffset'],",
@@ -283,6 +321,9 @@ test("filters and sorts via allowlists and counts on demand", { skip: !HAS_DJANG
   assert.equal(payload.staff_queries, 1, "filtered page must stay a single query");
   assert.equal(payload.staff_count, 3);
   assert.equal(payload.count, 3, "count must match the filtered rows");
+  assert.deepEqual(payload.annotated, ["user0", "user2", "user4"]);
+  assert.deepEqual(payload.has_group, ["user1"]);
+  assert.equal(payload.no_group_count, 4);
   assert.deepEqual(payload.icontains, ["user1"]);
   assert.deepEqual(payload.negate, ["user1", "user3"]);
   assert.deepEqual(payload.sorted_desc, ["user4", "user3"]);

@@ -3,7 +3,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import type { BackendTransport, BackendTransportMode } from "./backendClient";
-import type { BackendCommitResult, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import type { BackendCommitResult, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRelation, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { modelBrowserHtml } from "./modelBrowserHtml";
 import { DiagnosticLogger } from "./diagnostics";
 
@@ -126,6 +126,7 @@ class ModelBrowserPanel {
   private nextOffset: number | null = null;
   private pageSize = PAGE_SIZE;
   private columns: BackendModelColumn[] = [];
+  private relations: BackendModelRelation[] = [];
   private loadedRowCount = 0;
 
   /** Creates the webview panel for one model target and wires its message and dispose handlers. */
@@ -199,6 +200,8 @@ class ModelBrowserPanel {
         this.post({ message: schema.error ?? "Could not load model schema.", type: "error" });
         return;
       }
+      this.columns = schema.columns;
+      this.relations = schema.relations;
       this.post({ schema, type: "schema" });
       await this.loadPage(true);
     }
@@ -208,7 +211,7 @@ class ModelBrowserPanel {
 
   /** Loads one page of rows, resetting the grid or appending to it. */
   private async loadPage(reset: boolean): Promise<void> {
-    const query: ModelRowsQuery = { app: this.target.app, columns: this.columns, filters: this.filters, limit: this.pageSize, model: this.target.model, order: this.order };
+    const query: ModelRowsQuery = { app: this.target.app, columns: this.columns, filters: this.filters, limit: this.pageSize, model: this.target.model, order: this.order, relations: this.relations };
     if (!reset && this.nextCursor !== undefined && this.nextCursor !== null) {
       query.cursor = this.nextCursor;
     } else if (!reset && this.nextOffset !== null) {
@@ -224,12 +227,15 @@ class ModelBrowserPanel {
     if (rows.ok && rows.columns.length) {
       this.columns = rows.columns;
     }
+    if (rows.ok && rows.relations) {
+      this.relations = rows.relations;
+    }
     if (reset && rows.ok && this.reconstructsViaOrmCell()) {
       // ORM and Terminal modes have no schema RPC: build the grid head from the page's own columns/relations.
       this.post({ schema: { app: this.target.app, columns: rows.columns, label: this.target.label ?? "", model: this.target.model, ok: true, pk: rows.pk ?? "id", relations: rows.relations ?? [], table: "" }, type: "schema" });
     }
     this.logger?.log("model.browser.rows", { append: !reset, model: `${this.target.app}.${this.target.model}`, ok: rows.ok, rows: rows.rows.length });
-    this.post({ append: !reset, rows, type: "rows" });
+    this.post({ append: !reset, filters: this.filters, order: this.order, rows, type: "rows" });
   }
 
   /** Routes one message from the webview to its handler. */
@@ -270,7 +276,7 @@ class ModelBrowserPanel {
 
   /** Lazily fetches one @property column's values for the currently-loaded rows (user activated the column). */
   private async loadComputed(field: string): Promise<void> {
-    const result = await this.source.modelComputed({ app: this.target.app, columns: this.columns, field, filters: this.filters, limit: Math.max(this.loadedRowCount, 1), model: this.target.model, order: this.order });
+    const result = await this.source.modelComputed({ app: this.target.app, columns: this.columns, field, filters: this.filters, limit: Math.max(this.loadedRowCount, 1), model: this.target.model, order: this.order, relations: this.relations });
     if (this.disposed) {
       return;
     }
@@ -280,7 +286,7 @@ class ModelBrowserPanel {
 
   /** Computes and returns the total row count for the current filter set. */
   private async requestCount(): Promise<void> {
-    const result = await this.source.modelCount({ app: this.target.app, columns: this.columns, filters: this.filters, model: this.target.model });
+    const result = await this.source.modelCount({ app: this.target.app, columns: this.columns, filters: this.filters, model: this.target.model, relations: this.relations });
     this.post({ count: result.count, error: result.error, ok: result.ok, orm: result.orm, sql: result.sql, type: "count" });
   }
 
