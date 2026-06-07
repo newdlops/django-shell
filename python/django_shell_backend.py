@@ -997,6 +997,7 @@ def _pty_is_ipython():
 # buffer's tail-slice and never parses, hanging the serialized PTY request queue. Bounded reads pass through untouched.
 _PTY_MARKER_LIMIT = 1000000
 _PTY_CHUNK_LIMIT = 200000
+_PROPERTY_FILTER_CHUNK_SIZE = 1000
 
 
 def _pty_fit_response(response):
@@ -2384,7 +2385,8 @@ def _browse_python_filter_iter(queryset, terms):
     """Yields objects whose unannotated @property values match every Python-side filter term."""
     if not terms:
         return iter(queryset)
-    return (obj for obj in queryset if all(_browse_property_filter_match(obj, term) for term in terms))
+    source = queryset.iterator(chunk_size=_PROPERTY_FILTER_CHUNK_SIZE) if callable(getattr(queryset, "iterator", None)) else queryset
+    return (obj for obj in source if all(_browse_property_filter_match(obj, term) for term in terms))
 
 
 def _browse_property_filter_match(obj, term):

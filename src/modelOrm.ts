@@ -7,6 +7,7 @@ import type { BackendModelColumn, BackendModelFilter, BackendModelOrder, Backend
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const LOOKUPS = new Set(["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"]);
+const PYTHON_FILTER_CHUNK_SIZE = 1000;
 const TRUTHY = /^(true|1|t|yes|on)$/i;
 const NUMERIC_FIELD = /Integer|Float|Decimal|AutoField/;
 
@@ -160,7 +161,7 @@ function pythonFilterCell(baseExpression: string, terms: BackendModelFilter[], o
     `        return ${pythonFilterPredicate(terms)}`,
     "    except Exception:",
     "        return False",
-    `list(_it.islice((__o for __o in ${baseExpression} if _prop_ok(__o)), ${offset}, ${end}))`
+    `list(_it.islice((__o for __o in ${streamingQuerysetExpression(baseExpression)} if _prop_ok(__o)), ${offset}, ${end}))`
   ].join("\n");
 }
 
@@ -172,8 +173,13 @@ function pythonFilterCountCell(baseExpression: string, terms: BackendModelFilter
     `        return ${pythonFilterPredicate(terms)}`,
     "    except Exception:",
     "        return False",
-    `sum(1 for __o in ${baseExpression} if _prop_ok(__o))`
+    `sum(1 for __o in ${streamingQuerysetExpression(baseExpression)} if _prop_ok(__o))`
   ].join("\n");
+}
+
+/** Returns a QuerySet expression using iterator() so Python-side property filters stream candidates instead of caching the whole queryset. */
+function streamingQuerysetExpression(baseExpression: string): string {
+  return `(${baseExpression}).iterator(chunk_size=${PYTHON_FILTER_CHUNK_SIZE})`;
 }
 
 /** Returns a conjunction of safe Python property lookup predicates. */
@@ -275,7 +281,7 @@ export function buildComputedOrm(app: string | undefined, model: string, field: 
       `        return ${pythonFilterPredicate(plan.pythonTerms)}`,
       "    except Exception:",
       "        return False",
-      `[{${pyStr("pk")}: __o.pk, ${pyStr("value")}: ${access}} for __o in _it.islice((__o for __o in ${base} if _prop_ok(__o)), 0, ${cap})]`
+      `[{${pyStr("pk")}: __o.pk, ${pyStr("value")}: ${access}} for __o in _it.islice((__o for __o in ${streamingQuerysetExpression(base)} if _prop_ok(__o)), 0, ${cap})]`
     ].join("\n");
   }
   if ((columns ?? []).some((column) => column.attname === field && column.annotated)) {

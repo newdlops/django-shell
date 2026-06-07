@@ -116,6 +116,34 @@ test("parses unannotated property filters as Python-side predicates without mode
   assert.equal(payload.match, true);
 });
 
+test("streams Python-side property filters across chunk boundaries without dropping matches", { skip: !PYTHON }, () => {
+  const payload = runBackend([
+    "import json",
+    "class Row:",
+    "    def __init__(self, pk):",
+    "        self.pk = pk",
+    "    @property",
+    "    def flag(self):",
+    "        return self.pk in (1001, 1002, 2001)",
+    "class FakeQuerySet:",
+    "    def __init__(self, rows):",
+    "        self.rows = rows",
+    "        self.calls = []",
+    "    def iterator(self, chunk_size=None):",
+    "        self.calls.append(chunk_size)",
+    "        return iter(self.rows)",
+    "qs = FakeQuerySet([Row(pk) for pk in range(1, 2505)])",
+    "terms = [{'field': 'flag', 'lookup': 'exact', 'value': True, 'negate': False}]",
+    "matches = [obj.pk for obj in mod._browse_python_filter_iter(qs, terms)]",
+    "window = [obj.pk for obj in mod._browse_islice(mod._browse_python_filter_iter(qs, terms), 1, 3)]",
+    "print(json.dumps({'calls': qs.calls, 'matches': matches, 'window': window}))"
+  ]);
+
+  assert.deepEqual(payload.calls, [1000, 1000]);
+  assert.deepEqual(payload.matches, [1001, 1002, 2001]);
+  assert.deepEqual(payload.window, [1002, 2001]);
+});
+
 test("builds visible ORM cells with bare model names, not app-registry plumbing", () => {
   const columns = [
     { attname: "name", computed: false, type: "CharField" },
@@ -136,6 +164,7 @@ test("builds visible ORM cells with bare model names, not app-registry plumbing"
 
   assert.equal(cells[0], 'Company._base_manager.filter(**{"name__icontains": "acme"}).order_by(\'-name\')[0:51]');
   assert.match(pythonPropertyCell, /import itertools as _it/);
+  assert.match(pythonPropertyCell, /\.iterator\(chunk_size=1000\)/);
   assert.match(pythonPropertyCell, /getattr\(__o, "has_paid_subscription", None\)/);
   assert.match(buildRowsOrm({ app: "db", columns, filters: [{ field: "staff_alias", lookup: "exact", value: "true" }, { field: "rel:members", lookup: "isnull", value: "false" }], limit: 50, model: "Company", relations }), /annotate\(djs_staff_alias=/);
   assert.match(buildRowsOrm({ app: "db", columns, filters: [{ field: "staff_alias", lookup: "exact", value: "true" }, { field: "rel:members", lookup: "isnull", value: "false" }], limit: 50, model: "Company", relations }), /\.filter\(\*\*\{"djs_staff_alias__exact": True\}\)\.filter\(\*\*\{"members__isnull": False\}\)\.distinct\(\)/);
