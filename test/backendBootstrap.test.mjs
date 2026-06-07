@@ -12,11 +12,13 @@ const require = createRequire(import.meta.url);
 const {
   BACKEND_FAILED_PREFIX,
   BACKEND_READY_PREFIX,
+  BACKEND_RESPONSE_PREFIX,
   buildBackendBootstrap,
   buildBackendBootstrapCommand,
   buildInlineBackendBootstrapCommand,
   parseBackendFailedMarker,
-  parseBackendReadyMarker
+  parseBackendReadyMarker,
+  parseBackendResponseMarkers
 } = require("../out/backendBootstrap.js");
 
 test("builds a path bootstrap command when backend source is unavailable", () => {
@@ -76,4 +78,16 @@ test("parses backend ready and failed markers from terminal output", () => {
 
   assert.deepEqual(ready, { host: "127.0.0.1", port: 49152, token: "abc" });
   assert.equal(failed, "boom");
+});
+
+test("parses multiple complete PTY response markers and preserves an incomplete tail", () => {
+  const first = `${BACKEND_RESPONSE_PREFIX}${JSON.stringify({ chunk: { count: 2, data: '{"ok":', index: 0 }, id: "cell" })}\r\n`;
+  const second = `${BACKEND_RESPONSE_PREFIX}${JSON.stringify({ chunk: { count: 2, data: "true}", index: 1 }, id: "cell" })}\n`;
+  const partial = `${BACKEND_RESPONSE_PREFIX}{"id":"later"`;
+
+  const parsed = parseBackendResponseMarkers(`noise\n${first}${second}${partial}`);
+
+  assert.equal(parsed.markers.length, 2);
+  assert.deepEqual(parsed.markers.map((marker) => marker.chunk?.index), [0, 1]);
+  assert.equal(parsed.rest, partial);
 });

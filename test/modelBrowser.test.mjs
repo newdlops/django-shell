@@ -2,11 +2,16 @@
 
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
+import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
 
+const require = createRequire(import.meta.url);
+const { BackendClient } = require("../out/backendClient.js");
+const { buildComputedOrm, buildRowsOrm, __test: ormBuilders } = require("../out/modelOrm.js");
 const PYTHON = pythonExecutable();
 const HAS_DJANGO = PYTHON ? childProcess.spawnSync(PYTHON, ["-c", "import django"], { encoding: "utf8" }).status === 0 : false;
+const SUPPORT_LAYER_CELL = /apps\.get_model\(|django\.apps|__import__\("django\.apps"|json\.dumps|_djs_backend_module/;
 
 test("serializes non-primitive cells into JSON-safe tagged values", { skip: !PYTHON }, () => {
   const payload = runBackend([
@@ -54,6 +59,129 @@ test("returns graceful errors for unknown models without Django configured", { s
   for (const kind of ["models", "schema", "rows", "related", "lookup", "query"]) {
     assert.equal(payload[kind], false, `${kind} should fail gracefully`);
   }
+});
+
+test("builds visible ORM cells with bare model names, not app-registry plumbing", () => {
+  const columns = [
+    { attname: "name", computed: false, type: "CharField" },
+    { attname: "is_active", computed: false, type: "BooleanField" },
+    { attname: "has_paid_subscription", annotated: false, computed: true, type: "property" }
+  ];
+  const cells = [
+    buildRowsOrm({ app: "db", columns, filters: [{ field: "name", lookup: "icontains", value: "acme" }], limit: 50, model: "Company", order: [{ desc: true, field: "name" }] }),
+    buildComputedOrm("db", "Company", "has_paid_subscription", undefined, undefined, 50, columns),
+    ormBuilders.buildCountOrm("db", "Company", undefined, columns),
+    ormBuilders.buildLookupOrm("db", "Company", "acme", ["password"], 20),
+    ormBuilders.buildRelatedOrm("db", "Company", 7, "members", 10),
+    ormBuilders.buildCommitOrm("db", "Company", [{ pk: 7, fields: { name: "Acme" } }], columns)
+  ];
+
+  assert.equal(cells[0], 'Company._base_manager.filter(**{"name__icontains": "acme"}).order_by(\'-name\')[0:51]');
+  for (const cell of cells) {
+    assert.match(cell, /\bCompany\._base_manager\b/);
+    assert.doesNotMatch(cell, SUPPORT_LAYER_CELL);
+  }
+  assert.equal(ormBuilders.buildModelsOrm(), "len(apps.get_models())");
+  assert.equal(ormBuilders.buildInspectOrm(), "len(globals())");
+});
+
+test("keeps remote ORM metadata functional through pure Python inspection probe cells", async () => {
+  const typed = [];
+  const client = new BackendClient({ host: "127.0.0.1", port: 9, token: "t" }, undefined, async (payload) => {
+    typed.push(payload.code);
+    if (payload.code === "len(apps.get_models())") {
+      return `${JSON.stringify({ models: { models: [{ app: "db", label: "company", model: "Company", table: "db_company" }], ok: true }, ok: true, result: "1" })}\n`;
+    }
+    if (payload.code === "len(globals())") {
+      return `${JSON.stringify({ ok: true, result: "3", runtime: { loadedModuleCount: 1, variables: [{ name: "Company", preview: "<class>", type: "type" }] } })}\n`;
+    }
+    throw new Error(`unexpected PTY code: ${payload.code}`);
+  });
+  client.setTransportMode("orm");
+  client.markSocketUnavailable();
+
+  const models = await client.models();
+  const inspection = await client.inspect();
+
+  assert.deepEqual(typed, ["len(apps.get_models())", "len(globals())"]);
+  assert.equal(models.ok, true);
+  assert.equal(models.models[0].model, "Company");
+  assert.equal(inspection.ok, true);
+  assert.equal(inspection.variables[0].name, "Company");
+  for (const cell of typed) {
+    assert.doesNotMatch(cell ?? "", SUPPORT_LAYER_CELL);
+  }
+});
+
+test("builds runtime child inspection as pure Python probe cells", async () => {
+  const typed = [];
+  const client = new BackendClient({ host: "127.0.0.1", port: 9, token: "t" }, undefined, async (payload) => {
+    typed.push(payload.code);
+    if (payload.code === "dir(company)") {
+      return `${JSON.stringify({ inspect: { children: [{ name: "name", path: [{ name: "name", op: "attr" }], preview: "<attribute>", type: "attribute" }] }, ok: true, result: "None" })}\n`;
+    }
+    if (payload.code === "len(companies)") {
+      return `${JSON.stringify({ inspect: { children: [{ name: "[0]", path: [{ index: 0, op: "index" }], preview: "<Company>", type: "Company" }] }, ok: true, result: "1" })}\n`;
+    }
+    if (payload.code === "dir(list((company.legal_partner_relation_set).all())[0])") {
+      return `${JSON.stringify({ inspect: { children: [{ name: "id", path: [{ name: "id", op: "attr" }], preview: "7", type: "int" }] }, ok: true, result: "None" })}\n`;
+    }
+    throw new Error(`unexpected PTY code: ${payload.code}`);
+  });
+  client.setTransportMode("orm");
+  client.markSocketUnavailable();
+
+  const objectChildren = await client.children([{ name: "company", op: "name" }], "object");
+  const collectionChildren = await client.children([{ name: "companies", op: "name" }], "collection");
+  const relatedChild = await client.children([{ name: "company", op: "name" }, { name: "legal_partner_relation_set", op: "attr" }, { index: 0, op: "all_index" }], "object");
+
+  assert.deepEqual(typed, ["dir(company)", "len(companies)", "dir(list((company.legal_partner_relation_set).all())[0])"]);
+  assert.equal(objectChildren.ok, true);
+  assert.equal(collectionChildren.ok, true);
+  assert.equal(relatedChild.ok, true);
+  for (const cell of typed) {
+    assert.doesNotMatch(cell ?? "", SUPPORT_LAYER_CELL);
+  }
+});
+
+test("keeps Django model attname fields visible in inspection children", { skip: !PYTHON }, () => {
+  const payload = runBackend([
+    "import json",
+    "class Field:",
+    "    def __init__(self, name, attname=None, accessor=None, auto_created=False, concrete=True):",
+    "        self.name = name",
+    "        self.attname = attname or name",
+    "        self.accessor = accessor",
+    "        self.auto_created = auto_created",
+    "        self.concrete = concrete",
+    "    def get_accessor_name(self):",
+    "        return self.accessor",
+    "class Meta:",
+    "    def get_fields(self):",
+    "        return [Field('id'), Field('owner', 'owner_id'), Field('projects', accessor='projects', auto_created=True, concrete=False)]",
+    "class Instance:",
+    "    _meta = Meta()",
+    "    @property",
+    "    def display_name(self):",
+    "        return 'Acme'",
+    "inst = Instance()",
+    "inst.id = 7",
+    "inst.owner_id = 42",
+    "inst.owner = 'owner-object'",
+    "inst.projects = ['p1']",
+    "children = mod._browse_children_of(inst, [{'op': 'name', 'name': 'inst'}], 20)",
+    "socket_children = mod._inspect_value_children(inst, [{'op': 'name', 'name': 'inst'}])",
+    "print(json.dumps({",
+    "  'orm_names': [child['name'] for child in children],",
+    "  'socket_names': [child['name'] for child in socket_children],",
+    "  'orm_paths': [child['path'][-1]['name'] for child in children],",
+    "}))"
+  ]);
+
+  assert.deepEqual(payload.orm_names, ["id", "owner_id", "owner", "projects", "display_name"]);
+  assert.ok(payload.socket_names.includes("owner_id"));
+  assert.ok(payload.socket_names.includes("owner"));
+  assert.deepEqual(payload.orm_paths, payload.orm_names);
 });
 
 test("reads rows with a single query and keeps foreign keys as raw ids", { skip: !HAS_DJANGO }, () => {

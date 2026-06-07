@@ -9,9 +9,9 @@ import {
   ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery, modelUnsupportedFallback,
   parseModelCommitResponse, parseModelComputedResponse, parseModelCountResponse, parseModelListResponse, parseModelLookupResponse, parseModelQueryResponse,
   parseModelRelatedResponse, parseModelRowsResponse, parseModelSchemaResponse, parseOrmCommitResponse, parseOrmComputedResponse, parseOrmCountResponse,
-  ormStdoutJson, parseOrmGridResponse, parseOrmLookupResponse, parseOrmModelsResponse, parseOrmQueryResponse, parseOrmRelatedResponse
+  parseOrmGridResponse, parseOrmLookupResponse, parseOrmModelsResponse, parseOrmQueryResponse, parseOrmRelatedResponse
 } from "./modelBackend";
-import { buildChildrenOrm, buildCommitOrm, buildComputedOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, buildRowsOrm } from "./modelOrm";
+import { buildCommitOrm, buildComputedOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, buildRowsOrm } from "./modelOrm";
 
 const TCP_CONNECT_TIMEOUT_MS = 1500;
 const TCP_RESPONSE_TIMEOUT_MS = 30000;
@@ -86,15 +86,28 @@ export interface BackendRuntimeModule {
 }
 
 export interface BackendRuntimeVariable {
+  childCount?: number;
+  childrenTruncated?: boolean;
+  djangoModel?: BackendRuntimeDjangoModel;
+  dynamicAttributes?: boolean;
   hasChildren?: boolean;
   importLine?: string;
   kind?: string;
+  length?: number;
   name: string;
   origin?: string;
   path?: BackendRuntimePathSegment[];
   preview: string;
   type: string;
   typeImportLine?: string;
+}
+
+export interface BackendRuntimeDjangoModel {
+  app?: string;
+  model?: string;
+  pk?: string;
+  pkValue?: unknown;
+  table?: string;
 }
 
 export interface BackendRuntimePathSegment {
@@ -168,7 +181,7 @@ export class BackendClient {
 
   /** Returns whether expensive runtime tree requests are safe for the active transport. */
   supportsRuntimeInspection(): boolean {
-    // ORM/terminal modes serve introspection (inspect/children) over the loopback socket only; on PTY fallback they are suppressed (ORM_NO_PTY) so `_djs_rpc` plumbing is NEVER typed into the shell.
+    // Runtime inspection uses pure Python probe cells; the capture hook attaches metadata without logging helper calls.
     if (this.reconstructsViaOrmCell) { return Boolean(this.fallback); }
     return !this.tcpUnavailable || Boolean(this.fallback);
   }
@@ -185,8 +198,7 @@ export class BackendClient {
 
   /** Returns safe summaries for variables and modules in the attached runtime. */
   inspect(): Promise<BackendRuntimeInspection> {
-    const cell = this.reconstructsViaOrmCell ? buildInspectOrm() : "";
-    if (cell && cell.length <= PTY_CELL_LIMIT) { return this.ormCell(cell, parseOrmInspectResponse); }
+    if (this.reconstructsViaOrmCell) { return this.ormCell(buildInspectOrm(), parseOrmInspectResponse); }
     return this.request({ kind: "inspect" }, parseInspectionResponse);
   }
 
@@ -200,13 +212,11 @@ export class BackendClient {
     return this.request({ kind: "environment" }, parseEnvironmentResponse);
   }
 
-  /** Returns safe child summaries for one inspected runtime value path; an `object`-kind node with a name+attribute path is typed as a PURE expression (`a.b.c`) so the audit shows clean Python, not `_djs_orm_*` plumbing — the capture hook surfaces this object's children from the result. Collections/index/dict paths keep the readable helper cell. */
+  /** Returns safe child summaries for one inspected runtime value path using pure Python probe cells in ORM/terminal mode. */
   children(path: BackendRuntimePathSegment[], kind?: string): Promise<BackendRuntimeChildren> {
     if (this.reconstructsViaOrmCell) {
-      const expression = kind === "object" ? reconstructInspectExpression(path) : null;
+      const expression = buildInspectChildrenOrm(path, kind);
       if (expression) { return this.ormCell(expression, (buffer) => parseOrmInspectChildren(buffer, path)); }
-      const cell = buildChildrenOrm(path);
-      if (cell.length <= PTY_CELL_LIMIT) { return this.ormCell(cell, parseOrmChildrenResponse); }
     }
     return this.request({ kind: "children", path }, parseChildrenResponse);
   }
@@ -443,7 +453,7 @@ function connectHost(host: string): string {
 
 const PTY_FALLBACK_KINDS = new Set(["children", "complete", "environment", "execute", "inspect", "prelude", "models", "schema", "rows", "related", "count", "commit", "lookup", "query"]); // helpers: scrubbed _djs_rpc; execute: literal cell.
 // Kinds ORM/Terminal modes never type over the terminal; schema is synthesized from the first row page (see modelBrowser).
-const ORM_NO_PTY = new Set(["children", "environment", "inspect", "prelude", "schema"]);
+const ORM_NO_PTY = new Set(["children", "environment", "inspect", "models", "prelude", "schema"]);
 const ORM_PTY_SUPPRESSED = "Kept out of the shell: this metadata is not typed into the terminal — switch the Link selector to Socket/Auto to fetch it.";
 const PTY_PAGE_LIMIT = 25;
 
@@ -454,9 +464,6 @@ function isPtyFallbackKind(kind: string): boolean {
 
 /** Returns a smaller payload variant for the slower terminal fallback transport. */
 function ptyFallbackPayload(payload: BackendRequestPayload): BackendRequestPayload {
-  if (payload.kind === "inspect") {
-    return { ...payload, lightweight: true };
-  }
   if ((payload.kind === "rows" || payload.kind === "related" || payload.kind === "query") && (payload.limit === undefined || payload.limit > PTY_PAGE_LIMIT)) {
     return { ...payload, limit: PTY_PAGE_LIMIT };
   }
@@ -503,45 +510,51 @@ function parseInspectionResponse(buffer: string): BackendRuntimeInspection {
   return { error: parsed.error, loadedModuleCount: parsed.loadedModuleCount, modules: Array.isArray(parsed.modules) ? parsed.modules : [], ok: Boolean(parsed.ok), variables: Array.isArray(parsed.variables) ? parsed.variables : [] };
 }
 
-/** Reads an ORM print-cell marker's stdout JSON plus its trimmed failure message. */
-function ormCellJson<T>(buffer: string): { data?: T; error?: string; ok: boolean } {
-  const marker = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as { ok?: boolean; stderr?: string; stdout?: string; traceback?: string };
-  const error = (marker.traceback || marker.stderr || "").trim().split(/\r?\n/).filter(Boolean).pop();
-  return { data: ormStdoutJson<T>(marker.stdout), error, ok: marker.ok !== false };
-}
-
-/** Parses an ORM-mode inspect cell (namespace-introspection print) into a runtime inspection. */
+/** Parses a pure `len(globals())` probe marker into runtime inspection data attached by the capture hook. */
 function parseOrmInspectResponse(buffer: string): BackendRuntimeInspection {
-  const { data, error, ok } = ormCellJson<{ loadedModuleCount?: number; variables?: BackendRuntimeVariable[] }>(buffer);
-  if (!ok || !data || !Array.isArray(data.variables)) { return { error: error || "Runtime inspection failed in ORM mode.", loadedModuleCount: 0, modules: [], ok: false, variables: [] }; }
-  return { loadedModuleCount: data.loadedModuleCount ?? 0, modules: [], ok: true, variables: data.variables };
+  const marker = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as { ok?: boolean; runtime?: Partial<BackendRuntimeInspection>; stderr?: string; traceback?: string };
+  const runtime = marker.runtime;
+  if (marker.ok === false || !runtime || !Array.isArray(runtime.variables)) {
+    const error = (marker.traceback || marker.stderr || "Runtime inspection failed in ORM mode.").trim().split(/\r?\n/).filter(Boolean).pop();
+    return { error, loadedModuleCount: 0, modules: [], ok: false, variables: [] };
+  }
+  return { loadedModuleCount: runtime.loadedModuleCount ?? 0, modules: [], ok: true, variables: runtime.variables };
 }
 
-/** Parses an ORM-mode children cell (path drill-down print) into child summaries. */
-function parseOrmChildrenResponse(buffer: string): BackendRuntimeChildren {
-  const { data, error, ok } = ormCellJson<{ children?: BackendRuntimeVariable[] }>(buffer);
-  if (!ok || !data || !Array.isArray(data.children)) { return { children: [], error: error || "Children unavailable in ORM mode.", ok: false }; }
-  return { children: data.children, ok: true };
+/** Builds a pure Python inspection probe for one safe runtime path. */
+function buildInspectChildrenOrm(path: BackendRuntimePathSegment[], kind?: string): string | null {
+  const expression = reconstructInspectExpression(path);
+  if (!expression) { return null; }
+  return kind === "collection" ? `len(${expression})` : `dir(${expression})`;
 }
 
-/** Reconstructs a pure Python expression for a name + attribute-chain path (`a`, `a.b.c`); returns null for any non-attr segment (index/dict) or non-identifier name, so those keep the helper cell. */
+/** Reconstructs a pure Python expression for an inspector path (`a.b`, `list(a)[0]`, `list(a.all())[0]`, `list(d.items())[0][1]`) without helper calls. */
 function reconstructInspectExpression(path: BackendRuntimePathSegment[]): string | null {
   const root = path[0];
   if (!root || root.op !== "name" || !INSPECT_IDENTIFIER.test(root.name ?? "")) { return null; }
   let expression = root.name as string;
   for (let i = 1; i < path.length; i += 1) {
     const segment = path[i];
-    if (segment.op !== "attr" || !INSPECT_IDENTIFIER.test(segment.name ?? "")) { return null; }
-    expression += `.${segment.name}`;
+    if (segment.op === "attr" && INSPECT_IDENTIFIER.test(segment.name ?? "")) {
+      expression += `.${segment.name}`;
+    } else if (segment.op === "index" && Number.isInteger(segment.index) && (segment.index as number) >= 0) {
+      expression = `list((${expression}))[${segment.index}]`;
+    } else if (segment.op === "all_index" && Number.isInteger(segment.index) && (segment.index as number) >= 0) {
+      expression = `list((${expression}).all())[${segment.index}]`;
+    } else if (segment.op === "dict" && Number.isInteger(segment.index) && (segment.index as number) >= 0) {
+      expression = `list((${expression}).items())[${segment.index}][1]`;
+    } else {
+      return null;
+    }
   }
   return expression;
 }
 
-/** Parses a pure-expression drill-down: child summaries come from the capture hook's `inspect` marker field (NOT stdout) with paths RELATIVE to the result object, so the requested path is prepended to make them absolute. */
+/** Parses an inspection drill-down marker with paths RELATIVE to the result object, so the requested path is prepended to make them absolute. */
 function parseOrmInspectChildren(buffer: string, path: BackendRuntimePathSegment[]): BackendRuntimeChildren {
-  const marker = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as { inspect?: { children?: BackendRuntimeVariable[] }; ok?: boolean; stderr?: string; traceback?: string };
-  if (marker.ok === false || !marker.inspect || !Array.isArray(marker.inspect.children)) {
-    const error = (marker.traceback || marker.stderr || "").trim().split(/\r?\n/).filter(Boolean).pop();
+  const marker = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as { inspect?: { children?: BackendRuntimeVariable[]; error?: string }; ok?: boolean; stderr?: string; traceback?: string };
+  if (marker.ok === false || marker.inspect?.error || !marker.inspect || !Array.isArray(marker.inspect.children)) {
+    const error = (marker.inspect?.error || marker.traceback || marker.stderr || "").trim().split(/\r?\n/).filter(Boolean).pop();
     return { children: [], error: error || "Children unavailable in ORM mode.", ok: false };
   }
   const children = marker.inspect.children.map((child) => ({ ...child, path: [...path, ...(Array.isArray(child.path) ? child.path : [])] }));

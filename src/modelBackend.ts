@@ -330,34 +330,24 @@ function ormError(parsed: { stderr?: string; traceback?: string }, fallback: str
   return (parsed.traceback || parsed.stderr || fallback).trim().split(/\r?\n/).filter(Boolean).pop() || fallback;
 }
 
-/** Parses the JSON an ORM print-cell wrote to stdout (whole output, falling back to its last non-empty line). */
-export function ormStdoutJson<T>(stdout: string | undefined): T | undefined {
-  const out = (stdout || "").trim();
-  if (!out) { return undefined; }
-  for (const candidate of [out, out.split(/\r?\n/).filter(Boolean).pop() ?? ""]) {
-    try { return JSON.parse(candidate) as T; } catch { /* try the next candidate */ }
-  }
-  return undefined;
-}
-
-/** Parses an ORM-mode models cell (introspection print) into the catalog list. */
+/** Parses a pure `len(apps.get_models())` probe marker into the catalog attached by the capture hook. */
 export function parseOrmModelsResponse(buffer: string): BackendModelList {
-  const parsed = parseLine<{ ok?: boolean; stderr?: string; stdout?: string; traceback?: string }>(buffer);
-  const rows = ormStdoutJson<Array<[string, string, string, string]>>(parsed.stdout);
-  if (parsed.ok === false || !Array.isArray(rows)) {
+  const parsed = parseLine<{ models?: Partial<BackendModelList>; ok?: boolean; stderr?: string; traceback?: string }>(buffer);
+  const models = parsed.models;
+  if (parsed.ok === false || !models || !Array.isArray(models.models)) {
     return { error: ormError(parsed, "Could not list models in ORM mode."), models: [], ok: false };
   }
-  return { models: rows.map((row) => ({ app: String(row[0]), label: String(row[2] ?? row[1]), model: String(row[1]), table: String(row[3] ?? "") })), ok: true };
+  return { error: models.error, models: models.models, ok: Boolean(models.ok) };
 }
 
-/** Parses an ORM-mode foreign-key lookup cell (search print) into picker candidates (trims limit+1). */
+/** Parses an ORM-mode foreign-key lookup cell from the capture hook's values-grid rows (trims limit+1). */
 export function parseOrmLookupResponse(buffer: string, limit: number): BackendModelLookup {
-  const parsed = parseLine<{ ok?: boolean; stderr?: string; stdout?: string; traceback?: string }>(buffer);
-  const rows = ormStdoutJson<Array<{ label?: string; pk: unknown }>>(parsed.stdout);
+  const parsed = parseLine<{ grid?: { rows?: BackendModelRow[] }; ok?: boolean; sql?: BackendSqlEntry[]; stderr?: string; traceback?: string }>(buffer);
+  const rows = parsed.grid?.rows;
   if (parsed.ok === false || !Array.isArray(rows)) {
     return { error: ormError(parsed, "Lookup failed in ORM mode."), hasMore: false, ok: false, rows: [], sql: [] };
   }
-  return { hasMore: rows.length > limit, ok: true, rows: rows.slice(0, limit).map((row) => ({ label: String(row.label ?? row.pk), pk: row.pk })), sql: [] };
+  return { hasMore: rows.length > limit, ok: true, rows: rows.slice(0, limit).map((row) => ({ label: lookupRowLabel(row), pk: row.pk })), sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
 }
 
 /** Parses an ORM-mode count cell marker (`Model._base_manager.count()`) into a row count. */
@@ -483,16 +473,38 @@ export function parseModelComputedResponse(buffer: string): BackendModelComputed
   return { error: parsed.error, field: parsed.field, ok: Boolean(parsed.ok), queryCount: parsed.queryCount, rowCount: parsed.rowCount, values: parsed.values && typeof parsed.values === "object" ? parsed.values : {} };
 }
 
-/** Parses an ORM-mode computed-field response: the helper printed {field, ok, values} JSON to stdout. */
+/** Parses an ORM-mode computed-field response from grid rows returned by a visible ORM expression. */
 export function parseOrmComputedResponse(buffer: string): BackendModelComputed {
-  const parsed = parseLine<{ ok?: boolean; stderr?: string; stdout?: string; traceback?: string }>(buffer);
-  // The cell is now a readable ORM comprehension printing a bare {pk: value} dict (no wrapper); a raising property errors the
-  // cell, so the real reason surfaces via the cell traceback (parsed.ok === false → ormError).
-  const values = ormStdoutJson<Record<string, BackendModelCell>>(parsed.stdout);
-  if (parsed.ok === false || !values || typeof values !== "object" || Array.isArray(values)) {
+  const parsed = parseLine<{ grid?: { rows?: BackendModelRow[] }; ok?: boolean; stderr?: string; traceback?: string }>(buffer);
+  const rows = parsed.grid?.rows;
+  if (parsed.ok === false || !Array.isArray(rows)) {
     return { error: ormError(parsed, "Computed field failed in ORM mode."), ok: false, values: {} };
   }
+  const values: Record<string, BackendModelCell> = {};
+  for (const row of rows) {
+    const key = cellKey(row.pk);
+    if (key !== undefined) { values[key] = row.value ?? row.__djs ?? null; }
+  }
   return { ok: true, values };
+}
+
+/** Returns a compact FK picker label from a values() row. */
+function lookupRowLabel(row: BackendModelRow): string {
+  const values = Object.entries(row).filter(([key]) => key !== "pk").map(([, value]) => cellText(value)).filter(Boolean);
+  return values.length ? values.join(" · ") : String(row.pk ?? "");
+}
+
+/** Returns a stable string key for a serialized primary key cell. */
+function cellKey(value: BackendModelCell | undefined): string | undefined {
+  if (value === undefined || value === null) { return undefined; }
+  return typeof value === "object" ? value.v : String(value);
+}
+
+/** Formats one serialized cell for compact UI labels. */
+function cellText(value: BackendModelCell | undefined): string {
+  if (value === undefined || value === null) { return ""; }
+  if (typeof value === "object") { return value.v ?? ""; }
+  return String(value);
 }
 
 /** Returns a disabled response for a model-browser kind that cannot cross PTY fallback. */

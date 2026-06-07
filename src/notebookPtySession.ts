@@ -5,7 +5,7 @@ import * as pty from "node-pty";
 import * as vscode from "vscode";
 import { SerializedAsyncQueue } from "./asyncQueue";
 import { BackendClient, BackendRequestPayload, BackendTransportMode } from "./backendClient";
-import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BackendBootstrapCommand, backendBootstrapPayload, buildBackendBootstrapCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendReadyMarker, parseBackendResponseMarker } from "./backendBootstrap";
+import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BackendBootstrapCommand, BackendPtyResponse, backendBootstrapPayload, buildBackendBootstrapCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendReadyMarker, parseBackendResponseMarkers } from "./backendBootstrap";
 import { buildPtyBackendRequest, buildPtyExecuteCell, firstPathEntry, isSecretPrompt, safeCommand, trimTerminalText } from "./notebookPtyText";
 import { DiagnosticLogger } from "./diagnostics";
 import { buildShellEnv } from "./env";
@@ -60,6 +60,7 @@ export class NotebookPtySession implements vscode.Disposable {
   private bootstrapRetried = false;
   private bootstrapRetryPending = false;
   private ptyRequestBuffer = "";
+  private readonly ptyResponseChunks = new Map<string, { chunks: string[]; count: number }>();
   private ptyRequestSeq = 1;
   private shellLogTail = "";
   private spawnedAt = 0;
@@ -206,7 +207,7 @@ export class NotebookPtySession implements vscode.Disposable {
       this.lastPrimaryPromptAt = this.lastOutputAt;
     }
     if (this.ptyRequests.size || this.pendingCell) {
-      this.ptyRequestBuffer = `${this.ptyRequestBuffer}${data}`.slice(-1_250_000);
+      this.ptyRequestBuffer = `${this.ptyRequestBuffer}${data}`;
       this.inspectPtyResponses();
     }
     this.mode = nextModeForOutput(this.mode, this.outputTail);
@@ -385,16 +386,58 @@ export class NotebookPtySession implements vscode.Disposable {
 
   /** Resolves pending PTY backend requests from response markers in raw terminal output. */
   private inspectPtyResponses(): void {
-    const marker = parseBackendResponseMarker(this.ptyRequestBuffer);
-    if (!marker) {
+    const parsed = parseBackendResponseMarkers(this.ptyRequestBuffer);
+    this.ptyRequestBuffer = parsed.rest;
+    if (!parsed.markers.length) {
       return;
     }
-    const pending = this.ptyRequests.get(marker.id);
+    for (const marker of parsed.markers) {
+      this.handlePtyResponseMarker(marker);
+    }
+  }
+
+  /** Handles one complete PTY response marker, assembling chunked responses when needed. */
+  private handlePtyResponseMarker(marker: BackendPtyResponse): void {
+    if (marker.chunk) {
+      const response = this.assemblePtyResponseChunk(marker);
+      if (response === undefined) {
+        return;
+      }
+      this.resolvePtyResponse(marker.id, response);
+      return;
+    }
+    this.resolvePtyResponse(marker.id, marker.response);
+  }
+
+  /** Stores one response chunk and returns the parsed response after all chunks arrive. */
+  private assemblePtyResponseChunk(marker: BackendPtyResponse): unknown | undefined {
+    const chunk = marker.chunk;
+    if (!chunk || !Number.isInteger(chunk.count) || !Number.isInteger(chunk.index) || chunk.count <= 0 || chunk.index < 0 || chunk.index >= chunk.count) {
+      return undefined;
+    }
+    const entry = this.ptyResponseChunks.get(marker.id) ?? { chunks: new Array<string>(chunk.count), count: chunk.count };
+    if (entry.count !== chunk.count) {
+      this.ptyResponseChunks.delete(marker.id);
+      return undefined;
+    }
+    entry.chunks[chunk.index] = chunk.data;
+    this.ptyResponseChunks.set(marker.id, entry);
+    for (let index = 0; index < entry.count; index += 1) {
+      if (typeof entry.chunks[index] !== "string") {
+        return undefined;
+      }
+    }
+    this.ptyResponseChunks.delete(marker.id);
+    return JSON.parse(entry.chunks.join(""));
+  }
+
+  /** Resolves a pending PTY backend request from one parsed response payload. */
+  private resolvePtyResponse(id: string, response: unknown): void {
+    const pending = this.ptyRequests.get(id);
     if (pending) {
       clearTimeout(pending.timer);
-      this.ptyRequests.delete(marker.id);
-      this.ptyRequestBuffer = "";
-      pending.resolve(`${JSON.stringify(marker.response)}\n`);
+      this.ptyRequests.delete(id);
+      pending.resolve(`${JSON.stringify(response)}\n`);
       return;
     }
     // A literal-cell execute has no extension-assigned id; the run-cell hook's marker resolves it (FIFO).
@@ -402,8 +445,7 @@ export class NotebookPtySession implements vscode.Disposable {
       const cell = this.pendingCell;
       this.pendingCell = undefined;
       clearTimeout(cell.timer);
-      this.ptyRequestBuffer = "";
-      cell.resolve(`${JSON.stringify(marker.response)}\n`);
+      cell.resolve(`${JSON.stringify(response)}\n`);
     }
   }
 
@@ -414,6 +456,7 @@ export class NotebookPtySession implements vscode.Disposable {
       pending.reject(new Error(`${message} ${id}`));
     }
     this.ptyRequests.clear();
+    this.ptyResponseChunks.clear();
     if (this.pendingCell) {
       clearTimeout(this.pendingCell.timer);
       this.pendingCell.reject(new Error(message));
@@ -444,6 +487,7 @@ export class NotebookPtySession implements vscode.Disposable {
     this.outputTail = "";
     this.process = undefined;
     this.ptyRequestBuffer = "";
+    this.ptyResponseChunks.clear();
     this.spawnedAt = 0;
     this.started = false;
     this.state = "starting";

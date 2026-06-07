@@ -4,7 +4,6 @@
 // reconstructed expressions cannot inject code.
 
 import type { BackendModelColumn, BackendModelFilter, BackendModelOrder, ModelCommitChange } from "./modelBackend";
-import type { BackendRuntimePathSegment } from "./backendClient";
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const LOOKUPS = new Set(["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"]);
@@ -16,9 +15,9 @@ function safeName(value: string | undefined, fallback = "pk"): string {
   return typeof value === "string" && IDENTIFIER.test(value) ? value : fallback;
 }
 
-/** Resolves a model via the app registry so a reconstructed cell works for ANY catalogued model — not just bare names. The catalog lists every app's models (`apps.get_models()`), but the shell only defines names that were `from x import *`-ed, so a bare `Model` is often undefined → NameError. Self-contained `__import__` (no reliance on `apps`/`django` being imported); the string args are escaped (injection-proof). */
+/** Returns the bare model class name used in visible ORM cells; startup auto-import/shell_plus must bind it so the audit stays real ORM, not app-registry plumbing. */
 function modelRef(app: string | undefined, model: string | undefined): string {
-  return `__import__("django.apps", fromlist=["apps"]).apps.get_model(${pyStr(app)}, ${pyStr(model)})`;
+  return safeName(model, "Model");
 }
 
 /** Encodes a string as a Python string literal (double-quoted; JSON escaping is valid Python). */
@@ -83,7 +82,7 @@ export function buildRowsOrm(params: OrmRowsParams): string {
   return `${modelRef(params.app, params.model)}._base_manager${chain}.order_by(${orderArgs(params.order, attnames)})[${offset}:${offset + limit + 1}]`;
 }
 
-/** Builds a lazy single-@property fetch as a READABLE ORM comprehension — `print(json.dumps({str(o.pk): getattr(o, "field", None) for o in Model._base_manager.filter(...).order_by(...)[0:N]}))` — so the server audit shows real ORM + the per-row property access (which makes its N+1 nature self-evident), NOT opaque `_djs_backend_module` plumbing. getattr(...,None) keeps a missing attr from breaking the page; values are JSON-encoded (default=str) since _browse_cell can't be used without re-introducing the backend module. */
+/** Builds a lazy single-@property fetch as a readable ORM result, returning rows/dicts directly so raw audit has no JSON-print or backend-helper layer. */
 export function buildComputedOrm(app: string | undefined, model: string, field: string, filters: BackendModelFilter[] | undefined, order: BackendModelOrder[] | undefined, limit: number, columns: BackendModelColumn[] | undefined): string {
   const attnames = concreteAttnames(columns);
   const cap = Number.isInteger(limit) && limit > 0 ? limit : 50;
@@ -92,14 +91,13 @@ export function buildComputedOrm(app: string | undefined, model: string, field: 
   const tail = `${chain}.order_by(${orderArgs(order, attnames)})[0:${cap}]`;
   if ((columns ?? []).some((column) => column.attname === field && column.annotated)) {
     // The model declares a DB annotation for this field → ONE annotated query (no per-row @property N+1). The audit shows real
-    // ORM (annotate + values_list); a `lambda __m:` binds the model so the (long, self-contained) modelRef appears once —
-    // keeping the typed cell well under the tty input limit. Resolves `djshell_annotations` as a dict OR classmethod.
+    // ORM (annotate + values_list); a `lambda __m:` binds the model name once, keeping the typed cell compact. Resolves
+    // `djshell_annotations` as a dict OR classmethod.
     const expression = `(__m.djshell_annotations() if callable(__m.djshell_annotations) else __m.djshell_annotations)[${pyStr(field)}]`;
-    const body = `{str(__k): __v for __k, __v in __m._base_manager.annotate(__djs=${expression})${tail}.values_list("pk", "__djs")}`;
-    return `print(__import__("json").dumps((lambda __m: ${body})(${ref}), default=str))`;
+    return `(lambda __m: __m._base_manager.annotate(__djs=${expression})${chain}.order_by(${orderArgs(order, attnames)}).values("pk", "__djs")[0:${cap}])(${ref})`;
   }
   const access = IDENTIFIER.test(field) ? `__o.${field}` : `getattr(__o, ${pyStr(field)}, None)`;
-  return `print(__import__("json").dumps({str(__o.pk): ${access} for __o in ${ref}._base_manager${tail}}, default=str))`;
+  return `[{${pyStr("pk")}: __o.pk, ${pyStr("value")}: ${access}} for __o in ${ref}._base_manager${tail}]`;
 }
 
 /** Builds the row-count ORM `Model._base_manager.filter(...).count()` for the current filter set. */
@@ -107,44 +105,28 @@ export function buildCountOrm(app: string | undefined, model: string, filters: B
   return `${modelRef(app, model)}._base_manager${filterChain(filters, concreteAttnames(columns))}.count()`;
 }
 
-/** Builds a readable introspection cell that prints the installed-model catalog as JSON (ORM mode has no schema RPC). */
+/** Builds the pure Python model-catalog probe; the capture hook attaches the actual model list to the marker. */
 export function buildModelsOrm(): string {
-  return "import json, django.apps; print(json.dumps([[m._meta.app_label, m._meta.object_name, str(m._meta.verbose_name), m._meta.db_table] for m in django.apps.apps.get_models()]))";
+  return "len(apps.get_models())";
 }
 
-// Cap on variables serialized in one inspect ORM cell. Without it, a shell_plus / auto-imported namespace (1000s of
-// names) yields a multi-MB ORM-cell response that overruns the PTY marker buffer (1.25 MB) so the marker never parses
-// and the inspector hangs — and, because ORM reads share one serialized PTY queue, the model-data table queued behind it
-// hangs too. User variables are always emitted in full (listed first); only the pre-existing ("initial") names are capped.
-const INSPECT_VARIABLE_CAP = 500;
-
-/** Builds a non-evaluating namespace-introspection cell printing runtime variables (with real hasChildren) as JSON. */
+/** Builds the pure Python runtime-inspection probe; the capture hook attaches the actual namespace metadata. */
 export function buildInspectOrm(): string {
-  // Delegate to a backend helper so the TYPED cell stays tiny — the previous inlined form was ~1.5 KB, which overran the
-  // tty input limit over the PTY and hung the shell at a continuation prompt. The helper caps + serializes server-side.
-  return `print(_djs_backend_module._pty_orm_inspect(${INSPECT_VARIABLE_CAP}))`;
+  return "len(globals())";
 }
 
-/** Builds a cell resolving one inspector path and printing its children as JSON: dict/sequence items, manager/queryset rows, or for a Django model instance every field + reverse relation (FK/O2O/M2M) + @property value, else __dict__ attributes. */
-export function buildChildrenOrm(path: BackendRuntimePathSegment[]): string {
-  // Delegate to a backend helper (same reason as buildInspectOrm — the inlined drill-down cell was multi-KB). The helper
-  // replicates the rich drill-down (dict/sequence/manager rows + a model's fields/reverse relations/properties) server-side.
-  return `print(_djs_backend_module._pty_orm_children(${pyStr(JSON.stringify(path))}, 200))`;
-}
-
-/** Builds a foreign-key picker search as a real ORM cell: icontains across text fields, labelled by str(obj). */
+/** Builds a foreign-key picker search as a real ORM cell, returning `.values(...)` rows directly so raw audit has no JSON-print layer. */
 export function buildLookupOrm(app: string | undefined, model: string, q: string, exclude: string[], limit: number): string {
   const excluded = `[${(exclude ?? []).filter((field) => IDENTIFIER.test(field)).map((field) => pyStr(field)).join(", ")}]`;
   const cap = (Number.isInteger(limit) && limit > 0 ? limit : 20) + 1;
   return [
-    "import json",
     "from django.db.models import Q",
-    `_target, _search = ${modelRef(app, model)}, ${pyStr(q)}`,
-    `_fields = [f.name for f in _target._meta.concrete_fields if f.get_internal_type() in ("CharField", "TextField", "SlugField", "EmailField") and f.name not in ${excluded}]`,
+    `_search = ${pyStr(q)}`,
+    `_fields = [f.name for f in ${modelRef(app, model)}._meta.concrete_fields if f.get_internal_type() in ("CharField", "TextField", "SlugField", "EmailField") and f.name not in ${excluded}]`,
     "_where = Q(pk=_search) if _search.isdigit() else Q()",
     "for _name in _fields:",
     "    _where |= Q(**{_name + '__icontains': _search})",
-    `print(json.dumps([{"pk": _o.pk, "label": str(_o)} for _o in _target._base_manager.filter(_where)[:${cap}]], default=str))`
+    `${modelRef(app, model)}._base_manager.filter(_where).values("pk", *_fields)[:${cap}]`
   ].join("\n");
 }
 
@@ -198,4 +180,4 @@ export function buildCommitOrm(app: string | undefined, model: string, changes: 
   return lines.join("\n");
 }
 
-export const __test = { buildChildrenOrm, buildCommitOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, editValue, filterChain, orderArgs, safeName };
+export const __test = { buildCommitOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, editValue, filterChain, orderArgs, safeName };

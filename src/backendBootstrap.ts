@@ -20,8 +20,20 @@ export interface BackendEndpoint {
 }
 
 export interface BackendPtyResponse {
+  chunk?: BackendPtyResponseChunk;
   id: string;
-  response: unknown;
+  response?: unknown;
+}
+
+export interface BackendPtyResponseChunk {
+  count: number;
+  data: string;
+  index: number;
+}
+
+export interface BackendPtyResponseParseResult {
+  markers: BackendPtyResponse[];
+  rest: string;
 }
 
 export interface BackendBootstrapCommand {
@@ -108,7 +120,34 @@ export function parseBackendNeedsInline(output: string): boolean {
 
 /** Parses a PTY backend response marker from terminal output. */
 export function parseBackendResponseMarker(output: string): BackendPtyResponse | undefined {
-  return parseMarkerJson<BackendPtyResponse>(output, BACKEND_RESPONSE_PREFIX);
+  return parseBackendResponseMarkers(output).markers.at(-1);
+}
+
+/** Parses every complete PTY backend response marker from terminal output and keeps an incomplete tail. */
+export function parseBackendResponseMarkers(output: string): BackendPtyResponseParseResult {
+  const markers: BackendPtyResponse[] = [];
+  let searchFrom = 0;
+  let consumed = 0;
+  for (;;) {
+    const index = output.indexOf(BACKEND_RESPONSE_PREFIX, searchFrom);
+    if (index < 0) {
+      break;
+    }
+    const start = index + BACKEND_RESPONSE_PREFIX.length;
+    const end = lineEndIndex(output, start);
+    if (end < 0) {
+      break;
+    }
+    const raw = output.slice(start, end).trim();
+    try {
+      markers.push(JSON.parse(raw) as BackendPtyResponse);
+    } catch {
+      // Ignore malformed marker-looking output; later complete markers can still resolve the request.
+    }
+    consumed = output[end] === "\r" && output[end + 1] === "\n" ? end + 2 : end + 1;
+    searchFrom = consumed;
+  }
+  return { markers, rest: output.slice(consumed) };
 }
 
 /** Encodes a JavaScript string as a Python string literal. */
@@ -132,4 +171,17 @@ function parseMarkerJson<T>(output: string, prefix: string): T | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Returns the index of the next line ending, or -1 when the marker line is incomplete. */
+function lineEndIndex(output: string, start: number): number {
+  const cr = output.indexOf("\r", start);
+  const lf = output.indexOf("\n", start);
+  if (cr < 0) {
+    return lf;
+  }
+  if (lf < 0) {
+    return cr;
+  }
+  return Math.min(cr, lf);
 }

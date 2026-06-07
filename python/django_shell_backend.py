@@ -42,11 +42,29 @@ class _Handler(socketserver.StreamRequestHandler):
         self.wfile.write((json.dumps(response) + "\n").encode("utf-8"))
 
 
+class _InspectionError:
+    """Represents an attribute that exists but raised while inspection tried to read its value."""
+
+    def __init__(self, error):
+        """Stores a compact user-visible attribute read failure."""
+        self.error = _truncate(repr(error), 240)
+
+
+class _InspectionDeferred:
+    """Represents an attribute that exists but was not evaluated during child-list inspection."""
+
+    def __init__(self, label):
+        """Stores the static descriptor kind for a lazily evaluated child."""
+        self.label = label
+
+
 def start(namespace, token):
     """Starts or reuses the backend server for the given interactive shell namespace."""
     try:
-        # Bind workspace models before any initial-name snapshot so they count as pre-existing, not user vars.
-        autoimported = _autoimport_django_namespace(namespace) if _autoimport_enabled() else 0
+        # Bind common Django names before any initial-name snapshot; workspace model auto-import remains configurable.
+        autoimported = _autoimport_base_names(namespace)
+        if _autoimport_enabled():
+            autoimported += _autoimport_django_namespace(namespace)
         server = _STATE.get("server")
         if server is None:
             server = _Server((_bind_host(), 0), _Handler)
@@ -334,7 +352,7 @@ def _inspect_variables(namespace, initial_names, lightweight=False):
         origin = _variable_origin(name, initial_names)
         if lightweight and origin in ("bootstrap", "private"):
             continue
-        summary = _value_summary(name, value, [{"op": "name", "name": name}], origin)
+        summary = _value_summary(name, value, [{"op": "name", "name": name}], origin, detailed=False)
         if not lightweight:
             items.append(summary)
             continue
@@ -345,7 +363,7 @@ def _inspect_variables(namespace, initial_names, lightweight=False):
             importable_initial.append(summary)
     if lightweight:
         items = items + importable_initial
-        return items[:900]
+        return items
     return items
 
 
@@ -358,7 +376,7 @@ def _inspect_prelude_variables(namespace, initial_names):
         origin = _variable_origin(name, initial_names)
         if origin in ("bootstrap", "private"):
             continue
-        items.append(_value_summary(name, value, [{"op": "name", "name": name}], origin))
+        items.append(_value_summary(name, value, [{"op": "name", "name": name}], origin, detailed=False))
         if len(items) >= 1400:
             break
     return items
@@ -366,13 +384,20 @@ def _inspect_prelude_variables(namespace, initial_names):
 
 def _inspect_value_children(value, path):
     """Builds child summaries for mappings, sequences, modules, classes, and objects."""
+    if _inspection_value_leaf_needed(value):
+        return [_value_leaf_summary("value", value, path + [{"op": "value"}])]
     if isinstance(value, dict):
         return _dict_children(value, path)
     if isinstance(value, (list, tuple)):
         return _sequence_children(value, path)
     if isinstance(value, (set, frozenset)):
         return _sequence_children(list(value), path)
-    mapping = _attribute_mapping(value, evaluate_values=True)
+    if callable(getattr(value, "all", None)):
+        return _all_children(value, path)
+    model_mapping = _model_instance_attribute_mapping(value, evaluate_values=False)
+    if model_mapping is not None:
+        return _attribute_children(model_mapping, path)
+    mapping = _attribute_mapping(value, evaluate_values=False)
     if mapping is not None:
         return _attribute_children(mapping, path)
     return []
@@ -381,7 +406,7 @@ def _inspect_value_children(value, path):
 def _dict_children(value, path):
     """Builds child summaries for dictionary values without evaluating keys."""
     children = []
-    for index, (key, child) in enumerate(list(value.items())[:200]):
+    for index, (key, child) in enumerate(list(value.items())):
         name = f"[{_truncate(repr(key), 60)}]"
         children.append(_value_summary(name, child, path + [{"op": "dict", "index": index}]))
     return children
@@ -389,7 +414,12 @@ def _dict_children(value, path):
 
 def _sequence_children(value, path):
     """Builds child summaries for indexable sequence values."""
-    return [_value_summary(f"[{index}]", child, path + [{"op": "index", "index": index}]) for index, child in enumerate(list(value)[:200])]
+    return [_value_summary(f"[{index}]", child, path + [{"op": "index", "index": index}]) for index, child in enumerate(list(value))]
+
+
+def _all_children(value, path):
+    """Builds child summaries for Django managers/querysets that are iterated through all()."""
+    return [_value_summary(f"[{index}]", child, path + [{"op": "all_index", "index": index}]) for index, child in enumerate(list(value.all()))]
 
 
 def _attribute_children(mapping, path):
@@ -398,18 +428,41 @@ def _attribute_children(mapping, path):
     for name, child in sorted(mapping.items()):
         if name.startswith("__") and name.endswith("__"):
             continue
-        children.append(_value_summary(name, child, path + [{"op": "attr", "name": name}]))
-        if len(children) >= 200:
-            break
+        children.append(_value_summary(name, child, path + [{"op": "attr", "name": name}], detailed=False))
     return children
 
 
-def _value_summary(name, value, path, origin=None):
+def _value_summary(name, value, path, origin=None, detailed=True):
     """Builds one serializable runtime value summary."""
-    summary = {"hasChildren": _has_children(value), "importLine": _import_line(name, value), "kind": _variable_kind(value), "name": name, "path": path, "preview": _preview_value(value), "type": _type_name(value), "typeImportLine": _type_import_line(name, value)}
+    summary = {"hasChildren": _has_children(value, detailed), "importLine": _import_line(name, value), "kind": _variable_kind(value), "name": name, "path": path, "preview": _preview_value(value), "type": _type_name(value), "typeImportLine": _type_import_line(name, value)}
+    if detailed:
+        summary.update(_inspection_metadata(value))
     if origin is not None:
         summary["origin"] = origin
     return summary
+
+
+def _value_leaf_summary(name, value, path):
+    """Builds a non-expandable child that displays a lazily evaluated value."""
+    return {"hasChildren": False, "importLine": _import_line(name, value), "kind": _variable_kind(value), "name": name, "path": path, "preview": _preview_value(value), "type": _type_name(value), "typeImportLine": _type_import_line(name, value)}
+
+
+def _inspection_value_leaf_needed(value):
+    """Returns whether child inspection should show the value itself rather than only attributes."""
+    if isinstance(value, _InspectionError):
+        return True
+    if isinstance(value, _InspectionDeferred):
+        return False
+    if isinstance(value, (type(None), bool, int, float, complex, str, bytes)):
+        return True
+    try:
+        import datetime as _datetime
+        import decimal as _decimal
+        import uuid as _uuid
+
+        return isinstance(value, (_decimal.Decimal, _datetime.datetime, _datetime.date, _datetime.time, _datetime.timedelta, _uuid.UUID))
+    except Exception:
+        return False
 
 
 def _import_line(name, value):
@@ -462,17 +515,29 @@ def _resolve_child(value, segment):
     op = segment.get("op")
     if op == "attr":
         name = segment["name"]
-        mapping = _attribute_mapping(value, evaluate_values=True)
+        model_mapping = _model_instance_attribute_mapping(value, evaluate_values=False)
+        if isinstance(model_mapping, dict) and name in model_mapping:
+            return _read_attr_value(value, name)
+        mapping = _attribute_mapping(value, evaluate_values=False)
         if isinstance(mapping, dict) and name in mapping:
-            return mapping[name]
+            return _read_attr_value(value, name)
         # Django relation descriptors (FK / reverse FK / M2M managers) and computed fields are listed as drill-down children
         # (via _meta in _browse_children_of) but are NOT in the safe attribute mapping (vars/dataclass/property); resolve them
         # directly so drilling into a relation works the same as the pure-expression path. _pty_safe_getattr never raises.
         return _pty_safe_getattr(value, name)
     if op == "index":
-        return list(value)[segment["index"]]
+        try:
+            return list(value)[segment["index"]]
+        except TypeError:
+            if callable(getattr(value, "all", None)):
+                return list(value.all())[segment["index"]]
+            raise
+    if op == "all_index":
+        return list(value.all())[segment["index"]]
     if op == "dict":
         return list(value.items())[segment["index"]][1]
+    if op == "value":
+        return value
     raise ValueError("Unsupported runtime inspector path segment.")
 
 
@@ -489,6 +554,10 @@ def _variable_origin(name, initial_names):
 
 def _variable_kind(value):
     """Classifies one namespace value by display-oriented runtime kind."""
+    if isinstance(value, _InspectionError):
+        return "error"
+    if isinstance(value, _InspectionDeferred):
+        return "deferred"
     if isinstance(value, types.ModuleType):
         return "module"
     if inspect.isclass(value):
@@ -502,20 +571,161 @@ def _variable_kind(value):
     return "object"
 
 
-def _has_children(value):
+def _has_children(value, detailed=True):
     """Returns whether a runtime value has safe children to show in the tree."""
+    if isinstance(value, _InspectionError):
+        return False
+    if isinstance(value, _InspectionDeferred):
+        return True
     if isinstance(value, (dict, list, tuple, set, frozenset)):
         return len(value) > 0
+    if not detailed:
+        return _has_children_shallow(value)
+    model_mapping = _model_instance_attribute_mapping(value)
+    if model_mapping is not None:
+        return bool(model_mapping)
     mapping = _attribute_mapping(value)
     return bool(mapping and any(not (name.startswith("__") and name.endswith("__")) for name in mapping))
 
 
+def _has_children_shallow(value):
+    """Returns a fast conservative child flag for top-level namespace summaries."""
+    if isinstance(value, (type(None), bool, int, float, complex, str, bytes)):
+        return False
+    return True
+
+
+def _inspection_metadata(value):
+    """Returns exact static inspection metadata that does not evaluate arbitrary object values."""
+    metadata = {}
+    child_count = _child_count(value)
+    if child_count is not None:
+        metadata["childCount"] = child_count
+        metadata["childrenTruncated"] = False
+    collection_length = _collection_length(value)
+    if collection_length is not None:
+        metadata["length"] = collection_length
+    django_model = _django_model_metadata(value)
+    if django_model is not None:
+        metadata["djangoModel"] = django_model
+    if _has_dynamic_attribute_protocol(value):
+        metadata["dynamicAttributes"] = True
+    return metadata
+
+
+def _child_count(value):
+    """Returns the exact known child count for built-in containers and statically inspectable objects."""
+    if isinstance(value, _InspectionError):
+        return 0
+    if isinstance(value, (dict, list, tuple, set, frozenset)):
+        return len(value)
+    model_mapping = _model_instance_attribute_mapping(value)
+    if model_mapping is not None:
+        return len(model_mapping)
+    mapping = _attribute_mapping(value)
+    if mapping is None:
+        return None
+    return len([name for name in mapping if not (name.startswith("__") and name.endswith("__"))])
+
+
+def _collection_length(value):
+    """Returns a collection length without issuing ORM queries or consuming iterators."""
+    if isinstance(value, (dict, list, tuple, set, frozenset, str, bytes)):
+        return len(value)
+    return None
+
+
+def _django_model_metadata(value):
+    """Returns Django model identity metadata for model instances and model classes."""
+    meta = getattr(value, "_meta", None)
+    if meta is None:
+        return None
+    payload = {"app": getattr(meta, "app_label", ""), "model": getattr(meta, "object_name", ""), "table": getattr(meta, "db_table", "")}
+    pk = getattr(meta, "pk", None)
+    if pk is not None:
+        payload["pk"] = getattr(pk, "attname", getattr(pk, "name", ""))
+    if not isinstance(value, type):
+        payload["pkValue"] = _browse_jsonable(_pty_safe_getattr(value, payload.get("pk"))) if payload.get("pk") else None
+    return payload
+
+
+def _has_dynamic_attribute_protocol(value):
+    """Returns whether a value can synthesize attributes outside static metadata sources."""
+    owner = value if inspect.isclass(value) else type(value)
+    for name in ("__getattr__", "__getattribute__", "__dir__"):
+        try:
+            descriptor = inspect.getattr_static(owner, name)
+        except Exception:
+            continue
+        module = getattr(descriptor, "__module__", "")
+        if module not in ("builtins", ""):
+            return True
+    return False
+
+
+def _model_instance_attribute_mapping(value, evaluate_values=False):
+    """Returns Django model instance fields, relations, and computed attributes as inspector children."""
+    names = _model_instance_attribute_names(value)
+    if names is None:
+        return None
+    if not evaluate_values:
+        data = getattr(value, "__dict__", {})
+        return {name: data[name] if name in data else _InspectionDeferred(_model_instance_attribute_label(value, name)) for name in names}
+    return {name: _read_attr_value(value, name) for name in names}
+
+
+def _model_instance_attribute_label(value, name):
+    """Returns a static display label for one Django model instance child."""
+    if _pty_is_computed_field(type(value), name):
+        return "property"
+    return "attribute"
+
+
+def _model_instance_attribute_names(value):
+    """Returns ordered Django model instance child names, preserving raw foreign-key attnames."""
+    if getattr(value, "_meta", None) is None or isinstance(value, type):
+        return None
+    names = []
+    seen = set()
+
+    def add(name):
+        if isinstance(name, str) and name and not name.startswith("_") and name not in seen:
+            names.append(name)
+            seen.add(name)
+
+    try:
+        fields = value._meta.get_fields(include_hidden=True)
+    except TypeError:
+        fields = value._meta.get_fields()
+    except Exception:
+        fields = []
+    for field in fields:
+        try:
+            if getattr(field, "auto_created", False) and not getattr(field, "concrete", False):
+                accessor = field.get_accessor_name()
+                if isinstance(accessor, str) and not accessor.endswith("+"):
+                    add(accessor)
+                continue
+            add(getattr(field, "attname", None))
+            add(getattr(field, "name", None))
+        except Exception:
+            continue
+    for name in dir(type(value)):
+        if _pty_is_computed_field(type(value), name):
+            add(name)
+    return names
+
+
 def _attribute_mapping(value, evaluate_values=False):
-    """Returns safe attributes, dataclass fields, and readable properties."""
+    """Returns complete static member names and optionally reads their runtime values."""
     if not inspect.isclass(value):
         mapping = dict(_safe_vars(value) or {})
         _merge_dataclass_fields(value, mapping, evaluate_values)
+        _merge_slot_values(value, mapping, evaluate_values)
         _merge_property_values(value, mapping, evaluate_values)
+        _merge_annotation_values(value, mapping, evaluate_values)
+        _merge_class_attribute_values(value, mapping, evaluate_values)
+        _merge_static_dir_values(value, mapping, evaluate_values)
         return mapping or None
     merged = {}
     for cls in reversed(inspect.getmro(value)):
@@ -524,6 +734,24 @@ def _attribute_mapping(value, evaluate_values=False):
             merged.update(mapping)
     _merge_dataclass_fields(value, merged, evaluate_values)
     return merged
+
+
+def _set_mapped_attr_value(value, mapping, name, evaluate_values, fallback=None):
+    """Adds one attribute name to a mapping and optionally reads its runtime value."""
+    if name in mapping:
+        return
+    if not evaluate_values:
+        mapping[name] = fallback
+        return
+    mapping[name] = _read_attr_value(value, name)
+
+
+def _read_attr_value(value, name):
+    """Reads one attribute value while preserving failures as inspection results."""
+    try:
+        return getattr(value, name)
+    except Exception as error:
+        return _InspectionError(error)
 
 
 def _merge_dataclass_fields(value, mapping, evaluate_values):
@@ -536,23 +764,97 @@ def _merge_dataclass_fields(value, mapping, evaluate_values):
     for field in fields:
         if field.name in mapping:
             continue
-        if is_class or not evaluate_values:
-            mapping[field.name] = field
+        if is_class:
+            mapping[field.name] = _InspectionDeferred("dataclass field")
             continue
-        with contextlib.suppress(Exception):
-            mapping[field.name] = getattr(value, field.name)
+        if not evaluate_values:
+            mapping[field.name] = _read_attr_value(value, field.name)
+            continue
+        mapping[field.name] = _read_attr_value(value, field.name)
+
+
+def _merge_slot_values(value, mapping, evaluate_values):
+    """Adds non-dataclass slot attributes that are absent from vars(obj)."""
+    if inspect.isclass(value):
+        return
+    for name in _slot_names(type(value)):
+        if name not in mapping:
+            mapping[name] = _read_attr_value(value, name)
+
+
+def _slot_names(cls):
+    """Returns user-visible slot names declared across a class hierarchy."""
+    names = []
+    seen = set()
+    for owner in reversed(inspect.getmro(cls)):
+        slots = getattr(owner, "__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        elif isinstance(slots, dict):
+            slots = tuple(slots)
+        for name in slots:
+            if isinstance(name, str) and name not in ("__dict__", "__weakref__") and not (name.startswith("__") and name.endswith("__")) and name not in seen:
+                names.append(name)
+                seen.add(name)
+    return names
+
+
+def _merge_annotation_values(value, mapping, evaluate_values):
+    """Adds annotated instance fields when they are not already visible through vars or slots."""
+    if inspect.isclass(value):
+        return
+    for owner in reversed(inspect.getmro(type(value))):
+        annotations = (_safe_vars(owner) or {}).get("__annotations__", {})
+        if not isinstance(annotations, dict):
+            continue
+        for name, annotation in annotations.items():
+            if isinstance(name, str) and not (name.startswith("__") and name.endswith("__")):
+                _set_mapped_attr_value(value, mapping, name, evaluate_values, _InspectionDeferred("annotation"))
+
+
+def _merge_class_attribute_values(value, mapping, evaluate_values):
+    """Adds non-callable class-level fields for an instance without traversing methods."""
+    if inspect.isclass(value):
+        return
+    for owner in reversed(inspect.getmro(type(value))):
+        for name, descriptor in (_safe_vars(owner) or {}).items():
+            if (name.startswith("__") and name.endswith("__")) or name in ("__annotations__", "__dict__", "__slots__", "__weakref__") or name in mapping:
+                continue
+            if not _is_static_field_descriptor(descriptor):
+                continue
+            _set_mapped_attr_value(value, mapping, name, evaluate_values, descriptor)
+
+
+def _merge_static_dir_values(value, mapping, evaluate_values):
+    """Adds remaining names reported by dir()/__dir__ so regular objects do not lose metadata."""
+    for name in _safe_dir(value):
+        if name in mapping or (name.startswith("__") and name.endswith("__")):
+            continue
+        try:
+            descriptor = inspect.getattr_static(value, name)
+        except Exception:
+            descriptor = None
+        _set_mapped_attr_value(value, mapping, name, evaluate_values, descriptor)
+
+
+def _is_static_field_descriptor(descriptor):
+    """Returns whether a class attribute looks like data, not a method or computed descriptor."""
+    if isinstance(descriptor, (property, staticmethod, classmethod)) or type(descriptor).__name__ == "cached_property":
+        return False
+    if inspect.isroutine(descriptor) or inspect.isclass(descriptor) or callable(descriptor):
+        return False
+    if hasattr(descriptor, "__get__"):
+        return False
+    return True
 
 
 def _merge_property_values(value, mapping, evaluate_values):
-    """Adds property names and reads values only for explicit child inspection."""
+    """Adds property and cached-property names, reading values only for explicit child inspection."""
     for cls in reversed(inspect.getmro(type(value))):
         for name, descriptor in (_safe_vars(cls) or {}).items():
-            if name in mapping or not isinstance(descriptor, property):
+            if name in mapping or not (isinstance(descriptor, property) or type(descriptor).__name__ == "cached_property"):
                 continue
-            mapping[name] = descriptor
-            if evaluate_values:
-                with contextlib.suppress(Exception):
-                    mapping[name] = getattr(value, name)
+            _set_mapped_attr_value(value, mapping, name, evaluate_values, _InspectionDeferred(type(descriptor).__name__))
 
 
 def _safe_vars(value):
@@ -563,6 +865,14 @@ def _safe_vars(value):
         return None
 
 
+def _safe_dir(value):
+    """Returns dir(value) without allowing a custom __dir__ failure to break inspection."""
+    try:
+        return sorted(set(dir(value)))
+    except Exception:
+        return []
+
+
 def _inspect_modules():
     """Builds summaries for modules currently loaded in the Python process."""
     modules = []
@@ -570,13 +880,15 @@ def _inspect_modules():
         if not isinstance(module, types.ModuleType):
             continue
         modules.append({"file": str(getattr(module, "__file__", "") or ""), "name": name, "package": str(getattr(module, "__package__", "") or "")})
-        if len(modules) >= 300:
-            break
     return modules
 
 
 def _type_name(value):
     """Returns a compact fully-qualified type name."""
+    if isinstance(value, _InspectionError):
+        return "inspection.error"
+    if isinstance(value, _InspectionDeferred):
+        return value.label
     value_type = type(value)
     module = value_type.__module__
     if module == "builtins":
@@ -590,6 +902,10 @@ def _preview_value(value):
     import decimal as _decimal
     import uuid as _uuid
 
+    if isinstance(value, _InspectionError):
+        return f"<error: {value.error}>"
+    if isinstance(value, _InspectionDeferred):
+        return f"<{value.label}>"
     if isinstance(value, (type(None), bool, int, float, complex, str, bytes)):
         return _truncate(repr(value))
     if isinstance(value, (_decimal.Decimal, _datetime.datetime, _datetime.date, _datetime.time, _datetime.timedelta, _uuid.UUID)):
@@ -666,6 +982,7 @@ def _pty_is_ipython():
 # Keep a cell response marker under the extension's 1.25 MB PTY read buffer: a larger marker loses its prefix to the
 # buffer's tail-slice and never parses, hanging the serialized PTY request queue. Bounded reads pass through untouched.
 _PTY_MARKER_LIMIT = 1000000
+_PTY_CHUNK_LIMIT = 200000
 
 
 def _pty_fit_response(response):
@@ -682,9 +999,6 @@ def _pty_fit_response(response):
         value = fitted.get(key)
         if isinstance(value, str) and len(value) > 40000:
             fitted[key] = value[:40000] + notice
-    inspect = fitted.get("inspect")
-    if isinstance(inspect, dict) and isinstance(inspect.get("children"), list) and len(inspect["children"]) > 50:
-        fitted["inspect"] = dict(inspect, children=inspect["children"][:50], truncated=True)  # defensive: bounded children already fit, but never let inspect jam the marker
     grid = fitted.get("grid")
     if isinstance(grid, dict) and isinstance(grid.get("rows"), list) and grid["rows"]:
         rows = grid["rows"]
@@ -700,33 +1014,139 @@ def _pty_fit_response(response):
 
 
 def _pty_cell_marker(cell_id, response):
-    """Builds a `_djs_cell` response marker line, shrinking it to fit the PTY read buffer when the response is too large."""
+    """Builds one or more `_djs_cell` response marker lines, chunking oversized responses without dropping inspection data."""
     payload = json.dumps({"id": cell_id, "response": response})
     if len(payload) > _PTY_MARKER_LIMIT:
-        payload = json.dumps({"id": cell_id, "response": _pty_fit_response(response)})
+        fitted_payload = json.dumps({"id": cell_id, "response": _pty_fit_response(response)})
+        if len(fitted_payload) <= _PTY_MARKER_LIMIT:
+            return _RESPONSE_PREFIX + fitted_payload
+        response_payload = json.dumps(response)
+        chunks = [response_payload[index:index + _PTY_CHUNK_LIMIT] for index in range(0, len(response_payload), _PTY_CHUNK_LIMIT)]
+        count = len(chunks)
+        return "\n".join(_RESPONSE_PREFIX + json.dumps({"chunk": {"count": count, "data": chunk, "index": index}, "id": cell_id}) for index, chunk in enumerate(chunks))
     return _RESPONSE_PREFIX + payload
 
 
 def _pty_emit_cell(counter, ok, result_repr, out, err, tb, grid=None, sql=None, inspect=None):
     """Prints one response marker for a literal code cell run in the interactive shell (grid = ORM-mode rows; inspect = pure-expression drill-down child summaries)."""
-    print(_pty_cell_marker("_djs_cell-%d" % counter, {"grid": grid, "inspect": inspect, "ok": ok, "result": result_repr, "sql": sql or [], "stderr": err, "stdout": out, "traceback": tb}), flush=True)
+    response = {"grid": grid, "inspect": inspect, "ok": ok, "result": result_repr, "sql": sql or [], "stderr": err, "stdout": out, "traceback": tb}
+    raw = _STATE.pop("pty_raw_metadata", None)
+    if isinstance(raw, dict):
+        response.update(raw)
+    print(_pty_cell_marker("_djs_cell-%d" % counter, response), flush=True)
 
 
-def _pty_orm_inspect(limit=500):
-    """Returns bounded runtime-variable JSON for an ORM-mode inspect cell. Built server-side so the TYPED cell stays tiny
-    (the inlined form was ~1.5 KB → overran the tty input limit and hung over the PTY) and the output is capped to fit the
-    response marker. User variables come first (in full), then capped pre-existing names."""
-    namespace = _STATE["server"].namespace
+def _pty_orm_inspect(limit=None):
+    """Attaches runtime-variable metadata for ORM-mode inspection helper cells."""
+    _STATE["pty_raw_metadata"] = {"runtime": _pty_runtime_inspection(_STATE["server"].namespace, limit)}
+    return None
+
+
+def _pty_runtime_inspection(namespace, limit=None):
+    """Returns runtime-variable metadata for top-level namespace inspection."""
     initial = namespace.get("_djs_initial_names", frozenset())
     items = [(k, v) for k, v in sorted(namespace.items()) if not k.startswith("_")]
     ordered = [kv for kv in items if kv[0] not in initial] + [kv for kv in items if kv[0] in initial]
     variables = []
-    for name, value in ordered[: max(0, int(limit))]:
+    limit_value = None if limit is None else max(0, int(limit))
+    for name, value in (ordered if limit_value is None else ordered[:limit_value]):
         try:
-            variables.append(_value_summary(name, value, [{"op": "name", "name": name}], _variable_origin(name, initial)))
+            variables.append(_value_summary(name, value, [{"op": "name", "name": name}], _variable_origin(name, initial), detailed=False))
         except Exception:
             pass
-    return json.dumps({"loadedModuleCount": len(sys.modules), "variables": variables}, default=str)
+    return {"loadedModuleCount": len(sys.modules), "variables": variables}
+
+
+def _pty_is_models_probe(raw):
+    """Returns whether the cell is the pure Python model-catalog probe typed by the extension."""
+    return (raw or "").strip() == "len(apps.get_models())"
+
+
+def _pty_is_runtime_probe(raw):
+    """Returns whether the cell is the pure Python runtime-inspection probe typed by the extension."""
+    return (raw or "").strip() == "len(globals())"
+
+
+def _pty_inspect_probe_target(raw, namespace):
+    """Returns (matched, value, error) for pure `dir(expr)` / `len(expr)` inspection probe cells."""
+    try:
+        tree = ast.parse((raw or "").strip(), mode="eval")
+    except Exception:
+        return False, None, None
+    call = tree.body
+    if not isinstance(call, ast.Call) or len(call.args) != 1 or call.keywords:
+        return False, None, None
+    if not isinstance(call.func, ast.Name) or call.func.id not in ("dir", "len"):
+        return False, None, None
+    target = call.args[0]
+    if call.func.id == "len" and isinstance(target, ast.Call) and isinstance(target.func, ast.Name) and target.func.id == "globals":
+        return False, None, None
+    if not _pty_safe_inspect_expr(target):
+        return False, None, None
+    try:
+        return True, _pty_resolve_inspect_expr(target, namespace), None
+    except Exception as error:
+        return True, _InspectionError(error), None
+
+
+def _pty_resolve_inspect_expr(node, namespace):
+    """Resolves a safe inspector AST expression through the same lazy path rules as the structured helper."""
+    if isinstance(node, ast.Name):
+        return namespace[node.id]
+    if isinstance(node, ast.Attribute):
+        value = _pty_resolve_inspect_expr(node.value, namespace)
+        return value if isinstance(value, _InspectionError) else _resolve_child(value, {"op": "attr", "name": node.attr})
+    if isinstance(node, ast.Subscript):
+        value = _pty_resolve_inspect_expr(node.value, namespace)
+        return value if isinstance(value, _InspectionError) else _resolve_child(value, {"op": "index", "index": node.slice.value})
+    if isinstance(node, ast.Call):
+        return _pty_resolve_inspect_call(node, namespace)
+    raise ValueError("Unsupported runtime inspector expression.")
+
+
+def _pty_resolve_inspect_call(node, namespace):
+    """Resolves one safe inspector helper call without evaluating arbitrary functions."""
+    if isinstance(node.func, ast.Name) and node.func.id == "list":
+        value = _pty_resolve_inspect_expr(node.args[0], namespace)
+        return value if isinstance(value, _InspectionError) else list(value)
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "items":
+        value = _pty_resolve_inspect_expr(node.func.value, namespace)
+        return value if isinstance(value, _InspectionError) else value.items()
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "all":
+        value = _pty_resolve_inspect_expr(node.func.value, namespace)
+        return value if isinstance(value, _InspectionError) else value.all()
+    raise ValueError("Unsupported runtime inspector call.")
+
+
+def _pty_safe_inspect_expr(node):
+    """Returns whether an AST expression is a safe path expression generated by the inspector."""
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, ast.Attribute):
+        return _pty_safe_inspect_expr(node.value)
+    if isinstance(node, ast.Subscript):
+        return _pty_safe_inspect_expr(node.value) and _pty_safe_inspect_slice(node.slice)
+    if isinstance(node, ast.Call):
+        return _pty_safe_inspect_call(node)
+    return False
+
+
+def _pty_safe_inspect_slice(node):
+    """Returns whether an AST subscript slice is a non-negative integer index."""
+    return isinstance(node, ast.Constant) and isinstance(node.value, int) and node.value >= 0
+
+
+def _pty_safe_inspect_call(node):
+    """Returns whether an AST call is one of the path reconstruction helpers: list(x), x.items(), or x.all()."""
+    if node.keywords:
+        return False
+    if isinstance(node.func, ast.Name) and node.func.id == "list" and len(node.args) == 1:
+        return _pty_safe_inspect_expr(node.args[0])
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "items" and not node.args:
+        return _pty_safe_inspect_expr(node.func.value)
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "all" and not node.args:
+        return _pty_safe_inspect_expr(node.func.value)
+    return False
 
 
 def _pty_safe_getattr(obj, name):
@@ -739,31 +1159,44 @@ def _pty_safe_getattr(obj, name):
 
 def _pty_is_computed_field(owner, name):
     """Returns whether owner.name is a computed-field descriptor: @property OR @cached_property (Django's `django.utils.functional.cached_property` and `functools.cached_property` both have type name 'cached_property') — so the drill-down shows computed/derived fields, not just DB columns."""
-    descriptor = getattr(owner, name, None)
+    try:
+        descriptor = inspect.getattr_static(owner, name)
+    except Exception:
+        descriptor = getattr(owner, name, None)
     return isinstance(descriptor, property) or type(descriptor).__name__ == "cached_property"
 
 
-def _browse_children_of(value, base_path, n):
-    """Builds bounded child summaries for an ALREADY-RESOLVED object (rich drill-down: dict/sequence items, manager/queryset
+def _browse_children_of(value, base_path, n=None):
+    """Builds child summaries for an ALREADY-RESOLVED object (rich drill-down: dict/sequence items, manager/queryset
     rows, a Django model instance's fields + reverse relations + @property values, else __dict__ attrs). Each child's path is
     base_path + [segment]; pass base_path=[] (relative) when the result object came from a bare expression typed by the
     extension (which prepends the path it asked for), or the resolved path when called from the path-resolving helper."""
     v = value
-    if isinstance(v, dict):
-        src = [("[" + repr(k)[:60] + "]", cv, {"op": "dict", "index": i}) for i, (k, cv) in enumerate(list(v.items())[:n])]
+    limit = None if n is None else max(0, int(n))
+    def bounded(items):
+        """Returns all items unless a legacy explicit limit was supplied."""
+        return list(items) if limit is None else list(items)[:limit]
+    if _inspection_value_leaf_needed(v):
+        src = [("value", v, {"op": "value"})]
+    elif isinstance(v, dict):
+        src = [("[" + repr(k)[:60] + "]", cv, {"op": "dict", "index": i}) for i, (k, cv) in enumerate(bounded(v.items()))]
     elif isinstance(v, (list, tuple, set, frozenset)):
-        src = [("[" + str(i) + "]", cv, {"op": "index", "index": i}) for i, cv in enumerate(list(v)[:n])]
+        src = [("[" + str(i) + "]", cv, {"op": "index", "index": i}) for i, cv in enumerate(bounded(v))]
     elif callable(getattr(v, "all", None)):
-        src = [("[" + str(i) + "]", cv, {"op": "index", "index": i}) for i, cv in enumerate(list(v.all()[:n]))]
+        values = v.all() if limit is None else v.all()[:limit]
+        src = [("[" + str(i) + "]", cv, {"op": "all_index", "index": i}) for i, cv in enumerate(list(values))]
     elif getattr(v, "_meta", None) is not None and not isinstance(v, type):
-        names = [(f.get_accessor_name() if (f.auto_created and not f.concrete) else f.name) for f in v._meta.get_fields()] + [p for p in dir(type(v)) if _pty_is_computed_field(type(v), p)]
-        src = [(nm, _pty_safe_getattr(v, nm), {"op": "attr", "name": nm}) for nm in names if nm and not nm.startswith("_")][:n]
+        names = _model_instance_attribute_names(v) or []
+        mapping = _model_instance_attribute_mapping(v, evaluate_values=False) or {}
+        src = [(nm, mapping.get(nm), {"op": "attr", "name": nm}) for nm in bounded([name for name in names if name and not name.startswith("_")])]
     else:
-        src = [(a, cv, {"op": "attr", "name": a}) for a, cv in (list(vars(v).items()) if hasattr(v, "__dict__") else []) if not (a.startswith("__") and a.endswith("__"))][:n]
+        mapping = _attribute_mapping(v, evaluate_values=False) or {}
+        src = [(a, cv, {"op": "attr", "name": a}) for a, cv in bounded([(name, child) for name, child in sorted(mapping.items()) if not (name.startswith("__") and name.endswith("__"))])]
     children = []
     for nm, cv, seg in src:
         try:
-            children.append(_value_summary(nm, cv, base_path + [seg], None))
+            summary = _value_leaf_summary(nm, cv, base_path + [seg]) if seg.get("op") == "value" else _value_summary(nm, cv, base_path + [seg], None)
+            children.append(summary)
         except Exception:
             pass
     return children
@@ -776,16 +1209,17 @@ def _pty_is_name_chain(raw):
     return bool(stripped) and all(part.isidentifier() and not keyword.iskeyword(part) for part in parts)
 
 
-def _pty_orm_children(path_json, limit=200):
-    """Returns bounded child-summary JSON for an ORM-mode drill-down cell (fallback for collection/index/dict paths that have
-    no clean Python expression). Built server-side (so the typed cell stays tiny); resolves the path then reuses _browse_children_of."""
+def _pty_orm_children(path_json, limit=None):
+    """Attaches child-summary metadata for ORM-mode inspection drill-down helper cells."""
     namespace = _STATE["server"].namespace
     try:
         path = json.loads(path_json)
-        children = _browse_children_of(_resolve_path(namespace, path), path, max(0, int(limit)))
+        children = _browse_children_of(_resolve_path(namespace, path), [], limit)
     except Exception:
-        return json.dumps({"children": [], "error": traceback.format_exc()}, default=str)
-    return json.dumps({"children": children}, default=str)
+        _STATE["pty_raw_metadata"] = {"inspect": {"children": [], "error": traceback.format_exc()}}
+        return None
+    _STATE["pty_raw_metadata"] = {"inspect": {"children": children}}
+    return None
 
 
 def _pty_sql_begin(state):
@@ -912,18 +1346,33 @@ def _pty_install_ipython_capture(shell):
         error = getattr(result, "error_in_exec", None) or getattr(result, "error_before_exec", None)
         tb = "".join(traceback.format_exception(type(error), error, getattr(error, "__traceback__", None))) if error is not None else ""
         value = getattr(result, "result", None)
-        result_repr = _truncate(repr(value), 4000) if error is None and value is not None else None
-        grid = _pty_tabulate_result(value) if error is None else None
         inspect = None
-        if error is None and value is not None and _pty_is_name_chain(state.get("raw")):
-            # Pure-expression inspector drill-down: the extension typed a bare `a`/`a.b.c` (audit shows clean Python, no _djs_backend_module plumbing); surface this object's child tree from the result so the inspector renders without a helper call. Relative paths; the extension prepends the path it asked for.
-            try:
-                inspect = {"children": _browse_children_of(value, [], 200)}
-            except Exception:
-                inspect = None
+        matched_probe, probe_value, probe_error = _pty_inspect_probe_target(state.get("raw"), shell.user_ns)
+        inspection_probe = matched_probe or (error is None and (_pty_is_models_probe(state.get("raw")) or _pty_is_runtime_probe(state.get("raw"))))
+        if inspection_probe:
+            out = ""
+            err = ""
+        result_repr = None if inspection_probe else (_truncate(repr(value), 4000) if error is None and value is not None else None)
+        grid = None if inspection_probe else (_pty_tabulate_result(value) if error is None else None)
+        if matched_probe:
+            if probe_error:
+                inspect = {"children": [], "error": probe_error}
+            else:
+                try:
+                    inspect = {"children": _browse_children_of(probe_value, [])}
+                except Exception:
+                    inspect = {"children": [], "error": traceback.format_exc()}
+        raw_metadata = {}
+        if error is None and _pty_is_models_probe(state.get("raw")):
+            raw_metadata["models"] = _browse_models()
+        if error is None and _pty_is_runtime_probe(state.get("raw")):
+            raw_metadata["runtime"] = _pty_runtime_inspection(shell.user_ns)
+        if raw_metadata:
+            _STATE["pty_raw_metadata"] = raw_metadata
         sql = _pty_sql_end(state)
         state["counter"] += 1
-        _pty_emit_cell(state["counter"], error is None, result_repr, out, err, tb, grid, sql, inspect)
+        marker_ok = error is None or matched_probe
+        _pty_emit_cell(state["counter"], marker_ok, result_repr, out, err, "" if matched_probe else tb, grid, sql, inspect)
         if state.get("scrub"):
             state["scrub"] = False
             try:

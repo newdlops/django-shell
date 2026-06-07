@@ -389,8 +389,28 @@ function variableTreeItem(variable: BackendRuntimeVariable): vscode.TreeItem {
   const item = new vscode.TreeItem(variable.name, state);
   item.description = shorten(variable.preview, 80);
   item.iconPath = new vscode.ThemeIcon(variableIcon(variableKind(variable)));
-  item.tooltip = `${variable.name}: ${variable.type}\n${variable.preview}`;
+  item.tooltip = variableTooltip(variable);
   return item;
+}
+
+/** Builds an inspection tooltip with exact static metadata carried by the backend. */
+function variableTooltip(variable: BackendRuntimeVariable): string {
+  const lines = [`${variable.name}: ${variable.type}`, variable.preview];
+  if (typeof variable.childCount === "number") {
+    lines.push(`children: ${variable.childCount}${variable.childrenTruncated ? " (truncated)" : ""}`);
+  }
+  if (typeof variable.length === "number") {
+    lines.push(`length: ${variable.length}`);
+  }
+  if (variable.djangoModel) {
+    const model = [variable.djangoModel.app, variable.djangoModel.model].filter(Boolean).join(".");
+    const pk = variable.djangoModel.pk ? ` pk=${variable.djangoModel.pk}${variable.djangoModel.pkValue === undefined ? "" : `:${String(variable.djangoModel.pkValue)}`}` : "";
+    lines.push(`django: ${model || "model"}${pk}`);
+  }
+  if (variable.dynamicAttributes) {
+    lines.push("dynamic attributes: yes");
+  }
+  return lines.join("\n");
 }
 
 /** Returns the icon name for a runtime variable kind. */

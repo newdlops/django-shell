@@ -1,73 +1,341 @@
-# Handover for the next AI session — Django Shell extension (v0.0.9 WIP)
+# Django Shell — Handover
 
-_Updated 2026-06-04. Audience: the next Claude Code session in this repo._
+Date: 2026-06-06. Covers the model-data-browser / ORM-mode work on branch
+`model-browser-orm-enhancements` (commit `09ab10c`, not merged, not pushed).
 
-## Read first (orientation)
+---
 
-- You are continuing a long bug-fixing session on this VS Code extension. The user is **Korean-speaking** (reply in Korean). Commit/push/publish **only when explicitly asked**; nothing has been committed this session.
-- Your **auto-memory auto-loads** from `~/.claude/projects/-Users-lky-project-django-shell/memory/` (`MEMORY.md` index). It already holds the deep mechanism notes — **read them, don't re-derive**: `orm-mode-transport-contract`, `overlay-multitab-targeting`, `orm-model-autoimport`, `model-data-browser-feature`, `main-checks-already-red`. This file is the *session-state + working-agreement* layer on top of those.
-- **Concurrent edits happen** (the user / a linter edit files between your turns). **Re-read a file right before editing it** — don't trust a stale view.
-- **Headless cannot verify** CDP / IPython / plain REPL / Monaco / PTY timing / a live Django shell. `tsc` + `node:test` + ad-hoc Python are your only automated signals. **Do not claim runtime behavior is verified** — say "needs VS Code + a live shell_plus" and (per the established workflow) build a VSIX so the user can test.
+## 0. TL;DR / read this first
 
-## Repo state right now
+- **You test the INSTALLED extension, not this repo.** The shell loads
+  `~/.vscode/extensions/newdlops.django-shell-<version>/…`, **not**
+  `/Users/lky/project/django-shell`. Source changes only take effect after **F5**
+  (Extension Development Host) or **repackage + reinstall + reload window**.
+  Most "still broken after the fix" reports were the stale installed build.
+- The extension runs in three layers that must stay in sync:
+  1. **TS extension host** — `src/` → compiled to `out/` (gitignored) by `tsc`.
+  2. **Webview UIs** — `media/*Source.js` → bundled to `media/dist/*.js` (tracked) by esbuild.
+  3. **Python backend** — `python/django_shell_backend.py`, injected as source into the live Django shell.
+- Build/verify / package:
+  - `npx tsc -p ./ --noEmit` — fast typecheck loop.
+  - `node --test test/*.test.mjs` — unit tests.
+  - `npm run check` (= guidelines + `tsc` + `build:renderer` + tests). Current: **36 pass /
+    5 skip / 0 fail**. The 5 skips + the e2e "overlay-guard" are **pre-red on clean HEAD** —
+    not regressions.
+  - `npx --yes @vscode/vsce package` — build the `.vsix` **directly**. (`npm run package` runs
+    `check` first, which can be red on pre-existing issues; package directly to avoid that.)
+  - **No-Django Python check trick:** import `python/django_shell_backend.py` under system
+    `python3`, inject a fake `django.apps` into `sys.modules`, and call the target function — used
+    to unit-test backend logic without a real Django project. (Node's `--input-type=module -e`
+    importing `out/*.js` is the analogous trick for the TS cell builders — used throughout this
+    session to print/verify generated ORM cells.)
+- Guidelines (`scripts/check-code-guidelines.mjs`): every function needs a **single-line**
+  `/** … */` JSDoc immediately above it; **max 1000 lines/file**. First line of every code file is
+  a purpose comment.
 
-- **Everything is UNCOMMITTED.** `HEAD` = `v.0.0.8` (`2304c2f`). Working tree: **31 modified (+2428/−616) + 7 new files**; `package.json` already at `0.0.9`. Staged deletions: `log.txt`, `other_extension_log.txt`.
-- New files: `src/modelOrm.ts`, `src/modelQueryConsole.ts`, `src/shellTranscript.ts`, `media/gridRelated.js`, `media/gridResize.js`, `media/gridFkPicker.js`, `media/gridQuery.js`.
-- **Green:** `npx tsc -p ./ --noEmit` → 0; `node --test test/*.test.mjs` → 32 pass / 5 skipped / 0 fail.
-- **Red, but PRE-EXISTING (not yours, don't "fix" by cramming):** `check:guidelines` flags `src/customConsole.ts` (555) and `src/workbenchOverlaySyncRenderer.ts` (531) over the 500-line cap. See memory `main-checks-already-red`.
-- Latest artifact: `django-shell-0.0.9.vsix` (~2.93 MB), rebuilt with all current fixes.
+### Working agreement (if you're the next AI/Claude session)
+- The user is **Korean-speaking — reply in Korean.**
+- **Commit/push/publish only when explicitly asked** (the user's convention: a release commit on
+  `main` titled like `v.0.0.9 -release-`; PR/commit trailer
+  `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`).
+- **Concurrent edits happen** (the user / a linter touch files between turns) — **re-read a file
+  right before editing it.**
+- Per-project **auto-memory loads** from `~/.claude/projects/-Users-lky-project-django-shell/memory/`
+  (`MEMORY.md` index) — read those mechanism notes, don't re-derive (see §11).
+- You **cannot verify runtime behavior headlessly** (§9) — say so, and build a VSIX so the user
+  can test, rather than claiming it works.
 
-## Commands
+---
 
-```
-npx tsc -p ./ --noEmit          # typecheck (fast loop)
-node --test test/*.test.mjs     # unit tests
-npm run check                   # guidelines + tests — RED on the 2 pre-existing files above
-npx --yes @vscode/vsce package  # build .vsix DIRECTLY (npm run package fails: it runs check first)
-```
-Ad-hoc Python check pattern (no Django needed): import `python/django_shell_backend.py` under system `python3`, inject a fake `django.apps` into `sys.modules`, call the target function. Used this session to prove auto-import.
+## 1. What the extension is
 
-## Hard constraints the checker enforces (these have burned time before)
+A VS Code extension that attaches to an interactive Django shell and adds:
+- a **model data browser** (webview grid: rows, inline edit, FK pickers, relation
+  expansion, pinned/resizable columns, query log),
+- a **runtime variable inspector** (tree view),
+- a CDP-injected **Monaco "python cell" overlay** in the workbench,
+- a custom **console** webview.
 
-- **≤500 lines per code file** (`.py` exempt; `.md` exempt). When an edit pushes a `.ts`/`.js` over, compact (one-line `if`s, combined assigns) or extract a module — do **not** add to the two already-over files.
-- **Single-line JSDoc only** — multi-line `/** ... */` is rejected. First line of every code file is a purpose comment; every class/fn/method gets a one-line doc.
-- **Injection-proofing** for anything typed into the shell: `IDENTIFIER` regex, `pyStr` (JSON.stringify), `pyScalar`. ORM builders in `src/modelOrm.ts` must never interpolate raw user strings.
+The shell is whatever Python REPL the user reaches — **local** (`python manage.py shell`)
+or **remote** (SSH, `kubectl exec` into a pod). The backend is injected by typing a
+bootstrap `exec("…")` into that shell.
 
-## Where things live (symbols are durable; line #s approximate)
+---
 
-- **Backend** `python/django_shell_backend.py` (~1200+ lines, exempt): `start()` 45 → `_autoimport_django_namespace` 73 / `_autoimport_bind_models` 101 (run **before** the `_djs_initial_names` snapshot at `_pty_install_capture` 719/728 and `server.initial_names` 53). Capture hook: `_pty_emit_cell` 656, `_pty_tabulate_result` 687, `_pty_sql_begin` 661, `_pty_install_capture` 719. History fix `_pty_forget_ipython_db` 933. Cell value `_browse_cell` 1210.
-- **Transport routing** `src/backendClient.ts`: `models()`/rows/related/etc. branch on `this.mode==="orm"` → `ormCell()` (~211); `ORM_NO_PTY` set (~402) suppresses environment/prelude/schema in ORM mode; `supportsRuntimeInspection()` (~151).
-- **ORM builders** `src/modelOrm.ts`: `buildRowsOrm`/`buildRelatedOrm`/`buildCountOrm`/`buildCommitOrm`/`buildModelsOrm`/`buildInspectOrm`/`buildChildrenOrm`/`buildLookupOrm`; `pyValueSummary` for inspector; `__test` exports all.
-- **Catalog refresh** `src/modelCatalog.ts`: `load(token, attempt)` — token-guarded retry on `!ok` (this turn's fix B).
-- **Readiness → UI** `src/customConsole.ts`: `handleSessionSnapshot` (~241–263) fires `runtimeEmitter` on ready; `scheduleRuntimeRefresh` (~424, 750 ms) re-fires after each cell.
-- **PTY / ready marker** `src/notebookPtySession.ts`: marker parsed mid-bootstrap (~250); `requestViaPty` (~276) serializes via `ptyQueue`, single `pendingCell` slot, 90 s timeout; `buildPtyExecuteCell` bracketed paste + trailing newline.
-- **Overlay (CDP)** `src/workbenchOverlay*.ts`: `__dsoAttachRoot` sticks to first-bound frame; geometry de-dupe in `workbenchOverlayRenderer.ts`.
-- **Bootstrap** `src/backendBootstrap.ts`: env-var payload `DJANGO_SHELL_BACKEND_B64`, autoimport flag `DJANGO_SHELL_AUTOIMPORT_MODELS`.
+## 2. Transports & ORM mode (the central model)
 
-## Gotchas that already cost time
+`BackendTransportMode = "auto" | "tcp" | "pty" | "orm"` (`src/backendClient.ts`).
 
-- The CDP overlay **persists until the VS Code window reloads** — a captured trace / observed behavior can reflect the OLD overlay after a VSIX update if the window wasn't reloaded.
-- Never roll back IPython `execution_count` without DELETEing the `history.sqlite` row (`_pty_forget_ipython_db`) — that was the `Session/line number was not unique` bug.
-- The session reports `ready` **mid-bootstrap** (before a clean prompt), so the first ORM cell can mistype/parse-fail — that's why the catalog retries and ORM cells use bracketed paste + trailing newline.
-- **Catalog/inspector stuck on "loading" (fixed 2026-06-04):** the IPython capture hook is registered *during* the bootstrap `exec` cell, so that cell's `post_run_cell` fired with no matching `pre_run_cell` and emitted a spurious `_djs_cell-1` marker with **empty stdout**. Literal ORM cells resolve by FIFO (no id match), so that empty marker was consumed as the *models* response (0 models) and every later ORM request got the previous cell's marker — a permanent off-by-one desync (inspector then parsed the models JSON → 0 variables). Fix in `_pty_install_ipython_capture._post`: `if not state["save"]: return` — `_pre` only sets `save` for cells it set up, so the bootstrap cell now emits nothing and the FIFO stays aligned. The plain-REPL path already had the equivalent guard (`state["first"]`). Verified by ad-hoc IPython-shell simulation (bootstrap → 0 markers; real cell → one `_djs_cell-1` with captured stdout).
-- VS Code webviews live in a **shared layer** (`#<guid> > iframe`), not in editor-group DOM — overlay tab/group detection can't map iframe→tab; rely on sticking to the bound frame.
-- VSIX bloat: `Trace-*.json` / stray dirs slip in — `.vscodeignore` now excludes `Trace-*.json`, `.claude/**`, `.django-shell/**`, and the planning `.md`s.
+- **auto** — prefer the loopback socket, fall back to PTY.
+- **tcp / Socket** — socket-first, falls back to PTY unless no fallback exists.
+- **pty / Terminal** — force the interactive shell; reads reconstructed as ORM cells.
+- **orm** — model-browser reads run as the user's **literal ORM cells** typed into the
+  shell, so a server-side `pre_run_cell` audit logs real Django ORM, not RPC plumbing.
 
-## Pending / not done
+`reconstructsViaOrmCell = (mode === "orm" || mode === "pty")`.
 
-- **Paused tasks #15–17 (P3–P6):** query-console CDP-Monaco overlay (key parameterization, anchor+geometry+wiring, prelude/ownership/validation). Lower priority than user-reported bugs.
-- **Before release:** commit + tag (repo convention: a commit titled like `v.0.0.9 -release-`; PR/commit trailer `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`). Optionally split the two over-cap files so `check`/`npm run package` go green.
+**The default transport is now `orm`** (changed this session). Set in `package.json`
+(`djangoShell.modelBrowser.transport` default `"orm"`), `BackendClient` initial `mode`,
+and `customConsole`. Also fixed a latent gap: the configured value is now actually
+**applied at startup** (`customConsole` ~L259 seeds `setTransportMode(this.selectedTransport
+?? this.modelTransportSetting())`; previously the config was ignored on a fresh start).
 
-## Manual verification checklist (hand to the user; VS Code + shell_plus/IPython project)
+**Hard contract (user requirement):** in ORM mode `raw_cell` audit must show clean Django ORM or
+user Python only: **no `_djs_rpc`, `_djs_backend_module`, `apps.get_model`, or `json.dumps`
+support-layer cells**. Reconstructed cells are injection-proof (`pyStr`/`safeName`/identifier
+allowlists in `src/modelOrm.ts`). Model catalog and top-level inspection stay functional in
+remote PTY via pure probe cells (`len(apps.get_models())`, `len(globals())`); the capture hook
+attaches the metadata to the response marker.
 
-1. ORM mode (default): browsing a model → live audit shows only `Model._base_manager…[:N]`; edit→Commit → `o=…; o.save(update_fields=…)`.
-2. Auto-import: bare-name browse of a model `shell_plus` skips (e.g. `VertexAiPredictionRequest`) → **no `NameError`**.
-3. Catalog populates **immediately** on shell start, no manual refresh.
-4. Inspector: user vs pre-existing split; drill fields/properties/reverse-set; `datetime`/`Decimal` show values.
-5. FK expand, reverse relations, pagination, filter, sort, draggable column resize.
-6. Overlay: python cell stays responsive after opening a Model Browser tab; no column jump on resize.
-7. Transport selector → Socket/Terminal: no regression.
+**Remote ⇒ PTY.** The backend's `127.0.0.1:<port>` socket lives in the remote pod, so a
+local connect gets `ECONNREFUSED`. `backendClient` falls back to PTY; `markSocketUnavailable()`
+pre-marks the socket dead on a remote attach (detected via the inline-bootstrap retry).
 
-## If you need pre-compaction detail
+### Physical limits you must respect
+- **PTY response marker ≤ 1 MB** (`_PTY_MARKER_LIMIT`). Oversized backend responses are split into
+  chunk markers (`chunk.index/count/data`) and reassembled in `notebookPtySession`; do not restore the
+  old `ptyRequestBuffer.slice(-1_250_000)` tail-drop or large inspection responses can lose chunks.
+- **tty canonical input line ≈ 1 KB on macOS** (≈4 KB on Linux). A typed cell longer than
+  that is silently truncated → the shell hangs at a `…:` continuation prompt. This bit the
+  inspect/children cells and the bootstrap; keep typed cells short.
 
-Full transcript: `~/.claude/projects/-Users-lky-project-django-shell/5aafcd94-e0a7-49c3-a576-c152dd06d77b.jsonl`.
+---
+
+## 3. Backend bootstrap & the capture hook
+
+### Bootstrap delivery (`src/backendBootstrap.ts`, `src/notebookPtySession.ts`)
+The backend source reaches the shell three ways:
+1. **env payload** `DJANGO_SHELL_BACKEND_B64` (deflate+base64 on `pty.spawn` env) — local only;
+   does **not** cross SSH/kubectl.
+2. **local file** `open(runtimePath)` — only on the host running the extension.
+3. **inline** — source embedded in the typed `exec("…")` — the only channel that crosses to a
+   remote shell.
+
+Flow: type the **env-mode** bootstrap first. On a remote shell neither env nor local file is
+available → it now **prints a clean `__DJANGO_SHELL_BACKEND_NEEDS_INLINE__` marker** (guarded by
+`os.path.exists`), **instead of raising `FileNotFoundError`** in the server audit (this session's
+fix). `inspectMarkers` arms the inline retry on that marker **or** a traceback; the inline
+bootstrap is typed only once `detectPrimaryPythonPrompt` matches (typing the ~24 KB blob before
+the prompt returns corrupts it).
+
+The bootstrap was shrunk **1018 → 749 B** by moving the `_djs_rpc` lambda + `_djs_backend_initial_names`
+wiring out of **both** typed commands into `start(namespace, token)` (`backendLoadStatements`
+shared tail; the history scrub stays the **last** statement so IPython doesn't re-record it).
+This keeps it well under the tty line limit for long extension paths and removes `_djs_rpc` from
+the audit line. **The bootstrap is still required even in ORM mode** — the capture hook +
+`_pty_tabulate_result` produce the response markers the extension reads.
+
+### Capture hook (`_pty_install_ipython_capture` in `python/django_shell_backend.py`)
+Registers `pre_run_cell`/`post_run_cell`. For each cell `_post` reads `result.result`, runs
+`_pty_tabulate_result(value)` (→ `grid`), optionally computes `inspect` children, captures
+SQL, and prints `__DJANGO_SHELL_BACKEND_RESPONSE__` marker(s) (`_pty_emit_cell` →
+`_pty_cell_marker` → `_pty_fit_response` or chunk markers when oversized). Responses are
+FIFO-correlated by a per-cell counter id `_djs_cell-N`.
+
+Gotchas baked in (don't regress):
+- **FIFO-desync guard:** `_post` returns early when `state["save"]` is None — the bootstrap cell
+  that *installs* the hook mid-execution never ran `_pre`; emitting a marker there would desync
+  the queue so the first real read consumes it.
+- **History scrub:** legacy `_djs_backend_module._pty_orm_` helper cells are scrubbed if they ever
+  appear, but current ORM-mode code avoids typing them because they still appear in `pre_run_cell`
+  audit once.
+- **`_pty_fit_response`** truncates `stdout`/`stderr`/`traceback` (40 KB), caps `sql` to 50 and
+  **truncates each query's text** (2 KB), caps `inspect.children`, and keeps as many grid rows as
+  fit (`truncated`/`hasMore`) rather than dropping the grid.
+
+---
+
+## 4. Model data browser (`src/modelBrowser.ts`, `media/modelBrowserSource.js`, `src/modelOrm.ts`, `src/modelBackend.ts`)
+
+In ORM/PTY mode there is **no schema RPC** — the grid head is synthesized from the first rows
+page. Reads are built in `src/modelOrm.ts` (`build*Orm`) and parsed by `parseOrm*Response`.
+
+### Grid virtualization — `media/gridVirtual.js` (NEW)
+`createVirtualRows({scroller, getBody, columnSpan, buildRow, onRender})` windows the `<tbody>`:
+renders only the viewport ±12 overscan plus top/bottom **spacer `<tr class=vspacer>`** that hold
+the scrollbar. Tables ≤ **80 rows** render whole (identical to the old path, zero risk). Row
+height is measured from the first paint. Re-renders on scroll past the overscan **and** on a
+`ResizeObserver` (the log/table drag handle, window/panel resize). `onRows` calls
+`virtual.setRows(rows, append)`.
+- **Staged edits survive re-render** via `editor.applyStaged(tr)` (`media/gridEdit.js`) — edits
+  live in the editor's `pending` Map keyed by pk; re-render reapplies the dirty value.
+- **Pins survive** — `media/gridPin.js` `repaintPins` skips rows without `dataset.pk` (covers
+  spacers + detail rows) and offsets pinned columns past the row-number gutter.
+- Scroll re-render is **skipped while a cell editor input is focused** (no lost edit).
+- `content-visibility:auto` was rejected — it's a no-op on `<tr>` (table internals can't take
+  size containment), hence manual windowing.
+
+### Row-number gutter
+A frozen left `<th class=rownum>`/`<td class=rownum>` ("#") showing the **absolute** row index.
+`repaintPins` accounts for it (lead offset). CSS in `src/modelBrowserHtml.ts`.
+
+### Log/table resize handle
+`<div class=logresize>` on the top edge of the log panel drags `--log-h` (CSS var on the grid),
+persisted via `vscode.getState/setState`. The `1fr` grid track (the table) absorbs the change;
+the virtualizer's ResizeObserver re-renders.
+
+### Relation column headers
+`buildHead` shows kind + model: `relationKindLabel(kind)` (m2m → m2m, o2o → o2o, reverse-fk →
+reverseFK, fk → FK) + `relationModelName(target)` (strips the app prefix). Hidden reverse
+relations (`related_name='+'`, accessor ends in `+`) are excluded — `_browse_relation_name`
+filters them, and `_pty_orm_children`'s field list does too. **Do NOT use
+`ForeignObjectRel.is_hidden()`** — it's missing in some Django versions; check the accessor
+name `.endswith("+")` instead.
+
+### "all" page size / SQL-heavy results
+`ALL_PAGE_SIZE = 1e9` once made the rows ORM cell over-run the marker and `_pty_fit_response`
+*dropped* the grid → "could not tabulate". Fixed: `backendClient.modelRows` caps the ORM-mode
+limit at `ORM_PTY_ROW_CAP = 2000` (+ "Load more"); `_pty_fit_response` keeps as many rows as fit
+and truncates SQL query text; `parseOrmGridResponse` honors `grid.truncated`. Use **Socket/Auto**
+to fetch larger pages (no marker cap).
+
+---
+
+## 5. Computed `@property` columns (read-only, lazy)
+
+`_browse_computed_columns(model)` lists a model's `@property`/`@cached_property` names (via
+`_pty_is_computed_field`, sorted `dir()`, skips dunder + concrete/relation names + `pk`, cap 40),
+flagged `{computed: true, editable: false, type: "property", annotated: <bool>}`. They appear in
+the schema/columns so headers render, but are **NOT computed by default** (rows stay
+concrete-only — fast, no N+1).
+
+### Lazy per-column load
+Each computed header has a `▷/▼` toggle (`act:loadComputed`); cells show a muted `·` until
+activated. Activating posts `loadComputed {field}` → `modelBrowser.loadComputed` →
+`source.modelComputed({app, model, field, filters, order, limit: loadedRowCount, columns})` →
+posts `computed {field, values:{pk:cell}}`. The frontend stores values in `state.computed[field]`
+(keyed by `String(pk)`); `paintComputedCell` reads the store so values **survive virtualization**.
+Load-more re-requests active fields; reload/`onSchema` clears the store.
+
+### Why N+1 is inherent (decided with the user)
+A `@property` is arbitrary Python evaluated per instance; one that hits the DB is **inherently
+N+1** (1 base SELECT + per-row property queries). History of attempts and the user's final calls:
+1. eager-load all relations (`select_related`/`prefetch_related`) — **rejected**: properties join
+   many models → huge JOINs for every base row, worse than N+1. (All eager code was removed.)
+2. **annotation-backed single query** — the model may declare `djshell_annotations` (a dict OR
+   classmethod → `{field: <Django expression>}`); `buildComputedOrm` then emits
+   `…annotate(__djs=<expr>)…values("pk","__djs")` (one query). The header shows
+   "@property · 1 query". The user **declined to add this to their models / config / a side-file**.
+3. **final state:** keep lazy per-row, **bound by page size** (smaller page = fewer queries).
+   `_browse_computed` (socket) returns `queryCount`/`rowCount` to make the cost visible.
+
+### ORM-mode cell is readable ORM (not `_djs_backend_module` / JSON wrappers)
+`buildComputedOrm` emits (per-row case)
+`[{"pk": __o.pk, "value": __o.<field>} for __o in Company._base_manager…]`
+— the audit shows the real query + per-row property access (which makes the N+1 self-evident).
+Annotated case wraps it in a `lambda __m:` so the bare model name appears once, keeping the cell
+under the tty limit and returns `.values("pk", "__djs")` rows directly. `parseOrmComputedResponse`
+reads the capture hook's grid rows, not stdout JSON; a raising property errors the cell so the
+**real traceback surfaces** (the old generic
+"Computed field failed in ORM mode." hid it — and was caused by capturing the property's huge SQL
+into the response, blowing the marker; `_browse_computed` no longer captures SQL text).
+
+### Never filter/sort by a computed column
+A property can't resolve to a DB field → `FieldError: Cannot resolve keyword '…' into field`.
+`concreteAttnames(columns)` (drops `computed`) feeds **both** `filterChain` and `orderArgs` in
+`buildRowsOrm`/`buildComputedOrm`/`buildCountOrm`. The socket path was already concrete-only
+(`_browse_columns`/`concrete_fields`). The filter-field dropdown (`addFilterTerm`) omits computed
+columns, and computed headers are non-sortable. **If you still see this FieldError, you're on the
+stale installed build — rebuild.**
+
+---
+
+## 6. Runtime inspector (`src/runtimeInspector.ts`, backend `_inspect_*` / `_pty_orm_*`)
+
+Tree of namespace variables → drill into children. Paths are `BackendRuntimePathSegment[]` with
+ops `name | attr | index | all_index | dict` (`dict` is **positional** into `items()`, not key
+lookup; `all_index` means index into `obj.all()` for Django managers/querysets).
+
+### Inspection pure probes
+Inspection must keep `raw_cell` audit clean while staying fast. In ORM/terminal mode,
+`backendClient.inspect()` types `len(globals())`; child drill-down types pure Python probes such as
+`dir(obj)` for objects and `len(items)` for collections. The capture hook recognizes those probes,
+suppresses the probe's display/grid payload, and attaches `runtime` / `inspect` metadata to the cell
+marker. Do **not** type `_djs_backend_module` helper calls for inspection.
+Probe execution is only the audit facade: `_pty_inspect_probe_target` resolves the probe target with
+the structured helper path rules instead of trusting/parsing `dir()` output. If the raw `dir(...)`
+cell raises while a placeholder attribute/property is being opened, the marker can still be `ok`
+with helper-built children (often a `value` child carrying the inspection error) rather than an empty
+tree. Reverse manager rows should type as `dir(list((obj.related_set).all())[0])`, not
+`dir(list((obj.related_set))[0])`.
+Do **not** cap the namespace or child list: the user explicitly prefers complete inspection metadata
+even when the namespace is very large.
+- Oversized inspection responses must be chunked, not truncated. `_pty_cell_marker` emits chunk markers
+  and `parseBackendResponseMarkers` / `assemblePtyResponseChunk` rebuild the full response.
+- Object child listing is lazy for descriptors: all `@property` / `cached_property` names should appear,
+  but their getters are not evaluated until the property path itself is opened.
+- `_resolve_child` (op `attr`) falls back to `_pty_safe_getattr` when the name isn't in
+  `_attribute_mapping`, so Django reverse-relation/M2M-manager drill-downs resolve (they're listed
+  via `_meta` but absent from the vars/dataclass/property mapping).
+
+---
+
+## 7. Overlay backing-file dirty prompt (fixed)
+
+`src/overlayMemoryDocument.ts` opens `.django-shell/analysis.py` (and the query console's
+`query-analysis.py`) as real `TextDocument`s for Pylance and edits them via `applyEdit` (→ dirty).
+`syncAnalysis()` (called on every keystroke-driven language request) edited without saving, so the
+hidden doc sat dirty at rest → VS Code prompted "Save analysis.py?" on reload/exit (the exit
+prompt fires before `deactivate` cleanup can run). Fix: a **debounced clean-save** (300 ms,
+`scheduleAnalysisCleanSave`) flushes the doc clean once typing pauses. `save()` only clears the
+dirty flag (content unchanged), so IntelliSense is unaffected.
+
+---
+
+## 8. Other load-bearing facts (don't relearn the hard way)
+
+- **ORM model auto-import:** startup binds all workspace models (`apps.get_models()` + module
+  scan) before the initial-name snapshot, so bare-name browse doesn't `NameError`. Gated by
+  `DJANGO_SHELL_AUTOIMPORT_MODELS` (default on). The env flag doesn't cross to remote, but remote
+  is usually shell_plus which already imports models.
+- **`modelRef(app, model)`** now emits the bare class name (`Company._base_manager…`), not
+  `apps.get_model(...)`, so the audited cell stays actual ORM. This relies on startup
+  auto-import/local `shell_plus` to bind model names.
+- **CDP overlay** (Monaco python cell) is injected into the workbench; it prefers the "Django
+  Shell" tab's editor group. **Unverifiable headlessly.**
+- **execution_count / history.sqlite:** never roll back `execution_count` without DELETEing the
+  matching `history.sqlite` row, or IPython history logging corrupts.
+
+---
+
+## 9. What can't be verified here (needs a real environment)
+
+The webview UIs (grid, virtualization, row gutter, resize handle, lazy columns), the CDP overlay,
+the inspector tree, and anything touching a live Django shell are **not headlessly verifiable**.
+`npm run check` only covers TS types, node unit tests, and guidelines. **Everything in §4–§7 needs
+manual testing in real VS Code against a Django project** (the user's is `…/project/captain`,
+app `db`, model `Company` with a SQL-heavy `has_paid_subscription` `@property`).
+
+---
+
+## 10. Git / deploy state
+
+- Branch **`model-browser-orm-enhancements`** @ `09ab10c` (18 files, +1005/−165), based on `main`.
+  **Not merged, not pushed.** The user's convention is committing releases directly to `main`.
+- To run the new code: **F5** (Extension Development Host) or `npx vsce package` →
+  `code --install-extension django-shell-*.vsix` → reload window. Consider a **version bump**
+  (currently `0.0.901`) so the installed version visibly changes.
+- Open follow-ups / decisions left to the user:
+  - merge the branch to `main` (and/or push); release commit convention `v.0.0.X -release-`;
+  - the lazy-computed N+1 stays per-row by choice (annotation opt-in declined);
+  - optional: client-side filtering of *loaded* computed values (a future feature, not built).
+- **Paused from earlier sessions (lower priority than reported bugs):** the *query-console*
+  CDP-Monaco overlay (key parameterization, anchor+geometry+wiring, prelude/ownership/validation)
+  — `src/modelQueryConsole.ts` exists; the overlay piece was deferred.
+- `.vscodeignore` excludes `Trace-*.json`, `.claude/**`, `.django-shell/**`, planning `.md`s
+  (VSIX-bloat guard) — keep it that way.
+
+> Note: this file replaced an earlier `HANDOVER.md` (2026-06-04) aimed at the next AI session;
+> its still-relevant content (working agreement, build/package commands, no-Django test trick,
+> paused query-console task) was merged above. The rest of it described the then-uncommitted
+> pre-`v0.0.8`+ state and is superseded by §10.
+
+---
+
+## 11. Where the detailed rationale lives
+
+Claude's per-project session memory (`~/.claude/projects/-Users-lky-project-django-shell/memory/`)
+has blow-by-blow notes for a future Claude session: `orm-mode-transport-contract.md` (master),
+`remote-bootstrap-delivery.md`, `overlay-backing-file-dirty-prompt.md`, `orm-cell-fifo-desync.md`,
+`orm-model-autoimport.md`, `overlay-multitab-targeting.md`, `main-checks-already-red.md`. This
+`handover.md` is the self-contained summary for a human picking up the work.
