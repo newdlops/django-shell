@@ -61,6 +61,38 @@ test("returns graceful errors for unknown models without Django configured", { s
   }
 });
 
+test("binds app-registry model names for ORM cells even when model autoimport is disabled", { skip: !PYTHON }, () => {
+  const payload = runBackend([
+    "import json, os, sys, types",
+    "os.environ.pop('DJANGO_SHELL_AUTOIMPORT_MODELS', None)",
+    "class FiStaCompanySearchResult:",
+    "    pass",
+    "class Apps:",
+    "    ready = True",
+    "    def get_models(self):",
+    "        return [FiStaCompanySearchResult]",
+    "apps = Apps()",
+    "django_module = types.ModuleType('django')",
+    "django_apps_module = types.ModuleType('django.apps')",
+    "django_apps_module.apps = apps",
+    "sys.modules['django'] = django_module",
+    "sys.modules['django.apps'] = django_apps_module",
+    "namespace = {}",
+    "count = mod._autoimport_registered_models(namespace)",
+    "print(json.dumps({",
+    "  'count': count,",
+    "  'bound': namespace.get('FiStaCompanySearchResult') is FiStaCompanySearchResult,",
+    "  'modelCell': mod._pty_looks_like_model_cell('FiStaCompanySearchResult._base_manager.order_by(\\'pk\\')[0:51]'),",
+    "  'plainCell': mod._pty_looks_like_model_cell('len(globals())'),",
+    "}))"
+  ]);
+
+  assert.equal(payload.count, 1);
+  assert.equal(payload.bound, true);
+  assert.equal(payload.modelCell, true);
+  assert.equal(payload.plainCell, false);
+});
+
 test("builds visible ORM cells with bare model names, not app-registry plumbing", () => {
   const columns = [
     { attname: "name", computed: false, type: "CharField" },

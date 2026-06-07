@@ -284,13 +284,15 @@ dirty flag (content unchanged), so IntelliSense is unaffected.
 
 ## 8. Other load-bearing facts (don't relearn the hard way)
 
-- **ORM model auto-import:** startup binds all workspace models (`apps.get_models()` + module
-  scan) before the initial-name snapshot, so bare-name browse doesn't `NameError`. Gated by
-  `DJANGO_SHELL_AUTOIMPORT_MODELS` (default on). The env flag doesn't cross to remote, but remote
-  is usually shell_plus which already imports models.
+- **ORM model auto-import:** startup always binds model classes already present in Django's app
+  registry (`apps.get_models()`) before the initial-name snapshot, so bare-name browse doesn't
+  `NameError`. The slower module scan remains gated by `DJANGO_SHELL_AUTOIMPORT_MODELS` (default on).
+  The IPython capture hook also re-binds registry models just before `._base_manager` / `._meta`
+  cells execute, covering remote shells where the env flag did not cross or Django became ready
+  after bootstrap.
 - **`modelRef(app, model)`** now emits the bare class name (`Company._base_manager…`), not
-  `apps.get_model(...)`, so the audited cell stays actual ORM. This relies on startup
-  auto-import/local `shell_plus` to bind model names.
+  `apps.get_model(...)`, so the audited cell stays actual ORM. Binding happens silently in the
+  backend namespace; do not put `apps.get_model(...)` back into the visible cell.
 - **CDP overlay** (Monaco python cell) is injected into the workbench; it prefers the "Django
   Shell" tab's editor group. **Unverifiable headlessly.**
 - **execution_count / history.sqlite:** never roll back `execution_count` without DELETEing the

@@ -61,8 +61,10 @@ class _InspectionDeferred:
 def start(namespace, token):
     """Starts or reuses the backend server for the given interactive shell namespace."""
     try:
-        # Bind common Django names before any initial-name snapshot; workspace model auto-import remains configurable.
+        # Bind common Django names and registered model classes before any initial-name snapshot; the slower module scan
+        # remains configurable.
         autoimported = _autoimport_base_names(namespace)
+        autoimported += _autoimport_registered_models(namespace)
         if _autoimport_enabled():
             autoimported += _autoimport_django_namespace(namespace)
         server = _STATE.get("server")
@@ -118,6 +120,18 @@ def _autoimport_django_namespace(namespace):
             continue
         count += _autoimport_module_classes(namespace, module, inspect)
     return count
+
+
+def _autoimport_registered_models(namespace):
+    """Binds model classes already loaded in Django's app registry into the shell namespace."""
+    try:
+        from django.apps import apps
+
+        if not apps.ready:
+            return 0
+        return _autoimport_bind_models(namespace, apps)
+    except Exception:
+        return 0
 
 
 def _autoimport_bind_models(namespace, apps):
@@ -1067,6 +1081,12 @@ def _pty_is_runtime_probe(raw):
     return (raw or "").strip() == "len(globals())"
 
 
+def _pty_looks_like_model_cell(raw):
+    """Returns whether a raw cell likely needs bare Django model names to be bound before execution."""
+    text = raw or ""
+    return "._base_manager" in text or "._meta" in text
+
+
 def _pty_inspect_probe_target(raw, namespace):
     """Returns (matched, value, error) for pure `dir(expr)` / `len(expr)` inspection probe cells."""
     try:
@@ -1326,6 +1346,8 @@ def _pty_install_ipython_capture(shell):
             return
         state["skip"] = False
         state["raw"] = str(getattr(info, "raw_cell", "") or "")
+        if _pty_looks_like_model_cell(state["raw"]):
+            _autoimport_registered_models(shell.user_ns)
         # Introspection plumbing (inspect/children call a backend helper): capture+emit its marker like a normal cell, but drop it from history afterwards so it stays out of the interactive shell.
         state["scrub"] = "_djs_backend_module._pty_orm_" in state["raw"]
         state["out"], state["err"] = io.StringIO(), io.StringIO()
@@ -1364,6 +1386,7 @@ def _pty_install_ipython_capture(shell):
                     inspect = {"children": [], "error": traceback.format_exc()}
         raw_metadata = {}
         if error is None and _pty_is_models_probe(state.get("raw")):
+            _autoimport_registered_models(shell.user_ns)
             raw_metadata["models"] = _browse_models()
         if error is None and _pty_is_runtime_probe(state.get("raw")):
             raw_metadata["runtime"] = _pty_runtime_inspection(shell.user_ns)
