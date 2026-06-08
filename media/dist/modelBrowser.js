@@ -629,7 +629,7 @@ function paintRelatedCell(td, el2, renderValue2) {
   td.appendChild(renderValue2(td._cell));
   if (column.relation && rawOf(td._cell) !== null && rawOf(td._cell) !== void 0) {
     td.appendChild(document.createTextNode(" "));
-    td.appendChild(el2("button", { className: "linkbtn", dataset: { act: "open", target: column.relation.target }, title: `Open ${column.relation.target}` }, "\u2197"));
+    td.appendChild(el2("button", { className: "linkbtn", dataset: { act: "open", target: column.relation.target, val: String(rawOf(td._cell)) }, title: `Open ${column.relation.target} filtered to this row` }, "\u2197"));
   }
 }
 function buildEditableRelatedTable(result, deps) {
@@ -837,6 +837,440 @@ function createVirtualRows(ctx) {
   };
 }
 
+// media/gridFilter.js
+var REL = "r:";
+var FIELD = "f:";
+var TEXT_TYPES = /Char|Text|Email|Slug|URL|UUID|IP|File|FilePath|Duration|Generic/;
+var NUM_TYPES = /Integer|Float|Decimal|AutoField/;
+var LOOKUP_LABEL = {
+  exact: "=",
+  iexact: "= (i)",
+  contains: "contains",
+  icontains: "contains (i)",
+  gt: ">",
+  gte: "\u2265",
+  lt: "<",
+  lte: "\u2264",
+  startswith: "starts with",
+  istartswith: "starts with (i)",
+  endswith: "ends with",
+  iendswith: "ends with (i)",
+  in: "in (list)",
+  isnull: "is null",
+  range: "between",
+  date: "date =",
+  year: "year",
+  month: "month",
+  day: "day"
+};
+function defaultLookup(terminal, names) {
+  if (!terminal || terminal.role === "relation") {
+    return names[0];
+  }
+  if (TEXT_TYPES.test(String(terminal.type || ""))) {
+    return names.includes("icontains") ? "icontains" : names[0];
+  }
+  return names.includes("exact") ? "exact" : names[0];
+}
+function splitTarget(target) {
+  const at = String(target || "").lastIndexOf(".");
+  return at < 0 ? { app: "", model: String(target || "") } : { app: target.slice(0, at), model: target.slice(at + 1) };
+}
+function lookupsForTerminal(terminal, all) {
+  if (!terminal || terminal.role === "relation") {
+    return ["isnull"];
+  }
+  if (terminal.role === "computed") {
+    return all;
+  }
+  const type = String(terminal.type || "");
+  if (type === "pk") {
+    return ["exact", "in", "isnull"];
+  }
+  if (type === "BooleanField") {
+    return ["exact", "isnull"];
+  }
+  if (type === "DateTimeField") {
+    return ["exact", "gt", "gte", "lt", "lte", "range", "date", "year", "month", "day", "isnull"];
+  }
+  if (type === "DateField") {
+    return ["exact", "gt", "gte", "lt", "lte", "range", "year", "month", "day", "isnull"];
+  }
+  if (type === "TimeField") {
+    return ["exact", "gt", "gte", "lt", "lte", "range", "isnull"];
+  }
+  if (NUM_TYPES.test(type)) {
+    return ["exact", "gt", "gte", "lt", "lte", "in", "range", "isnull"];
+  }
+  if (TEXT_TYPES.test(type)) {
+    return ["exact", "iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull"];
+  }
+  return all;
+}
+function inputTypeFor(type) {
+  if (type === "pk") {
+    return "text";
+  }
+  if (type === "DateField") {
+    return "date";
+  }
+  if (type === "DateTimeField") {
+    return "datetime-local";
+  }
+  if (type === "TimeField") {
+    return "time";
+  }
+  if (NUM_TYPES.test(String(type || ""))) {
+    return "number";
+  }
+  return "text";
+}
+function createFilterBar(deps) {
+  const { el: el2, termsEl, activeEl, getState, postRaw, lookups } = deps;
+  const treeCache = /* @__PURE__ */ new Map();
+  const pending = /* @__PURE__ */ new Map();
+  let requestSeq = 0;
+  let syncToken = 0;
+  function onTreeResponse(message) {
+    const entry = pending.get(message.requestId);
+    if (!entry) {
+      return;
+    }
+    pending.delete(message.requestId);
+    const tree = message.result && message.result.ok ? message.result : null;
+    if (tree) {
+      treeCache.set(entry.target, tree);
+    }
+    entry.resolve(tree);
+  }
+  function fetchTree(target) {
+    if (treeCache.has(target)) {
+      return Promise.resolve(treeCache.get(target));
+    }
+    const parts = splitTarget(target);
+    return new Promise((resolve) => {
+      const requestId = ++requestSeq;
+      pending.set(requestId, { resolve, target });
+      postRaw({ app: parts.app, model: parts.model, requestId, type: "filterFields" });
+    });
+  }
+  function rootOptions(tree) {
+    const state2 = getState();
+    const options = [];
+    if (tree) {
+      for (const field of tree.fields || []) {
+        if (field.attname === state2.pk) {
+          continue;
+        }
+        options.push({ choices: field.choices, label: field.attname, role: "field", type: field.type, value: `${FIELD}${field.attname}` });
+      }
+    } else {
+      for (const column of state2.columns || []) {
+        if (column.computed || column.attname === state2.pk) {
+          continue;
+        }
+        options.push({ choices: column.choices, label: column.attname, role: "field", type: column.type, value: `${FIELD}${column.attname}` });
+      }
+    }
+    const pkColumn = (state2.columns || []).find((column) => column.pk && !column.computed);
+    options.push({ label: "pk", role: "field", title: "primary key", type: pkColumn ? pkColumn.type : "pk", value: `${FIELD}pk` });
+    for (const column of state2.columns || []) {
+      if (column.computed) {
+        options.push({ label: column.attname, role: "computed", title: "computed @property", type: "property", value: `${FIELD}${column.attname}` });
+      }
+    }
+    for (const relation of relationsOf(tree, state2)) {
+      options.push({ kind: relation.kind, label: `${relation.name} \u2192`, role: "relation", target: relation.target, title: `${relation.kind} \u2192 ${bareModel(relation.target)} (drill in)`, value: `${REL}${relation.name}` });
+    }
+    return options;
+  }
+  function nestedOptions(tree) {
+    const options = [];
+    for (const field of tree && tree.fields || []) {
+      options.push({ choices: field.choices, label: field.attname, role: "field", type: field.type, value: `${FIELD}${field.attname}` });
+    }
+    for (const relation of tree && tree.relations || []) {
+      options.push({ kind: relation.kind, label: `${relation.name} \u2192`, role: "relation", target: relation.target, title: `${relation.kind} \u2192 ${bareModel(relation.target)} (drill in)`, value: `${REL}${relation.name}` });
+    }
+    return options;
+  }
+  function relationsOf(tree, state2) {
+    return tree ? tree.relations || [] : (state2.relations || []).map((relation) => ({ kind: relation.kind, name: relation.queryName || relation.name, single: relation.single, target: relation.target }));
+  }
+  function bareModel(target) {
+    return splitTarget(target).model;
+  }
+  async function addTerm(initial) {
+    const term = el2("span", { className: "term" });
+    term._segs = [];
+    const path = el2("span", { className: "path", dataset: { role: "path" } });
+    const lookup = el2("select", { dataset: { role: "lookup" } });
+    const value = el2("span", { className: "valwrap", dataset: { role: "value" } });
+    const negate = el2("input", { checked: Boolean(initial && initial.negate), dataset: { role: "negate" }, type: "checkbox" });
+    const remove = el2("button", { className: "linkbtn", dataset: { role: "remove" }, title: "Remove filter" }, "\u2715");
+    remove.addEventListener("click", () => term.remove());
+    lookup.addEventListener("change", () => rebuildValue(term));
+    term.append(path, lookup, value, el2("label", { className: "neg" }, negate, "not"), remove);
+    termsEl.appendChild(term);
+    const token = syncToken;
+    const rootTree = await fetchTree(getState().model);
+    if (token !== syncToken) {
+      term.remove();
+      return term;
+    }
+    await buildSegment(term, 0, rootOptions(rootTree), initial ? segsFromPath(initial.field) : [], initial);
+    return term;
+  }
+  function segsFromPath(field) {
+    const text = String(field || "");
+    if (text.startsWith("rel:")) {
+      return [text.slice(4)];
+    }
+    return text ? text.split("__") : [];
+  }
+  async function buildSegment(term, level, options, preset, initial) {
+    const select = el2("select", { dataset: { level: String(level), role: "seg" } });
+    select.appendChild(el2("option", { value: "" }, level === 0 ? "\u2014 pick field / relation \u2014" : "\u2014 exists / pick field \u2014"));
+    for (const option of options.filter((option2) => option2.role !== "relation")) {
+      select.appendChild(el2("option", { title: option.title || "", value: option.value }, option.label));
+    }
+    const relationOptions = options.filter((option) => option.role === "relation");
+    if (relationOptions.length) {
+      const group = el2("optgroup", { label: "relations (drill in \u2192)" });
+      for (const option of relationOptions) {
+        group.appendChild(el2("option", { title: option.title || "", value: option.value }, option.label));
+      }
+      select.appendChild(group);
+    }
+    select._options = options;
+    select.addEventListener("change", () => void onSegmentChange(term, level));
+    term._segs[level] = { select };
+    term.querySelector("[data-role=path]").appendChild(select);
+    const presetValue = preset[level];
+    const match = presetValue === void 0 ? null : options.find((option) => option.value === `${REL}${presetValue}` || option.value === `${FIELD}${presetValue}`);
+    select.value = match ? match.value : "";
+    const chosen = currentOption(select);
+    if (chosen && chosen.role === "relation" && preset.length > level + 1) {
+      const tree = await fetchTree(chosen.target);
+      await buildSegment(term, level + 1, nestedOptions(tree), preset, initial);
+      return;
+    }
+    refreshLookups(term, initial);
+  }
+  function currentOption(select) {
+    return (select._options || []).find((option) => option.value === select.value) || null;
+  }
+  async function onSegmentChange(term, level) {
+    for (let deeper = term._segs.length - 1; deeper > level; deeper -= 1) {
+      const seg = term._segs[deeper];
+      if (seg && seg.select) {
+        seg.select.remove();
+      }
+      term._segs.pop();
+    }
+    const select = term._segs[level].select;
+    const chosen = currentOption(select);
+    if (chosen && chosen.role === "relation" && select.value) {
+      const expected = select.value;
+      const tree = await fetchTree(chosen.target);
+      if (select.value !== expected || !term._segs[level] || term._segs[level].select !== select) {
+        return;
+      }
+      await buildSegment(term, level + 1, nestedOptions(tree), [], null);
+      return;
+    }
+    refreshLookups(term);
+  }
+  function terminalOf(term) {
+    for (let level = term._segs.length - 1; level >= 0; level -= 1) {
+      const seg = term._segs[level];
+      if (seg && seg.select && seg.select.value) {
+        return currentOption(seg.select);
+      }
+    }
+    return null;
+  }
+  function refreshLookups(term, initial) {
+    const lookup = term.querySelector("[data-role=lookup]");
+    const terminal = terminalOf(term);
+    if (!terminal) {
+      lookup.innerHTML = "";
+      lookup.appendChild(el2("option", { value: "" }, "\u2014"));
+      term.querySelector("[data-role=value]").innerHTML = "";
+      term._value = null;
+      return;
+    }
+    const names = lookupsForTerminal(terminal, lookups);
+    const preferred = initial && initial.lookup || defaultLookup(terminal, names);
+    lookup.innerHTML = "";
+    for (const name of names) {
+      lookup.appendChild(el2("option", { value: name }, LOOKUP_LABEL[name] || name));
+    }
+    lookup.value = names.includes(preferred) ? preferred : names[0];
+    rebuildValue(term, initial && initial.value);
+  }
+  function rebuildValue(term, presetValue) {
+    const wrap = term.querySelector("[data-role=value]");
+    const lookup = term.querySelector("[data-role=lookup]").value;
+    const terminal = terminalOf(term);
+    const carried = presetValue !== void 0 ? presetValue : term._value ? term._value.getValue() : void 0;
+    const control = buildValueControl(terminal, lookup, carried);
+    wrap.innerHTML = "";
+    wrap.appendChild(control.node);
+    term._value = control;
+  }
+  function buildValueControl(terminal, lookup, presetValue) {
+    if (lookup === "isnull") {
+      const select = el2("select", {});
+      select.append(el2("option", { value: "false" }, "has value"), el2("option", { value: "true" }, "is null"));
+      select.value = isTruthy(presetValue) ? "true" : "false";
+      return { getValue: () => select.value, node: select };
+    }
+    if (lookup === "range") {
+      return rangePair(terminal, presetValue);
+    }
+    if (lookup === "in") {
+      return chips(presetValue);
+    }
+    if ((lookup === "exact" || lookup === "iexact") && terminal && terminal.type === "BooleanField") {
+      const select = el2("select", {});
+      select.append(el2("option", { value: "True" }, "true"), el2("option", { value: "False" }, "false"));
+      select.value = isTruthy(presetValue) ? "True" : "False";
+      return { getValue: () => select.value, node: select };
+    }
+    if ((lookup === "exact" || lookup === "iexact") && terminal && Array.isArray(terminal.choices) && terminal.choices.length) {
+      const select = el2("select", {});
+      for (const choice of terminal.choices) {
+        select.appendChild(el2("option", { value: String(choice[0]) }, `${choice[1]}`));
+      }
+      if (presetValue !== void 0 && presetValue !== null) {
+        select.value = String(presetValue);
+      }
+      return { getValue: () => select.value, node: select };
+    }
+    const type = lookup === "date" ? "DateField" : ["year", "month", "day"].includes(lookup) ? "IntegerField" : terminal ? terminal.type : "";
+    const input = el2("input", { type: inputTypeFor(type) });
+    if (presetValue !== void 0 && presetValue !== null) {
+      input.value = String(presetValue);
+    }
+    return { getValue: () => input.value, node: input };
+  }
+  function rangePair(terminal, presetValue) {
+    const type = inputTypeFor(terminal ? terminal.type : "");
+    const from = el2("input", { className: "rangefrom", placeholder: "from", type });
+    const to = el2("input", { className: "rangeto", placeholder: "to", type });
+    const parts = String(presetValue || "").split(",");
+    from.value = (parts[0] || "").trim();
+    to.value = (parts[1] || "").trim();
+    const node = el2("span", { className: "rangewrap" }, from, document.createTextNode(" \u2013 "), to);
+    return { getValue: () => `${from.value},${to.value}`, node };
+  }
+  function chips(presetValue) {
+    const values = [];
+    const node = el2("span", { className: "chips" });
+    const input = el2("input", { className: "chipinput", placeholder: "value + Enter", type: "text" });
+    const render = () => {
+      node.innerHTML = "";
+      values.forEach((text, index) => {
+        const close = el2("button", { className: "chipx", title: "Remove", type: "button" }, "\u2715");
+        close.addEventListener("click", () => {
+          values.splice(index, 1);
+          render();
+        });
+        node.appendChild(el2("span", { className: "filterchip" }, text, close));
+      });
+      node.appendChild(input);
+    };
+    const add = (text) => {
+      const value = String(text).trim();
+      if (value) {
+        values.push(value);
+      }
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === ",") {
+        event.preventDefault();
+        add(input.value);
+        input.value = "";
+        render();
+        input.focus();
+      }
+    });
+    input.addEventListener("blur", () => {
+      if (input.value.trim()) {
+        add(input.value);
+        input.value = "";
+        render();
+      }
+    });
+    for (const part of String(presetValue || "").split(",")) {
+      add(part);
+    }
+    render();
+    return { getValue: () => values.join(","), node };
+  }
+  function isTruthy(value) {
+    return /^(true|1|t|yes|on)$/i.test(String(value === void 0 || value === null ? "" : value).trim());
+  }
+  function pathOf(term) {
+    const names = [];
+    for (const seg of term._segs) {
+      if (seg && seg.select && seg.select.value) {
+        names.push(seg.select.value.slice(2));
+      }
+    }
+    return names.join("__");
+  }
+  function collect() {
+    const filters = [];
+    for (const term of termsEl.querySelectorAll(".term")) {
+      const field = pathOf(term);
+      if (!field || !term._value) {
+        continue;
+      }
+      const lookup = term.querySelector("[data-role=lookup]").value;
+      const value = term._value.getValue();
+      const negate = term.querySelector("[data-role=negate]").checked;
+      filters.push({ field, lookup, negate, value });
+    }
+    return filters;
+  }
+  function sync(filters) {
+    const token = ++syncToken;
+    termsEl.innerHTML = "";
+    for (const filter of filters || []) {
+      if (token !== syncToken) {
+        return;
+      }
+      void addTerm(filter);
+    }
+  }
+  function clear() {
+    syncToken += 1;
+    termsEl.innerHTML = "";
+  }
+  function renderSummary(filters) {
+    if (!activeEl) {
+      return;
+    }
+    activeEl.innerHTML = "";
+    if (!filters.length) {
+      activeEl.appendChild(el2("span", { className: "tag" }, "No filters"));
+      return;
+    }
+    activeEl.appendChild(el2("span", { className: "tag" }, "Applied"));
+    for (const filter of filters) {
+      activeEl.appendChild(el2("span", { className: "filterchip", title: "Currently applied filter" }, describe(filter)));
+    }
+  }
+  function describe(filter) {
+    const field = String(filter.field || "").replace(/^rel:/, "").replace(/__/g, " \u25B8 ");
+    const value = filter.lookup === "isnull" ? String(filter.value).toLowerCase() : String(filter.value == null ? "" : filter.value);
+    return `${filter.negate ? "not " : ""}${field} ${filter.lookup} ${value}`.trim();
+  }
+  return { addTerm: () => void addTerm(null), clear, collect, describe, onTreeResponse, renderSummary, sync };
+}
+
 // media/modelBrowserSource.js
 var vscode = acquireVsCodeApi();
 var els = {};
@@ -844,7 +1278,6 @@ for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more"
   els[id] = document.getElementById(id);
 }
 var LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"];
-var REL_FILTER_PREFIX = "rel:";
 var MAX_LOG_ENTRIES = 200;
 var ALL_PAGE_SIZE = 1e9;
 var state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, filters: [], order: [], model: "", pinned: /* @__PURE__ */ new Set(), widths: {}, computed: {}, computedActive: /* @__PURE__ */ new Set() };
@@ -870,13 +1303,21 @@ var virtual = createVirtualRows({
   },
   onRender: () => repaintPins(els.gridwrap, state)
 });
+var filterBar = createFilterBar({
+  el,
+  termsEl: els.filterterms,
+  activeEl: els.activefilters,
+  getState: () => state,
+  postRaw: (message) => vscode.postMessage(message),
+  lookups: LOOKUPS
+});
 window.addEventListener("message", (event) => handleMessage(event.data));
 els.reload.addEventListener("click", () => send({ type: "reload" }));
 els.more.addEventListener("click", () => send({ type: "loadMore" }));
 if (els.pageSize) {
   els.pageSize.addEventListener("change", () => send({ type: "reload" }));
 }
-els.addFilter.addEventListener("click", () => addFilterTerm());
+els.addFilter.addEventListener("click", () => filterBar.addTerm());
 els.applyFilter.addEventListener("click", () => applyQuery());
 els.clearFilter.addEventListener("click", () => clearQuery());
 els.count.addEventListener("click", () => vscode.postMessage({ type: "requestCount" }));
@@ -910,6 +1351,8 @@ function handleMessage(message) {
     onRelated(message);
   } else if (message.type === "lookup") {
     editor.onLookup(message);
+  } else if (message.type === "filterFields") {
+    filterBar.onTreeResponse(message);
   } else if (message.type === "computed") {
     onComputed(message);
   } else if (message.type === "count") {
@@ -947,8 +1390,8 @@ function onSchema(schema) {
   state.model = `${schema.app}.${schema.model}`;
   els.title.textContent = `${schema.app}.${schema.model}`;
   els.subtitle.textContent = `${schema.label || ""} \xB7 ${schema.table || ""}`;
-  syncFilterTerms(state.filters);
-  renderFilterSummary();
+  filterBar.sync(state.filters);
+  filterBar.renderSummary(state.filters);
   els.countinfo.textContent = "";
   const table = el("table", {});
   table.appendChild(buildHead());
@@ -1022,10 +1465,10 @@ function onRows(message) {
     state.order = message.order;
   }
   if (!message.append) {
-    syncFilterTerms(state.filters);
+    filterBar.sync(state.filters);
   }
   updateSortArrows();
-  renderFilterSummary();
+  filterBar.renderSummary(state.filters);
   state.rowCount = virtual.setRows(rows.rows || [], Boolean(message.append));
   if (message.append) {
     for (const field of state.computedActive) {
@@ -1102,7 +1545,7 @@ function paintCell(td) {
   if (column.relation && rawValue(cell) !== null && rawValue(cell) !== void 0) {
     const wrap = el("span", { className: "fk" });
     wrap.appendChild(el("button", { className: "linkbtn", title: "Expand related row", dataset: { act: "fk", rel: column.relation.field, pk: String(td._pk), val: String(rawValue(cell)) } }, "\u2398"));
-    wrap.appendChild(el("button", { className: "linkbtn", title: `Open ${column.relation.target}`, dataset: { act: "open", target: column.relation.target } }, "\u2197"));
+    wrap.appendChild(el("button", { className: "linkbtn", title: `Open ${column.relation.target} filtered to this row`, dataset: { act: "open", target: column.relation.target, val: String(rawValue(cell)) } }, "\u2197"));
     td.appendChild(document.createTextNode(" "));
     td.appendChild(wrap);
   }
@@ -1146,7 +1589,7 @@ function onTableClick(event) {
     toggleSort(data.col);
   } else if (data.act === "open") {
     const split = data.target.lastIndexOf(".");
-    vscode.postMessage({ type: "openModel", app: data.target.slice(0, split), model: data.target.slice(split + 1) });
+    vscode.postMessage({ type: "openModel", app: data.target.slice(0, split), model: data.target.slice(split + 1), filterPk: data.val });
   } else if (data.act === "fk") {
     expandInto(node, { relation: data.rel, pk: coerce(data.pk), value: coerce(data.val), single: true });
   } else if (data.act === "rel") {
@@ -1206,90 +1649,9 @@ function updateSortArrows() {
     span.textContent = arrows[span.dataset.arrow] || "";
   }
 }
-function addFilterTerm(initial = {}) {
-  const options = filterFieldOptions();
-  if (!options.length) {
-    return;
-  }
-  const term = el("span", { className: "term" });
-  const field = el("select", { dataset: { role: "field" } });
-  for (const option of options) {
-    field.appendChild(el("option", { title: option.title, value: option.value }, option.label));
-  }
-  field.value = options.some((option) => option.value === initial.field) ? initial.field : options[0].value;
-  const lookup = el("select", { dataset: { role: "lookup" } });
-  const value = el("input", { dataset: { role: "value" }, title: "Value (in/range: comma-separated; isnull: true/false)" });
-  const negate = el("input", { checked: Boolean(initial.negate), dataset: { role: "negate" }, type: "checkbox" });
-  const negwrap = el("label", { className: "neg" }, negate, "not");
-  const remove = el("button", { className: "linkbtn", dataset: { role: "remove" }, title: "Remove filter" }, "\u2715");
-  remove.addEventListener("click", () => term.remove());
-  field.addEventListener("change", () => refreshLookupOptions(term));
-  term.appendChild(field);
-  term.appendChild(lookup);
-  term.appendChild(value);
-  term.appendChild(negwrap);
-  term.appendChild(remove);
-  els.filterterms.appendChild(term);
-  refreshLookupOptions(term, initial.lookup);
-  value.value = initial.value === void 0 || initial.value === null ? value.value : String(initial.value);
-}
-function filterFieldOptions() {
-  const options = [];
-  for (const column of state.columns) {
-    if (column.computed && column.annotated) {
-      options.push({ label: `${column.attname} (@property \xB7 DB)`, title: "Filter through a declared ORM annotation", value: column.attname });
-    } else if (column.computed) {
-      options.push({ label: `${column.attname} (@property \xB7 Python)`, title: "Filter by evaluating this Python property across candidate rows", value: column.attname });
-    } else if (!column.computed) {
-      options.push({ label: column.attname, title: column.type || column.name, value: column.attname });
-    }
-  }
-  for (const relation of state.relations) {
-    options.push({ label: `${relation.name} (${relationKindLabel(relation.kind)} exists)`, title: `Filter by related-row existence: ${relation.target}`, value: `${REL_FILTER_PREFIX}${relation.name}` });
-  }
-  return options;
-}
-function refreshLookupOptions(term, preferred) {
-  const lookup = term.querySelector("[data-role=lookup]");
-  const value = term.querySelector("[data-role=value]");
-  const names = lookupOptionsFor(term.querySelector("[data-role=field]").value);
-  lookup.innerHTML = "";
-  for (const name of names) {
-    lookup.appendChild(el("option", { value: name }, name));
-  }
-  lookup.value = names.includes(preferred) ? preferred : names[0];
-  if (names.length === 1 && names[0] === "isnull") {
-    value.placeholder = "false = has value";
-    if (value.value === "") {
-      value.value = "false";
-    }
-  } else {
-    value.placeholder = "";
-  }
-}
-function lookupOptionsFor(field) {
-  return String(field || "").startsWith(REL_FILTER_PREFIX) ? ["isnull"] : LOOKUPS;
-}
-function syncFilterTerms(filters) {
-  els.filterterms.innerHTML = "";
-  for (const filter of filters || []) {
-    addFilterTerm(filter);
-  }
-}
-function collectFilters() {
-  const filters = [];
-  for (const term of els.filterterms.querySelectorAll(".term")) {
-    const field = term.querySelector("[data-role=field]").value;
-    const lookup = term.querySelector("[data-role=lookup]").value;
-    const value = term.querySelector("[data-role=value]").value;
-    const negate = term.querySelector("[data-role=negate]").checked;
-    filters.push({ field, lookup, negate, value });
-  }
-  return filters;
-}
 function applyQuery() {
-  state.filters = collectFilters();
-  renderFilterSummary();
+  state.filters = filterBar.collect();
+  filterBar.renderSummary(state.filters);
   send({ filters: state.filters, order: state.order, type: "applyQuery" });
 }
 function pageSizeValue() {
@@ -1301,39 +1663,12 @@ function send(message) {
   vscode.postMessage({ ...message, pageSize: pageSizeValue() });
 }
 function clearQuery() {
-  els.filterterms.innerHTML = "";
+  filterBar.clear();
   state.filters = [];
   state.order = [];
   updateSortArrows();
-  renderFilterSummary();
+  filterBar.renderSummary(state.filters);
   applyQuery();
-}
-function renderFilterSummary() {
-  if (!els.activefilters) {
-    return;
-  }
-  els.activefilters.innerHTML = "";
-  if (!state.filters.length) {
-    els.activefilters.appendChild(el("span", { className: "tag" }, "No filters"));
-    return;
-  }
-  els.activefilters.appendChild(el("span", { className: "tag" }, "Applied"));
-  for (const filter of state.filters) {
-    els.activefilters.appendChild(el("span", { className: "filterchip", title: "Currently applied filter" }, describeFilter(filter)));
-  }
-}
-function describeFilter(filter) {
-  const field = filterFieldLabel(filter.field);
-  const value = filter.lookup === "isnull" ? String(filter.value).toLowerCase() : String(filter.value ?? "");
-  return `${filter.negate ? "not " : ""}${field} ${filter.lookup} ${value}`;
-}
-function filterFieldLabel(field) {
-  const text = String(field || "");
-  if (text.startsWith(REL_FILTER_PREFIX)) {
-    return `${text.slice(REL_FILTER_PREFIX.length)} exists`;
-  }
-  const column = state.columns.find((item) => item.attname === text);
-  return column?.computed ? `${text} @property` : text;
 }
 function expandInto(button, request) {
   if (button.dataset.open === "1") {

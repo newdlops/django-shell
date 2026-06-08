@@ -96,8 +96,20 @@ function filterSpecs(columns: BackendModelColumn[] | undefined, relations: Backe
     if (IDENTIFIER.test(relation.name)) {
       specs.set(`rel:${relation.name}`, { distinct: !relation.single, key: relation.name, relation });
     }
+    // Relation-existence filters from the new cascading UI arrive as the bare filter query name (e.g. `members`,
+    // or a reverse relation's related_query_name) — register it so the term gets the right keyword AND .distinct().
+    const queryName = relation.queryName || relation.name;
+    if (IDENTIFIER.test(queryName) && !specs.has(queryName)) {
+      specs.set(queryName, { distinct: !relation.single, key: queryName, relation });
+    }
   }
   return specs;
+}
+
+/** Returns a relation-traversal filter path (e.g. `author__profile__city`, or `pk`) when every `__`-separated segment is a safe identifier, else null — so reconstructed ORM cells stay injection-proof. */
+function safeFilterPath(field: string): string | null {
+  const parts = String(field ?? "").split("__");
+  return parts.length && parts.every((part) => IDENTIFIER.test(part)) ? field : null;
 }
 
 /** Returns a safe annotation alias for a declared computed-property filter. */
@@ -119,8 +131,23 @@ function filterPlan(filters: BackendModelFilter[] | undefined, specs: Map<string
   const pythonTerms: BackendModelFilter[] = [];
   for (const term of filters ?? []) {
     const lookup = String(term?.lookup ?? "exact");
-    const spec = specs.get(String(term?.field));
-    if (!term || !spec || !LOOKUPS.has(lookup) || (spec.relation && lookup !== "isnull")) {
+    if (!term || !LOOKUPS.has(lookup)) {
+      continue;
+    }
+    const spec = specs.get(String(term.field));
+    if (!spec) {
+      // No concrete/annotated/relation spec: try a relation-traversal path (e.g. author__name) or `pk`. distinct guards
+      // against duplicate rows when the path may span a to-many relation (harmless when it does not).
+      const path = safeFilterPath(String(term.field ?? ""));
+      if (!path) {
+        continue;
+      }
+      distinct = distinct || path.includes("__");
+      const clause = `**{${pyStr(`${path}__${lookup}`)}: ${filterValue(lookup, term.value, undefined)}}`;
+      (term.negate ? excludes : includes).push(clause);
+      continue;
+    }
+    if (spec.relation && lookup !== "isnull") {
       continue;
     }
     if (spec.python) {

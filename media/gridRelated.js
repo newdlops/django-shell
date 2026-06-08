@@ -25,7 +25,7 @@ function paintRelatedCell(td, el, renderValue) {
   td.appendChild(renderValue(td._cell));
   if (column.relation && rawOf(td._cell) !== null && rawOf(td._cell) !== undefined) {
     td.appendChild(document.createTextNode(" "));
-    td.appendChild(el("button", { className: "linkbtn", dataset: { act: "open", target: column.relation.target }, title: `Open ${column.relation.target}` }, "↗"));
+    td.appendChild(el("button", { className: "linkbtn", dataset: { act: "open", target: column.relation.target, val: String(rawOf(td._cell)) }, title: `Open ${column.relation.target} filtered to this row` }, "↗"));
   }
 }
 

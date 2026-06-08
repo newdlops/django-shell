@@ -3,7 +3,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import type { BackendTransport, BackendTransportMode } from "./backendClient";
-import type { BackendCommitResult, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRelation, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import type { BackendCommitResult, BackendFilterFieldTree, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRelation, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { modelBrowserHtml } from "./modelBrowserHtml";
 import { DiagnosticLogger } from "./diagnostics";
 
@@ -13,6 +13,7 @@ export interface ModelDataSource {
   modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult>;
   modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed>;
   modelCount(query: ModelCountQuery): Promise<BackendModelCount>;
+  modelFilterFields(app: string, model: string): Promise<BackendFilterFieldTree>;
   modelLookup(query: ModelLookupQuery): Promise<BackendModelLookup>;
   modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery>;
   modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows>;
@@ -26,6 +27,8 @@ export interface ModelDataSource {
 
 interface ModelTarget {
   app: string;
+  /** When set, the panel opens pre-filtered to this primary key (FK-link drill-in). */
+  initialPk?: unknown;
   label?: string;
   model: string;
 }
@@ -35,6 +38,7 @@ interface IncomingMessage {
   changes?: ModelCommitChange[];
   columns?: BackendModelColumn[];
   field?: string;
+  filterPk?: unknown;
   filters?: BackendModelFilter[];
   mode?: BackendTransportMode;
   model?: string;
@@ -143,6 +147,10 @@ class ModelBrowserPanel {
       retainContextWhenHidden: true
     });
     this.panel.webview.html = modelBrowserHtml(this.panel.webview, extensionPath);
+    if (target.initialPk !== undefined && target.initialPk !== null) {
+      // Opened by following a foreign-key link: pre-filter to that row's primary key. `pk` is allowlisted backend-side and resolves to the model's real primary key in every transport.
+      this.filters = [{ field: "pk", lookup: "exact", value: target.initialPk }];
+    }
     this.panel.onDidDispose(() => this.handleDispose(), undefined, this.disposables);
     this.panel.webview.onDidReceiveMessage((message: IncomingMessage) => void this.handleMessage(message), undefined, this.disposables);
   }
@@ -269,9 +277,20 @@ class ModelBrowserPanel {
       await this.expandRelated(message);
     } else if (message.type === "lookupRelated") {
       await this.lookupRelated(message);
+    } else if (message.type === "filterFields" && message.app && message.model) {
+      await this.sendFilterFields(message);
     } else if (message.type === "openModel" && message.app && message.model) {
-      this.openAnother({ app: message.app, model: message.model });
+      this.openAnother({ app: message.app, initialPk: message.filterPk, model: message.model });
     }
+  }
+
+  /** Fetches one model's filter field/relation tree (root model or a relation target) for the cascading filter dropdowns. */
+  private async sendFilterFields(message: IncomingMessage): Promise<void> {
+    const result = await this.source.modelFilterFields(message.app as string, message.model as string);
+    if (this.disposed) {
+      return;
+    }
+    this.post({ requestId: message.requestId, result, target: `${message.app}.${message.model}`, type: "filterFields" });
   }
 
   /** Lazily fetches one @property column's values for the currently-loaded rows (user activated the column). */

@@ -4,10 +4,10 @@ import * as net from "net";
 import { BackendEndpoint } from "./backendBootstrap";
 import { DiagnosticLogger } from "./diagnostics";
 import {
-  BackendCommitResult, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder,
+  BackendCommitResult, BackendFilterFieldTree, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder,
   BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery,
   ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery, modelUnsupportedFallback,
-  parseModelCommitResponse, parseModelComputedResponse, parseModelCountResponse, parseModelListResponse, parseModelLookupResponse, parseModelQueryResponse,
+  parseFilterFieldsResponse, parseModelCommitResponse, parseModelComputedResponse, parseModelCountResponse, parseModelListResponse, parseModelLookupResponse, parseModelQueryResponse,
   parseModelRelatedResponse, parseModelRowsResponse, parseModelSchemaResponse, parseOrmCommitResponse, parseOrmComputedResponse, parseOrmCountResponse,
   parseOrmGridResponse, parseOrmLookupResponse, parseOrmModelsResponse, parseOrmQueryResponse, parseOrmRelatedResponse
 } from "./modelBackend";
@@ -232,6 +232,11 @@ export class BackendClient {
     return this.request({ app, kind: "schema", model }, parseModelSchemaResponse);
   }
 
+  /** Returns the filterable field/relation tree for one model so the filter UI can drill across relations (metadata RPC; suppressed in ORM/Terminal mode like schema). */
+  modelFilterFields(app: string, model: string): Promise<BackendFilterFieldTree> {
+    return this.request({ app, kind: "filterfields", model }, parseFilterFieldsResponse);
+  }
+
   /** Returns one bounded page of model rows with foreign keys kept as raw ids. */
   modelRows(query: ModelRowsQuery): Promise<BackendModelRows> {
     if (this.reconstructsViaOrmCell) {
@@ -451,9 +456,9 @@ function connectHost(host: string): string {
   return host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
 }
 
-const PTY_FALLBACK_KINDS = new Set(["children", "complete", "environment", "execute", "inspect", "prelude", "models", "schema", "rows", "related", "count", "commit", "lookup", "query"]); // helpers: scrubbed _djs_rpc; execute: literal cell.
-// Kinds ORM/Terminal modes never type over the terminal; schema is synthesized from the first row page (see modelBrowser).
-const ORM_NO_PTY = new Set(["children", "environment", "inspect", "models", "prelude", "schema"]);
+const PTY_FALLBACK_KINDS = new Set(["children", "complete", "environment", "execute", "inspect", "prelude", "models", "schema", "filterfields", "rows", "related", "count", "commit", "lookup", "query"]); // helpers: scrubbed _djs_rpc; execute: literal cell.
+// Kinds ORM/Terminal modes never type over the terminal; schema is synthesized from the first row page, and the filter tree falls back to flat fields (see modelBrowser).
+const ORM_NO_PTY = new Set(["children", "environment", "inspect", "models", "prelude", "schema", "filterfields"]);
 const ORM_PTY_SUPPRESSED = "Kept out of the shell: this metadata is not typed into the terminal — switch the Link selector to Socket/Auto to fetch it.";
 const PTY_PAGE_LIMIT = 25;
 

@@ -228,6 +228,51 @@ test("chunks oversized PTY inspection markers without dropping metadata", { skip
   assert.equal(payload.last, "name_2999");
 });
 
+test("emits an error marker when forcing a cell result's repr raises (lazy QuerySet hitting the DB)", { skip: !PYTHON }, () => {
+  // Regression: a cell whose statement only built a lazy value (error_in_exec is None) but whose repr
+  // raises when _post forces it must surface as the cell's error, not escape post_run_cell -- an escape
+  // skips the response marker, hanging the ORM read and double-faulting via ExecutionResult.__repr__.
+  const script = [
+    "import importlib.util, json, io, sys",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "class Events:",
+    "    def __init__(self): self.cb={}",
+    "    def register(self, name, fn): self.cb[name]=fn",
+    "class Shell: pass",
+    "class Boom:",
+    "    def __repr__(self): raise RuntimeError('kaboom-from-repr')",
+    "class Info:",
+    "    def __init__(self, raw): self.raw_cell=raw",
+    "class Result:",
+    "    def __init__(self, value): self.result=value; self.error_in_exec=None; self.error_before_exec=None",
+    "shell=Shell(); shell.user_ns={}; shell.events=Events()",
+    "mod._pty_install_ipython_capture(shell)",
+    "pre=shell.events.cb['pre_run_cell']; post=shell.events.cb['post_run_cell']",
+    "real=sys.stdout; buf=io.StringIO(); sys.stdout=buf; escaped=None",
+    "try:",
+    "    pre(Info('boom'))",
+    "    post(Result(Boom()))",
+    "except Exception as exc:",
+    "    escaped=repr(exc)",
+    "finally:",
+    "    sys.stdout=real",
+    "markers=[line for line in buf.getvalue().splitlines() if line.startswith(mod._RESPONSE_PREFIX)]",
+    "resp=json.loads(markers[0][len(mod._RESPONSE_PREFIX):])['response'] if markers else None",
+    "print(json.dumps({'escaped':escaped,'markers':len(markers),'ok':resp and resp['ok'],'gridIsNull':resp is not None and resp['grid'] is None,'tbHasError':bool(resp and 'kaboom-from-repr' in (resp.get('traceback') or ''))}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.escaped, null, "the repr failure must not escape post_run_cell");
+  assert.equal(payload.markers, 1, "exactly one response marker must still be emitted");
+  assert.equal(payload.ok, false);
+  assert.equal(payload.gridIsNull, true);
+  assert.equal(payload.tbHasError, true, "the marker traceback must carry the underlying error");
+});
+
 function pythonExecutable() {
   const candidates = [process.env.DJANGO_SHELL_E2E_PYTHON, process.env.DJLS_E2E_BASE_PYTHON, "/Users/lky/.asdf/installs/python/3.11.15/bin/python3.11", "/usr/bin/python3", "python3"].filter(Boolean);
   return candidates.find((candidate) => childProcess.spawnSync(candidate, ["--version"], { encoding: "utf8" }).status === 0);

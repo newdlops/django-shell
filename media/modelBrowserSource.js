@@ -7,6 +7,7 @@ import { enterQueryMode } from "./gridQuery.js";
 import { makeResizable } from "./gridResize.js";
 import { buildEditableRelatedTable } from "./gridRelated.js";
 import { createVirtualRows } from "./gridVirtual.js";
+import { createFilterBar } from "./gridFilter.js";
 
 const vscode = acquireVsCodeApi();
 
@@ -16,7 +17,6 @@ for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more"
 }
 
 const LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"];
-const REL_FILTER_PREFIX = "rel:";
 const MAX_LOG_ENTRIES = 200;
 const ALL_PAGE_SIZE = 1000000000;
 
@@ -40,13 +40,22 @@ const virtual = createVirtualRows({
   onRender: () => repaintPins(els.gridwrap, state)
 });
 
+const filterBar = createFilterBar({
+  el,
+  termsEl: els.filterterms,
+  activeEl: els.activefilters,
+  getState: () => state,
+  postRaw: (message) => vscode.postMessage(message),
+  lookups: LOOKUPS
+});
+
 window.addEventListener("message", (event) => handleMessage(event.data));
 els.reload.addEventListener("click", () => send({ type: "reload" }));
 els.more.addEventListener("click", () => send({ type: "loadMore" }));
 if (els.pageSize) {
   els.pageSize.addEventListener("change", () => send({ type: "reload" }));
 }
-els.addFilter.addEventListener("click", () => addFilterTerm());
+els.addFilter.addEventListener("click", () => filterBar.addTerm());
 els.applyFilter.addEventListener("click", () => applyQuery());
 els.clearFilter.addEventListener("click", () => clearQuery());
 els.count.addEventListener("click", () => vscode.postMessage({ type: "requestCount" }));
@@ -77,6 +86,8 @@ function handleMessage(message) {
     onRelated(message);
   } else if (message.type === "lookup") {
     editor.onLookup(message);
+  } else if (message.type === "filterFields") {
+    filterBar.onTreeResponse(message);
   } else if (message.type === "computed") {
     onComputed(message);
   } else if (message.type === "count") {
@@ -116,8 +127,8 @@ function onSchema(schema) {
   state.model = `${schema.app}.${schema.model}`;
   els.title.textContent = `${schema.app}.${schema.model}`;
   els.subtitle.textContent = `${schema.label || ""} · ${schema.table || ""}`;
-  syncFilterTerms(state.filters);
-  renderFilterSummary();
+  filterBar.sync(state.filters);
+  filterBar.renderSummary(state.filters);
   els.countinfo.textContent = "";
   const table = el("table", {});
   table.appendChild(buildHead());
@@ -199,10 +210,10 @@ function onRows(message) {
     state.order = message.order;
   }
   if (!message.append) {
-    syncFilterTerms(state.filters);
+    filterBar.sync(state.filters);
   }
   updateSortArrows();
-  renderFilterSummary();
+  filterBar.renderSummary(state.filters);
   state.rowCount = virtual.setRows(rows.rows || [], Boolean(message.append));
   if (message.append) {
     for (const field of state.computedActive) {
@@ -284,7 +295,7 @@ function paintCell(td) {
   if (column.relation && rawValue(cell) !== null && rawValue(cell) !== undefined) {
     const wrap = el("span", { className: "fk" });
     wrap.appendChild(el("button", { className: "linkbtn", title: "Expand related row", dataset: { act: "fk", rel: column.relation.field, pk: String(td._pk), val: String(rawValue(cell)) } }, "⎘"));
-    wrap.appendChild(el("button", { className: "linkbtn", title: `Open ${column.relation.target}`, dataset: { act: "open", target: column.relation.target } }, "↗"));
+    wrap.appendChild(el("button", { className: "linkbtn", title: `Open ${column.relation.target} filtered to this row`, dataset: { act: "open", target: column.relation.target, val: String(rawValue(cell)) } }, "↗"));
     td.appendChild(document.createTextNode(" "));
     td.appendChild(wrap);
   }
@@ -331,7 +342,9 @@ function onTableClick(event) {
     toggleSort(data.col);
   } else if (data.act === "open") {
     const split = data.target.lastIndexOf(".");
-    vscode.postMessage({ type: "openModel", app: data.target.slice(0, split), model: data.target.slice(split + 1) });
+    // Pass the pk as the raw string; the backend coerces it against the target model's real pk type (a numeric
+    // coerce here would turn a char/slug pk like "007" into 7 and miss the row).
+    vscode.postMessage({ type: "openModel", app: data.target.slice(0, split), model: data.target.slice(split + 1), filterPk: data.val });
   } else if (data.act === "fk") {
     expandInto(node, { relation: data.rel, pk: coerce(data.pk), value: coerce(data.val), single: true });
   } else if (data.act === "rel") {
@@ -398,96 +411,9 @@ function updateSortArrows() {
   }
 }
 
-function addFilterTerm(initial = {}) {
-  const options = filterFieldOptions();
-  if (!options.length) {
-    return;
-  }
-  const term = el("span", { className: "term" });
-  const field = el("select", { dataset: { role: "field" } });
-  for (const option of options) {
-    field.appendChild(el("option", { title: option.title, value: option.value }, option.label));
-  }
-  field.value = options.some((option) => option.value === initial.field) ? initial.field : options[0].value;
-  const lookup = el("select", { dataset: { role: "lookup" } });
-  const value = el("input", { dataset: { role: "value" }, title: "Value (in/range: comma-separated; isnull: true/false)" });
-  const negate = el("input", { checked: Boolean(initial.negate), dataset: { role: "negate" }, type: "checkbox" });
-  const negwrap = el("label", { className: "neg" }, negate, "not");
-  const remove = el("button", { className: "linkbtn", dataset: { role: "remove" }, title: "Remove filter" }, "✕");
-  remove.addEventListener("click", () => term.remove());
-  field.addEventListener("change", () => refreshLookupOptions(term));
-  term.appendChild(field);
-  term.appendChild(lookup);
-  term.appendChild(value);
-  term.appendChild(negwrap);
-  term.appendChild(remove);
-  els.filterterms.appendChild(term);
-  refreshLookupOptions(term, initial.lookup);
-  value.value = initial.value === undefined || initial.value === null ? value.value : String(initial.value);
-}
-
-function filterFieldOptions() {
-  const options = [];
-  for (const column of state.columns) {
-    if (column.computed && column.annotated) {
-      options.push({ label: `${column.attname} (@property · DB)`, title: "Filter through a declared ORM annotation", value: column.attname });
-    } else if (column.computed) {
-      options.push({ label: `${column.attname} (@property · Python)`, title: "Filter by evaluating this Python property across candidate rows", value: column.attname });
-    } else if (!column.computed) {
-      options.push({ label: column.attname, title: column.type || column.name, value: column.attname });
-    }
-  }
-  for (const relation of state.relations) {
-    options.push({ label: `${relation.name} (${relationKindLabel(relation.kind)} exists)`, title: `Filter by related-row existence: ${relation.target}`, value: `${REL_FILTER_PREFIX}${relation.name}` });
-  }
-  return options;
-}
-
-function refreshLookupOptions(term, preferred) {
-  const lookup = term.querySelector("[data-role=lookup]");
-  const value = term.querySelector("[data-role=value]");
-  const names = lookupOptionsFor(term.querySelector("[data-role=field]").value);
-  lookup.innerHTML = "";
-  for (const name of names) {
-    lookup.appendChild(el("option", { value: name }, name));
-  }
-  lookup.value = names.includes(preferred) ? preferred : names[0];
-  if (names.length === 1 && names[0] === "isnull") {
-    value.placeholder = "false = has value";
-    if (value.value === "") {
-      value.value = "false";
-    }
-  } else {
-    value.placeholder = "";
-  }
-}
-
-function lookupOptionsFor(field) {
-  return String(field || "").startsWith(REL_FILTER_PREFIX) ? ["isnull"] : LOOKUPS;
-}
-
-function syncFilterTerms(filters) {
-  els.filterterms.innerHTML = "";
-  for (const filter of filters || []) {
-    addFilterTerm(filter);
-  }
-}
-
-function collectFilters() {
-  const filters = [];
-  for (const term of els.filterterms.querySelectorAll(".term")) {
-    const field = term.querySelector("[data-role=field]").value;
-    const lookup = term.querySelector("[data-role=lookup]").value;
-    const value = term.querySelector("[data-role=value]").value;
-    const negate = term.querySelector("[data-role=negate]").checked;
-    filters.push({ field, lookup, negate, value });
-  }
-  return filters;
-}
-
 function applyQuery() {
-  state.filters = collectFilters();
-  renderFilterSummary();
+  state.filters = filterBar.collect();
+  filterBar.renderSummary(state.filters);
   send({ filters: state.filters, order: state.order, type: "applyQuery" });
 }
 
@@ -502,42 +428,12 @@ function send(message) {
 }
 
 function clearQuery() {
-  els.filterterms.innerHTML = "";
+  filterBar.clear();
   state.filters = [];
   state.order = [];
   updateSortArrows();
-  renderFilterSummary();
+  filterBar.renderSummary(state.filters);
   applyQuery();
-}
-
-function renderFilterSummary() {
-  if (!els.activefilters) {
-    return;
-  }
-  els.activefilters.innerHTML = "";
-  if (!state.filters.length) {
-    els.activefilters.appendChild(el("span", { className: "tag" }, "No filters"));
-    return;
-  }
-  els.activefilters.appendChild(el("span", { className: "tag" }, "Applied"));
-  for (const filter of state.filters) {
-    els.activefilters.appendChild(el("span", { className: "filterchip", title: "Currently applied filter" }, describeFilter(filter)));
-  }
-}
-
-function describeFilter(filter) {
-  const field = filterFieldLabel(filter.field);
-  const value = filter.lookup === "isnull" ? String(filter.value).toLowerCase() : String(filter.value ?? "");
-  return `${filter.negate ? "not " : ""}${field} ${filter.lookup} ${value}`;
-}
-
-function filterFieldLabel(field) {
-  const text = String(field || "");
-  if (text.startsWith(REL_FILTER_PREFIX)) {
-    return `${text.slice(REL_FILTER_PREFIX.length)} exists`;
-  }
-  const column = state.columns.find((item) => item.attname === text);
-  return column?.computed ? `${text} @property` : text;
 }
 
 function expandInto(button, request) {

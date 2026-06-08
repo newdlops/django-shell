@@ -256,6 +256,8 @@ def _run_request(namespace, token, request, initial_names):
         return _browse_models()
     if request.get("kind") == "schema":
         return _browse_schema(request)
+    if request.get("kind") == "filterfields":
+        return _browse_filter_fields(request)
     if request.get("kind") == "rows":
         return _browse_rows(request)
     if request.get("kind") == "related":
@@ -1375,8 +1377,23 @@ def _pty_install_ipython_capture(shell):
         if inspection_probe:
             out = ""
             err = ""
-        result_repr = None if inspection_probe else (_truncate(repr(value), 4000) if error is None and value is not None else None)
-        grid = None if inspection_probe else (_pty_tabulate_result(value) if error is None else None)
+        eval_tb = ""
+        result_repr = None
+        grid = None
+        if not inspection_probe and error is None:
+            try:
+                # The cell statement already ran; computing its repr/grid here forces any deferred work
+                # (e.g. a lazy QuerySet hitting the DB), which can raise. Catch it so the failure becomes
+                # this cell's error instead of escaping post_run_cell -- an escape skips _pty_emit_cell,
+                # leaving the ORM read with no marker (it hangs / desyncs the FIFO) and double-faults when
+                # IPython then reprs the ExecutionResult to build its "Error in callback" message.
+                if value is not None:
+                    result_repr = _truncate(repr(value), 4000)
+                grid = _pty_tabulate_result(value)
+            except Exception:
+                eval_tb = traceback.format_exc()
+                result_repr = None
+                grid = None
         if matched_probe:
             if probe_error:
                 inspect = {"children": [], "error": probe_error}
@@ -1395,8 +1412,8 @@ def _pty_install_ipython_capture(shell):
             _STATE["pty_raw_metadata"] = raw_metadata
         sql = _pty_sql_end(state)
         state["counter"] += 1
-        marker_ok = error is None or matched_probe
-        _pty_emit_cell(state["counter"], marker_ok, result_repr, out, err, "" if matched_probe else tb, grid, sql, inspect)
+        marker_ok = (error is None and not eval_tb) or matched_probe
+        _pty_emit_cell(state["counter"], marker_ok, result_repr, out, err, eval_tb or ("" if matched_probe else tb), grid, sql, inspect)
         if state.get("scrub"):
             state["scrub"] = False
             try:
@@ -1829,7 +1846,9 @@ def _browse_relations(model):
         name = _browse_relation_name(field)
         if name is None:
             continue
-        relations.append({"kind": _browse_relation_kind(field), "name": name, "single": single, "target": _browse_label(field.related_model)})
+        # `name` is the accessor (used to expand related rows); `queryName` is the filter query name (reverse
+        # relations differ — related_query_name, not the `_set` accessor) so traversal filters resolve correctly.
+        relations.append({"kind": _browse_relation_kind(field), "name": name, "queryName": _browse_relation_query_name(field) or name, "single": single, "target": _browse_label(field.related_model)})
     return relations
 
 
@@ -1854,6 +1873,93 @@ def _browse_relation_name(field):
             return None
         return name if name and not name.endswith("+") else None
     return field.name
+
+
+def _browse_relation_query_name(field):
+    """Returns the name used INSIDE .filter() to span this relation. Forward FK/O2O/M2M use the field name; reverse relations use related_query_name() (the lowercased model name by default), NOT the `_set` accessor name. Hidden relations (related_name ending '+') return None — they cannot be queried."""
+    if field.auto_created and not getattr(field, "concrete", False):
+        if getattr(field, "hidden", False):
+            return None
+        forward = getattr(field, "field", None)
+        if forward is None:
+            return None
+        try:
+            name = forward.related_query_name()
+        except Exception:
+            return None
+        return name if name and not str(name).endswith("+") else None
+    return field.name
+
+
+def _browse_filter_fields(request):
+    """Returns the filterable field/relation tree for one model so the cascading filter UI can drill across relations."""
+    with _EXECUTION_LOCK:
+        try:
+            model = _browse_resolve_model(request)
+            tree = _browse_filter_field_tree(model)
+            tree["ok"] = True
+            return tree
+        except Exception:
+            return {"error": traceback.format_exc(), "fields": [], "ok": False, "relations": []}
+
+
+def _browse_filter_field_tree(model):
+    """Returns {fields, relations, pk} for one model: leaf scalar fields (FKs as their *_id column) plus traversable relations carrying the filter query name and target label. Relations are deduped by query name."""
+    fields = []
+    for column in _browse_columns(model):
+        leaf = {"attname": column["attname"], "name": column["name"], "null": column["null"], "pk": column["pk"], "type": column["type"]}
+        if column.get("choices"):
+            leaf["choices"] = column["choices"]
+        fields.append(leaf)
+    relations = []
+    seen = set()
+    for field in model._meta.get_fields():
+        if not field.is_relation or field.related_model is None:
+            continue
+        name = _browse_relation_query_name(field)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        relations.append({"kind": _browse_relation_kind(field), "name": name, "single": bool(field.one_to_one or field.many_to_one), "target": _browse_label(field.related_model)})
+    return {"fields": fields, "pk": model._meta.pk.attname, "relations": relations}
+
+
+def _browse_match_segment(model, name):
+    """Resolves one filter-path segment to its field/relation: `pk`, a relation query name, a concrete field, or a foreign-key `*_id` attname (None when nothing matches)."""
+    if name == "pk":
+        return model._meta.pk
+    for field in model._meta.get_fields():
+        if field.is_relation and field.related_model is not None and _browse_relation_query_name(field) == name:
+            return field
+    try:
+        return model._meta.get_field(name)
+    except Exception:
+        for field in model._meta.concrete_fields:
+            if field.attname == name:
+                return field
+        return None
+
+
+def _browse_resolve_filter_path(model, path):
+    """Walks a `__`-separated query-name path across relations. Each non-final segment must be a traversable relation; returns (leaf_field_or_relation, needs_distinct, is_relation_leaf) or None if any segment is invalid. needs_distinct is set when the path spans a to-many relation (avoids duplicate rows)."""
+    parts = path.split("__")
+    if not parts or any(not part for part in parts):
+        return None
+    current = model
+    needs_distinct = False
+    for index, part in enumerate(parts):
+        field = _browse_match_segment(current, part)
+        if field is None:
+            return None
+        is_relation = bool(getattr(field, "is_relation", False) and getattr(field, "related_model", None) is not None)
+        if is_relation and (getattr(field, "many_to_many", False) or getattr(field, "one_to_many", False)):
+            needs_distinct = True
+        if index == len(parts) - 1:
+            return field, needs_distinct, is_relation
+        if not is_relation:
+            return None
+        current = field.related_model
+    return None
 
 
 def _browse_relation_kind(field):
@@ -2354,7 +2460,12 @@ def _browse_filter_term(model, term, attnames, declared):
     fields = {field.attname: field for field in model._meta.concrete_fields}
     annotation = None
     needs_distinct = False
-    if field in attnames:
+    if field == "pk":
+        # Must precede the @property branch: Django defines `pk` as a property on the base Model, so
+        # _pty_is_computed_field(model, "pk") is True and would otherwise misroute pk to a Python full-table scan.
+        key = "pk"
+        value = _browse_coerce_filter_value(lookup, term.get("value"), model._meta.pk)
+    elif field in attnames:
         key = field
         value = _browse_coerce_filter_value(lookup, term.get("value"), fields.get(field))
     elif field in declared and field.isidentifier():
@@ -2372,7 +2483,19 @@ def _browse_filter_term(model, term, attnames, declared):
         value = _browse_coerce_filter_value(lookup, term.get("value"))
         needs_distinct = bool(relation.one_to_many or relation.many_to_many)
     else:
-        return None
+        # Relation-traversal path (e.g. author__profile__city): every segment is allowlisted against the live
+        # model graph, so an unknown field/relation is rejected (never injected) and values stay ORM-parameterized.
+        resolved = _browse_resolve_filter_path(model, field)
+        if resolved is None:
+            return None
+        leaf, needs_distinct, is_relation_leaf = resolved
+        if is_relation_leaf:
+            if lookup != "isnull":
+                return None
+            value = _browse_coerce_filter_value("isnull", term.get("value"))
+        else:
+            value = _browse_coerce_filter_value(lookup, term.get("value"), leaf if getattr(leaf, "concrete", False) else None)
+        key = field
     return key, lookup, value, annotation, needs_distinct, None
 
 

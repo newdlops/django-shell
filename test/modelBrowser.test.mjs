@@ -168,7 +168,19 @@ test("builds visible ORM cells with bare model names, not app-registry plumbing"
   assert.match(pythonPropertyCell, /getattr\(__o, "has_paid_subscription", None\)/);
   assert.match(buildRowsOrm({ app: "db", columns, filters: [{ field: "staff_alias", lookup: "exact", value: "true" }, { field: "rel:members", lookup: "isnull", value: "false" }], limit: 50, model: "Company", relations }), /annotate\(djs_staff_alias=/);
   assert.match(buildRowsOrm({ app: "db", columns, filters: [{ field: "staff_alias", lookup: "exact", value: "true" }, { field: "rel:members", lookup: "isnull", value: "false" }], limit: 50, model: "Company", relations }), /\.filter\(\*\*\{"djs_staff_alias__exact": True\}\)\.filter\(\*\*\{"members__isnull": False\}\)\.distinct\(\)/);
-  for (const cell of [...cells, pythonPropertyCell]) {
+  // Relation-traversal paths pass through as parameterized filter() kwargs (distinct guards to-many spans); pk filters too.
+  const traversalCell = buildRowsOrm({ app: "db", columns, filters: [{ field: "owner__name", lookup: "icontains", value: "ac" }], limit: 50, model: "Company" });
+  assert.match(traversalCell, /\.filter\(\*\*\{"owner__name__icontains": "ac"\}\)\.distinct\(\)/);
+  assert.match(buildRowsOrm({ app: "db", columns, filters: [{ field: "pk", lookup: "exact", value: 7 }], limit: 50, model: "Company" }), /\.filter\(\*\*\{"pk__exact": "7"\}\)/);
+  // An unsafe traversal segment is dropped entirely, never injected.
+  assert.doesNotMatch(buildRowsOrm({ app: "db", columns, filters: [{ field: "owner__evil; DROP", lookup: "exact", value: "x" }], limit: 50, model: "Company" }), /owner__evil/);
+  // Relation-existence from the new UI arrives as the bare query name — it must still add .distinct() for a to-many relation.
+  const bareExistence = buildRowsOrm({ app: "db", columns, filters: [{ field: "members", lookup: "isnull", value: "false" }], limit: 50, model: "Company", relations });
+  assert.match(bareExistence, /\.filter\(\*\*\{"members__isnull": False\}\)\.distinct\(\)/);
+  // A reverse relation maps the _set accessor to its query name so the ORM keyword is valid.
+  const reverseRel = [{ kind: "reverse-fk", name: "order_set", queryName: "order", single: false, target: "db.Order" }];
+  assert.match(buildRowsOrm({ app: "db", columns, filters: [{ field: "order", lookup: "isnull", value: "false" }], limit: 50, model: "Company", relations: reverseRel }), /\.filter\(\*\*\{"order__isnull": False\}\)\.distinct\(\)/);
+  for (const cell of [...cells, pythonPropertyCell, traversalCell]) {
     assert.match(cell, /\bCompany\._base_manager\b/);
     assert.doesNotMatch(cell, SUPPORT_LAYER_CELL);
   }
@@ -359,6 +371,81 @@ test("filters and sorts via allowlists and counts on demand", { skip: !HAS_DJANG
   assert.equal(payload.sorted_offset, 2, "non-pk sort falls back to offset pagination");
   assert.equal(payload.injected_ok, true);
   assert.equal(payload.injected_rows, 5, "unknown field/lookup terms are ignored, never injected");
+});
+
+test("filters across relation-traversal paths with the filterfields tree and rejects invalid segments", { skip: !HAS_DJANGO }, () => {
+  const payload = runBackend([
+    "import json",
+    "from django.conf import settings",
+    "settings.configure(DEBUG=True, DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}, INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'], USE_TZ=True)",
+    "import django; django.setup()",
+    "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
+    "from django.contrib.auth.models import User, Group, Permission",
+    "ops = Group.objects.create(name='ops'); dev = Group.objects.create(name='dev')",
+    "alice = User.objects.create(username='alice', password='x'); bob = User.objects.create(username='bob', password='x'); carol = User.objects.create(username='carol', password='x')",
+    "alice.groups.add(ops); bob.groups.add(dev); carol.groups.add(ops)",
+    "alice.user_permissions.add(Permission.objects.filter(content_type__app_label='auth').first())",
+    "def call(kind, **kw): return mod._run_request({}, 't', {'token': 't', 'kind': kind, **kw}, set())",
+    "tree = call('filterfields', app='auth', model='User')",
+    "ops_users = call('rows', app='auth', model='User', filters=[{'field': 'groups__name', 'lookup': 'exact', 'value': 'ops'}])",
+    "deep = call('rows', app='auth', model='User', filters=[{'field': 'user_permissions__content_type__app_label', 'lookup': 'exact', 'value': 'auth'}])",
+    "reverse = call('rows', app='auth', model='Group', filters=[{'field': 'user__username', 'lookup': 'exact', 'value': 'bob'}])",
+    "from django.db import connection, reset_queries",
+    "reset_queries()",
+    "pk_one = call('rows', app='auth', model='User', filters=[{'field': 'pk', 'lookup': 'exact', 'value': bob.pk}])",
+    "pk_queries = len(connection.queries)",
+    "exists = call('rows', app='auth', model='User', filters=[{'field': 'groups', 'lookup': 'isnull', 'value': False}])",
+    "ops_count = call('count', app='auth', model='User', filters=[{'field': 'groups__name', 'lookup': 'exact', 'value': 'ops'}])",
+    "bad = call('rows', app='auth', model='User', filters=[{'field': 'groups__evil; DROP', 'lookup': 'exact', 'value': 'x'}, {'field': 'nope__bad', 'lookup': 'exact', 'value': 1}])",
+    "print(json.dumps({",
+    "  'tree_relations': sorted(r['name'] for r in tree['relations']),",
+    "  'tree_groups_target': next((r['target'] for r in tree['relations'] if r['name'] == 'groups'), None),",
+    "  'ops_users': sorted(r['username'] for r in ops_users['rows']), 'ops_distinct': '.distinct()' in ops_users['orm'],",
+    "  'deep': sorted(r['username'] for r in deep['rows']),",
+    "  'reverse': sorted(r['name'] for r in reverse['rows']),",
+    "  'pk_one': [r['username'] for r in pk_one['rows']], 'pk_queries': pk_queries, 'pk_db_side': any('WHERE' in (q.get('sql') or '').upper() for q in pk_one['sql']),",
+    "  'exists': sorted(set(r['username'] for r in exists['rows'])), 'ops_count': ops_count['count'],",
+    "  'bad_rows': len(bad['rows']), 'bad_ok': bad['ok'],",
+    "}))"
+  ]);
+  assert.deepEqual(payload.tree_relations, ["groups", "user_permissions"], "reverse/M2M relations use filter query names, not _set accessors");
+  assert.equal(payload.tree_groups_target, "auth.Group");
+  assert.deepEqual(payload.ops_users, ["alice", "carol"], "forward M2M traversal filters across the relation");
+  assert.equal(payload.ops_distinct, true, "a to-many traversal adds .distinct()");
+  assert.deepEqual(payload.deep, ["alice"], "three-level traversal (m2m → fk → field) resolves");
+  assert.deepEqual(payload.reverse, ["dev"], "reverse traversal from the related model works");
+  assert.deepEqual(payload.pk_one, ["bob"], "pk filter (FK-link drill-in) targets one row");
+  assert.equal(payload.pk_db_side, true, "pk filter resolves to a DB WHERE lookup, not a Python @property full-table scan");
+  assert.equal(payload.pk_queries, 1, "pk filter stays a single query");
+  assert.deepEqual(payload.exists, ["alice", "bob", "carol"], "relation-as-terminal isnull filters existence");
+  assert.equal(payload.ops_count, 2, "count matches the distinct traversal rows");
+  assert.equal(payload.bad_ok, true);
+  assert.equal(payload.bad_rows, 3, "invalid traversal segments are rejected, never injected");
+});
+
+test("a boolean filter across a relation traversal stays Django-valid in ORM/Terminal mode (capitalized True/False)", { skip: !HAS_DJANGO }, () => {
+  // ORM/Terminal mode reconstructs the filter as a literal ORM cell; on a traversal path the column type is unknown,
+  // so the value reaches Django uncoerced. The value control must emit "True"/"False" — Django rejects lowercase "true".
+  const cols = [{ attname: "id", name: "id", pk: true, type: "AutoField" }];
+  const goodExpr = buildRowsOrm({ app: "auth", columns: cols, filters: [{ field: "user__is_active", lookup: "exact", value: "True" }], limit: 50, model: "Group" });
+  const lowerExpr = buildRowsOrm({ app: "auth", columns: cols, filters: [{ field: "user__is_active", lookup: "exact", value: "true" }], limit: 50, model: "Group" });
+  const payload = runBackend([
+    "import json",
+    "from django.conf import settings",
+    "settings.configure(DEBUG=True, DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}, INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'], USE_TZ=True)",
+    "import django; django.setup()",
+    "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
+    "from django.contrib.auth.models import User, Group",
+    "from django.core.exceptions import ValidationError",
+    "def ev(expr):",
+    "    try:",
+    "        list(eval(expr)); return 'ok'",
+    "    except ValidationError: return 'validationerror'",
+    "    except Exception as e: return type(e).__name__",
+    `print(json.dumps({'good': ev(${JSON.stringify(goodExpr)}), 'lower': ev(${JSON.stringify(lowerExpr)})}))`
+  ]);
+  assert.equal(payload.good, "ok", "capitalized True is accepted by Django BooleanField across a traversal");
+  assert.equal(payload.lower, "validationerror", "lowercase true raises — confirms the value control must emit True/False");
 });
 
 test("commits staged edits atomically and rolls back the whole batch on a validation error", { skip: !HAS_DJANGO }, () => {

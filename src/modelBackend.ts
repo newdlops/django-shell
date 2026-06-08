@@ -36,10 +36,11 @@ export interface BackendModelColumn {
   type: string;
 }
 
-/** One expandable relation (reverse FK, M2M, reverse O2O) for a model. */
+/** One expandable relation (reverse FK, M2M, reverse O2O) for a model. `name` is the accessor used to expand rows; `queryName` is the Django filter query name (reverse uses related_query_name, not the `_set` accessor). */
 export interface BackendModelRelation {
   kind: string;
   name: string;
+  queryName?: string;
   single: boolean;
   target: string;
 }
@@ -111,6 +112,33 @@ export interface BackendModelFilter {
   lookup: string;
   negate?: boolean;
   value: unknown;
+}
+
+/** One leaf (filterable, non-traversable) field in a model's filter tree. */
+export interface BackendFilterField {
+  attname: string;
+  choices?: Array<[unknown, string]>;
+  name: string;
+  null: boolean;
+  pk: boolean;
+  type: string;
+}
+
+/** One traversable relation in a model's filter tree; `name` is the Django filter query name (reverse uses related_query_name, not the `_set` accessor). */
+export interface BackendFilterRelation {
+  kind: string;
+  name: string;
+  single: boolean;
+  target: string;
+}
+
+/** The filterable field/relation tree for one model, fed to the cascading filter dropdowns. */
+export interface BackendFilterFieldTree {
+  error?: string;
+  fields: BackendFilterField[];
+  ok: boolean;
+  pk?: string;
+  relations: BackendFilterRelation[];
 }
 
 /** On-demand row count for the current filter set. */
@@ -283,6 +311,18 @@ export function parseModelSchemaResponse(buffer: string): BackendModelSchema {
     pk: parsed.pk,
     relations: Array.isArray(parsed.relations) ? parsed.relations : [],
     table: parsed.table
+  };
+}
+
+/** Parses a backend filter-field-tree response (leaf fields + traversable relations for one model). */
+export function parseFilterFieldsResponse(buffer: string): BackendFilterFieldTree {
+  const parsed = parseLine<Partial<BackendFilterFieldTree>>(buffer);
+  return {
+    error: parsed.error,
+    fields: Array.isArray(parsed.fields) ? parsed.fields : [],
+    ok: Boolean(parsed.ok),
+    pk: parsed.pk,
+    relations: Array.isArray(parsed.relations) ? parsed.relations : []
   };
 }
 
@@ -517,6 +557,9 @@ export function modelUnsupportedFallback(kind: string, error: string): string | 
   }
   if (kind === "schema") {
     return `${JSON.stringify({ columns: [], error, ok: false, relations: [] })}\n`;
+  }
+  if (kind === "filterfields") {
+    return `${JSON.stringify({ error, fields: [], ok: false, relations: [] })}\n`;
   }
   if (kind === "rows" || kind === "related") {
     return `${JSON.stringify({ columns: [], error, ok: false, rows: [] })}\n`;

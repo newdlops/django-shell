@@ -40,10 +40,17 @@ button:disabled{opacity:.5;cursor:default}
 .terms{display:flex;flex-wrap:wrap;gap:6px}
 .activefilters{display:flex;align-items:center;gap:4px;flex-wrap:wrap;color:var(--vscode-descriptionForeground);font-size:11px}
 .filterchip{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border:1px solid var(--vscode-panel-border);border-radius:10px;background:var(--vscode-editor-inactiveSelectionBackground,transparent);color:var(--vscode-foreground)}
-.term{display:inline-flex;align-items:center;gap:4px;padding:2px 4px;border:1px solid var(--vscode-panel-border);border-radius:6px}
+.term{display:inline-flex;align-items:center;gap:4px;padding:2px 4px;border:1px solid var(--vscode-panel-border);border-radius:6px;flex-wrap:wrap}
 .term select,.term input{font:inherit;font-size:11px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:3px;padding:1px 3px}
 .term input{width:120px}
+.term .path{display:inline-flex;align-items:center;gap:3px;flex-wrap:wrap}
+.term .valwrap{display:inline-flex;align-items:center;gap:3px}
+.term .chips{display:inline-flex;align-items:center;gap:3px;flex-wrap:wrap;max-width:280px}
+.term .chipinput{width:90px}
+.term .rangewrap input{width:78px}
 .term .neg{display:inline-flex;align-items:center;gap:2px;font-size:11px;color:var(--vscode-descriptionForeground)}
+.chipx{background:none;border:none;color:inherit;cursor:pointer;padding:0;font-size:10px;line-height:1;opacity:.7}
+.chipx:hover{opacity:1}
 th.sortable:hover{color:var(--vscode-textLink-foreground)}
 th .sortarrow{margin-left:4px;color:var(--vscode-textLink-foreground)}
 .chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border:1px solid var(--vscode-panel-border);border-radius:12px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);font-size:11px;cursor:pointer}

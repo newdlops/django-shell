@@ -4,7 +4,7 @@ import * as vscode from "vscode";
 import type { BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransport, BackendTransportMode } from "./backendClient";
 import type { CustomDjangoConsole } from "./customConsole";
 import { DiagnosticLogger } from "./diagnostics";
-import type { BackendCommitResult, BackendModelComputed, BackendModelCount, BackendModelList, BackendModelLookup, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import type { BackendCommitResult, BackendFilterFieldTree, BackendModelComputed, BackendModelCount, BackendModelList, BackendModelLookup, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { ModelBrowser } from "./modelBrowser";
 import { ModelQueryConsole } from "./modelQueryConsole";
 import { ModelCatalog } from "./modelCatalog";
@@ -57,6 +57,11 @@ class LazyRuntimeSource implements vscode.Disposable {
   /** Returns model schema or an idle status without starting a shell. */
   modelSchema(app: string, model: string): Promise<BackendModelSchema> {
     return this.console?.activeBackend?.modelSchema(app, model) ?? Promise.resolve({ columns: [], error: MODEL_IDLE_MESSAGE, ok: false, relations: [] });
+  }
+
+  /** Returns the filterable field/relation tree for one model, or an idle status without starting a shell. */
+  modelFilterFields(app: string, model: string): Promise<BackendFilterFieldTree> {
+    return this.console?.activeBackend?.modelFilterFields(app, model) ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, fields: [], ok: false, relations: [] });
   }
 
   /** Returns a page of model rows or an idle status without starting a shell. */

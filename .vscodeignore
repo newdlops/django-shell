@@ -25,6 +25,7 @@ media/*Source.js
 media/sqlHighlight.js
 media/gridPin.js
 media/gridEdit.js
+media/gridFilter.js
 media/gridFkPicker.js
 media/gridQuery.js
 media/gridResize.js
