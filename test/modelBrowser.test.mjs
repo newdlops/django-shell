@@ -188,6 +188,99 @@ test("builds visible ORM cells with bare model names, not app-registry plumbing"
   assert.equal(ormBuilders.buildInspectOrm(), "len(globals())");
 });
 
+test("builds single-line injection-proof aggregate ORM cells (grouped, global, exists, distinct)", () => {
+  const cols = [
+    { attname: "id", computed: false, pk: true, type: "AutoField" },
+    { attname: "amount", computed: false, type: "IntegerField" },
+    { attname: "status", computed: false, type: "CharField" }
+  ];
+  const grouped = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "amount_sum", field: "amount", func: "sum" }, { alias: "n", field: "*", func: "count" }], app: "db", columns: cols, groupBy: ["status"], model: "Company" });
+  const globalAgg = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "avg_amount", field: "amount", func: "avg" }], app: "db", columns: cols, groupBy: [], model: "Company" });
+  const distinctAgg = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "d", distinct: true, field: "status", func: "count" }], app: "db", columns: cols, model: "Company" });
+  const existsOnly = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "any", func: "exists" }], app: "db", columns: cols, model: "Company" });
+  const mixed = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "n", field: "*", func: "count" }, { alias: "any", func: "exists" }], app: "db", columns: cols, model: "Company" });
+  const injected = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "x", field: "amount); import os #", func: "sum" }], app: "db", columns: cols, groupBy: ["status; DROP TABLE"], model: "Company" });
+  // No usable spec survives (exists-only with a group-by, or all fields invalid) → a degenerate empty aggregate the parser maps to an error.
+  const groupedExistsOnly = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "any", func: "exists" }], app: "db", columns: cols, groupBy: ["status"], model: "Company" });
+  const allInvalidFields = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "x", field: "ghost", func: "sum" }], app: "db", columns: cols, model: "Company" });
+
+  const relCount = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "g", distinct: true, field: "members", func: "count" }], app: "db", columns: cols, groupBy: ["status"], model: "Company", relations: [{ kind: "m2m", name: "members", queryName: "members", single: false, target: "db.Member" }] });
+  const computedCols = [{ attname: "id", computed: false, pk: true, type: "AutoField" }, { annotated: false, attname: "score", computed: true, type: "property" }];
+
+  assert.equal(groupedExistsOnly, "[Company._base_manager.aggregate()]");
+  assert.equal(allInvalidFields, "[Company._base_manager.aggregate()]");
+  assert.equal(relCount, 'Company._base_manager.values("status").annotate(g=models.Count("members", distinct=True)).order_by("status")[0:1001]');
+  // A lookup on an aggregate alias becomes a HAVING (.filter after .annotate), not a WHERE.
+  const havingAgg = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "n", field: "*", func: "count" }], app: "db", columns: cols, filters: [{ field: "n", lookup: "gte", value: "5" }], groupBy: ["status"], model: "Company" });
+  assert.equal(havingAgg, 'Company._base_manager.values("status").annotate(n=models.Count("pk")).filter(**{"n__gte": 5}).order_by("status")[0:1001]');
+  // FK drill-in: a traversal group-by and Count/Sum over a relation path are emitted as the joined path.
+  const drill = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "n", distinct: true, field: "orders__id", func: "count" }, { alias: "rev", field: "orders__amount", func: "sum" }], app: "db", columns: cols, groupBy: ["category__name"], model: "Company" });
+  assert.match(drill, /\.values\("category__name"\)/);
+  assert.match(drill, /n=models\.Count\("orders__id", distinct=True\)/);
+  assert.match(drill, /rev=models\.Sum\("orders__amount"\)/);
+  assert.doesNotMatch(drill, /\n/, "the FK-drill aggregate cell stays single-line");
+  // Computed-@property aggregates are routed to the socket Python scan, never an ORM cell.
+  assert.equal(ormBuilders.aggregatesNeedPython([{ field: "score", func: "avg" }], computedCols), true);
+  assert.equal(ormBuilders.aggregatesNeedPython([{ field: "id", func: "count" }], computedCols), false);
+  assert.equal(ormBuilders.aggregatesNeedPython([{ func: "exists" }], computedCols), false);
+  assert.equal(grouped, 'Company._base_manager.values("status").annotate(amount_sum=models.Sum("amount"), n=models.Count("pk")).order_by("status")[0:1001]');
+  assert.equal(globalAgg, '[Company._base_manager.aggregate(avg_amount=models.Avg("amount"))]');
+  assert.equal(distinctAgg, '[Company._base_manager.aggregate(d=models.Count("status", distinct=True))]');
+  assert.equal(existsOnly, '[{"any": Company._base_manager.exists()}]');
+  assert.equal(mixed, '[dict(Company._base_manager.aggregate(n=models.Count("pk")), **{"any": Company._base_manager.exists()})]');
+  // Unknown group-by/aggregate fields are dropped (never injected); with nothing left it falls back to an empty global aggregate.
+  assert.doesNotMatch(injected, /DROP|import os/);
+  for (const cell of [grouped, globalAgg, distinctAgg, existsOnly, mixed, injected]) {
+    assert.doesNotMatch(cell, /\n/, "aggregate cells must stay single-line so they type into any shell (plain REPL has no multi-line cells)");
+    assert.match(cell, /\bCompany\._base_manager\b/);
+    assert.doesNotMatch(cell, SUPPORT_LAYER_CELL);
+  }
+});
+
+test("adds per-row annotation columns to the rows ORM cell (relation Count, window, F-expression)", () => {
+  const cols = [{ attname: "id", computed: false, pk: true, type: "AutoField" }, { attname: "amount", computed: false, type: "IntegerField" }, { attname: "is_staff", computed: false, type: "BooleanField" }];
+  const rels = [{ kind: "m2m", name: "groups", queryName: "groups", single: false, target: "auth.Group" }];
+  const relCount = buildRowsOrm({ annotations: [{ alias: "gc", distinct: true, field: "groups", func: "count", kind: "aggregate" }], app: "auth", columns: cols, limit: 50, model: "User", relations: rels });
+  const win = buildRowsOrm({ annotations: [{ alias: "rn", field: undefined, func: "row_number", kind: "window", orderBy: [{ desc: true, field: "id" }], partitionBy: ["is_staff"] }], app: "auth", columns: cols, limit: 50, model: "User" });
+  const expr = buildRowsOrm({ annotations: [{ alias: "a10", kind: "expr", left: "amount", op: "+", right: 10 }], app: "auth", columns: cols, limit: 50, model: "User" });
+  const injected = buildRowsOrm({ annotations: [{ alias: "bad", field: "x); import os #", func: "sum", kind: "aggregate" }], app: "auth", columns: cols, limit: 50, model: "User" });
+
+  const keywordAlias = buildRowsOrm({ annotations: [{ alias: "class", field: "groups", func: "count", kind: "aggregate" }], app: "auth", columns: cols, limit: 50, model: "User", relations: rels });
+  const constExpr = buildRowsOrm({ annotations: [{ alias: "k", kind: "expr", left: "5", op: "/", right: "0" }], app: "auth", columns: cols, limit: 50, model: "User" });
+  const propCols = [...cols, { annotated: false, attname: "flag", computed: true, type: "property" }];
+  const propFilterAnn = buildRowsOrm({ annotations: [{ alias: "gc", field: "groups", func: "count", kind: "aggregate" }], app: "auth", columns: propCols, filters: [{ field: "flag", lookup: "exact", value: "true" }], limit: 50, model: "User", relations: rels });
+
+  assert.match(relCount, /\.annotate\(gc=models\.Count\("groups", distinct=True\)\)/);
+  assert.match(win, /\.annotate\(rn=models\.Window\(models\.functions\.RowNumber\(\), partition_by=\[models\.F\("is_staff"\)\], order_by=\[models\.F\("id"\)\.desc\(\)\]\)\)/);
+  assert.match(expr, /\.annotate\(a10=models\.F\("amount"\) \+ 10\)/);
+  assert.doesNotMatch(injected, /import os/);
+  assert.doesNotMatch(injected, /\.annotate\(/, "an unsafe annotation field is dropped, never emitted");
+  // A Python-keyword alias would be a raw `class=` SyntaxError in the cell — it falls back to a safe generated name.
+  assert.doesNotMatch(keywordAlias, /\(class=/);
+  assert.match(keywordAlias, /\.annotate\(groups_count=models\.Count\("groups"\)\)/);
+  // A constant-only F-expression (no field) is dropped (it isn't a valid annotation and `5/0` would crash the cell).
+  assert.doesNotMatch(constExpr, /\.annotate\(/);
+  // A @property filter streams a multi-line cell; the annotation must still be applied (transport parity with the socket path).
+  assert.match(propFilterAnn, /_prop_ok/);
+  assert.match(propFilterAnn, /\.annotate\(gc=models\.Count\("groups"\)\)/);
+  // A lookup on an annotation alias filters AFTER .annotate() (HAVING), not as a WHERE clause before it.
+  const having = buildRowsOrm({ annotations: [{ alias: "gc", field: "groups", func: "count", kind: "aggregate" }], app: "auth", columns: cols, filters: [{ field: "gc", lookup: "gte", value: "2" }], limit: 50, model: "User", relations: rels });
+  assert.match(having, /\.annotate\(gc=models\.Count\("groups"\)\)\.filter\(\*\*\{"gc__gte": 2\}\)\.order_by/);
+  // count >= 1 must emit the int 1, not the bool True (numeric-first coercion for aggregate HAVING values).
+  const havingOne = buildRowsOrm({ annotations: [{ alias: "gc", field: "groups", func: "count", kind: "aggregate" }], app: "auth", columns: cols, filters: [{ field: "gc", lookup: "gte", value: "1" }], limit: 50, model: "User", relations: rels });
+  assert.match(havingOne, /\.filter\(\*\*\{"gc__gte": 1\}\)/);
+  assert.doesNotMatch(havingOne, /gc__gte": True/);
+  // A lookup on a window column is dropped — SQL can't filter a window function.
+  const winFilter = buildRowsOrm({ annotations: [{ alias: "rn", func: "row_number", kind: "window", orderBy: [{ field: "id" }], partitionBy: ["is_staff"] }], app: "auth", columns: cols, filters: [{ field: "rn", lookup: "lte", value: "1" }], limit: 50, model: "User" });
+  assert.match(winFilter, /\.annotate\(rn=models\.Window/);
+  assert.doesNotMatch(winFilter, /rn__lte/);
+  for (const cell of [relCount, win, expr, injected]) {
+    assert.doesNotMatch(cell, /\n/, "annotation row cells must stay single-line");
+    assert.match(cell, /\bUser\._base_manager\b/);
+    assert.doesNotMatch(cell, SUPPORT_LAYER_CELL);
+  }
+});
+
 test("keeps remote ORM metadata functional through pure Python inspection probe cells", async () => {
   const typed = [];
   const client = new BackendClient({ host: "127.0.0.1", port: 9, token: "t" }, undefined, async (payload) => {
@@ -371,6 +464,210 @@ test("filters and sorts via allowlists and counts on demand", { skip: !HAS_DJANG
   assert.equal(payload.sorted_offset, 2, "non-pk sort falls back to offset pagination");
   assert.equal(payload.injected_ok, true);
   assert.equal(payload.injected_rows, 5, "unknown field/lookup terms are ignored, never injected");
+});
+
+test("aggregates with allowlisted group-by/fields, computes global + exists, and rejects injection", { skip: !HAS_DJANGO }, () => {
+  const payload = runBackend([
+    "import json",
+    "from django.conf import settings",
+    "settings.configure(DEBUG=True, DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}, INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'], USE_TZ=True)",
+    "import django; django.setup()",
+    "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
+    "from django.contrib.auth.models import User; from django.db import connection, reset_queries",
+    "[User.objects.create(username=f'user{i}', password='x', is_staff=(i % 2 == 0)) for i in range(5)]",
+    "def call(**kw): return mod._run_request({}, 't', {'token': 't', 'kind': 'aggregate', 'app': 'auth', 'model': 'User', **kw}, set())",
+    "reset_queries()",
+    "grouped = call(groupBy=['is_staff'], aggregates=[{'func': 'count', 'field': '*', 'alias': 'n'}])",
+    "grouped_queries = len(connection.queries)",
+    "glob = call(aggregates=[{'func': 'count', 'field': '*', 'alias': 'total'}, {'func': 'exists', 'alias': 'any'}, {'func': 'max', 'field': 'id', 'alias': 'max_id'}])",
+    "glob_cols = [c['attname'] for c in glob['columns']]",
+    "filtered = call(filters=[{'field': 'is_staff', 'lookup': 'exact', 'value': True}], aggregates=[{'func': 'count', 'field': 'id', 'alias': 'staff'}])",
+    "distinct = call(aggregates=[{'func': 'count', 'field': 'is_staff', 'alias': 'kinds', 'distinct': True}])",
+    "exists_grouped = call(groupBy=['is_staff'], aggregates=[{'func': 'exists', 'alias': 'any'}])",
+    "bad = call(groupBy=['evil; DROP'], aggregates=[{'func': 'sum', 'field': 'nope); import os', 'alias': 'x'}])",
+    "empty = call(filters=[{'field': 'username', 'lookup': 'exact', 'value': 'nobody'}], aggregates=[{'func': 'exists', 'alias': 'any'}])",
+    "print(json.dumps({",
+    "  'grouped_ok': grouped['ok'], 'grouped_queries': grouped_queries, 'grouped_cols': [c['attname'] for c in grouped['columns']],",
+    "  'grouped_total': sum(r['n'] for r in grouped['rows']), 'grouped_rows': len(grouped['rows']), 'grouped_echo': grouped.get('groupBy'),",
+    "  'global_total': glob['rows'][0]['total'], 'global_any': glob['rows'][0]['any'], 'global_has_max': 'max_id' in glob['rows'][0], 'global_cols': glob_cols,",
+    "  'filtered_staff': filtered['rows'][0]['staff'], 'distinct_kinds': distinct['rows'][0]['kinds'],",
+    "  'exists_grouped_ok': exists_grouped['ok'],",
+    "  'bad_ok': bad['ok'], 'empty_any': empty['rows'][0]['any'],",
+    "}))"
+  ]);
+  assert.equal(payload.grouped_ok, true);
+  assert.equal(payload.grouped_queries, 1, "a grouped aggregate is a single GROUP BY query");
+  assert.deepEqual(payload.grouped_cols, ["is_staff", "n"]);
+  assert.equal(payload.grouped_total, 5, "group counts sum to the row total");
+  assert.equal(payload.grouped_rows, 2);
+  assert.deepEqual(payload.grouped_echo, ["is_staff"]);
+  assert.equal(payload.global_total, 5);
+  assert.equal(payload.global_any, true);
+  assert.equal(payload.global_has_max, true);
+  assert.deepEqual(payload.global_cols, ["total", "max_id", "any"], "global aggregate columns are non-exists first then exists (matches ORM-mode dict order)");
+  assert.equal(payload.filtered_staff, 3, "filters apply as the WHERE clause");
+  assert.equal(payload.distinct_kinds, 2, "count distinct collapses to the distinct value count");
+  assert.equal(payload.exists_grouped_ok, false, "exists alone in grouped mode leaves no aggregate to compute");
+  assert.equal(payload.bad_ok, false, "all-invalid group-by/aggregate fields are rejected, never injected");
+  assert.equal(payload.empty_any, false, "exists is false when no rows match the filter");
+});
+
+test("aggregates drill through FK relations (traversal group-by + Count over a relation path), rejecting bad segments", { skip: !HAS_DJANGO }, () => {
+  const payload = runBackend([
+    "import json",
+    "from django.conf import settings",
+    "settings.configure(DEBUG=True, DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}, INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'], USE_TZ=True)",
+    "import django; django.setup()",
+    "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
+    "from django.contrib.auth.models import Permission",
+    "def agg(**kw): return mod._run_request({}, 't', {'token': 't', 'kind': 'aggregate', 'app': 'auth', 'model': 'Permission', **kw}, set())",
+    "def rows(**kw): return mod._run_request({}, 't', {'token': 't', 'kind': 'rows', 'app': 'auth', 'model': 'Permission', **kw}, set())",
+    "grouped = agg(groupBy=['content_type__app_label'], aggregates=[{'func': 'count', 'field': '*', 'alias': 'n'}])",
+    "grouped_total = sum(r['n'] for r in grouped['rows'])",
+    "drill_rows = rows(annotations=[{'kind': 'aggregate', 'func': 'count', 'field': 'content_type__permission', 'alias': 'siblings', 'distinct': True}], limit=3)",
+    "drill_cols = [c['attname'] for c in drill_rows['columns'] if c.get('annotation')]",
+    "bad = agg(groupBy=['content_type__evil); import os'], aggregates=[{'func': 'sum', 'field': 'content_type__nope);drop', 'alias': 'x'}])",
+    "print(json.dumps({",
+    "  'grouped_ok': grouped['ok'], 'grouped_cols': [c['attname'] for c in grouped['columns']], 'grouped_total': grouped_total,",
+    "  'grouped_orm': '.values(' in grouped['orm'] and 'content_type__app_label' in grouped['orm'],",
+    "  'drill_ok': drill_rows['ok'], 'drill_cols': drill_cols, 'drill_has': bool(drill_rows['rows']) and 'siblings' in drill_rows['rows'][0],",
+    "  'bad_ok': bad['ok'], 'bad_rows': len(bad['rows']),",
+    "}))"
+  ]);
+  assert.equal(payload.grouped_ok, true);
+  assert.deepEqual(payload.grouped_cols, ["content_type__app_label", "n"], "group-by drills through the content_type FK to app_label");
+  assert.ok(payload.grouped_total > 0, "the grouped counts cover every permission");
+  assert.equal(payload.grouped_orm, true);
+  assert.equal(payload.drill_ok, true);
+  assert.deepEqual(payload.drill_cols, ["siblings"], "a per-row Count over a relation traversal becomes an annotation column");
+  assert.equal(payload.drill_has, true);
+  assert.equal(payload.bad_ok, false, "an unsafe traversal segment is rejected, never injected");
+});
+
+test("to-many aggregates count distinct (no JOIN fan-out) and reject Sum/Avg over a to-many relation", { skip: !HAS_DJANGO }, () => {
+  const payload = runBackend([
+    "import json",
+    "from django.conf import settings",
+    "settings.configure(DEBUG=True, DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}, INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'], USE_TZ=True)",
+    "import django; django.setup()",
+    "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
+    "from django.contrib.auth.models import User, Group, Permission",
+    "g1 = Group.objects.create(name='a'); g2 = Group.objects.create(name='b')",
+    "u = User.objects.create(username='u0', password='x'); u.groups.add(g1, g2)",
+    "u.user_permissions.add(*list(Permission.objects.all()[:3]))",
+    "def rows(**kw): return mod._run_request({}, 't', {'token': 't', 'kind': 'rows', 'app': 'auth', 'model': 'User', **kw}, set())",
+    "fanout = rows(annotations=[{'kind': 'aggregate', 'func': 'count', 'field': 'groups', 'alias': 'g'}, {'kind': 'aggregate', 'func': 'count', 'field': 'user_permissions', 'alias': 'p'}])",
+    "row0 = next((r for r in fanout['rows'] if r['username'] == 'u0'), {})",
+    "summ = rows(annotations=[{'kind': 'aggregate', 'func': 'sum', 'field': 'groups__id', 'alias': 'gsum'}])",
+    "summ_cols = [c['attname'] for c in summ['columns'] if c.get('annotation')]",
+    "print(json.dumps({",
+    "  'g': row0.get('g'), 'p': row0.get('p'), 'distinct_orm': 'distinct=True' in fanout['orm'], 'sum_dropped': 'gsum' not in summ_cols,",
+    "}))"
+  ]);
+  assert.equal(payload.g, 2, "Count over a to-many relation is distinct (not multiplied by the sibling to-many join)");
+  assert.equal(payload.p, 3);
+  assert.equal(payload.distinct_orm, true, "the to-many Count is forced distinct in the logged ORM");
+  assert.equal(payload.sum_dropped, true, "Sum over a to-many relation is rejected (JOIN fan-out can't be de-duplicated)");
+});
+
+test("aggregates Count over relations and reduces @property aggregates with a Python scan, merged by group", { skip: !HAS_DJANGO }, () => {
+  const payload = runBackend([
+    "import json",
+    "from django.conf import settings",
+    "settings.configure(DEBUG=True, DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}, INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'], USE_TZ=True)",
+    "import django; django.setup()",
+    "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
+    "from django.contrib.auth.models import User, Group",
+    "User.doubled = property(lambda self: self.id * 2)",
+    "ops = Group.objects.create(name='ops'); dev = Group.objects.create(name='dev')",
+    "users = [User.objects.create(username=f'user{i}', password='x', is_staff=(i % 2 == 0)) for i in range(5)]",
+    "users[0].groups.add(ops); users[2].groups.add(ops, dev)",
+    "def call(**kw): return mod._run_request({}, 't', {'token': 't', 'kind': 'aggregate', 'app': 'auth', 'model': 'User', **kw}, set())",
+    "rel = call(groupBy=['is_staff'], aggregates=[{'func': 'count', 'field': 'groups', 'alias': 'g', 'distinct': True}])",
+    "rel_map = {str(r['is_staff']).lower(): r['g'] for r in rel['rows']}",
+    "prop = call(aggregates=[{'func': 'avg', 'field': 'doubled', 'alias': 'avg_d'}, {'func': 'count', 'field': 'doubled', 'alias': 'cnt'}, {'func': 'max', 'field': 'doubled', 'alias': 'max_d'}])",
+    "mixed = call(groupBy=['is_staff'], aggregates=[{'func': 'sum', 'field': 'doubled', 'alias': 'sum_d'}, {'func': 'count', 'field': 'groups', 'alias': 'g', 'distinct': True}])",
+    "mixed_map = {str(r['is_staff']).lower(): [r['sum_d'], r['g']] for r in mixed['rows']}",
+    "prop_only = call(groupBy=['is_staff'], aggregates=[{'func': 'sum', 'field': 'doubled', 'alias': 'sum_d'}])",
+    "prop_only_order = [r['is_staff'] for r in prop_only['rows']]",
+    "User.mixedp = property(lambda self: self.id if self.id % 2 else 'x')",
+    "het = call(aggregates=[{'func': 'avg', 'field': 'mixedp', 'alias': 'avg_m'}, {'func': 'count', 'field': 'mixedp', 'alias': 'cnt_m'}, {'func': 'sum', 'field': 'mixedp', 'alias': 'sum_m'}])",
+    "print(json.dumps({",
+    "  'rel_ok': rel['ok'], 'rel_cols': [c['attname'] for c in rel['columns']], 'rel_map': rel_map,",
+    "  'prop_scan': prop.get('pythonScan'), 'avg_d': prop['rows'][0]['avg_d'], 'cnt': prop['rows'][0]['cnt'], 'max_d': prop['rows'][0]['max_d'],",
+    "  'mixed_scan': mixed.get('pythonScan'), 'mixed_cols': [c['attname'] for c in mixed['columns']], 'mixed_map': mixed_map,",
+    "  'prop_only_order': prop_only_order, 'het_avg': het['rows'][0]['avg_m'], 'het_cnt': het['rows'][0]['cnt_m'], 'het_sum': het['rows'][0]['sum_m'],",
+    "}))"
+  ]);
+  assert.equal(payload.rel_ok, true);
+  assert.deepEqual(payload.rel_cols, ["is_staff", "g"]);
+  assert.deepEqual(payload.rel_map, { false: 0, true: 2 }, "Count over a reverse/M2M relation counts distinct related rows per group");
+  assert.equal(payload.prop_scan, true, "a @property aggregate marks the response as a Python scan");
+  assert.equal(payload.avg_d, 6, "avg of doubled = id*2 over ids 1..5");
+  assert.equal(payload.cnt, 5);
+  assert.equal(payload.max_d, 10);
+  assert.equal(payload.mixed_scan, true);
+  assert.deepEqual(payload.mixed_cols, ["is_staff", "sum_d", "g"]);
+  assert.deepEqual(payload.mixed_map, { false: [12, 0], true: [18, 2] }, "DB relation-count and Python @property-sum merge into the same group rows");
+  assert.deepEqual(payload.prop_only_order, [false, true], "@property-only grouped rows are ordered by the group-by (matching the DB path), not iteration order");
+  assert.equal(payload.het_avg, 3, "mixed-type @property avg divides the sum by the summable count, not the total non-null count");
+  assert.equal(payload.het_cnt, 5);
+  assert.equal(payload.het_sum, 9);
+});
+
+test("adds per-row annotation columns to the rows view and forces offset pagination for window functions", { skip: !HAS_DJANGO }, () => {
+  const payload = runBackend([
+    "import json",
+    "from django.conf import settings",
+    "settings.configure(DEBUG=True, DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}, INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'], USE_TZ=True)",
+    "import django; django.setup()",
+    "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
+    "from django.contrib.auth.models import User, Group",
+    "ops = Group.objects.create(name='ops'); dev = Group.objects.create(name='dev')",
+    "users = [User.objects.create(username=f'user{i}', password='x', is_staff=(i % 2 == 0)) for i in range(4)]",
+    "users[0].groups.add(ops); users[1].groups.add(ops, dev)",
+    "def call(**kw): return mod._run_request({}, 't', {'token': 't', 'kind': 'rows', 'app': 'auth', 'model': 'User', **kw}, set())",
+    "rc = call(annotations=[{'kind': 'aggregate', 'func': 'count', 'field': 'groups', 'alias': 'gc', 'distinct': True}])",
+    "rc_cols = [c for c in rc['columns'] if c.get('annotation')]",
+    "rc_map = {r['username']: r['gc'] for r in rc['rows']}",
+    "win = call(limit=2, annotations=[{'kind': 'window', 'func': 'row_number', 'partitionBy': ['is_staff'], 'orderBy': [{'field': 'id'}], 'alias': 'rn'}])",
+    "win_map = {r['username']: r['rn'] for r in call(annotations=[{'kind': 'window', 'func': 'row_number', 'partitionBy': ['is_staff'], 'orderBy': [{'field': 'id'}], 'alias': 'rn'}])['rows']}",
+    "expr = call(annotations=[{'kind': 'expr', 'op': '+', 'left': 'id', 'right': 100, 'alias': 'idp'}])",
+    "inj = call(annotations=[{'kind': 'aggregate', 'func': 'sum', 'field': 'evil); import os', 'alias': 'x'}])",
+    "inj_cols = [c for c in inj['columns'] if c.get('annotation')]",
+    "kw = call(annotations=[{'kind': 'aggregate', 'func': 'count', 'field': 'groups', 'alias': 'class', 'distinct': True}])",
+    "kw_cols = [c['attname'] for c in kw['columns'] if c.get('annotation')]",
+    "having = call(annotations=[{'kind': 'aggregate', 'func': 'count', 'field': 'groups', 'alias': 'gc', 'distinct': True}], filters=[{'field': 'gc', 'lookup': 'gte', 'value': '2'}])",
+    "having_users = sorted(r['username'] for r in having['rows'])",
+    "having1 = call(annotations=[{'kind': 'aggregate', 'func': 'count', 'field': 'groups', 'alias': 'gc', 'distinct': True}], filters=[{'field': 'gc', 'lookup': 'gte', 'value': '1'}])",
+    "having1_users = sorted(r['username'] for r in having1['rows'])",
+    "having1_orm_int = 'gc__gte=1' in having1['orm']",
+    "scalar = call(annotations=[{'kind': 'window', 'func': 'rank', 'partitionBy': 123, 'orderBy': 456, 'alias': 'r'}])",
+    "print(json.dumps({",
+    "  'kw_ok': kw['ok'], 'kw_cols': kw_cols, 'scalar_ok': scalar['ok'], 'having_users': having_users,",
+    "  'having1_users': having1_users, 'having1_orm_int': having1_orm_int,",
+    "  'rc_ok': rc['ok'], 'rc_col': (rc_cols[0]['attname'] if rc_cols else None), 'rc_col_ann': (rc_cols[0].get('annotation') if rc_cols else None), 'rc_map': rc_map,",
+    "  'win_keyset': win['nextCursor'], 'win_offset': win['nextOffset'], 'win_map': win_map,",
+    "  'idp': {r['username']: r['idp'] for r in expr['rows']},",
+    "  'inj_ok': inj['ok'], 'inj_cols': len(inj_cols),",
+    "}))"
+  ]);
+  assert.equal(payload.rc_ok, true);
+  assert.equal(payload.rc_col, "gc", "the relation Count annotation appears as an extra column");
+  assert.equal(payload.rc_col_ann, true);
+  assert.deepEqual(payload.rc_map, { user0: 1, user1: 2, user2: 0, user3: 0 }, "Count('groups', distinct=True) is computed per row");
+  assert.equal(payload.win_keyset, null, "window functions force offset pagination (no keyset cursor)");
+  assert.equal(payload.win_offset, 2, "window functions paginate by offset");
+  assert.deepEqual(payload.win_map, { user0: 1, user1: 1, user2: 2, user3: 2 }, "RowNumber partitions by is_staff, ordered by id");
+  assert.deepEqual(payload.idp, { user0: 101, user1: 102, user2: 103, user3: 104 }, "F('id') + 100 per row");
+  assert.equal(payload.inj_ok, true);
+  assert.equal(payload.inj_cols, 0, "an unsafe annotation field is dropped, never injected");
+  assert.equal(payload.kw_ok, true);
+  assert.deepEqual(payload.kw_cols, ["groups_count"], "a Python-keyword alias is sanitized to a safe generated name");
+  assert.equal(payload.scalar_ok, true, "a malformed scalar partitionBy/orderBy is dropped, not crashed");
+  assert.deepEqual(payload.having_users, ["user1"], "a lookup on an annotation column filters rows as HAVING (only user1 has >=2 groups)");
+  assert.deepEqual(payload.having1_users, ["user0", "user1"], "count >= 1 filters as HAVING over the integer value");
+  assert.equal(payload.having1_orm_int, true, "the HAVING value 1 is logged as the int 1, not the bool True or string '1'");
 });
 
 test("filters across relation-traversal paths with the filterfields tree and rejects invalid segments", { skip: !HAS_DJANGO }, () => {

@@ -264,6 +264,8 @@ def _run_request(namespace, token, request, initial_names):
         return _browse_related(request)
     if request.get("kind") == "count":
         return _browse_count(request)
+    if request.get("kind") == "aggregate":
+        return _browse_aggregate(request)
     if request.get("kind") == "commit":
         return _browse_commit(request)
     if request.get("kind") == "lookup":
@@ -1287,8 +1289,12 @@ def _pty_tabulate_result(value):
         if isinstance(value, QuerySet) and value._iterable_class is ModelIterable and not value.query.values_select:
             model = value.model
             concrete_names = [column["attname"] for column in _browse_columns(model)]
-            rows = [_browse_serialize_row({attname: getattr(instance, attname, None) for attname in concrete_names}) for instance in itertools.islice(value, 50001)]
-            return {"app": model._meta.app_label, "columns": _browse_columns(model) + _browse_computed_columns(model), "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
+            # Surface per-row annotation columns (e.g. annotate(Count('books')) / Window(...)) that Django sets on the
+            # instance, skipping the internal djs_/__ aliases used for declared-@property filters.
+            ann_names = [name for name in getattr(value.query, "annotation_select", {}) or {} if isinstance(name, str) and not name.startswith("djs_") and not name.startswith("__")]
+            rows = [_browse_serialize_row(dict({attname: getattr(instance, attname, None) for attname in concrete_names}, **{name: getattr(instance, name, None) for name in ann_names})) for instance in itertools.islice(value, 50001)]
+            columns = _browse_columns(model) + [{"annotation": True, "attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "annotation"} for name in ann_names] + _browse_computed_columns(model)
+            return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
         if isinstance(value, Model):
             model = type(value)
             concrete_names = [column["attname"] for column in _browse_columns(model)]
@@ -1665,17 +1671,33 @@ def _browse_schema(request):
 
 
 def _browse_rows(request):
-    """Returns one bounded page of rows using concrete columns only (no JOIN, no N+1)."""
+    """Returns one bounded page of rows (concrete columns only — no JOIN, no N+1), plus any per-row annotation columns
+    (relation/field aggregates, window functions, F-expression arithmetic) defined by the column builder."""
     with _EXECUTION_LOCK:
         try:
             model = _browse_resolve_model(request)
-            columns = _browse_columns(model) + _browse_computed_columns(model)
             attnames = [column["attname"] for column in _browse_columns(model)]
             pk_attname = model._meta.pk.attname
+            annotations = _browse_annotation_specs(model, request.get("annotations"), set(attnames), pk_attname)
+            ann_exprs = {spec["alias"]: spec["expr"] for spec in annotations}
+            ann_aliases = [spec["alias"] for spec in annotations]
+            has_window = any(spec["window"] for spec in annotations)
+            columns = _browse_columns(model) + _browse_annotation_columns(annotations) + _browse_computed_columns(model)
             limit = _browse_limit(request.get("limit"), maximum=None)
             order = _browse_order(request.get("order"), attnames, pk_attname)
-            keyset_capable = order == [pk_attname]
-            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all().order_by(*order), model, request.get("filters"), attnames)
+            # A lookup on an annotation column filters AFTER .annotate() (HAVING for aggregates, WHERE on the expression for
+            # F-expr); window columns can't be filtered in SQL, so those filters are dropped. The rest stay WHERE filters.
+            having_aliases = {spec["alias"] for spec in annotations if not spec["window"]}
+            all_alias_set = {spec["alias"] for spec in annotations}
+            base_filters, having_filters = _browse_split_having(request.get("filters"), all_alias_set, having_aliases)
+            # Window functions are evaluated over the WHERE set, then LIMIT/OFFSET; a keyset cursor (pk__gt) would restart
+            # their frames on every page, so any window annotation forces offset pagination.
+            keyset_capable = order == [pk_attname] and not has_window
+            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all().order_by(*order), model, base_filters, attnames)
+            if ann_exprs:
+                queryset = queryset.annotate(**ann_exprs)
+            if having_filters:
+                queryset = queryset.filter(_browse_having_q(having_filters, having_aliases))
             cursor = request.get("cursor")
             offset = request.get("offset")
             base_offset = offset if isinstance(offset, int) and offset > 0 else 0
@@ -1686,14 +1708,14 @@ def _browse_rows(request):
             with _browse_capture() as ctx:
                 if property_terms:
                     objects = list(_browse_islice(_browse_python_filter_iter(queryset, property_terms), base_offset, base_offset + limit + 1))
-                    raw = [{attname: getattr(obj, attname, None) for attname in attnames} for obj in objects]
+                    raw = [dict({attname: getattr(obj, attname, None) for attname in attnames}, **{alias: getattr(obj, alias, None) for alias in ann_aliases}) for obj in objects]
                 else:
-                    raw = list(queryset.values(*attnames)[: limit + 1])
+                    raw = list(queryset.values(*attnames, *ann_aliases)[: limit + 1])
             has_more = len(raw) > limit
             raw = raw[:limit]
             next_cursor = raw[-1][pk_attname] if keyset_capable and has_more and raw else None
             next_offset = base_offset + limit if not keyset_capable and has_more else None
-            orm = _browse_orm_rows(model, order, request.get("filters"), attnames, pk_attname, keyset_capable, cursor, base_offset, limit)
+            orm = _browse_orm_rows(model, order, base_filters, attnames, pk_attname, keyset_capable, cursor, base_offset, limit, annotations, having_filters)
             return {"columns": columns, "hasMore": has_more, "nextCursor": _browse_jsonable(next_cursor), "nextOffset": next_offset, "ok": True, "orm": orm, "pk": pk_attname, "rows": [_browse_serialize_row(row) for row in raw], "sql": _browse_sql(ctx)}
         except Exception:
             return {"ok": False, "columns": [], "error": traceback.format_exc(), "rows": []}
@@ -2069,6 +2091,537 @@ def _browse_count(request):
             return {"error": traceback.format_exc(), "ok": False}
 
 
+_BROWSE_AGG_FUNCS = frozenset({"count", "sum", "avg", "min", "max", "exists"})
+_BROWSE_AGG_LABELS = {"count": "Count", "sum": "Sum", "avg": "Avg", "min": "Min", "max": "Max"}
+
+
+def _browse_aggregate(request):
+    """Computes grouped or global aggregates (Count/Sum/Avg/Min/Max/Exists) for the current filter set. DB-aggregatable
+    args (concrete columns and Count over a reverse/M2M relation) run as one GROUP BY/aggregate query; @property args are
+    streamed object-by-object and aggregated in Python (a full scan), then merged with the DB results by group. Group-by
+    and DB args are allowlisted against the live model graph (no injection); the result is a read-only grid."""
+    with _EXECUTION_LOCK:
+        try:
+            from django.db.models import Avg, Count, Max, Min, Sum
+
+            model = _browse_resolve_model(request)
+            attnames = [field.attname for field in model._meta.concrete_fields]
+            attset = set(attnames)
+            pk_attname = model._meta.pk.attname
+            group_by = _browse_agg_group_by(request.get("groupBy"), attset, pk_attname, model)
+            specs = _browse_agg_specs(model, request.get("aggregates"), attset, pk_attname, bool(group_by))
+            if not specs and not group_by:
+                return {"columns": [], "error": "Add at least one aggregate, or a group-by field.", "ok": False, "rows": []}
+            if not specs:
+                return {"columns": [], "error": "Add at least one aggregate to compute per group.", "ok": False, "rows": []}
+            db_specs = [spec for spec in specs if spec["kind"] == "db"]
+            exists_specs = [spec for spec in specs if spec["kind"] == "exists"]
+            py_specs = [spec for spec in specs if spec["kind"] == "py"]
+            # A lookup on an aggregate column filters the groups AFTER aggregation (HAVING) — only DB aggregates support it
+            # (a Python-@property aggregate can't be a SQL HAVING). Such filters are split out of the WHERE clause.
+            having_aliases = {spec["alias"] for spec in db_specs} if group_by else set()
+            base_filters, having_filters = _browse_split_having(request.get("filters"), {spec["alias"] for spec in specs}, having_aliases)
+            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all(), model, base_filters, attnames)
+            if property_terms:
+                return {"columns": [], "error": "Aggregation cannot combine with Python @property filters; remove them first.", "ok": False, "rows": []}
+            limit = _browse_limit(request.get("limit"), default=1000, maximum=None)
+            builders = {"count": Count, "sum": Sum, "avg": Avg, "min": Min, "max": Max}
+
+            def _expr(spec):
+                if spec["func"] == "count":
+                    return Count(spec["arg"], distinct=spec["distinct"])
+                return builders[spec["func"]](spec["arg"])
+
+            with _browse_capture() as ctx:
+                if group_by:
+                    by_group = {}
+                    order = []
+                    if db_specs:
+                        grouped_qs = queryset.values(*group_by).annotate(**{spec["alias"]: _expr(spec) for spec in db_specs})
+                        if having_filters:
+                            grouped_qs = grouped_qs.filter(_browse_having_q(having_filters, having_aliases))
+                    else:
+                        # No DB aggregate to define the GROUP BY — seed the ordered, bounded group set from a cheap distinct
+                        # query so a @property-only grouped aggregate matches the DB path's ordering and limit instead of
+                        # materializing every group in iteration order.
+                        grouped_qs = queryset.values(*group_by).distinct()
+                    for row in grouped_qs.order_by(*group_by)[: limit + 1]:
+                        key = tuple(row.get(name) for name in group_by)
+                        order.append(key)
+                        by_group[key] = dict(row)
+                    if py_specs:
+                        _browse_agg_python_grouped(queryset, group_by, py_specs, by_group, order)
+                    has_more = len(order) > limit
+                    order = order[:limit]
+                    names = list(group_by) + [spec["alias"] for spec in specs]
+                    rows = [_browse_serialize_row({name: by_group.get(key, {}).get(name) for name in names}) for key in order]
+                else:
+                    result = {}
+                    aggregate = {spec["alias"]: _expr(spec) for spec in db_specs}
+                    if aggregate:
+                        result.update(queryset.aggregate(**aggregate))
+                    for spec in exists_specs:
+                        result[spec["alias"]] = queryset.exists()
+                    if py_specs:
+                        result.update(_browse_agg_python_global(queryset, py_specs))
+                    # Non-exists first, then exists, matching the ORM-mode cell's dict order so both transports agree.
+                    names = [spec["alias"] for spec in specs if spec["func"] != "exists"] + [spec["alias"] for spec in specs if spec["func"] == "exists"]
+                    rows = [_browse_serialize_row({name: result.get(name) for name in names})]
+                    has_more = False
+            columns = [_browse_agg_column(name, name in group_by) for name in names]
+            payload = {"columns": columns, "editable": False, "groupBy": group_by, "hasMore": has_more, "ok": True, "orm": _browse_orm_aggregate(model, base_filters, attset, group_by, specs, having_filters), "pk": None, "relations": [], "rows": rows, "sql": _browse_sql(ctx)}
+            if py_specs:
+                payload["pythonScan"] = True
+            return payload
+        except Exception:
+            return {"columns": [], "error": traceback.format_exc(), "ok": False, "rows": []}
+
+
+def _browse_agg_group_by(group_by, attset, pk_attname, model):
+    """Returns the safe, deduped group-by field names (concrete columns, `pk`→attname, or an FK-drill-in traversal path that
+    ends on a concrete field), bounded to 8."""
+    result = []
+    if isinstance(group_by, list):
+        for item in group_by:
+            name = item.get("field") if isinstance(item, dict) else item
+            if not isinstance(name, str):
+                continue
+            resolved = pk_attname if name == "pk" else name
+            if resolved in result:
+                continue
+            if resolved in attset:
+                result.append(resolved)
+            elif "__" in resolved:
+                # Group by a related concrete field (author__country); a path ending on a relation can't be a GROUP BY key.
+                path = _browse_resolve_filter_path(model, resolved)
+                if path is not None and not path[2]:
+                    result.append(resolved)
+            if len(result) >= 8:
+                break
+    return result
+
+
+def _browse_agg_specs(model, aggregates, attset, pk_attname, grouped):
+    """Parses aggregate terms into safe {func, arg, alias, distinct, kind} specs. `kind` is `db` (concrete column, or
+    Count over a reverse/M2M relation query name), `py` (a @property computed object-by-object), or `exists` (global-only).
+    Functions/fields are allowlisted, aliases sanitized to unique identifiers, and `exists` is dropped when grouping."""
+    specs = []
+    used = set()
+    if not isinstance(aggregates, list):
+        return specs
+    relation_names = _browse_agg_relation_names(model)
+    for term in aggregates:
+        if not isinstance(term, dict):
+            continue
+        func = term.get("func")
+        if func not in _BROWSE_AGG_FUNCS:
+            continue
+        kind = "db"
+        to_many = False
+        if func == "exists":
+            if grouped:
+                continue
+            arg, kind = pk_attname, "exists"
+        elif func == "count":
+            raw = term.get("field")
+            if raw in (None, "", "*", "pk"):
+                arg = pk_attname
+            elif raw in attset:
+                arg = raw
+            elif raw in relation_names:
+                arg, to_many = raw, _browse_path_is_to_many(model, raw)
+            elif isinstance(raw, str) and "__" in raw and _browse_resolve_filter_path(model, raw) is not None:
+                # FK drill-in: count related rows / a related field across an allowlisted traversal path.
+                arg, to_many = raw, _browse_path_is_to_many(model, raw)
+            elif isinstance(raw, str) and raw not in attset and raw.isidentifier() and _pty_is_computed_field(model, raw):
+                arg, kind = raw, "py"
+            else:
+                continue
+        else:
+            raw = term.get("field")
+            arg = pk_attname if raw == "pk" else raw
+            if isinstance(arg, str) and arg in attset:
+                pass
+            elif isinstance(arg, str) and "__" in arg:
+                # FK drill-in for Sum/Avg/Min/Max: must end on a concrete field AND not cross a to-many relation — a join
+                # fan-out would silently inflate the sum/average and distinct can't fix it, so reject those paths.
+                resolved = _browse_resolve_filter_path(model, arg)
+                if resolved is None or resolved[2] or resolved[1]:
+                    continue
+            elif isinstance(arg, str) and arg not in attset and arg not in relation_names and arg.isidentifier() and _pty_is_computed_field(model, arg):
+                kind = "py"
+            else:
+                # Relations are only countable (Sum/Avg/… over a bare relation is invalid); unknown args are dropped.
+                continue
+        alias = _browse_agg_alias(term.get("alias"), func, arg, used)
+        used.add(alias)
+        # Count over a to-many relation/traversal must be distinct, else a sibling to-many join multiplies the tally.
+        distinct = func == "count" and (bool(term.get("distinct")) or to_many)
+        specs.append({"alias": alias, "arg": arg, "distinct": distinct, "func": func, "kind": kind})
+        if len(specs) >= 20:
+            break
+    return specs
+
+
+def _browse_path_is_to_many(model, name):
+    """Returns whether a relation name or traversal path crosses a to-many (reverse-FK / M2M) relation. Such an aggregate
+    must count distinct (a sibling to-many join would multiply the tally), and Sum/Avg over it is unreliable (fan-out)."""
+    if not isinstance(name, str):
+        return False
+    if "__" in name:
+        resolved = _browse_resolve_filter_path(model, name)
+        return bool(resolved and resolved[1])
+    field = _browse_match_segment(model, name)
+    return bool(field is not None and (getattr(field, "one_to_many", False) or getattr(field, "many_to_many", False)))
+
+
+def _browse_agg_relation_names(model):
+    """Returns the set of filter/aggregate query names for the model's relations (reverse uses related_query_name)."""
+    names = set()
+    for field in model._meta.get_fields():
+        if getattr(field, "is_relation", False) and getattr(field, "related_model", None) is not None:
+            name = _browse_relation_query_name(field)
+            if name:
+                names.add(name)
+    return names
+
+
+def _browse_agg_python_global(queryset, py_specs):
+    """Streams the filtered objects once and reduces each @property aggregate in Python (a full scan, bounded memory)."""
+    accumulators = {spec["alias"]: _browse_agg_py_init() for spec in py_specs}
+    for obj in queryset.iterator(chunk_size=_PROPERTY_FILTER_CHUNK_SIZE):
+        for spec in py_specs:
+            _browse_agg_py_update(accumulators[spec["alias"]], _pty_safe_getattr(obj, spec["arg"]))
+    return {spec["alias"]: _browse_agg_py_final(accumulators[spec["alias"]], spec["func"]) for spec in py_specs}
+
+
+def _browse_agg_python_grouped(queryset, group_by, py_specs, by_group, order):
+    """Streams the filtered objects once, buckets them by group key, and reduces each @property aggregate per group.
+    When `order` is already populated (a DB pass ran), only those groups are accumulated and the values merged in;
+    otherwise the buckets define the groups and their first-seen order."""
+    wanted = set(order) if order else None
+    accumulators = {}
+    group_values = {}
+    for obj in queryset.iterator(chunk_size=_PROPERTY_FILTER_CHUNK_SIZE):
+        key = tuple(_pty_safe_getattr(obj, name) for name in group_by)
+        if wanted is not None and key not in wanted:
+            continue
+        bucket = accumulators.get(key)
+        if bucket is None:
+            bucket = {spec["alias"]: _browse_agg_py_init() for spec in py_specs}
+            accumulators[key] = bucket
+            if wanted is None:
+                group_values[key] = {name: _pty_safe_getattr(obj, name) for name in group_by}
+        for spec in py_specs:
+            _browse_agg_py_update(bucket[spec["alias"]], _pty_safe_getattr(obj, spec["arg"]))
+    for key, bucket in accumulators.items():
+        if key not in by_group:
+            by_group[key] = dict(group_values.get(key, {}))
+            order.append(key)
+        by_group[key].update({spec["alias"]: _browse_agg_py_final(bucket[spec["alias"]], spec["func"]) for spec in py_specs})
+
+
+def _browse_agg_py_init():
+    """Returns a fresh streaming accumulator (count/summable-count/sum/min/max state) for one @property aggregate."""
+    return {"n": 0, "sum": 0, "sum_n": 0, "min": None, "max": None}
+
+
+def _browse_agg_py_update(accumulator, value):
+    """Folds one @property value into a streaming accumulator (None is ignored, like SQL aggregates). `n` counts every
+    non-None value (for Count); `sum`/`sum_n` track only the values that are actually addable, so a mixed-type property
+    averages over its numeric subset rather than dividing a partial sum by the full count."""
+    if value is None:
+        return
+    accumulator["n"] += 1
+    try:
+        accumulator["sum"] += value
+        accumulator["sum_n"] += 1
+    except Exception:
+        pass
+    if accumulator["min"] is None or _browse_agg_lt(value, accumulator["min"]):
+        accumulator["min"] = value
+    if accumulator["max"] is None or _browse_agg_lt(accumulator["max"], value):
+        accumulator["max"] = value
+
+
+def _browse_agg_py_final(accumulator, func):
+    """Finalizes a streaming accumulator into the aggregate value (None on empty, matching SQL aggregate semantics)."""
+    if func == "count":
+        return accumulator["n"]
+    if func == "sum":
+        return accumulator["sum"] if accumulator["sum_n"] else None
+    if func == "avg":
+        return accumulator["sum"] / accumulator["sum_n"] if accumulator["sum_n"] else None
+    if func == "min":
+        return accumulator["min"]
+    if func == "max":
+        return accumulator["max"]
+    return None
+
+
+def _browse_agg_lt(left, right):
+    """Returns left < right, or False when the values aren't orderable together."""
+    try:
+        return left < right
+    except Exception:
+        return False
+
+
+def _browse_agg_safe_alias(name):
+    """Returns whether a string is a safe column alias: an identifier, not a Python keyword, not an internal djs_/__ alias."""
+    return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name) and not name.startswith("djs_") and not name.startswith("__")
+
+
+def _browse_agg_alias(alias, func, arg, used):
+    """Returns a unique safe identifier alias for one aggregate/annotation column (used as an ORM keyword argument)."""
+    candidate = alias if _browse_agg_safe_alias(alias) else ("exists" if func == "exists" else f"{arg}_{func}")
+    if not _browse_agg_safe_alias(candidate):
+        candidate = f"agg_{func}"
+    base = candidate
+    suffix = 2
+    while candidate in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _browse_agg_column(name, is_group):
+    """Returns a read-only grid column descriptor for one group-by or aggregate result column."""
+    return {"attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "group" if is_group else "agg"}
+
+
+_BROWSE_WINDOW_RANK_FUNCS = frozenset({"rank", "dense_rank", "row_number"})
+_BROWSE_WINDOW_AGG_FUNCS = frozenset({"sum", "avg", "min", "max", "count"})
+_BROWSE_EXPR_OPS = frozenset({"+", "-", "*", "/"})
+
+
+def _browse_annotation_specs(model, annotations, attset, pk_attname):
+    """Parses per-row annotation specs (aggregate / window / F-expr) into safe {alias, expr, window, log} entries."""
+    if not isinstance(annotations, list):
+        return []
+    relation_names = _browse_agg_relation_names(model)
+    specs = []
+    used = set()
+    for item in annotations:
+        if not isinstance(item, dict):
+            continue
+        built = _browse_build_annotation(model, item, attset, pk_attname, relation_names)
+        if built is None:
+            continue
+        field = item.get("field")
+        label = "expr" if item.get("kind") == "expr" else (item.get("func") or item.get("kind") or "col")
+        arg = field if isinstance(field, str) and field and field != "*" else "col"
+        alias = _browse_agg_alias(item.get("alias"), label, arg, used)
+        used.add(alias)
+        specs.append({"alias": alias, "expr": built["expr"], "log": built["log"], "window": built["window"]})
+        if len(specs) >= 12:
+            break
+    return specs
+
+
+def _browse_build_annotation(model, item, attset, pk_attname, relation_names):
+    """Builds one safe per-row annotation expression (and a readable log string) from a column-builder spec, or None.
+    Field/relation/order/partition identifiers are allowlisted against the live model graph (no injection)."""
+    from django.db.models import Avg, Count, F, Max, Min, Sum, Window
+    from django.db.models.functions import DenseRank, Rank, RowNumber
+
+    aggregates = {"count": Count, "sum": Sum, "avg": Avg, "min": Min, "max": Max}
+    kind = item.get("kind")
+    if kind == "aggregate":
+        func = item.get("func")
+        if func not in aggregates:
+            return None
+        raw = item.get("field")
+        if func == "count":
+            if raw in (None, "", "*", "pk"):
+                arg = pk_attname
+            elif raw in attset:
+                arg = raw
+            elif raw in relation_names or (isinstance(raw, str) and "__" in raw and _browse_resolve_filter_path(model, raw) is not None):
+                arg = raw
+            else:
+                return None
+            # Count over a to-many relation/traversal must be distinct (a sibling to-many join would multiply it).
+            distinct = bool(item.get("distinct")) or _browse_path_is_to_many(model, arg)
+            return {"expr": Count(arg, distinct=distinct), "label": func, "log": f"Count({arg!r}{', distinct=True' if distinct else ''})", "window": False}
+        arg = pk_attname if raw == "pk" else raw
+        if not isinstance(arg, str):
+            return None
+        if arg not in attset:
+            resolved = _browse_resolve_filter_path(model, arg)
+            # Reject a path that is invalid, ends on a relation, or crosses a to-many relation (Sum/Avg fan-out can't be deduped).
+            if resolved is None or resolved[2] or resolved[1]:
+                return None
+        return {"expr": aggregates[func](arg), "label": func, "log": f"{_BROWSE_AGG_LABELS[func]}({arg!r})", "window": False}
+    if kind == "window":
+        func = item.get("func")
+        raw_partition = item.get("partitionBy")
+        partition = [name for name in (raw_partition if isinstance(raw_partition, (list, tuple)) else []) if isinstance(name, str) and name in attset]
+        order_terms, order_log = _browse_window_order(item.get("orderBy"), attset)
+        if func in _BROWSE_WINDOW_RANK_FUNCS:
+            if not order_terms:
+                return None  # ranking windows require an ORDER BY
+            builder, inner_log = {"rank": (Rank, "Rank()"), "dense_rank": (DenseRank, "DenseRank()"), "row_number": (RowNumber, "RowNumber()")}[func]
+            inner = builder()
+        elif func in _BROWSE_WINDOW_AGG_FUNCS:
+            field = item.get("field")
+            arg = pk_attname if field in (None, "", "*", "pk") and func == "count" else field
+            if not (isinstance(arg, str) and arg in attset):
+                return None
+            inner = aggregates[func](F(arg))
+            inner_log = f"{_BROWSE_AGG_LABELS[func]}(F({arg!r}))"
+        else:
+            return None
+        expr = Window(expression=inner, partition_by=[F(name) for name in partition] or None, order_by=order_terms or None)
+        parts = [inner_log]
+        if partition:
+            parts.append("partition_by=[%s]" % ", ".join("F(%r)" % name for name in partition))
+        if order_terms:
+            parts.append("order_by=[%s]" % order_log)
+        return {"expr": expr, "label": "win_" + func, "log": "Window(%s)" % ", ".join(parts), "window": True}
+    if kind == "expr":
+        op = item.get("op")
+        if op not in _BROWSE_EXPR_OPS:
+            return None
+        left, left_log, left_field = _browse_expr_operand(item.get("left"), attset)
+        right, right_log, right_field = _browse_expr_operand(item.get("right"), attset)
+        # Require at least one field reference: a constant-only expression isn't a valid annotation (and `5/0` would crash).
+        if left is None or right is None or not (left_field or right_field):
+            return None
+        try:
+            expr = _browse_expr_combine(left, right, op)
+        except Exception:
+            return None
+        return {"expr": expr, "label": "expr", "log": f"{left_log} {op} {right_log}", "window": False}
+    return None
+
+
+def _browse_window_order(order_by, attset):
+    """Returns (order_by F-expression list, log text) for a window's ORDER BY, restricted to concrete fields."""
+    from django.db.models import F
+
+    terms, logs = [], []
+    for item in (order_by if isinstance(order_by, (list, tuple)) else []):
+        name = item.get("field") if isinstance(item, dict) else item
+        if not isinstance(name, str) or name not in attset:
+            continue
+        descending = isinstance(item, dict) and bool(item.get("desc"))
+        terms.append(F(name).desc() if descending else F(name).asc())
+        logs.append("F(%r).desc()" % name if descending else "F(%r)" % name)
+    return terms, ", ".join(logs)
+
+
+def _browse_expr_operand(raw, attset):
+    """Returns (operand, log, is_field) for one F-expression side: a concrete-field reference or a numeric literal; (None, '', False) if invalid."""
+    from django.db.models import F
+
+    if isinstance(raw, bool):
+        return None, "", False
+    if isinstance(raw, (int, float)):
+        return raw, repr(raw), False
+    if isinstance(raw, str):
+        if raw in attset:
+            return F(raw), "F(%r)" % raw, True
+        text = raw.strip()
+        try:
+            number = int(text) if text.lstrip("-").isdigit() else float(text)
+        except (ValueError, TypeError):
+            return None, "", False
+        return number, repr(number), False
+    return None, "", False
+
+
+def _browse_expr_combine(left, right, op):
+    """Combines two F-expression/numeric operands with an arithmetic operator into a Django expression."""
+    if op == "+":
+        return left + right
+    if op == "-":
+        return left - right
+    if op == "*":
+        return left * right
+    return left / right
+
+
+def _browse_annotation_columns(specs):
+    """Returns read-only grid column descriptors for per-row annotation columns (window vs plain annotation)."""
+    return [{"annotation": True, "attname": spec["alias"], "editable": False, "name": spec["alias"], "null": True, "pk": False, "type": "window" if spec["window"] else "annotation"} for spec in specs]
+
+
+def _browse_split_having(filters, all_aliases, having_aliases):
+    """Splits filters into (base WHERE filters, post-annotate HAVING filters). A filter on any annotation alias leaves the
+    base set; only filters on a HAVING-eligible alias (non-window) become HAVING filters — window-alias filters are dropped."""
+    base, having = [], []
+    for term in filters or []:
+        field = term.get("field") if isinstance(term, dict) else None
+        if field in all_aliases:
+            if field in having_aliases:
+                having.append(term)
+        else:
+            base.append(term)
+    return base, having
+
+
+def _browse_having_q(filters, having_aliases):
+    """Builds a Q for filters on annotation aliases, applied after .annotate() (HAVING / WHERE-on-expression). The alias is
+    an allowlisted identifier, the lookup is allowlisted, and the value is coerced/ORM-parameterized — injection-proof."""
+    from django.db.models import Q
+
+    query = Q()
+    for term in filters or []:
+        if not isinstance(term, dict):
+            continue
+        field = term.get("field")
+        lookup = term.get("lookup") or "exact"
+        if field not in having_aliases or lookup not in _BROWSE_LOOKUPS or not (isinstance(field, str) and field.isidentifier()):
+            continue
+        value = _browse_coerce_filter_value(lookup, term.get("value"), numeric=True)
+        clause = Q(**{f"{field}__{lookup}": value})
+        query &= ~clause if term.get("negate") else clause
+    return query
+
+
+def _browse_orm_aggregate(model, filters, attnames, group_by, specs, having_filters=None):
+    """Builds a readable Django ORM expression mirroring the executed aggregate query (for the command log)."""
+    includes, excludes, annotations, distinct = _browse_orm_clauses(model, filters, attnames)
+    lines = [f"{model.__name__}._base_manager"]
+    if annotations:
+        lines.append(f"    .annotate({', '.join(annotations)})")
+    if includes:
+        lines.append(f"    .filter({', '.join(includes)})")
+    if excludes:
+        lines.append(f"    .exclude({', '.join(excludes)})")
+    if distinct:
+        lines.append("    .distinct()")
+    db_specs = [spec for spec in specs if spec["kind"] == "db"]
+    if group_by:
+        lines.append(f"    .values({_orm_args(group_by)})")
+        if db_specs:
+            lines.append(f"    .annotate({', '.join(_browse_agg_expr_text(spec) for spec in db_specs)})")
+        for term in having_filters or []:
+            if isinstance(term, dict) and isinstance(term.get("field"), str):
+                having_lookup = term.get("lookup") or "exact"
+                having_key = term["field"] if having_lookup == "exact" else f"{term['field']}__{having_lookup}"
+                lines.append(f"    .{'exclude' if term.get('negate') else 'filter'}({having_key}={_browse_coerce_filter_value(having_lookup, term.get('value'), numeric=True)!r})  # HAVING")
+        lines.append(f"    .order_by({_orm_args(group_by)})")
+    else:
+        if db_specs:
+            lines.append(f"    .aggregate({', '.join(_browse_agg_expr_text(spec) for spec in db_specs)})")
+        for spec in specs:
+            if spec["kind"] == "exists":
+                lines.append(f"    # {spec['alias']}: .exists()")
+    for spec in specs:
+        if spec["kind"] == "py":
+            lines.append(f"    # {spec['alias']}: Python @property {spec['arg']!r} ({spec['func']})")
+    return "\n".join(lines)
+
+
+def _browse_agg_expr_text(spec):
+    """Returns the readable `alias=Func('field')` text for one aggregate spec."""
+    label = _BROWSE_AGG_LABELS.get(spec["func"], spec["func"])
+    distinct = ", distinct=True" if spec.get("distinct") else ""
+    return f"{spec['alias']}={label}({spec['arg']!r}{distinct})"
+
+
 def _browse_capture():
     """Returns a context manager that records the SQL executed inside it (even when DEBUG is off)."""
     from django.db import connection
@@ -2110,21 +2663,31 @@ def _browse_orm_clauses(model, filters, attnames):
     return includes, excludes, annotations, distinct
 
 
-def _browse_orm_rows(model, order, filters, attnames, pk_attname, keyset_capable, cursor, base_offset, limit):
-    """Builds a readable Django ORM expression mirroring the executed rows query."""
-    includes, excludes, annotations, distinct = _browse_orm_clauses(model, filters, set(attnames))
+def _browse_orm_rows(model, order, filters, attnames, pk_attname, keyset_capable, cursor, base_offset, limit, annotations=None, having_filters=None):
+    """Builds a readable Django ORM expression mirroring the executed rows query (including per-row annotation columns and any HAVING lookup on them)."""
+    includes, excludes, declared, distinct = _browse_orm_clauses(model, filters, set(attnames))
+    annotations = annotations or []
+    column_annotations = [f"{spec['alias']}={spec['log']}" for spec in annotations]
     lines = [f"{model.__name__}._base_manager", f"    .order_by({_orm_args(order)})"]
-    if annotations:
-        lines.append(f"    .annotate({', '.join(annotations)})")
+    # Match execution order: declared-@property annotations (so the WHERE can use them) → base WHERE → column annotations → HAVING.
+    if declared:
+        lines.append(f"    .annotate({', '.join(declared)})")
     if includes:
         lines.append(f"    .filter({', '.join(includes)})")
     if excludes:
         lines.append(f"    .exclude({', '.join(excludes)})")
+    if column_annotations:
+        lines.append(f"    .annotate({', '.join(column_annotations)})")
+    for term in having_filters or []:
+        if isinstance(term, dict) and isinstance(term.get("field"), str):
+            having_lookup = term.get("lookup") or "exact"
+            having_key = term["field"] if having_lookup == "exact" else f"{term['field']}__{having_lookup}"
+            lines.append(f"    .{'exclude' if term.get('negate') else 'filter'}({having_key}={_browse_coerce_filter_value(having_lookup, term.get('value'), numeric=True)!r})")
     if distinct:
         lines.append("    .distinct()")
     if keyset_capable and cursor is not None:
         lines.append(f"    .filter({pk_attname}__gt={cursor!r})")
-    lines.append(f"    .values({_orm_args(attnames)})")
+    lines.append(f"    .values({_orm_args(attnames + [spec['alias'] for spec in annotations])})")
     end = limit + 1
     lines.append(f"    [{base_offset}:{base_offset + end}]" if (not keyset_capable and base_offset) else f"    [:{end}]")
     return "\n".join(lines)
@@ -2394,8 +2957,13 @@ def _browse_tabulate_items(items, limit):
     if items and all(isinstance(item, Model) and type(item) is type(items[0]) for item in items):
         model = type(items[0])
         columns = _browse_columns(model)
-        rows = [{column["attname"]: _browse_cell(getattr(item, column["attname"], None)) for column in columns} for item in items]
-        return {"app": model._meta.app_label, "columns": columns + _browse_computed_columns(model), "editable": True, "hasMore": has_more, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
+        concrete = {column["attname"] for column in columns}
+        # Surface per-row annotation values Django stored on the instance (e.g. an annotate() over a @property-filtered
+        # stream) — they live in __dict__ as non-underscore keys outside the concrete columns.
+        ann_names = [name for name in vars(items[0]) if isinstance(name, str) and not name.startswith("_") and name not in concrete]
+        rows = [_browse_serialize_row(dict({column["attname"]: getattr(item, column["attname"], None) for column in columns}, **{name: getattr(item, name, None) for name in ann_names})) for item in items]
+        ann_cols = [{"annotation": True, "attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "annotation"} for name in ann_names]
+        return {"app": model._meta.app_label, "columns": columns + ann_cols + _browse_computed_columns(model), "editable": True, "hasMore": has_more, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
     if items and all(isinstance(item, dict) for item in items):
         names = list(dict.fromkeys(key for item in items for key in item))
         return {"columns": [{"attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": ""} for name in names], "editable": False, "hasMore": has_more, "rows": [_browse_serialize_row(item) for item in items]}
@@ -2578,20 +3146,24 @@ def _browse_islice(iterable, start, stop):
     return itertools.islice(iterable, start, stop)
 
 
-def _browse_coerce_filter_value(lookup, value, field=None):
-    """Coerces one filter value for lookups and field types that need a specific Python shape."""
+def _browse_coerce_filter_value(lookup, value, field=None, numeric=False):
+    """Coerces one filter value for lookups and field types that need a specific Python shape. `numeric` (used for
+    aggregate/annotation HAVING values) coerces a digit string to int/float BEFORE the boolean-string check, so a count
+    comparison like `>= 1` stays the int 1 rather than the bool True."""
     if lookup == "isnull":
         if isinstance(value, str):
             return value.strip().lower() not in ("", "false", "0", "no")
         return bool(value)
     if lookup in ("in", "range"):
         if isinstance(value, str):
-            parts = [part.strip() for part in value.split(",") if part.strip() != ""]
+            parts = [_browse_coerce_filter_value("exact", part.strip(), field, numeric) for part in value.split(",") if part.strip() != ""]
         elif isinstance(value, (list, tuple)):
             parts = list(value)
         else:
             parts = [value]
         return parts[:2] if lookup == "range" else parts
+    if numeric and isinstance(value, str) and value.strip().replace(".", "", 1).lstrip("-").isdigit():
+        return float(value.strip()) if "." in value.strip() else int(value.strip())
     if isinstance(value, str) and field is not None and field.get_internal_type() == "BooleanField":
         return value.strip().lower() in ("true", "1", "t", "yes", "on")
     if isinstance(value, str) and field is None and value.strip().lower() in ("true", "false", "1", "0", "t", "yes", "no", "on", "off"):

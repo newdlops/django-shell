@@ -3,13 +3,14 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import type { BackendTransport, BackendTransportMode } from "./backendClient";
-import type { BackendCommitResult, BackendFilterFieldTree, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRelation, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import type { BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRelation, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { modelBrowserHtml } from "./modelBrowserHtml";
 import { DiagnosticLogger } from "./diagnostics";
 
 /** Backend access used by the catalog tree and the data browser panels. */
 export interface ModelDataSource {
   listModels(): Promise<BackendModelList>;
+  modelAggregate(query: ModelAggregateQuery): Promise<BackendModelAggregate>;
   modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult>;
   modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed>;
   modelCount(query: ModelCountQuery): Promise<BackendModelCount>;
@@ -34,12 +35,15 @@ interface ModelTarget {
 }
 
 interface IncomingMessage {
+  aggregates?: ModelAggregateTerm[];
+  annotations?: ModelAnnotationSpec[];
   app?: string;
   changes?: ModelCommitChange[];
   columns?: BackendModelColumn[];
   field?: string;
   filterPk?: unknown;
   filters?: BackendModelFilter[];
+  groupBy?: string[];
   mode?: BackendTransportMode;
   model?: string;
   order?: BackendModelOrder[];
@@ -125,6 +129,7 @@ class ModelBrowserPanel {
   private panelReady = false;
   private disposed = false;
   private filters: BackendModelFilter[] = [];
+  private annotations: ModelAnnotationSpec[] = [];
   private order: BackendModelOrder[] = [];
   private nextCursor: unknown;
   private nextOffset: number | null = null;
@@ -219,7 +224,7 @@ class ModelBrowserPanel {
 
   /** Loads one page of rows, resetting the grid or appending to it. */
   private async loadPage(reset: boolean): Promise<void> {
-    const query: ModelRowsQuery = { app: this.target.app, columns: this.columns, filters: this.filters, limit: this.pageSize, model: this.target.model, order: this.order, relations: this.relations };
+    const query: ModelRowsQuery = { annotations: this.annotations, app: this.target.app, columns: this.columns, filters: this.filters, limit: this.pageSize, model: this.target.model, order: this.order, relations: this.relations };
     if (!reset && this.nextCursor !== undefined && this.nextCursor !== null) {
       query.cursor = this.nextCursor;
     } else if (!reset && this.nextOffset !== null) {
@@ -261,9 +266,12 @@ class ModelBrowserPanel {
     } else if (message.type === "applyQuery") {
       this.filters = Array.isArray(message.filters) ? message.filters : [];
       this.order = Array.isArray(message.order) ? message.order : [];
+      this.annotations = Array.isArray(message.annotations) ? message.annotations : [];
       await this.loadPage(true);
     } else if (message.type === "requestCount") {
       await this.requestCount();
+    } else if (message.type === "aggregate") {
+      await this.requestAggregate(message);
     } else if (message.type === "loadComputed" && typeof message.field === "string") {
       await this.loadComputed(message.field);
     } else if (message.type === "commitEdits") {
@@ -307,6 +315,26 @@ class ModelBrowserPanel {
   private async requestCount(): Promise<void> {
     const result = await this.source.modelCount({ app: this.target.app, columns: this.columns, filters: this.filters, model: this.target.model, relations: this.relations });
     this.post({ count: result.count, error: result.error, ok: result.ok, orm: result.orm, sql: result.sql, type: "count" });
+  }
+
+  /** Computes grouped/global aggregates for the current filter set and returns the result grid to the webview. */
+  private async requestAggregate(message: IncomingMessage): Promise<void> {
+    const filters = Array.isArray(message.filters) ? message.filters : this.filters;
+    this.filters = filters;
+    const result = await this.source.modelAggregate({
+      aggregates: Array.isArray(message.aggregates) ? message.aggregates : [],
+      app: this.target.app,
+      columns: this.columns,
+      filters,
+      groupBy: Array.isArray(message.groupBy) ? message.groupBy : [],
+      model: this.target.model,
+      relations: this.relations
+    });
+    if (this.disposed) {
+      return;
+    }
+    this.logger?.log("model.browser.aggregate", { groups: result.rows.length, model: `${this.target.app}.${this.target.model}`, ok: result.ok });
+    this.post({ result, type: "aggregate" });
   }
 
   /** Commits staged cell edits in one transaction and returns the result to the webview. */

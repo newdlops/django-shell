@@ -4,7 +4,7 @@ import * as vscode from "vscode";
 import type { BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransport, BackendTransportMode } from "./backendClient";
 import type { CustomDjangoConsole } from "./customConsole";
 import { DiagnosticLogger } from "./diagnostics";
-import type { BackendCommitResult, BackendFilterFieldTree, BackendModelComputed, BackendModelCount, BackendModelList, BackendModelLookup, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import type { BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelComputed, BackendModelCount, BackendModelList, BackendModelLookup, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { ModelBrowser } from "./modelBrowser";
 import { ModelQueryConsole } from "./modelQueryConsole";
 import { ModelCatalog } from "./modelCatalog";
@@ -87,6 +87,11 @@ class LazyRuntimeSource implements vscode.Disposable {
   /** Returns the row count or an idle status without starting a shell. */
   modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
     return this.console?.activeBackend?.modelCount(query) ?? Promise.resolve({ count: null, error: MODEL_IDLE_MESSAGE, ok: false, orm: "", sql: [] });
+  }
+
+  /** Returns grouped/global aggregate results or an idle status without starting a shell. */
+  modelAggregate(query: ModelAggregateQuery): Promise<BackendModelAggregate> {
+    return this.console?.activeBackend?.modelAggregate(query) ?? Promise.resolve({ columns: [], error: MODEL_IDLE_MESSAGE, groupBy: [], hasMore: false, ok: false, orm: "", rows: [], sql: [] });
   }
 
   /** Commits staged edits or returns an idle status without starting a shell. */

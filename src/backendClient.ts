@@ -4,14 +4,14 @@ import * as net from "net";
 import { BackendEndpoint } from "./backendBootstrap";
 import { DiagnosticLogger } from "./diagnostics";
 import {
-  BackendCommitResult, BackendFilterFieldTree, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder,
-  BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelCommitChange, ModelCommitQuery,
+  BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder,
+  BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange, ModelCommitQuery,
   ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery, modelUnsupportedFallback,
-  parseFilterFieldsResponse, parseModelCommitResponse, parseModelComputedResponse, parseModelCountResponse, parseModelListResponse, parseModelLookupResponse, parseModelQueryResponse,
-  parseModelRelatedResponse, parseModelRowsResponse, parseModelSchemaResponse, parseOrmCommitResponse, parseOrmComputedResponse, parseOrmCountResponse,
+  parseFilterFieldsResponse, parseModelAggregateResponse, parseModelCommitResponse, parseModelComputedResponse, parseModelCountResponse, parseModelListResponse, parseModelLookupResponse, parseModelQueryResponse,
+  parseModelRelatedResponse, parseModelRowsResponse, parseModelSchemaResponse, parseOrmAggregateResponse, parseOrmCommitResponse, parseOrmComputedResponse, parseOrmCountResponse,
   parseOrmGridResponse, parseOrmLookupResponse, parseOrmModelsResponse, parseOrmQueryResponse, parseOrmRelatedResponse
 } from "./modelBackend";
-import { buildCommitOrm, buildComputedOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, buildRowsOrm } from "./modelOrm";
+import { aggregatesNeedPython, buildAggregateOrm, buildCommitOrm, buildComputedOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, buildRowsOrm } from "./modelOrm";
 
 const TCP_CONNECT_TIMEOUT_MS = 1500;
 const TCP_RESPONSE_TIMEOUT_MS = 30000;
@@ -117,12 +117,15 @@ export interface BackendRuntimePathSegment {
 }
 
 export interface BackendRequestPayload {
+  aggregates?: ModelAggregateTerm[];
+  annotations?: ModelAnnotationSpec[];
   app?: string;
   changes?: ModelCommitChange[];
   code?: string;
   cursor?: unknown;
   exclude?: string[];
   filters?: BackendModelFilter[];
+  groupBy?: string[];
   kind: string;
   lightweight?: boolean;
   limit?: number;
@@ -243,7 +246,7 @@ export class BackendClient {
       const requested = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
       const limit = Math.min(requested, ORM_PTY_ROW_CAP); // the PTY marker can't carry an unbounded "all" page
       const offset = typeof query.offset === "number" && query.offset > 0 ? query.offset : 0;
-      return this.ormCell(buildRowsOrm({ app: query.app, columns: query.columns, filters: query.filters, limit, model: query.model, offset, order: query.order, relations: query.relations }), (buffer) => parseOrmGridResponse(buffer, limit, offset));
+      return this.ormCell(buildRowsOrm({ annotations: query.annotations, app: query.app, columns: query.columns, filters: query.filters, limit, model: query.model, offset, order: query.order, relations: query.relations }), (buffer) => parseOrmGridResponse(buffer, limit, offset));
     }
     return this.request({ ...query, kind: "rows" }, parseModelRowsResponse);
   }
@@ -297,6 +300,19 @@ export class BackendClient {
   modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
     if (this.reconstructsViaOrmCell) { return this.ormCell(buildCountOrm(query.app, query.model, query.filters, query.columns, query.relations), parseOrmCountResponse); }
     return this.request({ ...query, kind: "count" }, parseModelCountResponse);
+  }
+
+  /** Computes grouped or global aggregates (Count/Sum/Avg/Min/Max/Exists) for the current filter set. */
+  modelAggregate(query: ModelAggregateQuery): Promise<BackendModelAggregate> {
+    if (this.reconstructsViaOrmCell) {
+      if (aggregatesNeedPython(query.aggregates, query.columns)) {
+        // A computed @property aggregate needs a full Python scan, which can't be a clean ORM cell — direct to the socket.
+        return Promise.resolve({ columns: [], error: "Computed-@property aggregates aren't available over the terminal — switch the Link selector to Socket or Auto.", groupBy: [], hasMore: false, ok: false, orm: "", rows: [], sql: [] });
+      }
+      const limit = ORM_PTY_ROW_CAP;
+      return this.ormCell(buildAggregateOrm({ aggregates: query.aggregates, app: query.app, columns: query.columns, filters: query.filters, groupBy: query.groupBy, limit, model: query.model, relations: query.relations }), (buffer) => parseOrmAggregateResponse(buffer, limit));
+    }
+    return this.request({ ...query, kind: "aggregate" }, parseModelAggregateResponse);
   }
 
   /** Applies staged cell edits in one atomic transaction and returns per-row results. */
@@ -456,7 +472,7 @@ function connectHost(host: string): string {
   return host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
 }
 
-const PTY_FALLBACK_KINDS = new Set(["children", "complete", "environment", "execute", "inspect", "prelude", "models", "schema", "filterfields", "rows", "related", "count", "commit", "lookup", "query"]); // helpers: scrubbed _djs_rpc; execute: literal cell.
+const PTY_FALLBACK_KINDS = new Set(["children", "complete", "environment", "execute", "inspect", "prelude", "models", "schema", "filterfields", "rows", "related", "count", "aggregate", "commit", "lookup", "query"]); // helpers: scrubbed _djs_rpc; execute: literal cell.
 // Kinds ORM/Terminal modes never type over the terminal; schema is synthesized from the first row page, and the filter tree falls back to flat fields (see modelBrowser).
 const ORM_NO_PTY = new Set(["children", "environment", "inspect", "models", "prelude", "schema", "filterfields"]);
 const ORM_PTY_SUPPRESSED = "Kept out of the shell: this metadata is not typed into the terminal — switch the Link selector to Socket/Auto to fetch it.";

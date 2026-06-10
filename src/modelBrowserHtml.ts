@@ -16,8 +16,12 @@ export function modelBrowserHtml(webview: vscode.Webview, extensionPath: string)
 <title>Model Data</title>
 <style>
 body{margin:0;font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);font-size:var(--vscode-font-size)}
-.app{display:grid;grid-template-rows:auto auto 1fr auto auto;height:100vh;min-height:0}
-.topbar{display:flex;align-items:center;gap:10px;height:34px;padding:0 12px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}
+.app{position:relative;display:grid;grid-template-rows:auto auto auto 1fr auto auto;height:100vh;min-height:0}
+.fieldfinder{position:absolute;top:40px;right:18px;z-index:50;display:flex;align-items:center;gap:6px;padding:5px 8px;background:var(--vscode-editorWidget-background,var(--vscode-editor-background));border:1px solid var(--vscode-editorWidget-border,var(--vscode-focusBorder));border-radius:5px;box-shadow:0 2px 10px rgba(0,0,0,.4)}
+.fieldfinder[hidden]{display:none}
+.findlabel{font-size:11px;color:var(--vscode-descriptionForeground);white-space:nowrap}
+th.colfound{box-shadow:inset 0 0 0 2px var(--vscode-focusBorder)}
+.topbar{grid-row:1;display:flex;align-items:center;gap:10px;height:34px;padding:0 12px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}
 .title{font-weight:600}.subtitle{color:var(--vscode-descriptionForeground);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .spacer{flex:1}
 button{color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0;border-radius:4px;padding:3px 9px;font:inherit;cursor:pointer}
@@ -49,12 +53,40 @@ button:disabled{opacity:.5;cursor:default}
 .term .chipinput{width:90px}
 .term .rangewrap input{width:78px}
 .term .neg{display:inline-flex;align-items:center;gap:2px;font-size:11px;color:var(--vscode-descriptionForeground)}
+.combobox{position:relative;display:inline-flex}
+.cbx-input{font:inherit;font-size:11px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:3px;padding:1px 3px;min-width:96px}
+.cbx-input:focus{border-color:var(--vscode-focusBorder);outline:none}
+.term .cbx-input{width:auto;min-width:96px}
+.cbx-list{position:absolute;left:0;top:100%;z-index:40;min-width:140px;max-width:340px;max-height:248px;overflow-y:auto;background:var(--vscode-editorWidget-background,var(--vscode-editor-background));border:1px solid var(--vscode-editorWidget-border,var(--vscode-focusBorder));border-radius:3px;box-shadow:0 2px 8px rgba(0,0,0,.35)}
+.cbx-opt{padding:2px 8px;white-space:nowrap;cursor:pointer}
+.cbx-opt.active,.cbx-opt:hover{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}
+.cbx-group{padding:3px 8px 1px;color:var(--vscode-descriptionForeground);font-size:10px;text-transform:uppercase;letter-spacing:.04em;cursor:default}
+.cbx-empty{padding:2px 8px;color:var(--vscode-descriptionForeground);font-style:italic}
+.aggbar{grid-row:3;display:flex;flex-direction:column;gap:5px;padding:6px 12px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editor-inactiveSelectionBackground,transparent)}
+.aggbar[hidden]{display:none}
+.aggrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.aggrow .grow{flex:1}
+.agglabel{min-width:66px;color:var(--vscode-descriptionForeground);font-size:11px}
+.aggsegs,.aggterms{display:flex;flex-wrap:wrap;gap:6px}
+.aggchip,.aggterm{display:inline-flex;align-items:center;gap:4px;padding:2px 5px;border:1px solid var(--vscode-panel-border);border-radius:6px;font-size:11px;flex-wrap:wrap}
+.termbody{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
+.pathpick{display:inline-flex;align-items:center;gap:3px;flex-wrap:wrap}
+.winwrap{display:inline-flex;align-items:center;gap:3px;flex-wrap:wrap}
+.winchip{display:inline-flex;align-items:center;gap:2px;padding:1px 3px;border:1px solid var(--vscode-panel-border);border-radius:5px}
+th.annotation{cursor:default;color:var(--vscode-charts-purple,var(--vscode-textLink-foreground))}
+.aggalias{width:120px;font:inherit;font-size:11px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:3px;padding:1px 3px}
+.aggdistinct{display:inline-flex;align-items:center;gap:2px;font-size:11px;color:var(--vscode-descriptionForeground)}
+.aggnote{color:var(--vscode-descriptionForeground);font-size:11px;font-style:italic}
+.aggresult{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;font-family:var(--vscode-editor-font-family);font-size:12px;border-left:1px solid var(--vscode-panel-border)}
+.aggresult th,.aggresult td{border-right:1px solid var(--vscode-panel-border);border-bottom:1px solid var(--vscode-panel-border);padding:3px 8px;text-align:left;white-space:nowrap;vertical-align:top}
+.aggresult th{position:sticky;top:0;z-index:2;background-color:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}
+.aggresult .agggroupcol{font-weight:600;background-color:var(--vscode-editor-inactiveSelectionBackground,transparent)}
 .chipx{background:none;border:none;color:inherit;cursor:pointer;padding:0;font-size:10px;line-height:1;opacity:.7}
 .chipx:hover{opacity:1}
 th.sortable:hover{color:var(--vscode-textLink-foreground)}
 th .sortarrow{margin-left:4px;color:var(--vscode-textLink-foreground)}
 .chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border:1px solid var(--vscode-panel-border);border-radius:12px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);font-size:11px;cursor:pointer}
-.gridwrap{overflow:auto}
+.gridwrap{grid-row:4;overflow:auto}
 table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;font-family:var(--vscode-editor-font-family);font-size:12px;border-left:1px solid var(--vscode-panel-border)}
 th,td{border-right:1px solid var(--vscode-panel-border);border-bottom:1px solid var(--vscode-panel-border);padding:3px 8px;text-align:left;white-space:nowrap;max-width:380px;overflow:hidden;text-overflow:ellipsis;vertical-align:top}
 th{position:sticky;top:0;background-color:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));z-index:2;cursor:pointer}
@@ -106,7 +138,7 @@ td:has(.fkpick){overflow:visible}
 .gridwrap::-webkit-scrollbar-corner,.logbody::-webkit-scrollbar-corner{background:transparent}
 .gridwrap::-webkit-scrollbar-thumb,.logbody::-webkit-scrollbar-thumb{background:var(--vscode-scrollbarSlider-background);border-radius:5px}
 .gridwrap::-webkit-scrollbar-thumb:hover,.logbody::-webkit-scrollbar-thumb:hover{background:var(--vscode-scrollbarSlider-hoverBackground)}
-.logpanel{display:flex;flex-direction:column;min-height:0;height:var(--log-h,220px);border-top:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background)}
+.logpanel{grid-row:6;display:flex;flex-direction:column;min-height:0;height:var(--log-h,220px);border-top:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background)}
 .logpanel[hidden]{display:none}
 .logresize{flex:0 0 auto;height:6px;margin-top:-3px;cursor:row-resize;background:transparent}
 .logresize:hover,.logresize.dragging{background:var(--vscode-sash-hoverBorder,var(--vscode-focusBorder))}
@@ -128,7 +160,7 @@ td:has(.fkpick){overflow:visible}
 .logentry .ormcmd{display:block;margin-top:3px;padding:4px 8px;border-radius:4px;background:var(--vscode-textCodeBlock-background,var(--vscode-editorWidget-background));font-family:var(--vscode-editor-font-family);font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:var(--vscode-symbolIcon-variableForeground,var(--vscode-foreground))}
 .logbody.mode-sql .ormcmd{display:none}
 .logbody.mode-orm .sql{display:none}
-.statusbar{display:flex;align-items:center;gap:10px;padding:5px 12px;border-top:1px solid var(--vscode-panel-border);color:var(--vscode-descriptionForeground);font-size:12px}
+.statusbar{grid-row:5;display:flex;align-items:center;gap:10px;padding:5px 12px;border-top:1px solid var(--vscode-panel-border);color:var(--vscode-descriptionForeground);font-size:12px}
 .empty{padding:24px;color:var(--vscode-descriptionForeground)}
 .err{padding:12px;color:var(--vscode-errorForeground);white-space:pre-wrap;font-family:var(--vscode-editor-font-family)}
 </style>
@@ -146,6 +178,7 @@ td:has(.fkpick){overflow:visible}
       <option value="pty">Link: Terminal</option>
       <option value="orm">Link: ORM</option>
     </select>
+    <button id="groupToggle" class="secondary" type="button" title="Add computed columns: aggregate / window / F-expression, or group-by summaries">+ Column</button>
     <button id="logToggle" class="secondary" type="button" title="Toggle the query log (Django ORM + SQL)">Query Log</button>
     <button id="reload" class="secondary" type="button">Reload</button>
   </header>
@@ -161,6 +194,11 @@ td:has(.fkpick){overflow:visible}
     <button id="applyFilter" type="button">Apply</button>
     <button id="clearFilter" class="secondary" type="button">Clear</button>
   </div>
+  <div class="aggbar" id="aggregatebar" hidden>
+    <div class="aggrow"><span class="agglabel">Columns</span><span class="aggterms" id="aggregateTerms"></span><button id="addAggregate" class="secondary" type="button">+ column</button></div>
+    <div class="aggrow"><span class="agglabel">Group by</span><span class="aggsegs" id="aggregateGroupBy"></span><button id="addGroupBy" class="secondary" type="button">+ field</button></div>
+    <div class="aggrow"><span class="aggnote">No group-by → columns are added per row (annotate / window). With group-by → rows collapse into per-group summaries (Aggregate columns only). Uses the filters above as the WHERE clause.</span><span class="grow"></span><button id="runAggregate" type="button">Apply</button><button id="aggregateOff" class="secondary" type="button">Clear</button></div>
+  </div>
   <div class="gridwrap" id="gridwrap"><div class="empty" id="placeholder">Select a model from the Django Shell catalog.</div></div>
   <footer class="statusbar"><span id="status"></span><span id="countinfo"></span><span class="spacer"></span><button id="discard" class="secondary" type="button" disabled>Discard</button><button id="commit" type="button" disabled>Commit</button><button id="count" class="secondary" type="button">Count</button><label class="pagesize">Rows&nbsp;<select id="pageSize" class="transport" title="Rows per page"><option value="50">50</option><option value="100">100</option><option value="500">500</option><option value="1000">1000</option><option value="5000">5000</option><option value="10000">10000</option><option value="all">all (not recommended)</option></select></label><button id="more" class="secondary" type="button" disabled>Load more</button></footer>
   <div class="logpanel" id="logpanel">
@@ -168,6 +206,7 @@ td:has(.fkpick){overflow:visible}
     <div class="loghead"><span>Query Log</span><span class="grow"></span><button id="logMode" class="secondary" type="button">View: SQL</button><button id="logClear" class="secondary" type="button">Clear</button></div>
     <div class="logbody mode-sql" id="logbody"></div>
   </div>
+  <div class="fieldfinder" id="fieldfinder" hidden><span class="findlabel">Find field</span><span id="fieldfindslot"></span><button id="fieldfindClose" class="linkbtn" type="button" title="Close (Esc)">✕</button></div>
 </div>
 <script nonce="${nonce}" type="module" src="${scriptUri}"></script>
 </body>

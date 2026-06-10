@@ -25,6 +25,7 @@ export interface BackendModelColumnRelation {
 /** One concrete column descriptor for a model. */
 export interface BackendModelColumn {
   annotated?: boolean;
+  annotation?: boolean;
   attname: string;
   choices?: Array<[unknown, string]>;
   computed?: boolean;
@@ -150,8 +151,29 @@ export interface BackendModelCount {
   sql: BackendSqlEntry[];
 }
 
-/** Parameters for one model rows page request. (`columns` is supplied in ORM mode for the filter allowlist.) */
+/** One ORDER BY term inside a window-function annotation. */
+export interface ModelAnnotationOrder {
+  desc?: boolean;
+  field: string;
+}
+
+/** One per-row annotation column: an aggregate over a relation/field, a window function, or an F-expression. */
+export interface ModelAnnotationSpec {
+  alias?: string;
+  distinct?: boolean;
+  field?: string;
+  func?: string;
+  kind: string;
+  left?: string | number;
+  op?: string;
+  orderBy?: ModelAnnotationOrder[];
+  partitionBy?: string[];
+  right?: string | number;
+}
+
+/** Parameters for one model rows page request. (`columns` is supplied in ORM mode for the filter/annotation allowlist.) */
 export interface ModelRowsQuery {
+  annotations?: ModelAnnotationSpec[];
   app: string;
   columns?: BackendModelColumn[];
   cursor?: unknown;
@@ -170,6 +192,38 @@ export interface ModelCountQuery {
   filters?: BackendModelFilter[];
   model: string;
   relations?: BackendModelRelation[];
+}
+
+/** One aggregate term: a function (count/sum/avg/min/max/exists) over a field; count accepts "*"/pk for all rows. */
+export interface ModelAggregateTerm {
+  alias?: string;
+  distinct?: boolean;
+  field?: string;
+  func: string;
+}
+
+/** Parameters for one grouped/global aggregate request. (`columns` is supplied in ORM mode for the field allowlist.) */
+export interface ModelAggregateQuery {
+  aggregates: ModelAggregateTerm[];
+  app: string;
+  columns?: BackendModelColumn[];
+  filters?: BackendModelFilter[];
+  groupBy?: string[];
+  model: string;
+  relations?: BackendModelRelation[];
+}
+
+/** Result of a grouped/global aggregate: a read-only grid of group-by and aggregate columns. `pythonScan` marks that a computed-@property aggregate was reduced by a full Python scan. */
+export interface BackendModelAggregate {
+  columns: BackendModelColumn[];
+  error?: string;
+  groupBy?: string[];
+  hasMore: boolean;
+  ok: boolean;
+  orm: string;
+  pythonScan?: boolean;
+  rows: BackendModelRow[];
+  sql: BackendSqlEntry[];
 }
 
 /** One staged row's field edits to commit. */
@@ -404,6 +458,37 @@ export function parseOrmCountResponse(buffer: string): BackendModelCount {
   return { count, ok: true, orm: "", sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
 }
 
+/** Parses a backend aggregate response (socket / `_djs_rpc` transport) into a read-only grid. */
+export function parseModelAggregateResponse(buffer: string): BackendModelAggregate {
+  const parsed = parseLine<Partial<BackendModelAggregate>>(buffer);
+  return {
+    columns: Array.isArray(parsed.columns) ? parsed.columns : [],
+    error: parsed.error,
+    groupBy: Array.isArray(parsed.groupBy) ? parsed.groupBy : [],
+    hasMore: Boolean(parsed.hasMore),
+    ok: Boolean(parsed.ok),
+    orm: typeof parsed.orm === "string" ? parsed.orm : "",
+    pythonScan: Boolean(parsed.pythonScan),
+    rows: Array.isArray(parsed.rows) ? parsed.rows : [],
+    sql: Array.isArray(parsed.sql) ? parsed.sql : []
+  };
+}
+
+/** Parses an ORM/Terminal-mode aggregate cell marker into a read-only grid from the capture hook's `grid`. */
+export function parseOrmAggregateResponse(buffer: string, limit: number): BackendModelAggregate {
+  const parsed = parseLine<{ grid?: Partial<BackendModelAggregate>; sql?: BackendSqlEntry[]; stderr?: string; traceback?: string }>(buffer);
+  const grid = parsed.grid;
+  if (!grid || !Array.isArray(grid.columns)) {
+    return { columns: [], error: ormError(parsed, "Aggregation could not be tabulated in ORM mode; switch the Link selector to Socket/Auto."), groupBy: [], hasMore: false, ok: false, orm: "", rows: [], sql: [] };
+  }
+  if (!grid.columns.length) {
+    // A degenerate empty aggregate (no usable group-by/aggregate) tabulates to zero columns — mirror the socket error.
+    return { columns: [], error: "Add at least one aggregate, or a group-by field.", groupBy: [], hasMore: false, ok: false, orm: "", rows: [], sql: [] };
+  }
+  const all = Array.isArray(grid.rows) ? grid.rows : [];
+  return { columns: grid.columns, groupBy: Array.isArray(grid.groupBy) ? grid.groupBy : [], hasMore: all.length > limit, ok: true, orm: "", rows: all.slice(0, limit), sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
+}
+
 /** Parses an ORM-mode related cell marker into related rows from the capture hook's `grid`. */
 export function parseOrmRelatedResponse(buffer: string, limit: number, single: boolean): BackendModelRelatedRows {
   const parsed = parseLine<{ grid?: { app?: string; columns?: BackendModelColumn[]; model?: string; pk?: string; rows?: BackendModelRow[] }; sql?: BackendSqlEntry[]; stderr?: string; traceback?: string }>(buffer);
@@ -572,6 +657,9 @@ export function modelUnsupportedFallback(kind: string, error: string): string | 
   }
   if (kind === "count") {
     return `${JSON.stringify({ count: null, error, ok: false })}\n`;
+  }
+  if (kind === "aggregate") {
+    return `${JSON.stringify({ columns: [], error, ok: false, rows: [] })}\n`;
   }
   if (kind === "commit") {
     return `${JSON.stringify({ error, ok: false, results: [], saved: 0 })}\n`;

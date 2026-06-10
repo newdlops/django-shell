@@ -8,11 +8,13 @@ import { makeResizable } from "./gridResize.js";
 import { buildEditableRelatedTable } from "./gridRelated.js";
 import { createVirtualRows } from "./gridVirtual.js";
 import { createFilterBar } from "./gridFilter.js";
+import { createColumnBuilder, renderAggregateResult } from "./gridAggregate.js";
+import { createCombobox } from "./gridCombobox.js";
 
 const vscode = acquireVsCodeApi();
 
 const els = {};
-for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "activefilters", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode"]) {
+for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "activefilters", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode", "groupToggle", "aggregatebar", "aggregateGroupBy", "aggregateTerms", "addGroupBy", "addAggregate", "runAggregate", "aggregateOff", "fieldfinder", "fieldfindslot", "fieldfindClose"]) {
   els[id] = document.getElementById(id);
 }
 
@@ -20,7 +22,7 @@ const LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", 
 const MAX_LOG_ENTRIES = 200;
 const ALL_PAGE_SIZE = 1000000000;
 
-const state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, filters: [], order: [], model: "", pinned: new Set(), widths: {}, computed: {}, computedActive: new Set() };
+const state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, filters: [], order: [], annotations: [], model: "", pinned: new Set(), widths: {}, computed: {}, computedActive: new Set(), aggregateActive: false, aggregateGroupBy: [], aggregateColumns: [] };
 const pendingRelated = new Map();
 let relRequestId = 0;
 
@@ -49,6 +51,14 @@ const filterBar = createFilterBar({
   lookups: LOOKUPS
 });
 
+const columnBuilder = createColumnBuilder({
+  el,
+  groupEl: els.aggregateGroupBy,
+  termsEl: els.aggregateTerms,
+  getState: () => state,
+  postRaw: (message) => vscode.postMessage(message)
+});
+
 window.addEventListener("message", (event) => handleMessage(event.data));
 els.reload.addEventListener("click", () => send({ type: "reload" }));
 els.more.addEventListener("click", () => send({ type: "loadMore" }));
@@ -59,6 +69,11 @@ els.addFilter.addEventListener("click", () => filterBar.addTerm());
 els.applyFilter.addEventListener("click", () => applyQuery());
 els.clearFilter.addEventListener("click", () => clearQuery());
 els.count.addEventListener("click", () => vscode.postMessage({ type: "requestCount" }));
+els.groupToggle.addEventListener("click", () => toggleColumnPanel());
+els.addGroupBy.addEventListener("click", () => columnBuilder.addGroupBy());
+els.addAggregate.addEventListener("click", () => columnBuilder.addTerm());
+els.runAggregate.addEventListener("click", () => applyColumns());
+els.aggregateOff.addEventListener("click", () => clearColumns());
 els.commit.addEventListener("click", () => editor.commitEdits());
 els.discard.addEventListener("click", () => editor.discardEdits());
 els.transport.addEventListener("change", () => vscode.postMessage({ type: "setTransport", mode: els.transport.value }));
@@ -70,6 +85,15 @@ els.logMode.addEventListener("click", () => {
   els.logMode.textContent = showOrm ? "View: Django ORM" : "View: SQL";
 });
 setupLogResize();
+els.fieldfindClose.addEventListener("click", () => closeFieldFinder());
+window.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && (event.key === "f" || event.key === "F")) {
+    event.preventDefault();
+    toggleFieldFinder();
+  } else if (event.key === "Escape" && !els.fieldfinder.hidden) {
+    closeFieldFinder();
+  }
+});
 vscode.postMessage({ type: "ready" });
 
 function handleMessage(message) {
@@ -88,11 +112,14 @@ function handleMessage(message) {
     editor.onLookup(message);
   } else if (message.type === "filterFields") {
     filterBar.onTreeResponse(message);
+    columnBuilder.onTreeResponse(message);
   } else if (message.type === "computed") {
     onComputed(message);
   } else if (message.type === "count") {
     els.countinfo.textContent = message.ok ? `· total ${message.count}` : `· count failed`;
     logSql(`count ${state.model}`, message.sql, message.orm);
+  } else if (message.type === "aggregate") {
+    onAggregate(message);
   } else if (message.type === "commit") {
     logSql(`commit ${state.model}`, message.result && message.result.sql, message.result && message.result.orm);
     editor.handleResult(message.result);
@@ -116,20 +143,35 @@ function renderLoading(message) {
 }
 
 function onSchema(schema) {
+  const model = `${schema.app}.${schema.model}`;
+  // ORM/Terminal mode re-posts the schema on every re-query (filter / annotate / sort); preserve pins, loaded @property
+  // columns, and staged edits across a same-model reload so they aren't silently lost — only a genuine model change resets them.
+  const sameModel = model === state.model && state.columns.length > 0;
   state.columns = schema.columns || [];
   state.pk = schema.pk || "id";
   state.relations = schema.relations || [];
   state.rowCount = 0;
   state.order = [];
-  state.pinned = new Set();
-  state.computed = {};
-  state.computedActive = new Set();
-  state.model = `${schema.app}.${schema.model}`;
-  els.title.textContent = `${schema.app}.${schema.model}`;
+  if (!sameModel) {
+    state.pinned = new Set();
+    state.computed = {};
+    state.computedActive = new Set();
+  }
+  exitAggregateView();
+  state.model = model;
+  els.title.textContent = model;
   els.subtitle.textContent = `${schema.label || ""} · ${schema.table || ""}`;
   filterBar.sync(state.filters);
   filterBar.renderSummary(state.filters);
   els.countinfo.textContent = "";
+  installGridTable();
+  if (!sameModel) {
+    editor.reset();
+  }
+}
+
+/** Builds the empty row-grid table (head + #tbody) into the grid container and wires its interactions. */
+function installGridTable() {
   const table = el("table", {});
   table.appendChild(buildHead());
   table.appendChild(el("tbody", { id: "tbody" }));
@@ -138,7 +180,6 @@ function onSchema(schema) {
   makeResizable(table, state, () => repaintPins(els.gridwrap, state));
   table.addEventListener("click", onTableClick);
   table.addEventListener("dblclick", onTableDblClick);
-  editor.reset();
 }
 
 function onTableDblClick(event) {
@@ -169,8 +210,10 @@ function buildHead() {
   const row = el("tr", {});
   row.appendChild(el("th", { className: "rownum", title: "Row number" }, "#"));
   for (const column of state.columns) {
-    const sortable = !column.computed;
-    const th = el("th", { className: column.computed ? "computed" : "sortable", dataset: sortable ? { act: "sort", col: column.attname, key: column.attname } : { key: column.attname }, title: sortable ? `Sort by ${column.name} (${column.type})` : `${column.name} (computed @property — read-only)` });
+    const sortable = !column.computed && !column.annotation;
+    const headClass = column.annotation ? "annotation" : column.computed ? "computed" : "sortable";
+    const headTitle = sortable ? `Sort by ${column.name} (${column.type})` : column.annotation ? `${column.name} (computed column — read-only)` : `${column.name} (computed @property — read-only)`;
+    const th = el("th", { className: headClass, dataset: sortable ? { act: "sort", col: column.attname, key: column.attname } : { key: column.attname }, title: headTitle });
     const pinned = state.pinned.has(column.attname);
     th.appendChild(el("button", { className: pinned ? "pinbtn active" : "pinbtn", dataset: { act: "pin", col: column.attname }, title: pinned ? "Unpin column" : "Pin column (freeze left)" }, "⇤"));
     if (column.computed) {
@@ -196,11 +239,26 @@ function buildHead() {
   return head;
 }
 
+/** Returns a stable signature of a column set's attnames, for detecting when annotation columns are added/removed. */
+function columnAttnames(columns) {
+  return (columns || []).map((column) => column.attname).join(",");
+}
+
 function onRows(message) {
   const rows = message.rows || {};
   if (!rows.ok) {
     renderError(rows.error || "Could not load rows.");
     return;
+  }
+  const columnsChanged = !message.append && Array.isArray(rows.columns) && rows.columns.length > 0 && columnAttnames(rows.columns) !== columnAttnames(state.columns);
+  if (columnsChanged) {
+    // Per-row annotation columns were added/removed — adopt the new column set for the grid head.
+    state.columns = rows.columns;
+  }
+  if (state.aggregateActive || !document.getElementById("tbody") || columnsChanged) {
+    // Rows arrived over the read-only aggregate table (or an error view), or the column set changed — rebuild the grid skeleton.
+    exitAggregateView();
+    installGridTable();
   }
   logSql(`rows ${state.model}`, rows.sql, rows.orm);
   if (Array.isArray(message.filters)) {
@@ -414,7 +472,12 @@ function updateSortArrows() {
 function applyQuery() {
   state.filters = filterBar.collect();
   filterBar.renderSummary(state.filters);
-  send({ filters: state.filters, order: state.order, type: "applyQuery" });
+  if (state.aggregateActive) {
+    // A collapse summary is on screen — re-run it so a lookup on an aggregate column applies as HAVING.
+    applyColumns();
+    return;
+  }
+  send({ annotations: state.annotations, filters: state.filters, order: state.order, type: "applyQuery" });
 }
 
 function pageSizeValue() {
@@ -434,6 +497,77 @@ function clearQuery() {
   updateSortArrows();
   filterBar.renderSummary(state.filters);
   applyQuery();
+}
+
+/** Shows or hides the "+ Column" builder panel (seeding one term when first opened). */
+function toggleColumnPanel() {
+  const show = els.aggregatebar.hidden;
+  els.aggregatebar.hidden = !show;
+  els.groupToggle.classList.toggle("active", show);
+  if (show) {
+    columnBuilder.ensureRows();
+  }
+}
+
+/** Applies the builder: with group-by fields it collapses rows into per-group summaries; without, it adds the terms as per-row annotation columns to the grid. */
+function applyColumns() {
+  const { droppedToMany, groupBy, terms } = columnBuilder.collect();
+  state.filters = filterBar.collect();
+  filterBar.renderSummary(state.filters);
+  const drillNote = droppedToMany ? " · skipped Sum/Avg over a to-many relation (use Count, or group by the related model)" : "";
+  if (groupBy.length) {
+    const aggregates = terms.filter((term) => term.kind === "aggregate").map((term) => ({ alias: term.alias, distinct: term.distinct, field: term.field, func: term.func }));
+    if (!aggregates.length) {
+      els.status.textContent = "Add at least one Aggregate column to summarize per group (Window/Expr are per-row only).";
+      return;
+    }
+    state.aggregateActive = true;
+    state.aggregateGroupBy = groupBy;
+    state.annotations = [];
+    els.status.textContent = `Summarizing…${drillNote}`;
+    vscode.postMessage({ type: "aggregate", aggregates, filters: state.filters, groupBy });
+  } else {
+    exitAggregateView();
+    state.annotations = terms;
+    applyQuery();
+    if (drillNote) {
+      els.status.textContent = `Loading…${drillNote}`;
+    }
+  }
+}
+
+/** Clears the builder and removes any per-row annotation columns / collapsed view, returning to the plain row grid. */
+function clearColumns() {
+  columnBuilder.clear();
+  state.annotations = [];
+  exitAggregateView();
+  applyQuery();
+}
+
+/** Resets the collapsed-summary view state (the panel and its terms persist across row reloads). */
+function exitAggregateView() {
+  state.aggregateActive = false;
+  state.aggregateGroupBy = [];
+  state.aggregateColumns = [];
+}
+
+/** Renders an aggregate response as a read-only result table in place of the row grid. */
+function onAggregate(message) {
+  const result = message.result || {};
+  logSql(`aggregate ${state.model}`, result.sql, result.orm);
+  if (!result.ok) {
+    renderError(result.error || "Aggregation failed.");
+    return;
+  }
+  // Expose the aggregate (non-group) result columns so the filter bar can offer them as HAVING lookups.
+  state.aggregateColumns = (result.columns || []).map((column) => column.attname).filter((name) => !state.aggregateGroupBy.includes(name));
+  els.gridwrap.innerHTML = "";
+  els.gridwrap.appendChild(renderAggregateResult(result, { el, groupBy: state.aggregateGroupBy, renderValue }));
+  const count = (result.rows || []).length;
+  const noun = state.aggregateGroupBy.length ? `group${count === 1 ? "" : "s"}` : "aggregate";
+  const scan = result.pythonScan ? " · @property computed in Python (full scan)" : "";
+  els.status.textContent = `${count} ${noun}${result.hasMore ? " · more available" : ""}${scan}`;
+  els.more.disabled = true;
 }
 
 function expandInto(button, request) {
@@ -584,6 +718,52 @@ function clampLogHeight(value) {
 /** Persists the chosen log-panel height in webview state so it survives reloads. */
 function persistLogHeight(height) {
   vscode.setState({ ...(vscode.getState() || {}), logHeight: Math.round(height) });
+}
+
+/** Toggles the Cmd/Ctrl+F field finder (a searchable list of the grid's columns/relations). */
+function toggleFieldFinder() {
+  if (els.fieldfinder.hidden) {
+    openFieldFinder();
+  } else {
+    closeFieldFinder();
+  }
+}
+
+/** Opens the field finder, building a fresh combobox from the current columns + relations and focusing it. */
+function openFieldFinder() {
+  const options = [];
+  for (const column of state.columns || []) {
+    const kind = column.annotation ? "computed column" : column.computed ? "@property" : (column.type || "");
+    options.push({ label: column.attname, title: kind, value: column.attname });
+  }
+  for (const relation of state.relations || []) {
+    options.push({ group: "relations", label: `${relation.name} →`, title: relation.target || "", value: `rel:${relation.name}` });
+  }
+  els.fieldfindslot.innerHTML = "";
+  const combo = createCombobox({ el, onChange: (value) => scrollToField(value), options, placeholder: "type a field name…" });
+  els.fieldfindslot.appendChild(combo.node);
+  els.fieldfinder.hidden = false;
+  combo.focus();
+}
+
+/** Closes the field finder and clears its combobox. */
+function closeFieldFinder() {
+  els.fieldfinder.hidden = true;
+  els.fieldfindslot.innerHTML = "";
+}
+
+/** Scrolls the grid horizontally so the chosen column header is centered, and briefly highlights it. */
+function scrollToField(key) {
+  if (!key) {
+    return;
+  }
+  const th = els.gridwrap.querySelector(`thead th[data-key="${key}"]`);
+  if (!th) {
+    return;
+  }
+  th.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+  th.classList.add("colfound");
+  setTimeout(() => th.classList.remove("colfound"), 1200);
 }
 
 function el(tag, props, ...children) {

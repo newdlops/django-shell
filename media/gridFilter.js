@@ -2,6 +2,9 @@
 // Each term is a chain of field/relation dropdowns (field → ▸relation → field → … → lookup → value).
 // Relation segments are fetched lazily from the backend `filterfields` tree (cached per model) so the
 // user can drill across foreign keys (author__profile__city) instead of only the model's own fields.
+// The field/relation, operator, and enum-choice dropdowns are searchable comboboxes (type to filter).
+
+import { createCombobox } from "./gridCombobox.js";
 
 const REL = "r:";
 const FIELD = "f:";
@@ -40,6 +43,10 @@ function lookupsForTerminal(terminal, all) {
     return all;
   }
   const type = String(terminal.type || "");
+  if (type === "annotation") {
+    // Annotation/aggregate columns filter post-aggregation (HAVING / WHERE-on-expression) — numeric-style lookups only.
+    return ["exact", "gt", "gte", "lt", "lte", "in", "range", "isnull"];
+  }
   if (type === "pk") {
     return ["exact", "in", "isnull"];
   }
@@ -67,6 +74,7 @@ function lookupsForTerminal(terminal, all) {
 /** Returns the native input type for a value box given the field type (date/datetime/time/number/text). The synthetic `pk` entry stays text — a number box would silently drop a UUID/char primary key. */
 function inputTypeFor(type) {
   if (type === "pk") { return "text"; }
+  if (type === "annotation") { return "number"; }
   if (type === "DateField") { return "date"; }
   if (type === "DateTimeField") { return "datetime-local"; }
   if (type === "TimeField") { return "time"; }
@@ -125,6 +133,15 @@ export function createFilterBar(deps) {
         options.push({ label: column.attname, role: "computed", title: "computed @property", type: "property", value: `${FIELD}${column.attname}` });
       }
     }
+    // Per-row annotation columns (rows view) and aggregate-result columns (collapse view) filter post-aggregation (HAVING). Window columns can't be filtered in SQL.
+    for (const column of state.columns || []) {
+      if (column.annotation && column.type !== "window") {
+        options.push({ label: column.attname, role: "field", title: "computed column · filter as HAVING", type: "annotation", value: `${FIELD}${column.attname}` });
+      }
+    }
+    for (const name of state.aggregateColumns || []) {
+      options.push({ label: name, role: "field", title: "aggregate column · filter as HAVING", type: "annotation", value: `${FIELD}${name}` });
+    }
     for (const relation of relationsOf(tree, state)) {
       options.push({ kind: relation.kind, label: `${relation.name} →`, role: "relation", target: relation.target, title: `${relation.kind} → ${bareModel(relation.target)} (drill in)`, value: `${REL}${relation.name}` });
     }
@@ -158,13 +175,13 @@ export function createFilterBar(deps) {
     const term = el("span", { className: "term" });
     term._segs = [];
     const path = el("span", { className: "path", dataset: { role: "path" } });
-    const lookup = el("select", { dataset: { role: "lookup" } });
+    const lookupCombo = createCombobox({ dataset: { role: "lookup" }, el, onChange: () => rebuildValue(term), options: [], placeholder: "—" });
+    term._lookupCombo = lookupCombo;
     const value = el("span", { className: "valwrap", dataset: { role: "value" } });
     const negate = el("input", { checked: Boolean(initial && initial.negate), dataset: { role: "negate" }, type: "checkbox" });
     const remove = el("button", { className: "linkbtn", dataset: { role: "remove" }, title: "Remove filter" }, "✕");
     remove.addEventListener("click", () => term.remove());
-    lookup.addEventListener("change", () => rebuildValue(term));
-    term.append(path, lookup, value, el("label", { className: "neg" }, negate, "not"), remove);
+    term.append(path, lookupCombo.node, value, el("label", { className: "neg" }, negate, "not"), remove);
     termsEl.appendChild(term);
     const token = syncToken;
     const rootTree = await fetchTree(getState().model);
@@ -184,30 +201,19 @@ export function createFilterBar(deps) {
     return text ? text.split("__") : [];
   }
 
-  /** Builds the select for one path level, preselecting from a saved path and drilling into relations as needed. */
+  /** Builds the searchable combobox for one path level, preselecting from a saved path and drilling into relations as needed. */
   async function buildSegment(term, level, options, preset, initial) {
-    const select = el("select", { dataset: { level: String(level), role: "seg" } });
-    select.appendChild(el("option", { value: "" }, level === 0 ? "— pick field / relation —" : "— exists / pick field —"));
-    for (const option of options.filter((option) => option.role !== "relation")) {
-      select.appendChild(el("option", { title: option.title || "", value: option.value }, option.label));
-    }
-    const relationOptions = options.filter((option) => option.role === "relation");
-    if (relationOptions.length) {
-      const group = el("optgroup", { label: "relations (drill in →)" });
-      for (const option of relationOptions) {
-        group.appendChild(el("option", { title: option.title || "", value: option.value }, option.label));
-      }
-      select.appendChild(group);
-    }
-    select._options = options;
-    select.addEventListener("change", () => void onSegmentChange(term, level));
-    term._segs[level] = { select };
-    term.querySelector("[data-role=path]").appendChild(select);
+    const comboOptions = options.map((option) => ({ group: option.role === "relation" ? "relations (drill in →)" : "", label: option.label, title: option.title || "", value: option.value }));
     const presetValue = preset[level];
     // An unmatched preset (e.g. saved path absent from a changed/flat-fallback option set) stays on the empty
     // placeholder rather than silently binding the first field, so collect() never emits the wrong field.
     const match = presetValue === undefined ? null : options.find((option) => option.value === `${REL}${presetValue}` || option.value === `${FIELD}${presetValue}`);
-    select.value = match ? match.value : "";
+    const combo = createCombobox({ dataset: { level: String(level), role: "seg" }, el, onChange: () => void onSegmentChange(term, level), options: comboOptions, placeholder: level === 0 ? "— pick field / relation —" : "— exists / pick field —", value: match ? match.value : "" });
+    const select = combo.node;
+    // currentOption()/terminalOf() read the ORIGINAL option objects (role/target/type/choices), not the trimmed combo records.
+    select._options = options;
+    term._segs[level] = { combo, select };
+    term.querySelector("[data-role=path]").appendChild(select);
     const chosen = currentOption(select);
     if (chosen && chosen.role === "relation" && preset.length > level + 1) {
       // Saved path drills deeper through this relation → fetch its target and rebuild the next level.
@@ -259,23 +265,20 @@ export function createFilterBar(deps) {
 
   /** Repopulates the lookup select for the current terminal and rebuilds the matching value control. A fresh field selection defaults to a useful operator (contains/=), NOT the prior isnull. */
   function refreshLookups(term, initial) {
-    const lookup = term.querySelector("[data-role=lookup]");
+    const combo = term._lookupCombo;
     const terminal = terminalOf(term);
     if (!terminal) {
       // Nothing picked yet: no operator/value until the user chooses a field (collect() skips this empty term).
-      lookup.innerHTML = "";
-      lookup.appendChild(el("option", { value: "" }, "—"));
+      combo.setOptions([]);
+      combo.setValue("");
       term.querySelector("[data-role=value]").innerHTML = "";
       term._value = null;
       return;
     }
     const names = lookupsForTerminal(terminal, lookups);
     const preferred = (initial && initial.lookup) || defaultLookup(terminal, names);
-    lookup.innerHTML = "";
-    for (const name of names) {
-      lookup.appendChild(el("option", { value: name }, LOOKUP_LABEL[name] || name));
-    }
-    lookup.value = names.includes(preferred) ? preferred : names[0];
+    combo.setOptions(names.map((name) => ({ label: LOOKUP_LABEL[name] || name, value: name })));
+    combo.setValue(names.includes(preferred) ? preferred : names[0]);
     rebuildValue(term, initial && initial.value);
   }
 
@@ -314,12 +317,13 @@ export function createFilterBar(deps) {
       return { getValue: () => select.value, node: select };
     }
     if ((lookup === "exact" || lookup === "iexact") && terminal && Array.isArray(terminal.choices) && terminal.choices.length) {
-      const select = el("select", {});
-      for (const choice of terminal.choices) {
-        select.appendChild(el("option", { value: String(choice[0]) }, `${choice[1]}`));
-      }
-      if (presetValue !== undefined && presetValue !== null) { select.value = String(presetValue); }
-      return { getValue: () => select.value, node: select };
+      const choiceOptions = terminal.choices.map((choice) => ({ label: `${choice[1]}`, value: String(choice[0]) }));
+      // A carried value from a prior text lookup may be "" (or not a real choice); fall back to the first choice so the
+      // combobox never renders blank and collect() never emits an empty value — matching a native <select>'s default.
+      const carried = presetValue === undefined || presetValue === null ? "" : String(presetValue);
+      const selected = choiceOptions.some((option) => option.value === carried) ? carried : (choiceOptions[0] ? choiceOptions[0].value : "");
+      const combo = createCombobox({ el, options: choiceOptions, placeholder: "— choose —", value: selected });
+      return { getValue: () => combo.getValue(), node: combo.node };
     }
     // `date` compares only the date portion → force a plain date picker (a datetime-local value Django's __date rejects).
     const type = lookup === "date" ? "DateField" : (["year", "month", "day"].includes(lookup) ? "IntegerField" : (terminal ? terminal.type : ""));

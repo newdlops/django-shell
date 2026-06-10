@@ -3,9 +3,15 @@
 // Identifiers are restricted to a safe pattern and values are emitted as JSON/Python literals so
 // reconstructed expressions cannot inject code.
 
-import type { BackendModelColumn, BackendModelFilter, BackendModelOrder, BackendModelRelation, ModelCommitChange } from "./modelBackend";
+import type { BackendModelColumn, BackendModelFilter, BackendModelOrder, BackendModelRelation, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange } from "./modelBackend";
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const PYTHON_KEYWORDS = new Set(["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"]);
+
+/** Returns whether a string is safe as an emitted ORM keyword-argument alias (identifier, not a Python keyword, not an internal djs_/__ alias). */
+function isSafeAlias(name: string): boolean {
+  return IDENTIFIER.test(name) && !PYTHON_KEYWORDS.has(name) && !name.startsWith("djs_") && !name.startsWith("__");
+}
 const LOOKUPS = new Set(["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"]);
 const PYTHON_FILTER_CHUNK_SIZE = 1000;
 const TRUTHY = /^(true|1|t|yes|on)$/i;
@@ -269,6 +275,7 @@ function propertyListLiteral(value: string): string {
 
 /** Parameters for a reconstructed rows query (one bounded page of model instances). */
 export interface OrmRowsParams {
+  annotations?: ModelAnnotationSpec[];
   app?: string;
   columns?: BackendModelColumn[];
   filters?: BackendModelFilter[];
@@ -279,17 +286,164 @@ export interface OrmRowsParams {
   relations?: BackendModelRelation[];
 }
 
-/** Builds `Model._base_manager.filter(...).order_by(...)[offset:offset+limit+1]` (extra row = "has more"). @property columns are NOT computed here (concrete only) — they load lazily per-column via buildComputedOrm, so a property joining many models never delays the base page. */
+const WINDOW_RANK_FUNCS: Record<string, string> = { dense_rank: "DenseRank", rank: "Rank", row_number: "RowNumber" };
+
+/** Returns a safe single-line annotation expression for one per-row column spec via the `models` namespace, or null. */
+function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relationNames: Set<string>): string | null {
+  const kind = item ? String(item.kind) : "";
+  if (kind === "aggregate") {
+    const func = String(item.func);
+    if (func === "count") {
+      const raw = item.field;
+      const arg = raw === undefined || raw === null || raw === "" || raw === "*" || raw === "pk" ? "pk" : String(raw);
+      if (arg !== "pk" && !attnames.has(arg) && !relationNames.has(arg) && !(arg.includes("__") && safeFilterPath(arg))) {
+        return null;
+      }
+      return `models.Count(${pyStr(arg)}${item.distinct ? ", distinct=True" : ""})`;
+    }
+    if (AGG_FUNC_NAMES[func]) {
+      const arg = item.field === "pk" ? "pk" : String(item.field ?? "");
+      if (arg !== "pk" && !attnames.has(arg) && !(arg.includes("__") && safeFilterPath(arg))) {
+        return null;
+      }
+      return `models.${AGG_FUNC_NAMES[func]}(${pyStr(arg)})`;
+    }
+    return null;
+  }
+  if (kind === "window") {
+    const func = String(item.func);
+    const partition = (item.partitionBy ?? []).filter((field) => attnames.has(field));
+    const order = (item.orderBy ?? []).filter((term) => term && attnames.has(String(term.field)));
+    let inner: string;
+    if (WINDOW_RANK_FUNCS[func]) {
+      if (!order.length) {
+        return null;
+      }
+      inner = `models.functions.${WINDOW_RANK_FUNCS[func]}()`;
+    } else if (AGG_FUNC_NAMES[func]) {
+      const arg = func === "count" && (item.field === undefined || item.field === null || item.field === "" || item.field === "*" || item.field === "pk") ? "pk" : String(item.field ?? "");
+      if (arg !== "pk" && !attnames.has(arg)) {
+        return null;
+      }
+      inner = `models.${AGG_FUNC_NAMES[func]}(models.F(${pyStr(arg)}))`;
+    } else {
+      return null;
+    }
+    const parts = [inner];
+    if (partition.length) {
+      parts.push(`partition_by=[${partition.map((field) => `models.F(${pyStr(field)})`).join(", ")}]`);
+    }
+    if (order.length) {
+      parts.push(`order_by=[${order.map((term) => `models.F(${pyStr(String(term.field))})${term.desc ? ".desc()" : ".asc()"}`).join(", ")}]`);
+    }
+    return `models.Window(${parts.join(", ")})`;
+  }
+  if (kind === "expr") {
+    const op = String(item.op);
+    if (!["+", "-", "*", "/"].includes(op)) {
+      return null;
+    }
+    const left = exprOperand(item.left, attnames);
+    const right = exprOperand(item.right, attnames);
+    // Require at least one field reference: a constant-only expression isn't a valid Django annotation (and `5/0` would crash the cell).
+    if (!left || !right || (!left.field && !right.field)) {
+      return null;
+    }
+    return `${left.text} ${op} ${right.text}`;
+  }
+  return null;
+}
+
+/** Returns one F-expression operand (`models.F('field')` or a numeric literal) with a `field` flag, or null when neither. */
+function exprOperand(raw: string | number | undefined, attnames: Set<string>): { field: boolean; text: string } | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return { field: false, text: String(raw) };
+  }
+  if (typeof raw === "string") {
+    if (attnames.has(raw)) {
+      return { field: true, text: `models.F(${pyStr(raw)})` };
+    }
+    const text = raw.trim();
+    return /^-?\d+(\.\d+)?$/.test(text) ? { field: false, text } : null;
+  }
+  return null;
+}
+
+/** Returns safe {alias, expr, window} annotation specs (allowlisted, unique aliases) for the rows query. */
+function buildRowAnnotations(annotations: ModelAnnotationSpec[] | undefined, attnames: Set<string>, relationNames: Set<string>): Array<{ alias: string; expr: string; window: boolean }> {
+  const specs: Array<{ alias: string; expr: string; window: boolean }> = [];
+  const used = new Set<string>();
+  for (const item of annotations ?? []) {
+    const expr = annotationExpr(item, attnames, relationNames);
+    if (expr) {
+      const label = item.kind === "expr" ? "expr" : String(item.func || item.kind || "col");
+      const arg = typeof item.field === "string" && item.field && item.field !== "*" ? item.field : "col";
+      specs.push({ alias: aggregateAlias(item.alias, label, arg, used), expr, window: String(item.kind) === "window" });
+    }
+  }
+  return specs;
+}
+
+/** Returns a Python literal for one scalar HAVING value, numeric-FIRST so a count comparison like `>= 1` emits the int 1, not the bool True. */
+function havingScalar(text: string): string {
+  const trimmed = String(text ?? "").trim();
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^(true|false)$/i.test(trimmed)) {
+    return /^true$/i.test(trimmed) ? "True" : "False";
+  }
+  return pyStr(trimmed);
+}
+
+/** Returns a Python literal for a HAVING value, matching the socket's numeric-aware coercion (isnull→bool, in→list, range→2-element list, scalar numeric-first). */
+function havingValue(lookup: string, value: unknown): string {
+  const text = String(value ?? "");
+  if (lookup === "isnull") {
+    return TRUTHY.test(text.trim()) ? "True" : "False";
+  }
+  if (lookup === "in") {
+    return `[${text.split(",").map((part) => havingScalar(part)).join(", ")}]`;
+  }
+  if (lookup === "range") {
+    return `[${text.split(",").slice(0, 2).map((part) => havingScalar(part)).join(", ")}]`;
+  }
+  return havingScalar(text);
+}
+
+/** Returns the `.filter(...)`/`.exclude(...)` chain for lookups on annotation aliases, applied after .annotate() (HAVING / WHERE-on-expression). */
+function havingChain(filters: BackendModelFilter[] | undefined, havingAliases: Set<string>): string {
+  let chain = "";
+  for (const term of filters ?? []) {
+    const lookup = String(term?.lookup ?? "exact");
+    if (!term || !havingAliases.has(String(term.field)) || !LOOKUPS.has(lookup)) {
+      continue;
+    }
+    const clause = `**{${pyStr(`${term.field}__${lookup}`)}: ${havingValue(lookup, term.value)}}`;
+    chain += term.negate ? `.exclude(${clause})` : `.filter(${clause})`;
+  }
+  return chain;
+}
+
+/** Builds `Model._base_manager.filter(...).annotate(...).order_by(...)[offset:offset+limit+1]` (extra row = "has more"). @property columns load lazily via buildComputedOrm; per-row annotation columns (relation/field aggregates, window functions, F-expression arithmetic) are added here and surface on the instance via the capture hook. */
 export function buildRowsOrm(params: OrmRowsParams): string {
   const offset = Number.isInteger(params.offset) && (params.offset as number) > 0 ? (params.offset as number) : 0;
   const limit = Number.isInteger(params.limit) && params.limit > 0 ? params.limit : 50;
   const attnames = concreteAttnames(params.columns);
-  const plan = filterPlan(params.filters, filterSpecs(params.columns, params.relations));
+  const annotations = buildRowAnnotations(params.annotations, attnames, relationQueryNames(params.relations, params.columns));
+  const annotate = annotations.length ? `.annotate(${annotations.map((spec) => `${spec.alias}=${spec.expr}`).join(", ")})` : "";
+  // A lookup on a (non-window) annotation alias filters AFTER .annotate() (HAVING / WHERE-on-expression); window aliases can't be filtered.
+  const allAliases = new Set(annotations.map((spec) => spec.alias));
+  const havingAliases = new Set(annotations.filter((spec) => !spec.window).map((spec) => spec.alias));
+  const baseFilters = (params.filters ?? []).filter((term) => !allAliases.has(String(term?.field)));
+  const having = havingChain(params.filters, havingAliases);
+  const plan = filterPlan(baseFilters, filterSpecs(params.columns, params.relations));
   const order = `.order_by(${orderArgs(params.order, attnames)})`;
   if (plan.pythonTerms.length) {
-    return pythonFilterCell(queryExpression(params.app, params.model, plan, order), plan.pythonTerms, offset, offset + limit + 1);
+    // @property filter streams instances; annotate first so each instance carries the annotation attrs the capture hook surfaces.
+    return pythonFilterCell(queryExpression(params.app, params.model, plan, `${annotate}${having}${order}`), plan.pythonTerms, offset, offset + limit + 1);
   }
-  return queryExpression(params.app, params.model, plan, `${order}[${offset}:${offset + limit + 1}]`);
+  return queryExpression(params.app, params.model, plan, `${annotate}${having}${order}[${offset}:${offset + limit + 1}]`);
 }
 
 /** Builds a lazy single-@property fetch as a readable ORM result, returning rows/dicts directly so raw audit has no JSON-print or backend-helper layer. */
@@ -329,6 +483,122 @@ export function buildCountOrm(app: string | undefined, model: string, filters: B
     return pythonFilterCountCell(queryExpression(app, model, plan), plan.pythonTerms);
   }
   return queryExpression(app, model, plan, ".count()");
+}
+
+const AGG_FUNC_NAMES: Record<string, string> = { avg: "Avg", count: "Count", max: "Max", min: "Min", sum: "Sum" };
+
+/** Parameters for a reconstructed grouped/global aggregate query. */
+export interface OrmAggregateParams {
+  aggregates: ModelAggregateTerm[];
+  app?: string;
+  columns?: BackendModelColumn[];
+  filters?: BackendModelFilter[];
+  groupBy?: string[];
+  limit?: number;
+  model: string;
+  relations?: BackendModelRelation[];
+}
+
+interface AggregateCellSpec {
+  alias: string;
+  arg: string;
+  expr: string;
+  func: string;
+}
+
+/** Returns a unique safe identifier alias for one aggregate column (only emitted as an ORM keyword). */
+function aggregateAlias(alias: string | undefined, func: string, arg: string, used: Set<string>): string {
+  let candidate = typeof alias === "string" && isSafeAlias(alias) ? alias : func === "exists" ? "exists" : `${arg}_${func}`;
+  if (!isSafeAlias(candidate)) {
+    candidate = `agg_${func}`;
+  }
+  const base = candidate;
+  let suffix = 2;
+  while (used.has(candidate)) {
+    candidate = `${base}_${suffix}`;
+    suffix += 1;
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+/** Returns the relation query names Count can target: reverse/M2M (related_query_name) plus forward FK/O2O field names from the columns. */
+function relationQueryNames(relations: BackendModelRelation[] | undefined, columns?: BackendModelColumn[]): Set<string> {
+  const names = new Set((relations ?? []).map((relation) => relation.queryName || relation.name).filter((name): name is string => Boolean(name)));
+  for (const column of columns ?? []) {
+    if (column.relation && column.relation.field) {
+      names.add(column.relation.field);
+    }
+  }
+  return names;
+}
+
+/** Returns whether any aggregate targets a computed @property column — those need a Python scan (Socket/Auto only), not an ORM cell. */
+export function aggregatesNeedPython(aggregates: ModelAggregateTerm[] | undefined, columns: BackendModelColumn[] | undefined): boolean {
+  const computed = new Set((columns ?? []).filter((column) => column.computed).map((column) => column.attname));
+  return (aggregates ?? []).some((term) => term && String(term.func) !== "exists" && typeof term.field === "string" && computed.has(term.field));
+}
+
+/** Returns safe aggregate specs (allowlisted field/func/relation, unique aliases) emitting each function via the auto-imported `models` namespace. Count may target a reverse/M2M relation query name; `exists` is dropped in grouped mode. */
+function aggregateSpecs(terms: ModelAggregateTerm[] | undefined, attnames: Set<string>, relationNames: Set<string>, grouped: boolean): AggregateCellSpec[] {
+  const specs: AggregateCellSpec[] = [];
+  const used = new Set<string>();
+  for (const term of terms ?? []) {
+    const func = term ? String(term.func) : "";
+    if (func === "exists") {
+      if (grouped) {
+        continue;
+      }
+      specs.push({ alias: aggregateAlias(term.alias, func, "pk", used), arg: "pk", expr: "", func });
+    } else if (func === "count") {
+      const raw = term.field;
+      const arg = raw === undefined || raw === null || raw === "" || raw === "*" || raw === "pk" ? "pk" : String(raw);
+      if (arg !== "pk" && !attnames.has(arg) && !relationNames.has(arg) && !(arg.includes("__") && safeFilterPath(arg))) {
+        continue;
+      }
+      specs.push({ alias: aggregateAlias(term.alias, func, arg, used), arg, expr: `models.Count(${pyStr(arg)}${term.distinct ? ", distinct=True" : ""})`, func });
+    } else if (AGG_FUNC_NAMES[func]) {
+      const arg = term.field === "pk" ? "pk" : String(term.field ?? "");
+      if (arg !== "pk" && !attnames.has(arg) && !(arg.includes("__") && safeFilterPath(arg))) {
+        continue;
+      }
+      specs.push({ alias: aggregateAlias(term.alias, func, arg, used), arg, expr: `models.${AGG_FUNC_NAMES[func]}(${pyStr(arg)})`, func });
+    }
+  }
+  return specs;
+}
+
+/** Builds a single-line, injection-proof aggregate ORM cell: grouped → `.values().annotate().order_by()` (a queryset the capture hook materializes), global → a list-wrapped `.aggregate()`/`.exists()` tabulating as one row. Aggregate functions use the auto-imported `models` namespace (models.Sum, models.Count, …) so no import line is needed and the cell stays one line (plain-REPL multi-line cells are unsupported). Computed-@property aggregates are NOT emitted here — the caller routes those to the socket Python scan (see aggregatesNeedPython). */
+export function buildAggregateOrm(params: OrmAggregateParams): string {
+  const attnames = concreteAttnames(params.columns);
+  const groupBy = [...new Set((params.groupBy ?? []).filter((field) => field === "pk" || attnames.has(field) || (field.includes("__") && Boolean(safeFilterPath(field)))))].slice(0, 8);
+  const specs = aggregateSpecs(params.aggregates, attnames, relationQueryNames(params.relations, params.columns), groupBy.length > 0);
+  // A lookup on an aggregate alias filters the groups AFTER aggregation (HAVING) — keep it out of the WHERE plan.
+  const aliasSet = new Set(specs.map((spec) => spec.alias));
+  const baseFilters = (params.filters ?? []).filter((term) => !aliasSet.has(String(term?.field)));
+  const plan = filterPlan(baseFilters, filterSpecs(params.columns, params.relations));
+  if (!specs.length) {
+    // Nothing usable survived (all fields dropped, or exists-only with a group-by): emit a degenerate empty aggregate
+    // that tabulates to a zero-column grid, which parseOrmAggregateResponse maps to the same error the socket returns.
+    return `[${queryExpression(params.app, params.model, plan, "")}.aggregate()]`;
+  }
+  if (groupBy.length) {
+    const keys = groupBy.map((field) => pyStr(field)).join(", ");
+    const annotate = `.annotate(${specs.map((spec) => `${spec.alias}=${spec.expr}`).join(", ")})`;
+    const having = havingChain(params.filters, aliasSet);
+    // Bound the grouped result like the socket does (limit+1) so a high-cardinality group-by can't overrun the PTY marker.
+    const cap = Number.isInteger(params.limit) && (params.limit as number) > 0 ? (params.limit as number) : 1000;
+    return queryExpression(params.app, params.model, plan, `.values(${keys})${annotate}${having}.order_by(${keys})[0:${cap + 1}]`);
+  }
+  const base = queryExpression(params.app, params.model, plan, "");
+  const aggregates = specs.filter((spec) => spec.func !== "exists");
+  const exists = specs.filter((spec) => spec.func === "exists");
+  const aggregateCall = `${base}.aggregate(${aggregates.map((spec) => `${spec.alias}=${spec.expr}`).join(", ")})`;
+  if (!exists.length) {
+    return `[${aggregateCall}]`;
+  }
+  const existsEntries = exists.map((spec) => `${pyStr(spec.alias)}: ${base}.exists()`).join(", ");
+  return aggregates.length ? `[dict(${aggregateCall}, **{${existsEntries}})]` : `[{${existsEntries}}]`;
 }
 
 /** Builds the pure Python model-catalog probe; the capture hook attaches the actual model list to the marker. */
@@ -406,4 +676,4 @@ export function buildCommitOrm(app: string | undefined, model: string, changes: 
   return lines.join("\n");
 }
 
-export const __test = { buildCommitOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, editValue, filterChain, orderArgs, safeName };
+export const __test = { aggregatesNeedPython, buildAggregateOrm, buildCommitOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, editValue, filterChain, orderArgs, safeName };
