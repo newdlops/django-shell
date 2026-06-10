@@ -12,7 +12,8 @@ const PYTHON_KEYWORDS = new Set(["False", "None", "True", "and", "as", "assert",
 function isSafeAlias(name: string): boolean {
   return IDENTIFIER.test(name) && !PYTHON_KEYWORDS.has(name) && !name.startsWith("djs_") && !name.startsWith("__");
 }
-const LOOKUPS = new Set(["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"]);
+const LOOKUPS = new Set(["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "length", "length__gt", "length__gte", "length__lt", "length__lte", "trim"]);
+const INT_TRANSFORM_LOOKUPS = new Set(["week_day", "quarter", "hour", "minute", "second"]);
 const PYTHON_FILTER_CHUNK_SIZE = 1000;
 const TRUTHY = /^(true|1|t|yes|on)$/i;
 const NUMERIC_FIELD = /Integer|Float|Decimal|AutoField/;
@@ -64,6 +65,10 @@ function filterValue(lookup: string, value: unknown, column?: BackendModelColumn
   const text = String(value ?? "");
   if (lookup === "isnull") {
     return TRUTHY.test(text.trim()) ? "True" : "False";
+  }
+  if (lookup.startsWith("length") || INT_TRANSFORM_LOOKUPS.has(lookup)) {
+    // length and date/time extracts (week_day, quarter, hour, ...) compare against an int regardless of field type.
+    return /^-?\d+(\.\d+)?$/.test(text.trim()) ? text.trim() : "0";
   }
   if (lookup === "in" || lookup === "range") {
     return `[${text.split(",").map((part) => pyStr(part.trim())).join(", ")}]`;
@@ -446,14 +451,20 @@ export function buildRowsOrm(params: OrmRowsParams): string {
   return queryExpression(params.app, params.model, plan, `${annotate}${having}${order}[${offset}:${offset + limit + 1}]`);
 }
 
-/** Builds a lazy single-@property fetch as a readable ORM result, returning rows/dicts directly so raw audit has no JSON-print or backend-helper layer. */
-export function buildComputedOrm(app: string | undefined, model: string, field: string, filters: BackendModelFilter[] | undefined, order: BackendModelOrder[] | undefined, limit: number, columns: BackendModelColumn[] | undefined, relations?: BackendModelRelation[]): string {
+/** Builds a lazy single-@property fetch as a readable ORM result, returning rows/dicts directly so raw audit has no JSON-print or backend-helper layer. Per-row annotation columns are re-applied so the loaded page matches the rows grid even when it is sorted by an annotation alias. */
+export function buildComputedOrm(app: string | undefined, model: string, field: string, filters: BackendModelFilter[] | undefined, order: BackendModelOrder[] | undefined, limit: number, columns: BackendModelColumn[] | undefined, relations?: BackendModelRelation[], annotations?: ModelAnnotationSpec[]): string {
   const attnames = concreteAttnames(columns);
   const cap = Number.isInteger(limit) && limit > 0 ? limit : 50;
-  const plan = filterPlan(filters, filterSpecs(columns, relations));
-  const tail = `.order_by(${orderArgs(order, attnames)})[0:${cap}]`;
+  const rowAnnotations = buildRowAnnotations(annotations, attnames, relationQueryNames(relations, columns));
+  const annotate = rowAnnotations.length ? `.annotate(${rowAnnotations.map((spec) => `${spec.alias}=${spec.expr}`).join(", ")})` : "";
+  const allAliases = new Set(rowAnnotations.map((spec) => spec.alias));
+  const havingAliases = new Set(rowAnnotations.filter((spec) => !spec.window).map((spec) => spec.alias));
+  const baseFilters = (filters ?? []).filter((term) => !allAliases.has(String(term?.field)));
+  // annotate (so order_by('alias') resolves) → HAVING → order_by, mirroring buildRowsOrm's clause order.
+  const pageTail = `${annotate}${havingChain(filters, havingAliases)}.order_by(${orderArgs(order, attnames)})`;
+  const plan = filterPlan(baseFilters, filterSpecs(columns, relations));
   if (plan.pythonTerms.length) {
-    const base = queryExpression(app, model, plan, `.order_by(${orderArgs(order, attnames)})`);
+    const base = queryExpression(app, model, plan, pageTail);
     const access = IDENTIFIER.test(field) ? `__o.${field}` : `getattr(__o, ${pyStr(field)}, None)`;
     return [
       "import itertools as _it",
@@ -470,10 +481,10 @@ export function buildComputedOrm(app: string | undefined, model: string, field: 
     // ORM (annotate + values_list); a `lambda __m:` binds the model name once, keeping the typed cell compact. Resolves
     // `djshell_annotations` as a dict OR classmethod.
     plan.annotations.push({ alias: "__djs", expression: annotationExpression(field) });
-    return queryExpression(app, model, plan, `.order_by(${orderArgs(order, attnames)}).values("pk", "__djs")[0:${cap}]`);
+    return queryExpression(app, model, plan, `${pageTail}.values("pk", "__djs")[0:${cap}]`);
   }
   const access = IDENTIFIER.test(field) ? `__o.${field}` : `getattr(__o, ${pyStr(field)}, None)`;
-  return `[{${pyStr("pk")}: __o.pk, ${pyStr("value")}: ${access}} for __o in ${queryExpression(app, model, plan, tail)}]`;
+  return `[{${pyStr("pk")}: __o.pk, ${pyStr("value")}: ${access}} for __o in ${queryExpression(app, model, plan, `${pageTail}[0:${cap}]`)}]`;
 }
 
 /** Builds the row-count ORM `Model._base_manager.filter(...).count()` for the current filter set. */

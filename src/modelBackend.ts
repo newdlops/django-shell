@@ -320,6 +320,7 @@ export interface ModelRelatedQuery {
 
 /** Parameters for one lazy computed-field (@property) fetch over the current filter/order page. */
 export interface ModelComputedQuery {
+  annotations?: ModelAnnotationSpec[];
   app: string;
   columns?: BackendModelColumn[];
   field: string;

@@ -280,7 +280,7 @@ export class BackendClient {
   modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed> {
     const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
     if (this.reconstructsViaOrmCell) {
-      return this.ormCell(buildComputedOrm(query.app, query.model, query.field, query.filters, query.order, limit, query.columns, query.relations), parseOrmComputedResponse);
+      return this.ormCell(buildComputedOrm(query.app, query.model, query.field, query.filters, query.order, limit, query.columns, query.relations, query.annotations), parseOrmComputedResponse);
     }
     return this.request({ ...query, kind: "computed", limit }, parseModelComputedResponse);
   }

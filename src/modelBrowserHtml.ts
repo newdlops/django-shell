@@ -73,7 +73,7 @@ button:disabled{opacity:.5;cursor:default}
 .pathpick{display:inline-flex;align-items:center;gap:3px;flex-wrap:wrap}
 .winwrap{display:inline-flex;align-items:center;gap:3px;flex-wrap:wrap}
 .winchip{display:inline-flex;align-items:center;gap:2px;padding:1px 3px;border:1px solid var(--vscode-panel-border);border-radius:5px}
-th.annotation{cursor:default;color:var(--vscode-charts-purple,var(--vscode-textLink-foreground))}
+th.annotation{cursor:pointer;color:var(--vscode-charts-purple,var(--vscode-textLink-foreground))}
 .aggalias{width:120px;font:inherit;font-size:11px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:3px;padding:1px 3px}
 .aggdistinct{display:inline-flex;align-items:center;gap:2px;font-size:11px;color:var(--vscode-descriptionForeground)}
 .aggnote{color:var(--vscode-descriptionForeground);font-size:11px;font-style:italic}

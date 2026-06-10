@@ -67,6 +67,7 @@ def start(namespace, token):
         autoimported += _autoimport_registered_models(namespace)
         if _autoimport_enabled():
             autoimported += _autoimport_django_namespace(namespace)
+        _register_transform_lookups()
         server = _STATE.get("server")
         if server is None:
             server = _Server((_bind_host(), 0), _Handler)
@@ -87,6 +88,25 @@ def start(namespace, token):
         _print_marker(_READY_PREFIX, {"autoImported": autoimported, "cellCapture": bool(capture), "host": _connect_host(host), "ipython": _pty_is_ipython(), "port": port, "token": token})
     except Exception:
         _print_marker(_FAILED_PREFIX, {"error": traceback.format_exc()})
+
+
+def _register_transform_lookups():
+    """Registers the char/text field transforms the model browser exposes as filter operators — Length (string
+    length) and Trim (whitespace-stripped match) — so `field__length__gt=5` / `field__trim='x'` resolve natively.
+    Date/time extracts (week_day, quarter, hour, minute, second) are Django built-ins and need no registration.
+    Idempotent and best-effort: never blocks startup."""
+    if _STATE.get("transforms_registered"):
+        return
+    try:
+        from django.db import models
+        from django.db.models.functions import Length, Trim
+
+        for field_class in (models.CharField, models.TextField):
+            field_class.register_lookup(Length)
+            field_class.register_lookup(Trim)
+        _STATE["transforms_registered"] = True
+    except Exception:
+        pass
 
 
 def _autoimport_enabled():
@@ -1684,20 +1704,24 @@ def _browse_rows(request):
             has_window = any(spec["window"] for spec in annotations)
             columns = _browse_columns(model) + _browse_annotation_columns(annotations) + _browse_computed_columns(model)
             limit = _browse_limit(request.get("limit"), maximum=None)
-            order = _browse_order(request.get("order"), attnames, pk_attname)
+            # Sorting may target a concrete column or an annotation alias; alias order_by is applied AFTER .annotate() below.
+            order = _browse_order(request.get("order"), attnames, pk_attname, ann_aliases)
             # A lookup on an annotation column filters AFTER .annotate() (HAVING for aggregates, WHERE on the expression for
             # F-expr); window columns can't be filtered in SQL, so those filters are dropped. The rest stay WHERE filters.
             having_aliases = {spec["alias"] for spec in annotations if not spec["window"]}
             all_alias_set = {spec["alias"] for spec in annotations}
             base_filters, having_filters = _browse_split_having(request.get("filters"), all_alias_set, having_aliases)
             # Window functions are evaluated over the WHERE set, then LIMIT/OFFSET; a keyset cursor (pk__gt) would restart
-            # their frames on every page, so any window annotation forces offset pagination.
+            # their frames on every page, so any window annotation forces offset pagination. Ordering by an annotation alias
+            # likewise can't keyset on pk, so it falls through to offset paging (order != [pk]).
             keyset_capable = order == [pk_attname] and not has_window
-            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all().order_by(*order), model, base_filters, attnames)
+            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all(), model, base_filters, attnames)
             if ann_exprs:
                 queryset = queryset.annotate(**ann_exprs)
             if having_filters:
                 queryset = queryset.filter(_browse_having_q(having_filters, having_aliases))
+            # order_by AFTER .annotate() so a sort on an annotation alias resolves (a pre-annotate order_by raises FieldError).
+            queryset = queryset.order_by(*order)
             cursor = request.get("cursor")
             offset = request.get("offset")
             base_offset = offset if isinstance(offset, int) and offset > 0 else 0
@@ -1831,9 +1855,22 @@ def _browse_computed(request):
             if not isinstance(field, str) or not field.isidentifier() or not _pty_is_computed_field(model, field):
                 return {"ok": False, "error": "not a computed field", "values": {}}
             attnames = [column["attname"] for column in _browse_columns(model)]
-            order = _browse_order(request.get("order"), attnames, model._meta.pk.attname)
+            pk_attname = model._meta.pk.attname
+            # Reproduce the rows page exactly (same per-row annotations / HAVING / order) so the {pk: value} map covers the
+            # displayed rows even when the grid is sorted by an annotation alias (which the rows query annotates).
+            ann_specs = _browse_annotation_specs(model, request.get("annotations"), set(attnames), pk_attname)
+            ann_exprs = {spec["alias"]: spec["expr"] for spec in ann_specs}
+            ann_aliases = {spec["alias"] for spec in ann_specs}
+            having_aliases = {spec["alias"] for spec in ann_specs if not spec["window"]}
+            base_filters, having_filters = _browse_split_having(request.get("filters"), ann_aliases, having_aliases)
+            order = _browse_order(request.get("order"), attnames, pk_attname, ann_aliases)
             limit = _browse_limit(request.get("limit"), maximum=None)
-            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all().order_by(*order), model, request.get("filters"), attnames)
+            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all(), model, base_filters, attnames)
+            if ann_exprs:
+                queryset = queryset.annotate(**ann_exprs)
+            if having_filters:
+                queryset = queryset.filter(_browse_having_q(having_filters, having_aliases))
+            queryset = queryset.order_by(*order)
             # Capture only the query COUNT (never the SQL text — serializing it bloated the marker and corrupted the parseable
             # JSON; see the SQL-heavy @property bugfix). queryCount makes the cost verifiable: ≈ 1 with a declared annotation
             # (single SQL query), >> rowCount for a per-row @property (N+1).
@@ -2009,14 +2046,16 @@ def _browse_limit(value, default=50, maximum=200):
     return default
 
 
-def _browse_order(order, attnames, pk_attname):
-    """Returns a safe order-by list restricted to real columns, defaulting to the primary key."""
+def _browse_order(order, attnames, pk_attname, extra=None):
+    """Returns a safe order-by list restricted to real columns (plus any allowlisted annotation aliases in `extra`),
+    defaulting to the primary key. Annotation aliases are applied AFTER .annotate() by the caller so they resolve."""
+    allowed = attnames if not extra else (set(attnames) | set(extra))
     result = []
     if isinstance(order, list):
         for item in order:
             field = item.get("field") if isinstance(item, dict) else item
             descending = isinstance(item, dict) and bool(item.get("desc"))
-            if field in attnames:
+            if field in allowed:
                 result.append(f"-{field}" if descending else field)
     return result or [pk_attname]
 
@@ -2063,7 +2102,7 @@ def _browse_jsonable(value):
     return str(value)
 
 
-_BROWSE_LOOKUPS = frozenset({"exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"})
+_BROWSE_LOOKUPS = frozenset({"exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "length", "length__gt", "length__gte", "length__lt", "length__lte", "trim"})
 
 
 def _browse_count(request):
@@ -2668,8 +2707,8 @@ def _browse_orm_rows(model, order, filters, attnames, pk_attname, keyset_capable
     includes, excludes, declared, distinct = _browse_orm_clauses(model, filters, set(attnames))
     annotations = annotations or []
     column_annotations = [f"{spec['alias']}={spec['log']}" for spec in annotations]
-    lines = [f"{model.__name__}._base_manager", f"    .order_by({_orm_args(order)})"]
-    # Match execution order: declared-@property annotations (so the WHERE can use them) → base WHERE → column annotations → HAVING.
+    lines = [f"{model.__name__}._base_manager"]
+    # Match execution order: declared-@property annotations (so the WHERE can use them) → base WHERE → column annotations → HAVING → order_by.
     if declared:
         lines.append(f"    .annotate({', '.join(declared)})")
     if includes:
@@ -2683,6 +2722,8 @@ def _browse_orm_rows(model, order, filters, attnames, pk_attname, keyset_capable
             having_lookup = term.get("lookup") or "exact"
             having_key = term["field"] if having_lookup == "exact" else f"{term['field']}__{having_lookup}"
             lines.append(f"    .{'exclude' if term.get('negate') else 'filter'}({having_key}={_browse_coerce_filter_value(having_lookup, term.get('value'), numeric=True)!r})")
+    # order_by AFTER .annotate() so a sort on an annotation alias is valid in the printed (runnable) ORM.
+    lines.append(f"    .order_by({_orm_args(order)})")
     if distinct:
         lines.append("    .distinct()")
     if keyset_capable and cursor is not None:
@@ -3028,12 +3069,18 @@ def _browse_filter_term(model, term, attnames, declared):
     fields = {field.attname: field for field in model._meta.concrete_fields}
     annotation = None
     needs_distinct = False
+    # `length`/`length__<cmp>` and `trim` are char/text transforms (Length/Trim, registered at startup).
+    is_text_transform = lookup == "trim" or lookup == "length" or lookup.startswith("length__")
     if field == "pk":
         # Must precede the @property branch: Django defines `pk` as a property on the base Model, so
         # _pty_is_computed_field(model, "pk") is True and would otherwise misroute pk to a Python full-table scan.
+        if is_text_transform:
+            return None
         key = "pk"
         value = _browse_coerce_filter_value(lookup, term.get("value"), model._meta.pk)
     elif field in attnames:
+        if is_text_transform and type(fields[field]).__name__ not in _BROWSE_TEXT_TYPES:
+            return None  # Length()/Trim() are only valid on char/text columns; drop the term rather than raise FieldError.
         key = field
         value = _browse_coerce_filter_value(lookup, term.get("value"), fields.get(field))
     elif field in declared and field.isidentifier():
@@ -3062,6 +3109,8 @@ def _browse_filter_term(model, term, attnames, declared):
                 return None
             value = _browse_coerce_filter_value("isnull", term.get("value"))
         else:
+            if is_text_transform and type(leaf).__name__ not in _BROWSE_TEXT_TYPES:
+                return None  # Length()/Trim() only on a char/text leaf (e.g. author__name), never a numeric/relation leaf.
             value = _browse_coerce_filter_value(lookup, term.get("value"), leaf if getattr(leaf, "concrete", False) else None)
         key = field
     return key, lookup, value, annotation, needs_distinct, None
@@ -3154,6 +3203,8 @@ def _browse_coerce_filter_value(lookup, value, field=None, numeric=False):
         if isinstance(value, str):
             return value.strip().lower() not in ("", "false", "0", "no")
         return bool(value)
+    if isinstance(lookup, str) and (lookup.startswith("length") or lookup in ("week_day", "quarter", "hour", "minute", "second")):
+        numeric = True  # length and date/time extracts compare against an int, regardless of the underlying field type.
     if lookup in ("in", "range"):
         if isinstance(value, str):
             parts = [_browse_coerce_filter_value("exact", part.strip(), field, numeric) for part in value.split(",") if part.strip() != ""]

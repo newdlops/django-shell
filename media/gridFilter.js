@@ -9,13 +9,20 @@ import { createCombobox } from "./gridCombobox.js";
 const REL = "r:";
 const FIELD = "f:";
 const TEXT_TYPES = /Char|Text|Email|Slug|URL|UUID|IP|File|FilePath|Duration|Generic/;
+// String-length filtering (Django's Length transform) is only valid on char/text-backed columns — a narrower set than
+// TEXT_TYPES (which also matches UUID/IP/Duration/etc.). The backend registers Length on CharField/TextField only.
+const LENGTH_TYPES = /Char|Text|Email|Slug|URL|FilePath/;
 const NUM_TYPES = /Integer|Float|Decimal|AutoField/;
 // Readable operator labels (the value stays the Django lookup name); "(i)" = case-insensitive.
 const LOOKUP_LABEL = {
   exact: "=", iexact: "= (i)", contains: "contains", icontains: "contains (i)", gt: ">", gte: "≥", lt: "<", lte: "≤",
   startswith: "starts with", istartswith: "starts with (i)", endswith: "ends with", iendswith: "ends with (i)",
-  in: "in (list)", isnull: "is null", range: "between", date: "date =", year: "year", month: "month", day: "day"
+  in: "in (list)", isnull: "is null", range: "between", date: "date =", year: "year", month: "month", day: "day",
+  week_day: "weekday", quarter: "quarter", hour: "hour", minute: "minute", second: "second",
+  length: "length =", length__gt: "length >", length__gte: "length ≥", length__lt: "length <", length__lte: "length ≤", trim: "trimmed ="
 };
+// Integer-valued operators (transforms/extracts) whose value box must be a number, not the field's native type.
+const INT_LOOKUPS = new Set(["year", "month", "day", "week_day", "quarter", "hour", "minute", "second"]);
 
 /** Returns a sensible default operator for a freshly-picked terminal (contains for text, = otherwise, is-null for a relation). */
 function defaultLookup(terminal, names) {
@@ -54,19 +61,24 @@ function lookupsForTerminal(terminal, all) {
     return ["exact", "isnull"];
   }
   if (type === "DateTimeField") {
-    return ["exact", "gt", "gte", "lt", "lte", "range", "date", "year", "month", "day", "isnull"];
+    return ["exact", "gt", "gte", "lt", "lte", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "isnull"];
   }
   if (type === "DateField") {
-    return ["exact", "gt", "gte", "lt", "lte", "range", "year", "month", "day", "isnull"];
+    return ["exact", "gt", "gte", "lt", "lte", "range", "year", "quarter", "month", "week_day", "day", "isnull"];
   }
   if (type === "TimeField") {
-    return ["exact", "gt", "gte", "lt", "lte", "range", "isnull"];
+    return ["exact", "gt", "gte", "lt", "lte", "range", "hour", "minute", "second", "isnull"];
   }
   if (NUM_TYPES.test(type)) {
     return ["exact", "gt", "gte", "lt", "lte", "in", "range", "isnull"];
   }
   if (TEXT_TYPES.test(type)) {
-    return ["exact", "iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull"];
+    const text = ["exact", "iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull"];
+    if (LENGTH_TYPES.test(type)) {
+      // Length() / Trim() are registered transforms on char/text fields (backend startup); both are injection-proof lookups.
+      text.push("trim", "length", "length__gt", "length__gte", "length__lt", "length__lte");
+    }
+    return text;
   }
   return all;
 }
@@ -84,7 +96,7 @@ function inputTypeFor(type) {
 
 /** Creates the cascading filter-bar controller bound to the term/active-filter containers. */
 export function createFilterBar(deps) {
-  const { el, termsEl, activeEl, getState, postRaw, lookups } = deps;
+  const { el, termsEl, activeEl, getState, postRaw, lookups, onRemove } = deps;
   const treeCache = new Map();
   const pending = new Map();
   let requestSeq = 0;
@@ -122,7 +134,8 @@ export function createFilterBar(deps) {
       }
     } else {
       for (const column of state.columns || []) {
-        if (column.computed || column.attname === state.pk) { continue; }
+        // Skip computed @property, the pk (added below), and annotation columns (added by the dedicated HAVING loop) to avoid duplicates.
+        if (column.computed || column.annotation || column.attname === state.pk) { continue; }
         options.push({ choices: column.choices, label: column.attname, role: "field", type: column.type, value: `${FIELD}${column.attname}` });
       }
     }
@@ -326,7 +339,8 @@ export function createFilterBar(deps) {
       return { getValue: () => combo.getValue(), node: combo.node };
     }
     // `date` compares only the date portion → force a plain date picker (a datetime-local value Django's __date rejects).
-    const type = lookup === "date" ? "DateField" : (["year", "month", "day"].includes(lookup) ? "IntegerField" : (terminal ? terminal.type : ""));
+    // Length/extract operators (length*, year/month/day, week_day, quarter, hour/minute/second) compare against an integer → number box.
+    const type = lookup === "date" ? "DateField" : (INT_LOOKUPS.has(lookup) || String(lookup).startsWith("length") ? "IntegerField" : (terminal ? terminal.type : ""));
     const input = el("input", { type: inputTypeFor(type) });
     if (presetValue !== undefined && presetValue !== null) { input.value = String(presetValue); }
     return { getValue: () => input.value, node: input };
@@ -408,13 +422,29 @@ export function createFilterBar(deps) {
     }
   }
 
+  /** Returns the current term rows as filter objects, INCLUDING incomplete ones (so a refresh keeps in-progress edits). */
+  function snapshot() {
+    const terms = [];
+    for (const term of termsEl.querySelectorAll(".term")) {
+      const lookupNode = term.querySelector("[data-role=lookup]");
+      const negateNode = term.querySelector("[data-role=negate]");
+      terms.push({ field: pathOf(term), lookup: lookupNode ? lookupNode.value : "", negate: Boolean(negateNode && negateNode.checked), value: term._value ? term._value.getValue() : "" });
+    }
+    return terms;
+  }
+
+  /** Rebuilds the open term rows against the CURRENT option set (e.g. after a `+ Column` adds an annotation/aggregate alias), preserving each term's picked field/lookup/value. */
+  function refresh() {
+    sync(snapshot());
+  }
+
   /** Clears every term row. */
   function clear() {
     syncToken += 1;
     termsEl.innerHTML = "";
   }
 
-  /** Renders the read-only "applied filters" chip summary. */
+  /** Renders the "applied filters" chip summary; each chip carries an ✕ that drops just that filter and re-applies. */
   function renderSummary(filters) {
     if (!activeEl) { return; }
     activeEl.innerHTML = "";
@@ -423,17 +453,21 @@ export function createFilterBar(deps) {
       return;
     }
     activeEl.appendChild(el("span", { className: "tag" }, "Applied"));
-    for (const filter of filters) {
-      activeEl.appendChild(el("span", { className: "filterchip", title: "Currently applied filter" }, describe(filter)));
-    }
+    filters.forEach((filter, index) => {
+      const remove = el("button", { className: "chipx", title: "Remove this filter", type: "button" }, "✕");
+      // Drop only this chip's filter (by position) and re-apply the reduced set, leaving the other applied filters intact.
+      remove.addEventListener("click", () => { if (onRemove) { onRemove(filters.filter((_, other) => other !== index)); } });
+      activeEl.appendChild(el("span", { className: "filterchip", title: "Applied filter — ✕ to remove" }, describe(filter), remove));
+    });
   }
 
   /** Returns a compact human description of one applied filter. */
   function describe(filter) {
     const field = String(filter.field || "").replace(/^rel:/, "").replace(/__/g, " ▸ ");
+    const op = LOOKUP_LABEL[filter.lookup] || filter.lookup;
     const value = filter.lookup === "isnull" ? String(filter.value).toLowerCase() : String(filter.value == null ? "" : filter.value);
-    return `${filter.negate ? "not " : ""}${field} ${filter.lookup} ${value}`.trim();
+    return `${filter.negate ? "not " : ""}${field} ${op} ${value}`.trim();
   }
 
-  return { addTerm: () => void addTerm(null), clear, collect, describe, onTreeResponse, renderSummary, sync };
+  return { addTerm: () => void addTerm(null), clear, collect, describe, onTreeResponse, refresh, renderSummary, sync };
 }

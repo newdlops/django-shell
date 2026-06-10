@@ -1,16 +1,11 @@
-// Verifies the additive Django model data-browser backend kinds.
+// Verifies the additive Django model data-browser backend kinds. (Filter/transform-specific tests live in
+// modelBrowserFilters.test.mjs; shared helpers in modelBrowserHelpers.mjs.)
 
 import assert from "node:assert/strict";
-import childProcess from "node:child_process";
-import { createRequire } from "node:module";
-import path from "node:path";
 import test from "node:test";
 
-const require = createRequire(import.meta.url);
-const { BackendClient } = require("../out/backendClient.js");
-const { buildComputedOrm, buildRowsOrm, __test: ormBuilders } = require("../out/modelOrm.js");
-const PYTHON = pythonExecutable();
-const HAS_DJANGO = PYTHON ? childProcess.spawnSync(PYTHON, ["-c", "import django"], { encoding: "utf8" }).status === 0 : false;
+import { BackendClient, HAS_DJANGO, PYTHON, buildComputedOrm, buildRowsOrm, ormBuilders, runBackend } from "./modelBrowserHelpers.mjs";
+
 const SUPPORT_LAYER_CELL = /apps\.get_model\(|django\.apps|__import__\("django\.apps"|json\.dumps|_djs_backend_module/;
 
 test("serializes non-primitive cells into JSON-safe tagged values", { skip: !PYTHON }, () => {
@@ -878,23 +873,3 @@ test("tabulates custom ORM query results, editable only for single-model instanc
   assert.deepEqual(payload.scalar_cols, ["value"]);
   assert.equal(payload.scalar_value, 4, "a scalar result becomes a single value cell");
 });
-
-/** Runs Python that loads the backend module as `mod` and prints one JSON line. */
-function runBackend(lines) {
-  const header = [
-    "import importlib.util",
-    `path = ${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
-    "spec = importlib.util.spec_from_file_location('django_shell_backend', path)",
-    "mod = importlib.util.module_from_spec(spec)",
-    "spec.loader.exec_module(mod)"
-  ];
-  const result = childProcess.spawnSync(PYTHON, ["-c", [...header, ...lines].join("\n")], { encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  return JSON.parse(result.stdout.trim().split(/\r?\n/).pop());
-}
-
-/** Returns the first runnable Python interpreter for backend tests. */
-function pythonExecutable() {
-  const candidates = [process.env.DJANGO_SHELL_E2E_PYTHON, process.env.DJLS_E2E_BASE_PYTHON, "/Users/lky/.asdf/installs/python/3.11.15/bin/python3.11", "/usr/bin/python3", "python3"].filter(Boolean);
-  return candidates.find((candidate) => childProcess.spawnSync(candidate, ["--version"], { encoding: "utf8" }).status === 0);
-}

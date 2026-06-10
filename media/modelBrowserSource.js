@@ -48,7 +48,8 @@ const filterBar = createFilterBar({
   activeEl: els.activefilters,
   getState: () => state,
   postRaw: (message) => vscode.postMessage(message),
-  lookups: LOOKUPS
+  lookups: LOOKUPS,
+  onRemove: removeFilter
 });
 
 const columnBuilder = createColumnBuilder({
@@ -210,9 +211,11 @@ function buildHead() {
   const row = el("tr", {});
   row.appendChild(el("th", { className: "rownum", title: "Row number" }, "#"));
   for (const column of state.columns) {
-    const sortable = !column.computed && !column.annotation;
+    // Annotation/aggregate/window columns are real query expressions, so they sort server-side (order_by the alias);
+    // only @property/GeneratedField (computed) columns aren't DB-orderable.
+    const sortable = !column.computed;
     const headClass = column.annotation ? "annotation" : column.computed ? "computed" : "sortable";
-    const headTitle = sortable ? `Sort by ${column.name} (${column.type})` : column.annotation ? `${column.name} (computed column — read-only)` : `${column.name} (computed @property — read-only)`;
+    const headTitle = sortable ? `Sort by ${column.name} (${column.type})` : `${column.name} (computed @property — read-only)`;
     const th = el("th", { className: headClass, dataset: sortable ? { act: "sort", col: column.attname, key: column.attname } : { key: column.attname }, title: headTitle });
     const pinned = state.pinned.has(column.attname);
     th.appendChild(el("button", { className: pinned ? "pinbtn active" : "pinbtn", dataset: { act: "pin", col: column.attname }, title: pinned ? "Unpin column" : "Pin column (freeze left)" }, "⇤"));
@@ -268,7 +271,13 @@ function onRows(message) {
     state.order = message.order;
   }
   if (!message.append) {
-    filterBar.sync(state.filters);
+    // When `+ Column` added/removed annotation columns, refresh the open filter terms IN PLACE so the new aliases
+    // become searchable while keeping any in-progress edit; on a fresh load (no terms yet) build from the applied filters.
+    if (columnsChanged && els.filterterms.querySelector(".term")) {
+      filterBar.refresh();
+    } else {
+      filterBar.sync(state.filters);
+    }
   }
   updateSortArrows();
   filterBar.renderSummary(state.filters);
@@ -509,10 +518,22 @@ function toggleColumnPanel() {
   }
 }
 
-/** Applies the builder: with group-by fields it collapses rows into per-group summaries; without, it adds the terms as per-row annotation columns to the grid. */
-function applyColumns() {
+/** Removes a single applied filter (the already-reduced set is passed in) and re-runs the current view with it, leaving the rest of the filters and the sort/columns intact. */
+function removeFilter(next) {
+  state.filters = next;
+  filterBar.sync(next);
+  if (state.aggregateActive) {
+    applyColumns(next);
+    return;
+  }
+  filterBar.renderSummary(next);
+  send({ annotations: state.annotations, filters: next, order: state.order, type: "applyQuery" });
+}
+
+/** Applies the builder: with group-by fields it collapses rows into per-group summaries; without, it adds the terms as per-row annotation columns to the grid. An explicit `filtersOverride` (from a chip removal) is used instead of re-collecting the builder, avoiding a race with the async term-row sync. */
+function applyColumns(filtersOverride) {
   const { droppedToMany, groupBy, terms } = columnBuilder.collect();
-  state.filters = filterBar.collect();
+  state.filters = filtersOverride !== undefined ? filtersOverride : filterBar.collect();
   filterBar.renderSummary(state.filters);
   const drillNote = droppedToMany ? " · skipped Sum/Avg over a to-many relation (use Count, or group by the related model)" : "";
   if (groupBy.length) {
@@ -561,6 +582,8 @@ function onAggregate(message) {
   }
   // Expose the aggregate (non-group) result columns so the filter bar can offer them as HAVING lookups.
   state.aggregateColumns = (result.columns || []).map((column) => column.attname).filter((name) => !state.aggregateGroupBy.includes(name));
+  // Refresh the open filter terms so the just-created aggregate aliases become searchable (keeping in-progress edits).
+  filterBar.refresh();
   els.gridwrap.innerHTML = "";
   els.gridwrap.appendChild(renderAggregateResult(result, { el, groupBy: state.aggregateGroupBy, renderValue }));
   const count = (result.rows || []).length;

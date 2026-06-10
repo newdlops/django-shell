@@ -303,7 +303,7 @@ class ModelBrowserPanel {
 
   /** Lazily fetches one @property column's values for the currently-loaded rows (user activated the column). */
   private async loadComputed(field: string): Promise<void> {
-    const result = await this.source.modelComputed({ app: this.target.app, columns: this.columns, field, filters: this.filters, limit: Math.max(this.loadedRowCount, 1), model: this.target.model, order: this.order, relations: this.relations });
+    const result = await this.source.modelComputed({ annotations: this.annotations, app: this.target.app, columns: this.columns, field, filters: this.filters, limit: Math.max(this.loadedRowCount, 1), model: this.target.model, order: this.order, relations: this.relations });
     if (this.disposed) {
       return;
     }

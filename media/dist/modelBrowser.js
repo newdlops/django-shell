@@ -984,6 +984,7 @@ function createCombobox(deps) {
 var REL = "r:";
 var FIELD = "f:";
 var TEXT_TYPES = /Char|Text|Email|Slug|URL|UUID|IP|File|FilePath|Duration|Generic/;
+var LENGTH_TYPES = /Char|Text|Email|Slug|URL|FilePath/;
 var NUM_TYPES = /Integer|Float|Decimal|AutoField/;
 var LOOKUP_LABEL = {
   exact: "=",
@@ -1004,8 +1005,20 @@ var LOOKUP_LABEL = {
   date: "date =",
   year: "year",
   month: "month",
-  day: "day"
+  day: "day",
+  week_day: "weekday",
+  quarter: "quarter",
+  hour: "hour",
+  minute: "minute",
+  second: "second",
+  length: "length =",
+  length__gt: "length >",
+  length__gte: "length \u2265",
+  length__lt: "length <",
+  length__lte: "length \u2264",
+  trim: "trimmed ="
 };
+var INT_LOOKUPS = /* @__PURE__ */ new Set(["year", "month", "day", "week_day", "quarter", "hour", "minute", "second"]);
 function defaultLookup(terminal, names) {
   if (!terminal || terminal.role === "relation") {
     return names[0];
@@ -1037,19 +1050,23 @@ function lookupsForTerminal(terminal, all) {
     return ["exact", "isnull"];
   }
   if (type === "DateTimeField") {
-    return ["exact", "gt", "gte", "lt", "lte", "range", "date", "year", "month", "day", "isnull"];
+    return ["exact", "gt", "gte", "lt", "lte", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "isnull"];
   }
   if (type === "DateField") {
-    return ["exact", "gt", "gte", "lt", "lte", "range", "year", "month", "day", "isnull"];
+    return ["exact", "gt", "gte", "lt", "lte", "range", "year", "quarter", "month", "week_day", "day", "isnull"];
   }
   if (type === "TimeField") {
-    return ["exact", "gt", "gte", "lt", "lte", "range", "isnull"];
+    return ["exact", "gt", "gte", "lt", "lte", "range", "hour", "minute", "second", "isnull"];
   }
   if (NUM_TYPES.test(type)) {
     return ["exact", "gt", "gte", "lt", "lte", "in", "range", "isnull"];
   }
   if (TEXT_TYPES.test(type)) {
-    return ["exact", "iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull"];
+    const text = ["exact", "iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull"];
+    if (LENGTH_TYPES.test(type)) {
+      text.push("trim", "length", "length__gt", "length__gte", "length__lt", "length__lte");
+    }
+    return text;
   }
   return all;
 }
@@ -1075,7 +1092,7 @@ function inputTypeFor(type) {
   return "text";
 }
 function createFilterBar(deps) {
-  const { el: el2, termsEl, activeEl, getState, postRaw, lookups } = deps;
+  const { el: el2, termsEl, activeEl, getState, postRaw, lookups, onRemove } = deps;
   const treeCache = /* @__PURE__ */ new Map();
   const pending = /* @__PURE__ */ new Map();
   let requestSeq = 0;
@@ -1115,7 +1132,7 @@ function createFilterBar(deps) {
       }
     } else {
       for (const column of state2.columns || []) {
-        if (column.computed || column.attname === state2.pk) {
+        if (column.computed || column.annotation || column.attname === state2.pk) {
           continue;
         }
         options.push({ choices: column.choices, label: column.attname, role: "field", type: column.type, value: `${FIELD}${column.attname}` });
@@ -1287,7 +1304,7 @@ function createFilterBar(deps) {
       const combo = createCombobox({ el: el2, options: choiceOptions2, placeholder: "\u2014 choose \u2014", value: selected });
       return { getValue: () => combo.getValue(), node: combo.node };
     }
-    const type = lookup === "date" ? "DateField" : ["year", "month", "day"].includes(lookup) ? "IntegerField" : terminal ? terminal.type : "";
+    const type = lookup === "date" ? "DateField" : INT_LOOKUPS.has(lookup) || String(lookup).startsWith("length") ? "IntegerField" : terminal ? terminal.type : "";
     const input = el2("input", { type: inputTypeFor(type) });
     if (presetValue !== void 0 && presetValue !== null) {
       input.value = String(presetValue);
@@ -1384,6 +1401,18 @@ function createFilterBar(deps) {
       void addTerm(filter);
     }
   }
+  function snapshot() {
+    const terms = [];
+    for (const term of termsEl.querySelectorAll(".term")) {
+      const lookupNode = term.querySelector("[data-role=lookup]");
+      const negateNode = term.querySelector("[data-role=negate]");
+      terms.push({ field: pathOf(term), lookup: lookupNode ? lookupNode.value : "", negate: Boolean(negateNode && negateNode.checked), value: term._value ? term._value.getValue() : "" });
+    }
+    return terms;
+  }
+  function refresh() {
+    sync(snapshot());
+  }
   function clear() {
     syncToken += 1;
     termsEl.innerHTML = "";
@@ -1398,16 +1427,23 @@ function createFilterBar(deps) {
       return;
     }
     activeEl.appendChild(el2("span", { className: "tag" }, "Applied"));
-    for (const filter of filters) {
-      activeEl.appendChild(el2("span", { className: "filterchip", title: "Currently applied filter" }, describe(filter)));
-    }
+    filters.forEach((filter, index) => {
+      const remove = el2("button", { className: "chipx", title: "Remove this filter", type: "button" }, "\u2715");
+      remove.addEventListener("click", () => {
+        if (onRemove) {
+          onRemove(filters.filter((_, other) => other !== index));
+        }
+      });
+      activeEl.appendChild(el2("span", { className: "filterchip", title: "Applied filter \u2014 \u2715 to remove" }, describe(filter), remove));
+    });
   }
   function describe(filter) {
     const field = String(filter.field || "").replace(/^rel:/, "").replace(/__/g, " \u25B8 ");
+    const op = LOOKUP_LABEL[filter.lookup] || filter.lookup;
     const value = filter.lookup === "isnull" ? String(filter.value).toLowerCase() : String(filter.value == null ? "" : filter.value);
-    return `${filter.negate ? "not " : ""}${field} ${filter.lookup} ${value}`.trim();
+    return `${filter.negate ? "not " : ""}${field} ${op} ${value}`.trim();
   }
-  return { addTerm: () => void addTerm(null), clear, collect, describe, onTreeResponse, renderSummary, sync };
+  return { addTerm: () => void addTerm(null), clear, collect, describe, onTreeResponse, refresh, renderSummary, sync };
 }
 
 // media/gridFieldPath.js
@@ -1794,7 +1830,8 @@ var filterBar = createFilterBar({
   activeEl: els.activefilters,
   getState: () => state,
   postRaw: (message) => vscode.postMessage(message),
-  lookups: LOOKUPS
+  lookups: LOOKUPS,
+  onRemove: removeFilter
 });
 var columnBuilder = createColumnBuilder({
   el,
@@ -1944,9 +1981,9 @@ function buildHead() {
   const row = el("tr", {});
   row.appendChild(el("th", { className: "rownum", title: "Row number" }, "#"));
   for (const column of state.columns) {
-    const sortable = !column.computed && !column.annotation;
+    const sortable = !column.computed;
     const headClass = column.annotation ? "annotation" : column.computed ? "computed" : "sortable";
-    const headTitle = sortable ? `Sort by ${column.name} (${column.type})` : column.annotation ? `${column.name} (computed column \u2014 read-only)` : `${column.name} (computed @property \u2014 read-only)`;
+    const headTitle = sortable ? `Sort by ${column.name} (${column.type})` : `${column.name} (computed @property \u2014 read-only)`;
     const th = el("th", { className: headClass, dataset: sortable ? { act: "sort", col: column.attname, key: column.attname } : { key: column.attname }, title: headTitle });
     const pinned = state.pinned.has(column.attname);
     th.appendChild(el("button", { className: pinned ? "pinbtn active" : "pinbtn", dataset: { act: "pin", col: column.attname }, title: pinned ? "Unpin column" : "Pin column (freeze left)" }, "\u21E4"));
@@ -1997,7 +2034,11 @@ function onRows(message) {
     state.order = message.order;
   }
   if (!message.append) {
-    filterBar.sync(state.filters);
+    if (columnsChanged && els.filterterms.querySelector(".term")) {
+      filterBar.refresh();
+    } else {
+      filterBar.sync(state.filters);
+    }
   }
   updateSortArrows();
   filterBar.renderSummary(state.filters);
@@ -2214,9 +2255,19 @@ function toggleColumnPanel() {
     columnBuilder.ensureRows();
   }
 }
-function applyColumns() {
+function removeFilter(next) {
+  state.filters = next;
+  filterBar.sync(next);
+  if (state.aggregateActive) {
+    applyColumns(next);
+    return;
+  }
+  filterBar.renderSummary(next);
+  send({ annotations: state.annotations, filters: next, order: state.order, type: "applyQuery" });
+}
+function applyColumns(filtersOverride) {
   const { droppedToMany, groupBy, terms } = columnBuilder.collect();
-  state.filters = filterBar.collect();
+  state.filters = filtersOverride !== void 0 ? filtersOverride : filterBar.collect();
   filterBar.renderSummary(state.filters);
   const drillNote = droppedToMany ? " \xB7 skipped Sum/Avg over a to-many relation (use Count, or group by the related model)" : "";
   if (groupBy.length) {
@@ -2258,6 +2309,7 @@ function onAggregate(message) {
     return;
   }
   state.aggregateColumns = (result.columns || []).map((column) => column.attname).filter((name) => !state.aggregateGroupBy.includes(name));
+  filterBar.refresh();
   els.gridwrap.innerHTML = "";
   els.gridwrap.appendChild(renderAggregateResult(result, { el, groupBy: state.aggregateGroupBy, renderValue }));
   const count = (result.rows || []).length;
