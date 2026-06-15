@@ -1576,7 +1576,7 @@ function createPathPicker(deps) {
 }
 
 // media/gridAggregate.js
-var KINDS = [{ label: "Aggregate", value: "aggregate" }, { label: "Window", value: "window" }, { label: "Expr (F)", value: "expr" }];
+var KINDS = [{ label: "Annotate", value: "annotate" }, { label: "Aggregate", value: "aggregate" }, { label: "Window", value: "window" }, { label: "Expr (F)", value: "expr" }];
 var AGG_FUNCS = [{ label: "Count", value: "count" }, { label: "Sum", value: "sum" }, { label: "Avg", value: "avg" }, { label: "Min", value: "min" }, { label: "Max", value: "max" }];
 var WINDOW_FUNCS = [{ label: "Rank", value: "rank" }, { label: "DenseRank", value: "dense_rank" }, { label: "RowNumber", value: "row_number" }, { label: "Sum", value: "sum" }, { label: "Avg", value: "avg" }, { label: "Min", value: "min" }, { label: "Max", value: "max" }, { label: "Count", value: "count" }];
 var WINDOW_AGG = /* @__PURE__ */ new Set(["sum", "avg", "min", "max", "count"]);
@@ -1695,6 +1695,18 @@ function createColumnBuilder(deps) {
     body.append(left, opCombo.node, right);
     return () => ({ left: left.value.trim(), op: opCombo.node.value, right: right.value.trim() });
   }
+  function annotateBody(body, initial) {
+    const expression = el2("input", {
+      className: "aggexpr",
+      placeholder: "models.F('field') / models.Subquery(...)",
+      spellcheck: false,
+      title: "Django expression passed to annotate(alias=...)",
+      type: "text",
+      value: initial && initial.expression != null ? String(initial.expression) : ""
+    });
+    body.append(expression);
+    return () => ({ expression: expression.value.trim() });
+  }
   function addTerm(initial) {
     let seed = initial || {};
     const row = el2("span", { className: "aggterm" });
@@ -1707,7 +1719,7 @@ function createColumnBuilder(deps) {
     const rebuild = () => {
       body.innerHTML = "";
       const kind = kindCombo.node.value;
-      readBody = kind === "window" ? windowBody(body, seed) : kind === "expr" ? exprBody(body, seed) : aggregateBody(body, seed);
+      readBody = kind === "annotate" ? annotateBody(body, seed) : kind === "window" ? windowBody(body, seed) : kind === "expr" ? exprBody(body, seed) : aggregateBody(body, seed);
     };
     kindCombo.node.addEventListener("change", () => {
       seed = {};
@@ -1719,6 +1731,9 @@ function createColumnBuilder(deps) {
     rebuild();
   }
   function defaultAlias(spec) {
+    if (spec.kind === "annotate") {
+      return "annotate";
+    }
     if (spec.kind === "expr") {
       return "expr";
     }
@@ -2273,7 +2288,7 @@ function applyColumns(filtersOverride) {
   if (groupBy.length) {
     const aggregates = terms.filter((term) => term.kind === "aggregate").map((term) => ({ alias: term.alias, distinct: term.distinct, field: term.field, func: term.func }));
     if (!aggregates.length) {
-      els.status.textContent = "Add at least one Aggregate column to summarize per group (Window/Expr are per-row only).";
+      els.status.textContent = "Add at least one Aggregate column to summarize per group (Annotate/Window/Expr are per-row only).";
       return;
     }
     state.aggregateActive = true;

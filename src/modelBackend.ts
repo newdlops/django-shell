@@ -157,10 +157,11 @@ export interface ModelAnnotationOrder {
   field: string;
 }
 
-/** One per-row annotation column: an aggregate over a relation/field, a window function, or an F-expression. */
+/** One per-row annotation column: an aggregate, window function, F-expression, or raw Django annotate expression. */
 export interface ModelAnnotationSpec {
   alias?: string;
   distinct?: boolean;
+  expression?: string;
   field?: string;
   func?: string;
   kind: string;

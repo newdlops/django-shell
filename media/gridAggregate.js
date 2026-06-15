@@ -1,13 +1,13 @@
 // Unified "+ Column" builder for the model data browser.
-// Each term defines one computed column — an aggregate (Count/Sum/Avg/Min/Max over a field or relation), a window
-// function (Rank/DenseRank/RowNumber/running Sum/Avg/Min/Max/Count with partition + order), or an F-expression. A
-// group-by section is the toggle: no group-by → the terms are per-row annotation columns added to the grid; with
-// group-by → the rows collapse into per-group summaries. Field/relation identifiers are picked from comboboxes.
+// Each term defines one computed column — a raw annotate expression, an aggregate (Count/Sum/Avg/Min/Max over a field or
+// relation), a window function (Rank/DenseRank/RowNumber/running Sum/Avg/Min/Max/Count with partition + order), or an
+// F-expression. A group-by section is the toggle: no group-by → the terms are per-row annotation columns added to the
+// grid; with group-by → the rows collapse into per-group summaries. Field/relation identifiers are picked from comboboxes.
 
 import { createCombobox } from "./gridCombobox.js";
 import { createPathPicker, createTreeService } from "./gridFieldPath.js";
 
-const KINDS = [{ label: "Aggregate", value: "aggregate" }, { label: "Window", value: "window" }, { label: "Expr (F)", value: "expr" }];
+const KINDS = [{ label: "Annotate", value: "annotate" }, { label: "Aggregate", value: "aggregate" }, { label: "Window", value: "window" }, { label: "Expr (F)", value: "expr" }];
 const AGG_FUNCS = [{ label: "Count", value: "count" }, { label: "Sum", value: "sum" }, { label: "Avg", value: "avg" }, { label: "Min", value: "min" }, { label: "Max", value: "max" }];
 const WINDOW_FUNCS = [{ label: "Rank", value: "rank" }, { label: "DenseRank", value: "dense_rank" }, { label: "RowNumber", value: "row_number" }, { label: "Sum", value: "sum" }, { label: "Avg", value: "avg" }, { label: "Min", value: "min" }, { label: "Max", value: "max" }, { label: "Count", value: "count" }];
 const WINDOW_AGG = new Set(["sum", "avg", "min", "max", "count"]);
@@ -143,6 +143,20 @@ export function createColumnBuilder(deps) {
     return () => ({ left: left.value.trim(), op: opCombo.node.value, right: right.value.trim() });
   }
 
+  /** Builds the raw annotate-expression sub-control and returns a spec getter. */
+  function annotateBody(body, initial) {
+    const expression = el("input", {
+      className: "aggexpr",
+      placeholder: "models.F('field') / models.Subquery(...)",
+      spellcheck: false,
+      title: "Django expression passed to annotate(alias=...)",
+      type: "text",
+      value: (initial && initial.expression != null ? String(initial.expression) : "")
+    });
+    body.append(expression);
+    return () => ({ expression: expression.value.trim() });
+  }
+
   /** Appends one column term row whose body switches on the selected kind. */
   function addTerm(initial) {
     let seed = initial || {};
@@ -156,7 +170,7 @@ export function createColumnBuilder(deps) {
     const rebuild = () => {
       body.innerHTML = "";
       const kind = kindCombo.node.value;
-      readBody = kind === "window" ? windowBody(body, seed) : kind === "expr" ? exprBody(body, seed) : aggregateBody(body, seed);
+      readBody = kind === "annotate" ? annotateBody(body, seed) : kind === "window" ? windowBody(body, seed) : kind === "expr" ? exprBody(body, seed) : aggregateBody(body, seed);
     };
     kindCombo.node.addEventListener("change", () => { seed = {}; rebuild(); });
     row._read = () => ({ alias: alias.value.trim(), kind: kindCombo.node.value, ...readBody() });
@@ -167,6 +181,7 @@ export function createColumnBuilder(deps) {
 
   /** Returns a default alias for a term when the user left it blank. */
   function defaultAlias(spec) {
+    if (spec.kind === "annotate") { return "annotate"; }
     if (spec.kind === "expr") { return "expr"; }
     if (spec.kind === "window") { return spec.func + (WINDOW_AGG.has(spec.func) && spec.field ? `_${spec.field}` : ""); }
     return `${spec.field && spec.field !== "*" ? spec.field : "rows"}_${spec.func}`;

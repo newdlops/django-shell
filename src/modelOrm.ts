@@ -292,10 +292,18 @@ export interface OrmRowsParams {
 }
 
 const WINDOW_RANK_FUNCS: Record<string, string> = { dense_rank: "DenseRank", rank: "Rank", row_number: "RowNumber" };
+const ANNOTATION_FUNCTION_CONSTRUCTORS = new Set(["Cast", "Coalesce", "Concat", "Greatest", "Length", "Lower", "Trim", "Upper"]);
+const ANNOTATION_BARE_CONSTRUCTORS = ["Avg", "Case", "Cast", "Coalesce", "Concat", "Count", "Exists", "ExpressionWrapper", "F", "Greatest", "Length", "Lower", "Max", "Min", "OuterRef", "Q", "Subquery", "Sum", "Trim", "Upper", "Value", "When", "Window"];
+const ANNOTATION_BLOCKED_WORDS = /\b(?:breakpoint|compile|delattr|eval|exec|getattr|globals|input|lambda|locals|open|setattr|super|type|vars|__import__)\b/;
+const ANNOTATION_BLOCKED_METHODS = /\.(?:bulk_create|bulk_update|create|cursor|delete|execute|executemany|extra|get_or_create|raw|save|update|update_or_create)\s*\(/;
+const ANNOTATION_BLOCKED_MODULES = /\b(?:builtins|ctypes|importlib|os|pathlib|shutil|socket|subprocess|sys)\b/;
 
 /** Returns a safe single-line annotation expression for one per-row column spec via the `models` namespace, or null. */
 function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relationNames: Set<string>): string | null {
   const kind = item ? String(item.kind) : "";
+  if (kind === "annotate") {
+    return normalizeAnnotationExpressionText(item.expression);
+  }
   if (kind === "aggregate") {
     const func = String(item.func);
     if (func === "count") {
@@ -359,6 +367,32 @@ function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relati
   return null;
 }
 
+/** Returns a safe single-line raw annotate expression, normalizing bare Django constructors to the `models` namespace. */
+function normalizeAnnotationExpressionText(expression: string | undefined): string | null {
+  const text = String(expression ?? "").trim();
+  if (!isSafeAnnotationExpressionText(text)) {
+    return null;
+  }
+  return text.replace(new RegExp(`\\b(${ANNOTATION_BARE_CONSTRUCTORS.join("|")})\\s*\\(`, "g"), (match, name, offset, source) => {
+    const before = source.slice(Math.max(0, offset - 1), offset);
+    if (before === ".") {
+      return match;
+    }
+    return ANNOTATION_FUNCTION_CONSTRUCTORS.has(name) ? `models.functions.${name}(` : `models.${name}(`;
+  });
+}
+
+/** Returns whether raw annotate expression text is safe enough to emit into an ORM-mode single-line cell. */
+function isSafeAnnotationExpressionText(text: string): boolean {
+  if (!text || text.length > 800 || /[\r\n;#`]/.test(text)) {
+    return false;
+  }
+  if (/\b__[A-Za-z0-9_]*__\b/.test(text) || ANNOTATION_BLOCKED_WORDS.test(text) || ANNOTATION_BLOCKED_METHODS.test(text) || ANNOTATION_BLOCKED_MODULES.test(text)) {
+    return false;
+  }
+  return /^[A-Za-z0-9_.'",:()[\]\s=+\-*\/%<>!&|]+$/.test(text);
+}
+
 /** Returns one F-expression operand (`models.F('field')` or a numeric literal) with a `field` flag, or null when neither. */
 function exprOperand(raw: string | number | undefined, attnames: Set<string>): { field: boolean; text: string } | null {
   if (typeof raw === "number" && Number.isFinite(raw)) {
@@ -381,7 +415,7 @@ function buildRowAnnotations(annotations: ModelAnnotationSpec[] | undefined, att
   for (const item of annotations ?? []) {
     const expr = annotationExpr(item, attnames, relationNames);
     if (expr) {
-      const label = item.kind === "expr" ? "expr" : String(item.func || item.kind || "col");
+      const label = item.kind === "expr" ? "expr" : item.kind === "annotate" ? "annotate" : String(item.func || item.kind || "col");
       const arg = typeof item.field === "string" && item.field && item.field !== "*" ? item.field : "col";
       specs.push({ alias: aggregateAlias(item.alias, label, arg, used), expr, window: String(item.kind) === "window" });
     }
@@ -430,7 +464,7 @@ function havingChain(filters: BackendModelFilter[] | undefined, havingAliases: S
   return chain;
 }
 
-/** Builds `Model._base_manager.filter(...).annotate(...).order_by(...)[offset:offset+limit+1]` (extra row = "has more"). @property columns load lazily via buildComputedOrm; per-row annotation columns (relation/field aggregates, window functions, F-expression arithmetic) are added here and surface on the instance via the capture hook. */
+/** Builds `Model._base_manager.filter(...).annotate(...).order_by(...)[offset:offset+limit+1]` (extra row = "has more"). @property columns load lazily via buildComputedOrm; per-row annotation columns (raw annotate expressions, relation/field aggregates, window functions, F-expression arithmetic) are added here and surface on the instance via the capture hook. */
 export function buildRowsOrm(params: OrmRowsParams): string {
   const offset = Number.isInteger(params.offset) && (params.offset as number) > 0 ? (params.offset as number) : 0;
   const limit = Number.isInteger(params.limit) && params.limit > 0 ? params.limit : 50;

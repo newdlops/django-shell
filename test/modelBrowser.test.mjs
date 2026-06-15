@@ -232,14 +232,19 @@ test("builds single-line injection-proof aggregate ORM cells (grouped, global, e
   }
 });
 
-test("adds per-row annotation columns to the rows ORM cell (relation Count, window, F-expression)", () => {
+test("adds per-row annotation columns to the rows ORM cell (raw annotate, relation Count, window, F-expression)", () => {
   const cols = [{ attname: "id", computed: false, pk: true, type: "AutoField" }, { attname: "amount", computed: false, type: "IntegerField" }, { attname: "is_staff", computed: false, type: "BooleanField" }];
   const rels = [{ kind: "m2m", name: "groups", queryName: "groups", single: false, target: "auth.Group" }];
+  const raw = buildRowsOrm({ annotations: [{ alias: "copy", expression: 'models.F("amount")', kind: "annotate" }], app: "auth", columns: cols, limit: 50, model: "User" });
+  const subquery = buildRowsOrm({ annotations: [{ alias: "first_group", expression: 'models.Subquery(User.groups.through.objects.filter(user_id=models.OuterRef("pk")).order_by("group__name").values("group__name")[:1])', kind: "annotate" }], app: "auth", columns: cols, limit: 50, model: "User" });
   const relCount = buildRowsOrm({ annotations: [{ alias: "gc", distinct: true, field: "groups", func: "count", kind: "aggregate" }], app: "auth", columns: cols, limit: 50, model: "User", relations: rels });
   const win = buildRowsOrm({ annotations: [{ alias: "rn", field: undefined, func: "row_number", kind: "window", orderBy: [{ desc: true, field: "id" }], partitionBy: ["is_staff"] }], app: "auth", columns: cols, limit: 50, model: "User" });
   const expr = buildRowsOrm({ annotations: [{ alias: "a10", kind: "expr", left: "amount", op: "+", right: 10 }], app: "auth", columns: cols, limit: 50, model: "User" });
   const injected = buildRowsOrm({ annotations: [{ alias: "bad", field: "x); import os #", func: "sum", kind: "aggregate" }], app: "auth", columns: cols, limit: 50, model: "User" });
+  const injectedRaw = buildRowsOrm({ annotations: [{ alias: "bad", expression: "models.Value(1); import os", kind: "annotate" }], app: "auth", columns: cols, limit: 50, model: "User" });
 
+  assert.match(raw, /\.annotate\(copy=models\.F\("amount"\)\)/);
+  assert.match(subquery, /\.annotate\(first_group=models\.Subquery\(User\.groups\.through\.objects\.filter\(user_id=models\.OuterRef\("pk"\)\)\.order_by\("group__name"\)\.values\("group__name"\)\[:1\]\)\)/);
   const keywordAlias = buildRowsOrm({ annotations: [{ alias: "class", field: "groups", func: "count", kind: "aggregate" }], app: "auth", columns: cols, limit: 50, model: "User", relations: rels });
   const constExpr = buildRowsOrm({ annotations: [{ alias: "k", kind: "expr", left: "5", op: "/", right: "0" }], app: "auth", columns: cols, limit: 50, model: "User" });
   const propCols = [...cols, { annotated: false, attname: "flag", computed: true, type: "property" }];
@@ -250,6 +255,8 @@ test("adds per-row annotation columns to the rows ORM cell (relation Count, wind
   assert.match(expr, /\.annotate\(a10=models\.F\("amount"\) \+ 10\)/);
   assert.doesNotMatch(injected, /import os/);
   assert.doesNotMatch(injected, /\.annotate\(/, "an unsafe annotation field is dropped, never emitted");
+  assert.doesNotMatch(injectedRaw, /import os/);
+  assert.doesNotMatch(injectedRaw, /\.annotate\(/, "an unsafe raw annotate expression is dropped, never emitted");
   // A Python-keyword alias would be a raw `class=` SyntaxError in the cell — it falls back to a safe generated name.
   assert.doesNotMatch(keywordAlias, /\(class=/);
   assert.match(keywordAlias, /\.annotate\(groups_count=models\.Count\("groups"\)\)/);
@@ -269,7 +276,7 @@ test("adds per-row annotation columns to the rows ORM cell (relation Count, wind
   const winFilter = buildRowsOrm({ annotations: [{ alias: "rn", func: "row_number", kind: "window", orderBy: [{ field: "id" }], partitionBy: ["is_staff"] }], app: "auth", columns: cols, filters: [{ field: "rn", lookup: "lte", value: "1" }], limit: 50, model: "User" });
   assert.match(winFilter, /\.annotate\(rn=models\.Window/);
   assert.doesNotMatch(winFilter, /rn__lte/);
-  for (const cell of [relCount, win, expr, injected]) {
+  for (const cell of [raw, subquery, relCount, win, expr, injected, injectedRaw]) {
     assert.doesNotMatch(cell, /\n/, "annotation row cells must stay single-line");
     assert.match(cell, /\bUser\._base_manager\b/);
     assert.doesNotMatch(cell, SUPPORT_LAYER_CELL);
@@ -627,9 +634,13 @@ test("adds per-row annotation columns to the rows view and forces offset paginat
     "rc_map = {r['username']: r['gc'] for r in rc['rows']}",
     "win = call(limit=2, annotations=[{'kind': 'window', 'func': 'row_number', 'partitionBy': ['is_staff'], 'orderBy': [{'field': 'id'}], 'alias': 'rn'}])",
     "win_map = {r['username']: r['rn'] for r in call(annotations=[{'kind': 'window', 'func': 'row_number', 'partitionBy': ['is_staff'], 'orderBy': [{'field': 'id'}], 'alias': 'rn'}])['rows']}",
+    "raw = call(annotations=[{'kind': 'annotate', 'expression': \"models.F('username')\", 'alias': 'uname'}])",
+    "subq = call(annotations=[{'kind': 'annotate', 'expression': \"models.Subquery(User.groups.through.objects.filter(user_id=models.OuterRef('pk')).order_by('group__name').values('group__name')[:1])\", 'alias': 'first_group'}])",
     "expr = call(annotations=[{'kind': 'expr', 'op': '+', 'left': 'id', 'right': 100, 'alias': 'idp'}])",
     "inj = call(annotations=[{'kind': 'aggregate', 'func': 'sum', 'field': 'evil); import os', 'alias': 'x'}])",
     "inj_cols = [c for c in inj['columns'] if c.get('annotation')]",
+    "raw_inj = call(annotations=[{'kind': 'annotate', 'expression': \"models.Value(1); import os\", 'alias': 'x'}])",
+    "raw_inj_cols = [c for c in raw_inj['columns'] if c.get('annotation')]",
     "kw = call(annotations=[{'kind': 'aggregate', 'func': 'count', 'field': 'groups', 'alias': 'class', 'distinct': True}])",
     "kw_cols = [c['attname'] for c in kw['columns'] if c.get('annotation')]",
     "having = call(annotations=[{'kind': 'aggregate', 'func': 'count', 'field': 'groups', 'alias': 'gc', 'distinct': True}], filters=[{'field': 'gc', 'lookup': 'gte', 'value': '2'}])",
@@ -643,8 +654,9 @@ test("adds per-row annotation columns to the rows view and forces offset paginat
     "  'having1_users': having1_users, 'having1_orm_int': having1_orm_int,",
     "  'rc_ok': rc['ok'], 'rc_col': (rc_cols[0]['attname'] if rc_cols else None), 'rc_col_ann': (rc_cols[0].get('annotation') if rc_cols else None), 'rc_map': rc_map,",
     "  'win_keyset': win['nextCursor'], 'win_offset': win['nextOffset'], 'win_map': win_map,",
+    "  'raw_map': {r['username']: r['uname'] for r in raw['rows']}, 'subq_map': {r['username']: r['first_group'] for r in subq['rows']},",
     "  'idp': {r['username']: r['idp'] for r in expr['rows']},",
-    "  'inj_ok': inj['ok'], 'inj_cols': len(inj_cols),",
+    "  'inj_ok': inj['ok'], 'inj_cols': len(inj_cols), 'raw_inj_ok': raw_inj['ok'], 'raw_inj_cols': len(raw_inj_cols),",
     "}))"
   ]);
   assert.equal(payload.rc_ok, true);
@@ -654,9 +666,13 @@ test("adds per-row annotation columns to the rows view and forces offset paginat
   assert.equal(payload.win_keyset, null, "window functions force offset pagination (no keyset cursor)");
   assert.equal(payload.win_offset, 2, "window functions paginate by offset");
   assert.deepEqual(payload.win_map, { user0: 1, user1: 1, user2: 2, user3: 2 }, "RowNumber partitions by is_staff, ordered by id");
+  assert.deepEqual(payload.raw_map, { user0: "user0", user1: "user1", user2: "user2", user3: "user3" }, "raw annotate can add a plain F() column");
+  assert.deepEqual(payload.subq_map, { user0: "ops", user1: "dev", user2: null, user3: null }, "raw annotate supports Subquery/OuterRef expressions");
   assert.deepEqual(payload.idp, { user0: 101, user1: 102, user2: 103, user3: 104 }, "F('id') + 100 per row");
   assert.equal(payload.inj_ok, true);
   assert.equal(payload.inj_cols, 0, "an unsafe annotation field is dropped, never injected");
+  assert.equal(payload.raw_inj_ok, true);
+  assert.equal(payload.raw_inj_cols, 0, "an unsafe raw annotate expression is dropped, never injected");
   assert.equal(payload.kw_ok, true);
   assert.deepEqual(payload.kw_cols, ["groups_count"], "a Python-keyword alias is sanitized to a safe generated name");
   assert.equal(payload.scalar_ok, true, "a malformed scalar partitionBy/orderBy is dropped, not crashed");

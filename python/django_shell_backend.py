@@ -279,7 +279,7 @@ def _run_request(namespace, token, request, initial_names):
     if request.get("kind") == "filterfields":
         return _browse_filter_fields(request)
     if request.get("kind") == "rows":
-        return _browse_rows(request)
+        return _browse_rows(namespace, request)
     if request.get("kind") == "related":
         return _browse_related(request)
     if request.get("kind") == "count":
@@ -291,7 +291,7 @@ def _run_request(namespace, token, request, initial_names):
     if request.get("kind") == "lookup":
         return _browse_lookup(request)
     if request.get("kind") == "computed":
-        return _browse_computed(request)
+        return _browse_computed(namespace, request)
     if request.get("kind") == "query":
         return _browse_query(namespace, request)
     code = request.get("code")
@@ -1690,15 +1690,15 @@ def _browse_schema(request):
             return {"ok": False, "error": traceback.format_exc()}
 
 
-def _browse_rows(request):
+def _browse_rows(namespace, request):
     """Returns one bounded page of rows (concrete columns only — no JOIN, no N+1), plus any per-row annotation columns
-    (relation/field aggregates, window functions, F-expression arithmetic) defined by the column builder."""
+    (raw annotate expressions, relation/field aggregates, window functions, F-expression arithmetic) defined by the column builder."""
     with _EXECUTION_LOCK:
         try:
             model = _browse_resolve_model(request)
             attnames = [column["attname"] for column in _browse_columns(model)]
             pk_attname = model._meta.pk.attname
-            annotations = _browse_annotation_specs(model, request.get("annotations"), set(attnames), pk_attname)
+            annotations = _browse_annotation_specs(model, request.get("annotations"), set(attnames), pk_attname, namespace)
             ann_exprs = {spec["alias"]: spec["expr"] for spec in annotations}
             ann_aliases = [spec["alias"] for spec in annotations]
             has_window = any(spec["window"] for spec in annotations)
@@ -1846,7 +1846,7 @@ def _browse_computed_columns(model):
     return columns
 
 
-def _browse_computed(request):
+def _browse_computed(namespace, request):
     """Lazily computes ONE @property over the current filter/order page — the opt-in replacement for eager-loading. The user activates a single column, so only that property runs (no N+1 across every property, no multi-model JOIN explosion), bounded to the loaded rows. Restricted to actual @property/@cached_property names; each value read via safe getattr so a throwing property yields null, not a failure. Returns {pk: cell}."""
     with _EXECUTION_LOCK:
         try:
@@ -1858,7 +1858,7 @@ def _browse_computed(request):
             pk_attname = model._meta.pk.attname
             # Reproduce the rows page exactly (same per-row annotations / HAVING / order) so the {pk: value} map covers the
             # displayed rows even when the grid is sorted by an annotation alias (which the rows query annotates).
-            ann_specs = _browse_annotation_specs(model, request.get("annotations"), set(attnames), pk_attname)
+            ann_specs = _browse_annotation_specs(model, request.get("annotations"), set(attnames), pk_attname, namespace)
             ann_exprs = {spec["alias"]: spec["expr"] for spec in ann_specs}
             ann_aliases = {spec["alias"] for spec in ann_specs}
             having_aliases = {spec["alias"] for spec in ann_specs if not spec["window"]}
@@ -2432,10 +2432,12 @@ def _browse_agg_column(name, is_group):
 _BROWSE_WINDOW_RANK_FUNCS = frozenset({"rank", "dense_rank", "row_number"})
 _BROWSE_WINDOW_AGG_FUNCS = frozenset({"sum", "avg", "min", "max", "count"})
 _BROWSE_EXPR_OPS = frozenset({"+", "-", "*", "/"})
+_BROWSE_ANNOTATION_SAFE_METHODS = frozenset({"alias", "all", "annotate", "defer", "distinct", "exclude", "filter", "none", "only", "order_by", "prefetch_related", "select_related", "using", "values", "values_list"})
+_BROWSE_ANNOTATION_BLOCKED_ATTRS = frozenset({"bulk_create", "bulk_update", "create", "cursor", "delete", "execute", "executemany", "extra", "get_or_create", "raw", "save", "update", "update_or_create"})
 
 
-def _browse_annotation_specs(model, annotations, attset, pk_attname):
-    """Parses per-row annotation specs (aggregate / window / F-expr) into safe {alias, expr, window, log} entries."""
+def _browse_annotation_specs(model, annotations, attset, pk_attname, namespace=None):
+    """Parses per-row annotation specs (raw annotate / aggregate / window / F-expr) into safe {alias, expr, window, log} entries."""
     if not isinstance(annotations, list):
         return []
     relation_names = _browse_agg_relation_names(model)
@@ -2444,11 +2446,11 @@ def _browse_annotation_specs(model, annotations, attset, pk_attname):
     for item in annotations:
         if not isinstance(item, dict):
             continue
-        built = _browse_build_annotation(model, item, attset, pk_attname, relation_names)
+        built = _browse_build_annotation(model, item, attset, pk_attname, relation_names, namespace)
         if built is None:
             continue
         field = item.get("field")
-        label = "expr" if item.get("kind") == "expr" else (item.get("func") or item.get("kind") or "col")
+        label = "expr" if item.get("kind") == "expr" else ("annotate" if item.get("kind") == "annotate" else (item.get("func") or item.get("kind") or "col"))
         arg = field if isinstance(field, str) and field and field != "*" else "col"
         alias = _browse_agg_alias(item.get("alias"), label, arg, used)
         used.add(alias)
@@ -2458,7 +2460,7 @@ def _browse_annotation_specs(model, annotations, attset, pk_attname):
     return specs
 
 
-def _browse_build_annotation(model, item, attset, pk_attname, relation_names):
+def _browse_build_annotation(model, item, attset, pk_attname, relation_names, namespace=None):
     """Builds one safe per-row annotation expression (and a readable log string) from a column-builder spec, or None.
     Field/relation/order/partition identifiers are allowlisted against the live model graph (no injection)."""
     from django.db.models import Avg, Count, F, Max, Min, Sum, Window
@@ -2466,6 +2468,11 @@ def _browse_build_annotation(model, item, attset, pk_attname, relation_names):
 
     aggregates = {"count": Count, "sum": Sum, "avg": Avg, "min": Min, "max": Max}
     kind = item.get("kind")
+    if kind == "annotate":
+        expr = _browse_eval_annotation_expression(item.get("expression"), namespace)
+        if expr is None:
+            return None
+        return {"expr": expr, "label": "annotate", "log": str(item.get("expression", "")).strip(), "window": False}
     if kind == "aggregate":
         func = item.get("func")
         if func not in aggregates:
@@ -2533,6 +2540,107 @@ def _browse_build_annotation(model, item, attset, pk_attname, relation_names):
             return None
         return {"expr": expr, "label": "expr", "log": f"{left_log} {op} {right_log}", "window": False}
     return None
+
+
+def _browse_eval_annotation_expression(source, namespace):
+    """Evaluates a user-supplied annotate expression after AST validation, returning a Django expression or None."""
+    if not isinstance(source, str):
+        return None
+    text = source.strip()
+    if not text or len(text) > 800:
+        return None
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError:
+        return None
+    env = _browse_annotation_eval_env(namespace)
+    if not _browse_annotation_ast_safe(tree, set(env)):
+        return None
+    try:
+        expr = eval(compile(tree, "<django-shell-annotate>", "eval"), {"__builtins__": {}}, env)
+    except Exception:
+        return None
+    return expr if hasattr(expr, "resolve_expression") else None
+
+
+def _browse_annotation_eval_env(namespace):
+    """Returns the restricted names available to raw annotate expressions."""
+    from django.apps import apps
+    from django.db import models
+    from django.db.models import Avg, Case, Count, Exists, ExpressionWrapper, F, Max, Min, OuterRef, Q, Subquery, Sum, Value, When, Window
+    from django.db.models.functions import Cast, Coalesce, Concat, Greatest, Length, Lower, Trim, Upper
+
+    env = {
+        "Avg": Avg, "Case": Case, "Cast": Cast, "Coalesce": Coalesce, "Concat": Concat, "Count": Count,
+        "Exists": Exists, "ExpressionWrapper": ExpressionWrapper, "F": F, "Greatest": Greatest, "Length": Length,
+        "Lower": Lower, "Max": Max, "Min": Min, "OuterRef": OuterRef, "Q": Q, "Subquery": Subquery, "Sum": Sum,
+        "Trim": Trim, "Upper": Upper, "Value": Value, "When": When, "Window": Window, "models": models,
+    }
+    try:
+        for model in apps.get_models():
+            name = getattr(model, "__name__", "")
+            if _browse_agg_safe_alias(name):
+                env.setdefault(name, model)
+    except Exception:
+        pass
+    for name, value in (namespace or {}).items():
+        if _browse_agg_safe_alias(name) and _browse_annotation_namespace_value(value):
+            env.setdefault(name, value)
+    return env
+
+
+def _browse_annotation_namespace_value(value):
+    """Returns whether a shell namespace value may be referenced by a raw annotate expression."""
+    try:
+        return hasattr(value, "_meta") and hasattr(value, "_default_manager")
+    except Exception:
+        return False
+
+
+def _browse_annotation_ast_safe(tree, safe_names):
+    """Returns whether a parsed raw annotate expression uses only lazy ORM/expression constructs."""
+    allowed_nodes = (
+        ast.Expression, ast.Call, ast.Name, ast.Load, ast.Attribute, ast.Constant, ast.keyword, ast.Subscript, ast.Slice,
+        ast.Tuple, ast.List, ast.Dict, ast.UnaryOp, ast.BinOp, ast.BoolOp, ast.Compare, ast.And, ast.Or, ast.Add, ast.Sub,
+        ast.Mult, ast.Div, ast.Mod, ast.Pow, ast.USub, ast.UAdd, ast.Eq, ast.NotEq, ast.Gt, ast.GtE, ast.Lt, ast.LtE,
+        ast.In, ast.NotIn, ast.Is, ast.IsNot,
+    )
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed_nodes):
+            return False
+        if isinstance(node, ast.Name) and node.id not in safe_names:
+            return False
+        if isinstance(node, ast.Attribute) and not _browse_annotation_attr_safe(node.attr):
+            return False
+        if isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
+            return False
+        if isinstance(node, ast.Call) and not _browse_annotation_call_safe(node.func):
+            return False
+    return True
+
+
+def _browse_annotation_attr_safe(name):
+    """Returns whether an attribute name is allowed in a raw annotate expression."""
+    return isinstance(name, str) and name and not name.startswith("_") and name not in _BROWSE_ANNOTATION_BLOCKED_ATTRS
+
+
+def _browse_annotation_call_safe(func):
+    """Returns whether a call target is a safe expression constructor or lazy QuerySet method."""
+    if isinstance(func, ast.Name):
+        return True
+    if not isinstance(func, ast.Attribute) or not _browse_annotation_attr_safe(func.attr):
+        return False
+    if _browse_annotation_attr_root(func) == "models":
+        return True
+    return func.attr in _BROWSE_ANNOTATION_SAFE_METHODS
+
+
+def _browse_annotation_attr_root(node):
+    """Returns the root name for an attribute chain, or None for other AST forms."""
+    current = node
+    while isinstance(current, ast.Attribute):
+        current = current.value
+    return current.id if isinstance(current, ast.Name) else None
 
 
 def _browse_window_order(order_by, attset):

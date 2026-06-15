@@ -539,7 +539,7 @@ function applyColumns(filtersOverride) {
   if (groupBy.length) {
     const aggregates = terms.filter((term) => term.kind === "aggregate").map((term) => ({ alias: term.alias, distinct: term.distinct, field: term.field, func: term.func }));
     if (!aggregates.length) {
-      els.status.textContent = "Add at least one Aggregate column to summarize per group (Window/Expr are per-row only).";
+      els.status.textContent = "Add at least one Aggregate column to summarize per group (Annotate/Window/Expr are per-row only).";
       return;
     }
     state.aggregateActive = true;
