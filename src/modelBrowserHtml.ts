@@ -179,7 +179,7 @@ td:has(.fkpick){overflow:visible}
       <option value="pty">Link: Terminal</option>
       <option value="orm">Link: ORM</option>
     </select>
-    <button id="groupToggle" class="secondary" type="button" title="Add computed columns: annotate / aggregate / window / F-expression, or group-by summaries">+ Column</button>
+    <button id="groupToggle" class="secondary" type="button" title="Add computed columns: aggregate / subquery / annotate / window / F-expression, or group-by summaries">+ Column</button>
     <button id="logToggle" class="secondary" type="button" title="Toggle the query log (Django ORM + SQL)">Query Log</button>
     <button id="reload" class="secondary" type="button">Reload</button>
   </header>
@@ -198,7 +198,7 @@ td:has(.fkpick){overflow:visible}
   <div class="aggbar" id="aggregatebar" hidden>
     <div class="aggrow"><span class="agglabel">Columns</span><span class="aggterms" id="aggregateTerms"></span><button id="addAggregate" class="secondary" type="button">+ column</button></div>
     <div class="aggrow"><span class="agglabel">Group by</span><span class="aggsegs" id="aggregateGroupBy"></span><button id="addGroupBy" class="secondary" type="button">+ field</button></div>
-    <div class="aggrow"><span class="aggnote">No group-by → columns are added per row (annotate / window / expr). With group-by → rows collapse into per-group summaries (Aggregate columns only). Uses the filters above as the WHERE clause.</span><span class="grow"></span><button id="runAggregate" type="button">Apply</button><button id="aggregateOff" class="secondary" type="button">Clear</button></div>
+    <div class="aggrow"><span class="aggnote">No group-by → columns are added per row (aggregate / subquery / annotate / window / expr). With group-by → rows collapse into per-group summaries (Aggregate columns only). Uses the filters above as the WHERE clause.</span><span class="grow"></span><button id="runAggregate" type="button">Apply</button><button id="aggregateOff" class="secondary" type="button">Clear</button></div>
   </div>
   <div class="gridwrap" id="gridwrap"><div class="empty" id="placeholder">Select a model from the Django Shell catalog.</div></div>
   <footer class="statusbar"><span id="status"></span><span id="countinfo"></span><span class="spacer"></span><button id="discard" class="secondary" type="button" disabled>Discard</button><button id="commit" type="button" disabled>Commit</button><button id="count" class="secondary" type="button">Count</button><label class="pagesize">Rows&nbsp;<select id="pageSize" class="transport" title="Rows per page"><option value="50">50</option><option value="100">100</option><option value="500">500</option><option value="1000">1000</option><option value="5000">5000</option><option value="10000">10000</option><option value="all">all (not recommended)</option></select></label><button id="more" class="secondary" type="button" disabled>Load more</button></footer>

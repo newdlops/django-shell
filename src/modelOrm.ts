@@ -299,10 +299,13 @@ const ANNOTATION_BLOCKED_METHODS = /\.(?:bulk_create|bulk_update|create|cursor|d
 const ANNOTATION_BLOCKED_MODULES = /\b(?:builtins|ctypes|importlib|os|pathlib|shutil|socket|subprocess|sys)\b/;
 
 /** Returns a safe single-line annotation expression for one per-row column spec via the `models` namespace, or null. */
-function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relationNames: Set<string>): string | null {
+function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relationNames: Set<string>, sourceModel: string): string | null {
   const kind = item ? String(item.kind) : "";
   if (kind === "annotate") {
     return normalizeAnnotationExpressionText(item.expression);
+  }
+  if (kind === "subquery") {
+    return subqueryAnnotationExpr(item, sourceModel);
   }
   if (kind === "aggregate") {
     const func = String(item.func);
@@ -367,6 +370,60 @@ function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relati
   return null;
 }
 
+/** Returns a safe single-line Subquery expression for the structured Subquery column builder. */
+function subqueryAnnotationExpr(item: ModelAnnotationSpec, sourceModel: string): string | null {
+  const valuePath = safeFilterPath(String(item.field ?? ""));
+  if (!valuePath) {
+    return null;
+  }
+  if (item.relationKind === "m2m") {
+    const owner = safeName(item.throughOwner, safeName(sourceModel, ""));
+    const relation = safeName(item.throughRelation, "");
+    const source = safeName(item.throughSource, "");
+    const target = safeName(item.throughTarget, "");
+    if (!owner || !relation || !source || !target) {
+      return null;
+    }
+    const selected = `${target}__${valuePath}`;
+    const order = subqueryOrderArgs(item.orderBy, valuePath, target);
+    return `models.Subquery(${owner}.${relation}.through.objects.filter(**{${pyStr(`${source}_id`)}: models.OuterRef(${pyStr("pk")})}).order_by(${order}).values(${pyStr(selected)})[:1])`;
+  }
+  const targetModel = targetModelName(item.target);
+  const filterField = safeFilterPath(String(item.filterField ?? ""));
+  const outerField = safeFilterPath(String(item.outerField ?? "pk"));
+  if (!targetModel || !filterField || !outerField) {
+    return null;
+  }
+  const order = subqueryOrderArgs(item.orderBy, valuePath);
+  return `models.Subquery(${targetModel}._base_manager.filter(**{${pyStr(filterField)}: models.OuterRef(${pyStr(outerField)})}).order_by(${order}).values(${pyStr(valuePath)})[:1])`;
+}
+
+/** Returns a safe model class name from an app-qualified label. */
+function targetModelName(target: string | undefined): string | null {
+  const name = String(target ?? "").split(".").pop() ?? "";
+  return IDENTIFIER.test(name) ? name : null;
+}
+
+/** Returns a comma-separated `.order_by()` argument list for a structured Subquery. */
+function subqueryOrderArgs(orderBy: ModelAnnotationSpec["orderBy"], fallback: string, prefix?: string): string {
+  const terms = [];
+  for (const term of orderBy ?? []) {
+    const path = safeFilterPath(String(term?.field ?? ""));
+    if (!path) {
+      continue;
+    }
+    const field = prefix ? `${prefix}__${path}` : path;
+    terms.push(pyStr(`${term.desc ? "-" : ""}${field}`));
+    if (terms.length >= 3) {
+      break;
+    }
+  }
+  if (!terms.length) {
+    terms.push(pyStr(prefix ? `${prefix}__${fallback}` : fallback));
+  }
+  return terms.join(", ");
+}
+
 /** Returns a safe single-line raw annotate expression, normalizing bare Django constructors to the `models` namespace. */
 function normalizeAnnotationExpressionText(expression: string | undefined): string | null {
   const text = String(expression ?? "").trim();
@@ -409,11 +466,11 @@ function exprOperand(raw: string | number | undefined, attnames: Set<string>): {
 }
 
 /** Returns safe {alias, expr, window} annotation specs (allowlisted, unique aliases) for the rows query. */
-function buildRowAnnotations(annotations: ModelAnnotationSpec[] | undefined, attnames: Set<string>, relationNames: Set<string>): Array<{ alias: string; expr: string; window: boolean }> {
+function buildRowAnnotations(annotations: ModelAnnotationSpec[] | undefined, attnames: Set<string>, relationNames: Set<string>, sourceModel: string): Array<{ alias: string; expr: string; window: boolean }> {
   const specs: Array<{ alias: string; expr: string; window: boolean }> = [];
   const used = new Set<string>();
   for (const item of annotations ?? []) {
-    const expr = annotationExpr(item, attnames, relationNames);
+    const expr = annotationExpr(item, attnames, relationNames, sourceModel);
     if (expr) {
       const label = item.kind === "expr" ? "expr" : item.kind === "annotate" ? "annotate" : String(item.func || item.kind || "col");
       const arg = typeof item.field === "string" && item.field && item.field !== "*" ? item.field : "col";
@@ -469,7 +526,7 @@ export function buildRowsOrm(params: OrmRowsParams): string {
   const offset = Number.isInteger(params.offset) && (params.offset as number) > 0 ? (params.offset as number) : 0;
   const limit = Number.isInteger(params.limit) && params.limit > 0 ? params.limit : 50;
   const attnames = concreteAttnames(params.columns);
-  const annotations = buildRowAnnotations(params.annotations, attnames, relationQueryNames(params.relations, params.columns));
+  const annotations = buildRowAnnotations(params.annotations, attnames, relationQueryNames(params.relations, params.columns), params.model);
   const annotate = annotations.length ? `.annotate(${annotations.map((spec) => `${spec.alias}=${spec.expr}`).join(", ")})` : "";
   // A lookup on a (non-window) annotation alias filters AFTER .annotate() (HAVING / WHERE-on-expression); window aliases can't be filtered.
   const allAliases = new Set(annotations.map((spec) => spec.alias));
@@ -489,7 +546,7 @@ export function buildRowsOrm(params: OrmRowsParams): string {
 export function buildComputedOrm(app: string | undefined, model: string, field: string, filters: BackendModelFilter[] | undefined, order: BackendModelOrder[] | undefined, limit: number, columns: BackendModelColumn[] | undefined, relations?: BackendModelRelation[], annotations?: ModelAnnotationSpec[]): string {
   const attnames = concreteAttnames(columns);
   const cap = Number.isInteger(limit) && limit > 0 ? limit : 50;
-  const rowAnnotations = buildRowAnnotations(annotations, attnames, relationQueryNames(relations, columns));
+  const rowAnnotations = buildRowAnnotations(annotations, attnames, relationQueryNames(relations, columns), model);
   const annotate = rowAnnotations.length ? `.annotate(${rowAnnotations.map((spec) => `${spec.alias}=${spec.expr}`).join(", ")})` : "";
   const allAliases = new Set(rowAnnotations.map((spec) => spec.alias));
   const havingAliases = new Set(rowAnnotations.filter((spec) => !spec.window).map((spec) => spec.alias));

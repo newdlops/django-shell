@@ -1154,7 +1154,7 @@ function createFilterBar(deps) {
       options.push({ label: name, role: "field", title: "aggregate column \xB7 filter as HAVING", type: "annotation", value: `${FIELD}${name}` });
     }
     for (const relation of relationsOf(tree, state2)) {
-      options.push({ kind: relation.kind, label: `${relation.name} \u2192`, role: "relation", target: relation.target, title: `${relation.kind} \u2192 ${bareModel2(relation.target)} (drill in)`, value: `${REL}${relation.name}` });
+      options.push({ kind: relation.kind, label: `${relation.name} \u2192`, role: "relation", target: relation.target, title: `${relation.kind} \u2192 ${bareModel3(relation.target)} (drill in)`, value: `${REL}${relation.name}` });
     }
     return options;
   }
@@ -1164,14 +1164,14 @@ function createFilterBar(deps) {
       options.push({ choices: field.choices, label: field.attname, role: "field", type: field.type, value: `${FIELD}${field.attname}` });
     }
     for (const relation of tree && tree.relations || []) {
-      options.push({ kind: relation.kind, label: `${relation.name} \u2192`, role: "relation", target: relation.target, title: `${relation.kind} \u2192 ${bareModel2(relation.target)} (drill in)`, value: `${REL}${relation.name}` });
+      options.push({ kind: relation.kind, label: `${relation.name} \u2192`, role: "relation", target: relation.target, title: `${relation.kind} \u2192 ${bareModel3(relation.target)} (drill in)`, value: `${REL}${relation.name}` });
     }
     return options;
   }
   function relationsOf(tree, state2) {
     return tree ? tree.relations || [] : (state2.relations || []).map((relation) => ({ kind: relation.kind, name: relation.queryName || relation.name, single: relation.single, target: relation.target }));
   }
-  function bareModel2(target) {
+  function bareModel3(target) {
     return splitTarget(target).model;
   }
   async function addTerm(initial) {
@@ -1576,15 +1576,22 @@ function createPathPicker(deps) {
 }
 
 // media/gridAggregate.js
-var KINDS = [{ label: "Annotate", value: "annotate" }, { label: "Aggregate", value: "aggregate" }, { label: "Window", value: "window" }, { label: "Expr (F)", value: "expr" }];
+var KINDS = [{ label: "Aggregate", value: "aggregate" }, { label: "Subquery", value: "subquery" }, { label: "Annotate", value: "annotate" }, { label: "Window", value: "window" }, { label: "Expr (F)", value: "expr" }];
 var AGG_FUNCS = [{ label: "Count", value: "count" }, { label: "Sum", value: "sum" }, { label: "Avg", value: "avg" }, { label: "Min", value: "min" }, { label: "Max", value: "max" }];
 var WINDOW_FUNCS = [{ label: "Rank", value: "rank" }, { label: "DenseRank", value: "dense_rank" }, { label: "RowNumber", value: "row_number" }, { label: "Sum", value: "sum" }, { label: "Avg", value: "avg" }, { label: "Min", value: "min" }, { label: "Max", value: "max" }, { label: "Count", value: "count" }];
 var WINDOW_AGG = /* @__PURE__ */ new Set(["sum", "avg", "min", "max", "count"]);
 var OPS = [{ label: "+", value: "+" }, { label: "\u2212", value: "-" }, { label: "\xD7", value: "*" }, { label: "\xF7", value: "/" }];
 var ORDER_DIR = [{ label: "asc", value: "asc" }, { label: "desc", value: "desc" }];
+var SUBQUERY_MODES = [{ label: "Relation", value: "relation" }, { label: "Model", value: "model" }];
+function bareModel2(target) {
+  return String(target || "").split(".").pop();
+}
 function createColumnBuilder(deps) {
   const { el: el2, groupEl, termsEl, getState, postRaw } = deps;
   const treeService = createTreeService(postRaw);
+  const modelRequests = /* @__PURE__ */ new Map();
+  let modelRequestSeq = 0;
+  let modelOptionsCache = null;
   function concreteFields() {
     return (getState().columns || []).filter((column) => !column.computed && !column.annotation).map((column) => ({ label: column.attname, title: column.type, value: column.attname }));
   }
@@ -1592,7 +1599,7 @@ function createColumnBuilder(deps) {
     if (tree) {
       return tree.relations || [];
     }
-    return (getState().relations || []).map((relation) => ({ kind: relation.kind, name: relation.queryName || relation.name, target: relation.target })).filter((relation) => relation.name && relation.target);
+    return (getState().relations || []).map((relation) => ({ ...relation, name: relation.queryName || relation.name })).filter((relation) => relation.name && relation.target);
   }
   function levelFields(tree) {
     if (tree) {
@@ -1624,6 +1631,51 @@ function createColumnBuilder(deps) {
       options.push({ kind: relation.kind, label: `${relation.name} \u2192`, role: "relation", target: relation.target, title: `${relation.kind} \u2192 drill in`, value: `r:${relation.name}` });
     }
     return options;
+  }
+  function subqueryRelationOptions(tree) {
+    const options = [];
+    for (const relation of relationsOf(tree)) {
+      options.push({ ...relation, group: "relations", label: `${relation.name} \u2192`, role: "relation", title: `${relation.kind} \u2192 ${bareModel2(relation.target)}`, value: relation.name });
+    }
+    if (!tree) {
+      for (const column of getState().columns || []) {
+        if (column.relation) {
+          options.push({ ...column.relation, group: "foreign keys", kind: "fk", label: `${column.relation.field} \u2192`, name: column.relation.field, role: "relation", title: `FK \u2192 ${bareModel2(column.relation.target)}`, value: column.relation.field });
+        }
+      }
+    }
+    return options;
+  }
+  function subqueryTargetOptions(tree) {
+    const options = [];
+    for (const field of tree && tree.fields || []) {
+      options.push({ label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
+    }
+    for (const relation of tree && tree.relations || []) {
+      options.push({ kind: relation.kind, label: `${relation.name} \u2192`, role: "relation", target: relation.target, title: `${relation.kind} \u2192 ${bareModel2(relation.target)} (drill in)`, value: `r:${relation.name}` });
+    }
+    return options;
+  }
+  function onModelListResponse(message) {
+    const entry = modelRequests.get(message.requestId);
+    if (!entry) {
+      return;
+    }
+    modelRequests.delete(message.requestId);
+    const result = message.result && message.result.ok ? message.result : null;
+    const options = result ? (result.models || []).map((model) => ({ label: `${model.app}.${model.model}`, title: model.table || model.label || "", value: `${model.app}.${model.model}` })) : [];
+    modelOptionsCache = options;
+    entry.resolve(options);
+  }
+  function fetchModelOptions() {
+    if (modelOptionsCache) {
+      return Promise.resolve(modelOptionsCache);
+    }
+    return new Promise((resolve) => {
+      const requestId = `models-${modelRequestSeq += 1}`;
+      modelRequests.set(requestId, { resolve });
+      postRaw({ requestId, type: "modelList" });
+    });
   }
   function pathPicker(rootOptions, placeholder) {
     return createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => getState().model, placeholder, rootOptions });
@@ -1695,6 +1747,127 @@ function createColumnBuilder(deps) {
     body.append(left, opCombo.node, right);
     return () => ({ left: left.value.trim(), op: opCombo.node.value, right: right.value.trim() });
   }
+  function subqueryBody(body, initial) {
+    const modeCombo = createCombobox({ el: el2, onChange: () => rebuildMode(), options: SUBQUERY_MODES, value: initial && initial.target && !initial.relation ? "model" : "relation" });
+    const content = el2("span", { className: "termbody" });
+    let readMode = () => ({});
+    body.append(modeCombo.node, content);
+    function rebuildMode() {
+      content.innerHTML = "";
+      readMode = modeCombo.node.value === "model" ? subqueryModelBody(content, initial) : subqueryRelationBody(content, initial);
+    }
+    rebuildMode();
+    return () => readMode();
+  }
+  function subqueryRelationBody(body, initial) {
+    const relationMap = /* @__PURE__ */ new Map();
+    const relationCombo = createCombobox({ el: el2, onChange: () => rebuildPickers(), options: [], placeholder: "relation \u2192", value: initial && initial.relation || "" });
+    const valueSlot = el2("span", { className: "pathpick" });
+    const orderSlot = el2("span", { className: "pathpick" });
+    const dirCombo = createCombobox({ el: el2, options: ORDER_DIR, value: initial && initial.orderBy && initial.orderBy[0] && initial.orderBy[0].desc ? "desc" : "asc" });
+    let targetModel = "";
+    let valuePicker = null;
+    let orderPicker = null;
+    body.append(document.createTextNode("from "), relationCombo.node, document.createTextNode(" take "), valueSlot, document.createTextNode(" order "), orderSlot, dirCombo.node);
+    treeService.fetchTree(getState().model).then((tree) => {
+      const options = subqueryRelationOptions(tree);
+      relationMap.clear();
+      for (const option of options) {
+        relationMap.set(option.value, option);
+      }
+      relationCombo.setOptions(options);
+      if (initial && initial.relation) {
+        relationCombo.setValue(initial.relation);
+      }
+      rebuildPickers();
+    });
+    function rebuildPickers() {
+      const relation = relationMap.get(relationCombo.node.value);
+      targetModel = relation && relation.target ? relation.target : "";
+      valueSlot.innerHTML = "";
+      orderSlot.innerHTML = "";
+      valuePicker = null;
+      orderPicker = null;
+      if (!targetModel) {
+        valueSlot.appendChild(el2("span", { className: "tag" }, "field"));
+        orderSlot.appendChild(el2("span", { className: "tag" }, "field"));
+        return;
+      }
+      valuePicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "value field", rootOptions: subqueryTargetOptions });
+      orderPicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "order field", rootOptions: subqueryTargetOptions });
+      valueSlot.appendChild(valuePicker.node);
+      orderSlot.appendChild(orderPicker.node);
+    }
+    return () => {
+      const relation = relationMap.get(relationCombo.node.value) || {};
+      const orderField = orderPicker ? orderPicker.getPath() : "";
+      return {
+        field: valuePicker ? valuePicker.getPath() : "",
+        filterField: relation.filterField,
+        orderBy: orderField ? [{ desc: dirCombo.node.value === "desc", field: orderField }] : [],
+        outerField: relation.outerField,
+        relation: relationCombo.node.value,
+        relationKind: relation.kind,
+        target: relation.target,
+        throughOwner: relation.throughOwner,
+        throughRelation: relation.throughRelation,
+        throughSource: relation.throughSource,
+        throughTarget: relation.throughTarget
+      };
+    };
+  }
+  function subqueryModelBody(body, initial) {
+    const modelCombo = createCombobox({ el: el2, onChange: () => rebuildTargetPickers(), options: [], placeholder: "app.Model", value: initial && initial.target || "" });
+    const filterSlot = el2("span", { className: "pathpick" });
+    const outerSlot = el2("span", { className: "pathpick" });
+    const valueSlot = el2("span", { className: "pathpick" });
+    const orderSlot = el2("span", { className: "pathpick" });
+    const dirCombo = createCombobox({ el: el2, options: ORDER_DIR, value: initial && initial.orderBy && initial.orderBy[0] && initial.orderBy[0].desc ? "desc" : "asc" });
+    let filterPicker = null;
+    let outerPicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => getState().model, placeholder: "current field", rootOptions: subqueryTargetOptions });
+    let valuePicker = null;
+    let orderPicker = null;
+    body.append(document.createTextNode("from "), modelCombo.node, document.createTextNode(" where "), filterSlot, document.createTextNode(" = current "), outerSlot, document.createTextNode(" take "), valueSlot, document.createTextNode(" order "), orderSlot, dirCombo.node);
+    outerSlot.appendChild(outerPicker.node);
+    fetchModelOptions().then((options) => {
+      modelCombo.setOptions(options);
+      if (initial && initial.target) {
+        modelCombo.setValue(initial.target);
+      }
+      rebuildTargetPickers();
+    });
+    function rebuildTargetPickers() {
+      filterSlot.innerHTML = "";
+      valueSlot.innerHTML = "";
+      orderSlot.innerHTML = "";
+      filterPicker = null;
+      valuePicker = null;
+      orderPicker = null;
+      const targetModel = modelCombo.node.value;
+      if (!targetModel) {
+        filterSlot.appendChild(el2("span", { className: "tag" }, "target field"));
+        valueSlot.appendChild(el2("span", { className: "tag" }, "value field"));
+        orderSlot.appendChild(el2("span", { className: "tag" }, "order field"));
+        return;
+      }
+      filterPicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "target field", rootOptions: subqueryTargetOptions });
+      valuePicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "value field", rootOptions: subqueryTargetOptions });
+      orderPicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "order field", rootOptions: subqueryTargetOptions });
+      filterSlot.appendChild(filterPicker.node);
+      valueSlot.appendChild(valuePicker.node);
+      orderSlot.appendChild(orderPicker.node);
+    }
+    return () => {
+      const orderField = orderPicker ? orderPicker.getPath() : "";
+      return {
+        field: valuePicker ? valuePicker.getPath() : "",
+        filterField: filterPicker ? filterPicker.getPath() : "",
+        orderBy: orderField ? [{ desc: dirCombo.node.value === "desc", field: orderField }] : [],
+        outerField: outerPicker ? outerPicker.getPath() : "",
+        target: modelCombo.node.value
+      };
+    };
+  }
   function annotateBody(body, initial) {
     const expression = el2("input", {
       className: "aggexpr",
@@ -1719,7 +1892,7 @@ function createColumnBuilder(deps) {
     const rebuild = () => {
       body.innerHTML = "";
       const kind = kindCombo.node.value;
-      readBody = kind === "annotate" ? annotateBody(body, seed) : kind === "window" ? windowBody(body, seed) : kind === "expr" ? exprBody(body, seed) : aggregateBody(body, seed);
+      readBody = kind === "annotate" ? annotateBody(body, seed) : kind === "subquery" ? subqueryBody(body, seed) : kind === "window" ? windowBody(body, seed) : kind === "expr" ? exprBody(body, seed) : aggregateBody(body, seed);
     };
     kindCombo.node.addEventListener("change", () => {
       seed = {};
@@ -1736,6 +1909,9 @@ function createColumnBuilder(deps) {
     }
     if (spec.kind === "expr") {
       return "expr";
+    }
+    if (spec.kind === "subquery") {
+      return `${spec.relation || "related"}_${spec.field || "value"}`.replace(/[^A-Za-z0-9_]+/g, "_");
     }
     if (spec.kind === "window") {
       return spec.func + (WINDOW_AGG.has(spec.func) && spec.field ? `_${spec.field}` : "");
@@ -1779,7 +1955,7 @@ function createColumnBuilder(deps) {
     groupEl.innerHTML = "";
     termsEl.innerHTML = "";
   }
-  return { addGroupBy: () => addGroupBy(), addTerm: () => addTerm(null), clear, collect, ensureRows, onTreeResponse: treeService.onTreeResponse };
+  return { addGroupBy: () => addGroupBy(), addTerm: () => addTerm(null), clear, collect, ensureRows, onModelListResponse, onTreeResponse: treeService.onTreeResponse };
 }
 function renderAggregateResult(result, helpers) {
   const { el: el2, renderValue: renderValue2, groupBy } = helpers;
@@ -1912,6 +2088,8 @@ function handleMessage(message) {
   } else if (message.type === "filterFields") {
     filterBar.onTreeResponse(message);
     columnBuilder.onTreeResponse(message);
+  } else if (message.type === "modelList") {
+    columnBuilder.onModelListResponse(message);
   } else if (message.type === "computed") {
     onComputed(message);
   } else if (message.type === "count") {

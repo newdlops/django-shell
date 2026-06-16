@@ -1810,7 +1810,9 @@ def _browse_columns(model):
     for field in model._meta.concrete_fields:
         column = {"attname": field.attname, "editable": bool(getattr(field, "editable", False)) and not field.primary_key, "name": field.name, "null": bool(getattr(field, "null", False)), "pk": bool(field.primary_key), "type": type(field).__name__}
         if field.is_relation and field.related_model is not None:
-            column["relation"] = {"field": field.name, "single": True, "target": _browse_label(field.related_model)}
+            relation = {"field": field.name, "single": True, "target": _browse_label(field.related_model)}
+            relation.update(_browse_relation_subquery_meta(model, field))
+            column["relation"] = relation
         choices = getattr(field, "choices", None)
         if choices:
             column["choices"] = [[_browse_jsonable(choice[0]), str(choice[1])] for choice in list(choices)[:200]]
@@ -1907,7 +1909,9 @@ def _browse_relations(model):
             continue
         # `name` is the accessor (used to expand related rows); `queryName` is the filter query name (reverse
         # relations differ — related_query_name, not the `_set` accessor) so traversal filters resolve correctly.
-        relations.append({"kind": _browse_relation_kind(field), "name": name, "queryName": _browse_relation_query_name(field) or name, "single": single, "target": _browse_label(field.related_model)})
+        relation = {"kind": _browse_relation_kind(field), "name": name, "queryName": _browse_relation_query_name(field) or name, "single": single, "target": _browse_label(field.related_model)}
+        relation.update(_browse_relation_subquery_meta(model, field))
+        relations.append(relation)
     return relations
 
 
@@ -1950,6 +1954,31 @@ def _browse_relation_query_name(field):
     return field.name
 
 
+def _browse_relation_subquery_meta(model, field):
+    """Returns relation metadata the UI/ORM-mode builder needs to generate a correlated one-row Subquery safely."""
+    meta = {}
+    try:
+        if getattr(field, "many_to_many", False):
+            relation_field = getattr(field, "field", field)
+            owner_model = getattr(relation_field, "model", model)
+            if getattr(field, "auto_created", False):
+                source_name = relation_field.m2m_reverse_field_name()
+                target_name = relation_field.m2m_field_name()
+            else:
+                source_name = relation_field.m2m_field_name()
+                target_name = relation_field.m2m_reverse_field_name()
+            meta.update({"throughOwner": owner_model.__name__, "throughRelation": relation_field.name, "throughSource": source_name, "throughTarget": target_name})
+        elif getattr(field, "auto_created", False) and not getattr(field, "concrete", False):
+            forward = getattr(field, "field", None)
+            if forward is not None:
+                meta.update({"filterField": forward.attname, "outerField": "pk"})
+        elif getattr(field, "many_to_one", False) or getattr(field, "one_to_one", False):
+            meta.update({"filterField": field.related_model._meta.pk.attname, "outerField": field.attname})
+    except Exception:
+        return meta
+    return meta
+
+
 def _browse_filter_fields(request):
     """Returns the filterable field/relation tree for one model so the cascading filter UI can drill across relations."""
     with _EXECUTION_LOCK:
@@ -1979,7 +2008,9 @@ def _browse_filter_field_tree(model):
         if not name or name in seen:
             continue
         seen.add(name)
-        relations.append({"kind": _browse_relation_kind(field), "name": name, "single": bool(field.one_to_one or field.many_to_one), "target": _browse_label(field.related_model)})
+        relation = {"kind": _browse_relation_kind(field), "name": name, "single": bool(field.one_to_one or field.many_to_one), "target": _browse_label(field.related_model)}
+        relation.update(_browse_relation_subquery_meta(model, field))
+        relations.append(relation)
     return {"fields": fields, "pk": model._meta.pk.attname, "relations": relations}
 
 
@@ -2473,6 +2504,8 @@ def _browse_build_annotation(model, item, attset, pk_attname, relation_names, na
         if expr is None:
             return None
         return {"expr": expr, "label": "annotate", "log": str(item.get("expression", "")).strip(), "window": False}
+    if kind == "subquery":
+        return _browse_build_subquery_annotation(model, item, pk_attname)
     if kind == "aggregate":
         func = item.get("func")
         if func not in aggregates:
@@ -2540,6 +2573,163 @@ def _browse_build_annotation(model, item, attset, pk_attname, relation_names, na
             return None
         return {"expr": expr, "label": "expr", "log": f"{left_log} {op} {right_log}", "window": False}
     return None
+
+
+def _browse_build_subquery_annotation(model, item, pk_attname):
+    """Builds a correlated one-row Subquery for a selected relation, value field, and optional order fields."""
+    from django.db.models import OuterRef, Subquery
+
+    relation = _browse_find_subquery_relation(model, item.get("relation"))
+    target = relation.related_model if relation is not None else _browse_resolve_model_label(item.get("target"))
+    if target is None:
+        return None
+    value_path = _browse_subquery_value_path(target, item.get("field"))
+    if value_path is None:
+        return None
+    if relation is None:
+        return _browse_build_custom_subquery(model, target, item, value_path)
+    if getattr(relation, "many_to_many", False):
+        query = _browse_m2m_subquery(relation, pk_attname, value_path, item.get("orderBy"))
+        if query is None:
+            return None
+        inner, log = query
+    else:
+        filter_key, outer_field = _browse_subquery_correlation(model, relation, pk_attname)
+        if filter_key is None or outer_field is None:
+            return None
+        order, order_log = _browse_subquery_order(target, item.get("orderBy"), target._meta.pk.attname)
+        inner = target._base_manager.filter(**{filter_key: OuterRef(outer_field)}).order_by(*order).values(value_path)
+        log = "Subquery(%s._base_manager.filter(%s=OuterRef(%r)).order_by(%s).values(%r)[:1])" % (target.__name__, filter_key, outer_field, order_log, value_path)
+    return {"expr": Subquery(inner[:1]), "label": "subquery", "log": log, "window": False}
+
+
+def _browse_resolve_model_label(label):
+    """Returns a Django model class from an app.Model label, or None when the label is invalid."""
+    if not isinstance(label, str) or "." not in label:
+        return None
+    app, model_name = label.rsplit(".", 1)
+    try:
+        from django.apps import apps
+
+        return apps.get_model(app, model_name)
+    except Exception:
+        return None
+
+
+def _browse_build_custom_subquery(model, target, item, value_path):
+    """Builds a correlated Subquery that compares an arbitrary target-model field to a current-row field."""
+    from django.db.models import OuterRef, Subquery
+
+    filter_path = _browse_subquery_value_path(target, item.get("filterField"))
+    outer_path = _browse_subquery_value_path(model, item.get("outerField"))
+    if filter_path is None or outer_path is None:
+        return None
+    order, order_log = _browse_subquery_order(target, item.get("orderBy"), target._meta.pk.attname)
+    inner = target._base_manager.filter(**{filter_path: OuterRef(outer_path)}).order_by(*order).values(value_path)
+    log = "Subquery(%s._base_manager.filter(%s=OuterRef(%r)).order_by(%s).values(%r)[:1])" % (target.__name__, filter_path, outer_path, order_log, value_path)
+    return {"expr": Subquery(inner[:1]), "label": "subquery", "log": log, "window": False}
+
+
+def _browse_find_subquery_relation(model, relation):
+    """Resolves a relation name/query-name selected by the Subquery UI to a Django relation field."""
+    if not isinstance(relation, str) or not relation:
+        return None
+    for field in model._meta.get_fields():
+        if not getattr(field, "is_relation", False) or getattr(field, "related_model", None) is None:
+            continue
+        names = {getattr(field, "name", None), _browse_relation_name(field), _browse_relation_query_name(field)}
+        if relation in names:
+            return field
+    return None
+
+
+def _browse_subquery_correlation(model, relation, pk_attname):
+    """Returns (inner_filter_field, outer_ref_field) for FK/O2O/reverse-FK one-row subqueries."""
+    if getattr(relation, "auto_created", False) and not getattr(relation, "concrete", False):
+        forward = getattr(relation, "field", None)
+        return (getattr(forward, "attname", None), "pk") if forward is not None else (None, None)
+    if getattr(relation, "many_to_one", False) or getattr(relation, "one_to_one", False):
+        return relation.related_model._meta.pk.attname, relation.attname
+    return None, None
+
+
+def _browse_subquery_value_path(model, path):
+    """Returns a validated scalar field path for a subquery `.values()` or `.order_by()` clause."""
+    if not isinstance(path, str) or not path:
+        return None
+    resolved = _browse_resolve_filter_path(model, path)
+    if resolved is None or resolved[2]:
+        return None
+    return path
+
+
+def _browse_subquery_order(model, order_by, default_path):
+    """Returns validated order_by terms and readable log text for a Subquery inner queryset."""
+    terms, logs = [], []
+    for item in (order_by if isinstance(order_by, (list, tuple)) else []):
+        field = item.get("field") if isinstance(item, dict) else item
+        path = _browse_subquery_value_path(model, field)
+        if path is None:
+            continue
+        descending = isinstance(item, dict) and bool(item.get("desc"))
+        terms.append(f"-{path}" if descending else path)
+        logs.append("%r" % (f"-{path}" if descending else path))
+        if len(terms) >= 3:
+            break
+    if not terms:
+        terms.append(default_path)
+        logs.append("%r" % default_path)
+    return terms, ", ".join(logs)
+
+
+def _browse_m2m_subquery(relation, pk_attname, value_path, order_by):
+    """Builds the through-table queryset used for M2M Subquery annotations, returning (queryset, log)."""
+    try:
+        relation_field = getattr(relation, "field", relation)
+        through = relation_field.remote_field.through
+        if getattr(relation, "auto_created", False):
+            source_name = relation_field.m2m_reverse_field_name()
+            target_name = relation_field.m2m_field_name()
+        else:
+            source_name = relation_field.m2m_field_name()
+            target_name = relation_field.m2m_reverse_field_name()
+        related_model = relation.related_model
+    except Exception:
+        return None
+    target_value = _browse_prefixed_subquery_path(target_name, value_path)
+    target_default = _browse_prefixed_subquery_path(target_name, related_model._meta.pk.attname)
+    order, order_log = _browse_subquery_prefixed_order(related_model, order_by, target_name, target_default)
+    from django.db.models import OuterRef
+
+    filter_key = f"{source_name}_id"
+    inner = through._base_manager.filter(**{filter_key: OuterRef(pk_attname)}).order_by(*order).values(target_value)
+    log = "Subquery(%s._base_manager.filter(%s=OuterRef(%r)).order_by(%s).values(%r)[:1])" % (through.__name__, filter_key, pk_attname, order_log, target_value)
+    return inner, log
+
+
+def _browse_prefixed_subquery_path(prefix, path):
+    """Prefixes a target-model field path so it can be selected through an M2M through-table FK."""
+    return f"{prefix}__{path}"
+
+
+def _browse_subquery_prefixed_order(model, order_by, prefix, default_path):
+    """Returns through-table order_by terms for target-model field paths."""
+    terms, logs = [], []
+    for item in (order_by if isinstance(order_by, (list, tuple)) else []):
+        field = item.get("field") if isinstance(item, dict) else item
+        path = _browse_subquery_value_path(model, field)
+        if path is None:
+            continue
+        prefixed = _browse_prefixed_subquery_path(prefix, path)
+        descending = isinstance(item, dict) and bool(item.get("desc"))
+        terms.append(f"-{prefixed}" if descending else prefixed)
+        logs.append("%r" % (f"-{prefixed}" if descending else prefixed))
+        if len(terms) >= 3:
+            break
+    if not terms:
+        terms.append(default_path)
+        logs.append("%r" % default_path)
+    return terms, ", ".join(logs)
 
 
 def _browse_eval_annotation_expression(source, namespace):

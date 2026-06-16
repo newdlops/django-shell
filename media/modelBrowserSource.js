@@ -114,6 +114,8 @@ function handleMessage(message) {
   } else if (message.type === "filterFields") {
     filterBar.onTreeResponse(message);
     columnBuilder.onTreeResponse(message);
+  } else if (message.type === "modelList") {
+    columnBuilder.onModelListResponse(message);
   } else if (message.type === "computed") {
     onComputed(message);
   } else if (message.type === "count") {

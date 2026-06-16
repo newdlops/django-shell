@@ -18,8 +18,14 @@ export interface BackendModelList {
 /** Forward relation target attached to a foreign-key column. */
 export interface BackendModelColumnRelation {
   field: string;
+  filterField?: string;
+  outerField?: string;
   single: boolean;
   target: string;
+  throughOwner?: string;
+  throughRelation?: string;
+  throughSource?: string;
+  throughTarget?: string;
 }
 
 /** One concrete column descriptor for a model. */
@@ -39,11 +45,17 @@ export interface BackendModelColumn {
 
 /** One expandable relation (reverse FK, M2M, reverse O2O) for a model. `name` is the accessor used to expand rows; `queryName` is the Django filter query name (reverse uses related_query_name, not the `_set` accessor). */
 export interface BackendModelRelation {
+  filterField?: string;
   kind: string;
   name: string;
+  outerField?: string;
   queryName?: string;
   single: boolean;
   target: string;
+  throughOwner?: string;
+  throughRelation?: string;
+  throughSource?: string;
+  throughTarget?: string;
 }
 
 /** Column and relation metadata for one model. */
@@ -127,10 +139,16 @@ export interface BackendFilterField {
 
 /** One traversable relation in a model's filter tree; `name` is the Django filter query name (reverse uses related_query_name, not the `_set` accessor). */
 export interface BackendFilterRelation {
+  filterField?: string;
   kind: string;
   name: string;
+  outerField?: string;
   single: boolean;
   target: string;
+  throughOwner?: string;
+  throughRelation?: string;
+  throughSource?: string;
+  throughTarget?: string;
 }
 
 /** The filterable field/relation tree for one model, fed to the cascading filter dropdowns. */
@@ -162,14 +180,23 @@ export interface ModelAnnotationSpec {
   alias?: string;
   distinct?: boolean;
   expression?: string;
+  filterField?: string;
   field?: string;
   func?: string;
   kind: string;
   left?: string | number;
   op?: string;
   orderBy?: ModelAnnotationOrder[];
+  outerField?: string;
   partitionBy?: string[];
+  relation?: string;
+  relationKind?: string;
   right?: string | number;
+  target?: string;
+  throughOwner?: string;
+  throughRelation?: string;
+  throughSource?: string;
+  throughTarget?: string;
 }
 
 /** Parameters for one model rows page request. (`columns` is supplied in ORM mode for the filter/annotation allowlist.) */

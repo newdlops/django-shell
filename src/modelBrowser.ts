@@ -51,7 +51,7 @@ interface IncomingMessage {
   pk?: unknown;
   q?: string;
   relation?: string;
-  requestId?: number;
+  requestId?: number | string;
   single?: boolean;
   target?: string;
   type: string;
@@ -287,6 +287,8 @@ class ModelBrowserPanel {
       await this.lookupRelated(message);
     } else if (message.type === "filterFields" && message.app && message.model) {
       await this.sendFilterFields(message);
+    } else if (message.type === "modelList") {
+      await this.sendModelList(message);
     } else if (message.type === "openModel" && message.app && message.model) {
       this.openAnother({ app: message.app, initialPk: message.filterPk, model: message.model });
     }
@@ -299,6 +301,15 @@ class ModelBrowserPanel {
       return;
     }
     this.post({ requestId: message.requestId, result, target: `${message.app}.${message.model}`, type: "filterFields" });
+  }
+
+  /** Sends the installed-model list to the webview for free-form Subquery target selection. */
+  private async sendModelList(message: IncomingMessage): Promise<void> {
+    const result = await this.source.listModels();
+    if (this.disposed) {
+      return;
+    }
+    this.post({ requestId: message.requestId, result, type: "modelList" });
   }
 
   /** Lazily fetches one @property column's values for the currently-loaded rows (user activated the column). */

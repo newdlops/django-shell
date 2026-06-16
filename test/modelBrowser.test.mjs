@@ -237,6 +237,8 @@ test("adds per-row annotation columns to the rows ORM cell (raw annotate, relati
   const rels = [{ kind: "m2m", name: "groups", queryName: "groups", single: false, target: "auth.Group" }];
   const raw = buildRowsOrm({ annotations: [{ alias: "copy", expression: 'models.F("amount")', kind: "annotate" }], app: "auth", columns: cols, limit: 50, model: "User" });
   const subquery = buildRowsOrm({ annotations: [{ alias: "first_group", expression: 'models.Subquery(User.groups.through.objects.filter(user_id=models.OuterRef("pk")).order_by("group__name").values("group__name")[:1])', kind: "annotate" }], app: "auth", columns: cols, limit: 50, model: "User" });
+  const easySubquery = buildRowsOrm({ annotations: [{ alias: "first_group_easy", field: "name", kind: "subquery", orderBy: [{ field: "name" }], relation: "groups", relationKind: "m2m", target: "auth.Group", throughOwner: "User", throughRelation: "groups", throughSource: "user", throughTarget: "group" }], app: "auth", columns: cols, limit: 50, model: "User" });
+  const customSubquery = buildRowsOrm({ annotations: [{ alias: "matching_group", field: "name", filterField: "name", kind: "subquery", orderBy: [{ field: "id" }], outerField: "amount", target: "auth.Group" }], app: "auth", columns: cols, limit: 50, model: "User" });
   const relCount = buildRowsOrm({ annotations: [{ alias: "gc", distinct: true, field: "groups", func: "count", kind: "aggregate" }], app: "auth", columns: cols, limit: 50, model: "User", relations: rels });
   const win = buildRowsOrm({ annotations: [{ alias: "rn", field: undefined, func: "row_number", kind: "window", orderBy: [{ desc: true, field: "id" }], partitionBy: ["is_staff"] }], app: "auth", columns: cols, limit: 50, model: "User" });
   const expr = buildRowsOrm({ annotations: [{ alias: "a10", kind: "expr", left: "amount", op: "+", right: 10 }], app: "auth", columns: cols, limit: 50, model: "User" });
@@ -245,6 +247,8 @@ test("adds per-row annotation columns to the rows ORM cell (raw annotate, relati
 
   assert.match(raw, /\.annotate\(copy=models\.F\("amount"\)\)/);
   assert.match(subquery, /\.annotate\(first_group=models\.Subquery\(User\.groups\.through\.objects\.filter\(user_id=models\.OuterRef\("pk"\)\)\.order_by\("group__name"\)\.values\("group__name"\)\[:1\]\)\)/);
+  assert.match(easySubquery, /\.annotate\(first_group_easy=models\.Subquery\(User\.groups\.through\.objects\.filter\(\*\*\{"user_id": models\.OuterRef\("pk"\)\}\)\.order_by\("group__name"\)\.values\("group__name"\)\[:1\]\)\)/);
+  assert.match(customSubquery, /\.annotate\(matching_group=models\.Subquery\(Group\._base_manager\.filter\(\*\*\{"name": models\.OuterRef\("amount"\)\}\)\.order_by\("id"\)\.values\("name"\)\[:1\]\)\)/);
   const keywordAlias = buildRowsOrm({ annotations: [{ alias: "class", field: "groups", func: "count", kind: "aggregate" }], app: "auth", columns: cols, limit: 50, model: "User", relations: rels });
   const constExpr = buildRowsOrm({ annotations: [{ alias: "k", kind: "expr", left: "5", op: "/", right: "0" }], app: "auth", columns: cols, limit: 50, model: "User" });
   const propCols = [...cols, { annotated: false, attname: "flag", computed: true, type: "property" }];
@@ -276,7 +280,7 @@ test("adds per-row annotation columns to the rows ORM cell (raw annotate, relati
   const winFilter = buildRowsOrm({ annotations: [{ alias: "rn", func: "row_number", kind: "window", orderBy: [{ field: "id" }], partitionBy: ["is_staff"] }], app: "auth", columns: cols, filters: [{ field: "rn", lookup: "lte", value: "1" }], limit: 50, model: "User" });
   assert.match(winFilter, /\.annotate\(rn=models\.Window/);
   assert.doesNotMatch(winFilter, /rn__lte/);
-  for (const cell of [raw, subquery, relCount, win, expr, injected, injectedRaw]) {
+  for (const cell of [raw, subquery, easySubquery, customSubquery, relCount, win, expr, injected, injectedRaw]) {
     assert.doesNotMatch(cell, /\n/, "annotation row cells must stay single-line");
     assert.match(cell, /\bUser\._base_manager\b/);
     assert.doesNotMatch(cell, SUPPORT_LAYER_CELL);
@@ -581,7 +585,7 @@ test("aggregates Count over relations and reduces @property aggregates with a Py
     "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
     "from django.contrib.auth.models import User, Group",
     "User.doubled = property(lambda self: self.id * 2)",
-    "ops = Group.objects.create(name='ops'); dev = Group.objects.create(name='dev')",
+    "ops = Group.objects.create(name='ops'); dev = Group.objects.create(name='dev'); name_match = Group.objects.create(name='user2')",
     "users = [User.objects.create(username=f'user{i}', password='x', is_staff=(i % 2 == 0)) for i in range(5)]",
     "users[0].groups.add(ops); users[2].groups.add(ops, dev)",
     "def call(**kw): return mod._run_request({}, 't', {'token': 't', 'kind': 'aggregate', 'app': 'auth', 'model': 'User', **kw}, set())",
@@ -625,7 +629,7 @@ test("adds per-row annotation columns to the rows view and forces offset paginat
     "import django; django.setup()",
     "from django.core.management import call_command; call_command('migrate', '--run-syncdb', verbosity=0)",
     "from django.contrib.auth.models import User, Group",
-    "ops = Group.objects.create(name='ops'); dev = Group.objects.create(name='dev')",
+    "ops = Group.objects.create(name='ops'); dev = Group.objects.create(name='dev'); name_match = Group.objects.create(name='user2')",
     "users = [User.objects.create(username=f'user{i}', password='x', is_staff=(i % 2 == 0)) for i in range(4)]",
     "users[0].groups.add(ops); users[1].groups.add(ops, dev)",
     "def call(**kw): return mod._run_request({}, 't', {'token': 't', 'kind': 'rows', 'app': 'auth', 'model': 'User', **kw}, set())",
@@ -636,6 +640,8 @@ test("adds per-row annotation columns to the rows view and forces offset paginat
     "win_map = {r['username']: r['rn'] for r in call(annotations=[{'kind': 'window', 'func': 'row_number', 'partitionBy': ['is_staff'], 'orderBy': [{'field': 'id'}], 'alias': 'rn'}])['rows']}",
     "raw = call(annotations=[{'kind': 'annotate', 'expression': \"models.F('username')\", 'alias': 'uname'}])",
     "subq = call(annotations=[{'kind': 'annotate', 'expression': \"models.Subquery(User.groups.through.objects.filter(user_id=models.OuterRef('pk')).order_by('group__name').values('group__name')[:1])\", 'alias': 'first_group'}])",
+    "subq_easy = call(annotations=[{'kind': 'subquery', 'relation': 'groups', 'field': 'name', 'orderBy': [{'field': 'name'}], 'alias': 'first_group_easy'}])",
+    "subq_custom = call(annotations=[{'kind': 'subquery', 'target': 'auth.Group', 'filterField': 'name', 'outerField': 'username', 'field': 'name', 'alias': 'matching_group'}])",
     "expr = call(annotations=[{'kind': 'expr', 'op': '+', 'left': 'id', 'right': 100, 'alias': 'idp'}])",
     "inj = call(annotations=[{'kind': 'aggregate', 'func': 'sum', 'field': 'evil); import os', 'alias': 'x'}])",
     "inj_cols = [c for c in inj['columns'] if c.get('annotation')]",
@@ -654,7 +660,7 @@ test("adds per-row annotation columns to the rows view and forces offset paginat
     "  'having1_users': having1_users, 'having1_orm_int': having1_orm_int,",
     "  'rc_ok': rc['ok'], 'rc_col': (rc_cols[0]['attname'] if rc_cols else None), 'rc_col_ann': (rc_cols[0].get('annotation') if rc_cols else None), 'rc_map': rc_map,",
     "  'win_keyset': win['nextCursor'], 'win_offset': win['nextOffset'], 'win_map': win_map,",
-    "  'raw_map': {r['username']: r['uname'] for r in raw['rows']}, 'subq_map': {r['username']: r['first_group'] for r in subq['rows']},",
+    "  'raw_map': {r['username']: r['uname'] for r in raw['rows']}, 'subq_map': {r['username']: r['first_group'] for r in subq['rows']}, 'subq_easy_map': {r['username']: r['first_group_easy'] for r in subq_easy['rows']}, 'subq_custom_map': {r['username']: r['matching_group'] for r in subq_custom['rows']},",
     "  'idp': {r['username']: r['idp'] for r in expr['rows']},",
     "  'inj_ok': inj['ok'], 'inj_cols': len(inj_cols), 'raw_inj_ok': raw_inj['ok'], 'raw_inj_cols': len(raw_inj_cols),",
     "}))"
@@ -668,6 +674,8 @@ test("adds per-row annotation columns to the rows view and forces offset paginat
   assert.deepEqual(payload.win_map, { user0: 1, user1: 1, user2: 2, user3: 2 }, "RowNumber partitions by is_staff, ordered by id");
   assert.deepEqual(payload.raw_map, { user0: "user0", user1: "user1", user2: "user2", user3: "user3" }, "raw annotate can add a plain F() column");
   assert.deepEqual(payload.subq_map, { user0: "ops", user1: "dev", user2: null, user3: null }, "raw annotate supports Subquery/OuterRef expressions");
+  assert.deepEqual(payload.subq_easy_map, payload.subq_map, "the structured Subquery builder matches the raw Subquery/OuterRef expression");
+  assert.deepEqual(payload.subq_custom_map, { user0: null, user1: null, user2: "user2", user3: null }, "the structured Subquery builder can compare unrelated model fields");
   assert.deepEqual(payload.idp, { user0: 101, user1: 102, user2: 103, user3: 104 }, "F('id') + 100 per row");
   assert.equal(payload.inj_ok, true);
   assert.equal(payload.inj_cols, 0, "an unsafe annotation field is dropped, never injected");
