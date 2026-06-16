@@ -2194,7 +2194,7 @@ function toggleSort(col) {
     state.order = [{ field: col, desc: false }];
   }
   updateSortArrows();
-  applyQuery();
+  applyQuery({ collectFilters: false });
 }
 function toggleComputed(field, button) {
   const active = !state.computedActive.has(field);
@@ -2237,11 +2237,14 @@ function updateSortArrows() {
     span.textContent = arrows[span.dataset.arrow] || "";
   }
 }
-function applyQuery() {
-  state.filters = filterBar.collect();
+function applyQuery(options = {}) {
+  const collectFilters = options.collectFilters !== false;
+  if (collectFilters) {
+    state.filters = filterBar.collect();
+  }
   filterBar.renderSummary(state.filters);
   if (state.aggregateActive) {
-    applyColumns();
+    applyColumns(collectFilters ? void 0 : state.filters);
     return;
   }
   send({ annotations: state.annotations, filters: state.filters, order: state.order, type: "applyQuery" });

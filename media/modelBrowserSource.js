@@ -429,7 +429,7 @@ function toggleSort(col) {
     state.order = [{ field: col, desc: false }];
   }
   updateSortArrows();
-  applyQuery();
+  applyQuery({ collectFilters: false });
 }
 
 /** Activates (loads) or deactivates a lazy @property column, updating its header button in place and repainting cells. */
@@ -478,12 +478,16 @@ function updateSortArrows() {
   }
 }
 
-function applyQuery() {
-  state.filters = filterBar.collect();
+/** Applies the current row query, optionally preserving the already-applied filters for sort-only changes. */
+function applyQuery(options = {}) {
+  const collectFilters = options.collectFilters !== false;
+  if (collectFilters) {
+    state.filters = filterBar.collect();
+  }
   filterBar.renderSummary(state.filters);
   if (state.aggregateActive) {
     // A collapse summary is on screen — re-run it so a lookup on an aggregate column applies as HAVING.
-    applyColumns();
+    applyColumns(collectFilters ? undefined : state.filters);
     return;
   }
   send({ annotations: state.annotations, filters: state.filters, order: state.order, type: "applyQuery" });
