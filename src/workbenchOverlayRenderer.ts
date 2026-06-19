@@ -435,7 +435,7 @@ export function overlayRendererSource(modelUri: string): string {
       }
       root.__dsoUseVisiblePrelude = !!window.__djangoShellOverlayUseVisiblePrelude;
       root.style.display = "block";
-      if (!root.__dsoGeometryTimer) { root.__dsoGeometryTimer = window.setInterval(function () { if (root.style.display !== "none") { __dsoApplyGeometry(root, window.__djangoShellOverlayGeometry); } }, 250); }
+      if (!root.__dsoGeometryTimer) { root.__dsoGeometryTimer = window.setInterval(function () { if (root.style.display !== "none" && !__dsoApplyGeometry(root, window.__djangoShellOverlayGeometry) && root.__dsoHadConsoleFrame && window.__dsoDisposeOverlay) { window.__dsoDisposeOverlay(root); } }, 250); }
       if (!__dsoApplyGeometry(root, geometry)) { return "django-shell-overlay-shown:pending:no-webview-host:" + __dsoStatus(); }
       const editor = __dsoEnsureEditor(root);
       __dsoApplyGeometry(root, geometry);

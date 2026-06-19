@@ -64,10 +64,12 @@ export function overlayFrameRendererSource(): string {
       const closest = frame.closest(".webview");
       return closest && closest !== frame ? closest : frame.parentElement;
     }
-    /** Binds the overlay to the console webview: always prefers the Django Shell-owned frame (correcting a wrong or drifted binding and blocking another webview from stealing it), keeps the current frame while it stays connected, and only then falls back to the largest webview. */
+    /** Binds the overlay to the console webview without letting a closed console fall through to an unrelated webview. */
     function __dsoAttachRoot(root) {
       const rects = __dsoConsoleGroups();
       const owned = __dsoConsoleFrame(rects);
+      if (owned) { root.__dsoHadConsoleFrame = true; }
+      if (!owned && root.__dsoHadConsoleFrame && !rects.length) { root.__dsoFrame = null; return null; }
       const frame = owned || (root.__dsoFrame && root.__dsoFrame.isConnected ? root.__dsoFrame : __dsoFindWebviewFrame(rects));
       const host = __dsoFindWebviewHost(frame);
       if (!frame || !host) { root.__dsoFrame = null; return null; }

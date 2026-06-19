@@ -16,17 +16,19 @@ type PendingReply = (response: CdpResponse) => void; type RunHandler = (code: st
 export interface WorkbenchOverlayGeometry { height: number; left: number; top: number; width: number; }
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
-const RENDERER_PATCH_VERSION = 42;
+const RENDERER_PATCH_VERSION = 43;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private readonly pending = new Map<number, PendingReply>();
   private injectPromise: Promise<void> | undefined;
   private messageId = 1;
+  private rendererInjected = false;
   private runHandler: RunHandler | undefined;
   private server: http.Server | undefined;
   private serverPort: number | undefined;
   private generatedCleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  private shutdownPromise: Promise<void> | undefined;
   private readonly token = Math.random().toString(36).slice(2) + Date.now().toString(36);
   private ws: WebSocket | undefined;
   private geometry: WorkbenchOverlayGeometry | undefined;
@@ -53,6 +55,9 @@ export class WorkbenchOverlay implements vscode.Disposable {
 
   /** Shows the workbench overlay editor and creates it when needed. */
   async show(): Promise<void> {
+    if (this.shutdownPromise) {
+      throw new Error("Django Shell overlay has been disposed.");
+    }
     const started = Date.now();
     await this.ensureInjected();
     if (await this.rendererPatchVersion() !== String(RENDERER_PATCH_VERSION)) { await this.inject(); }
@@ -105,8 +110,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
     });
   }
 
-  /** Hides the workbench overlay without tearing down the bridge. */
-  hide(): void { void vscode.commands.executeCommand("setContext", "djangoShell.overlayVisible", false); if (this.ws?.readyState === WebSocket.OPEN) { void this.evalInWorkbench("window.__djangoShellOverlayHide ? window.__djangoShellOverlayHide() : 'overlay-not-installed'").catch(() => undefined); } }
+  /** Tears down the renderer overlay without closing the reusable bridge. */
+  hide(): void { void this.disposeRendererOverlay(false, "overlay.hide.error"); }
 
   /** Clears overlay text and generated prelude for a fresh backend session. */
   async reset(): Promise<void> { this.prelude = ""; await this.memoryDocument.reset(); void vscode.commands.executeCommand("setContext", "djangoShell.overlayVisible", false); if (this.ws?.readyState === WebSocket.OPEN) { await this.evalInWorkbench(resetExpression(this.memoryDocument.visibleText())).catch((error: unknown) => { this.logger?.log("overlay.reset.error", { error: error instanceof Error ? error.message : String(error) }); }); } }
@@ -118,14 +123,46 @@ export class WorkbenchOverlay implements vscode.Disposable {
   /** Evaluates a renderer expression for extension host E2E tests. */
   async e2eEvaluate(expression: string): Promise<string> { await this.ensureInjected(); return this.evalInWorkbench(expression); }
 
-  /** Disposes the bridge and hides the overlay if possible. */
-  dispose(): void {
-    this.hide();
+  /** Disposes the bridge and renderer overlay asynchronously. */
+  dispose(): void { void this.shutdown(); }
+
+  /** Tears down renderer and extension-host resources in dependency order. */
+  async shutdown(): Promise<void> {
+    if (this.shutdownPromise) {
+      return this.shutdownPromise;
+    }
+    this.shutdownPromise = this.shutdownNow();
+    return this.shutdownPromise;
+  }
+
+  /** Runs the one-shot shutdown sequence for this overlay instance. */
+  private async shutdownNow(): Promise<void> {
+    await this.disposeRendererOverlay(true, "overlay.dispose.error");
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
     this.closeServer();
     clearTimeout(this.generatedCleanupTimer); this.closeSocket("dispose");
+  }
+
+  /** Requests renderer-owned overlay cleanup before local bridge resources vanish. */
+  private async disposeRendererOverlay(reconnect: boolean, errorEvent: string): Promise<void> {
+    void vscode.commands.executeCommand("setContext", "djangoShell.overlayVisible", false);
+    if (!reconnect && this.ws?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    if (reconnect && this.ws?.readyState !== WebSocket.OPEN && !this.rendererInjected) {
+      return;
+    }
+    try {
+      if (reconnect && this.ws?.readyState !== WebSocket.OPEN) {
+        await this.ensureCdpSocket();
+      }
+      const report = await this.evalInWorkbench(disposeExpression());
+      this.logger?.log("overlay.dispose.renderer", { report });
+    } catch (error) {
+      this.logger?.log(errorEvent, { error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   /** Ensures the local bridge and renderer patch are available. */
@@ -150,6 +187,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
     if (!report.includes("django-shell-overlay-shown")) {
       throw new Error(`overlay patch failed: ${report}`);
     }
+    this.rendererInjected = true;
     this.logger?.log("overlay.inject", { report });
   }
   /** Returns the renderer patch version currently installed in the workbench window. */
@@ -486,6 +524,9 @@ function preludeExpression(prelude: string): string { return `window.__djangoShe
 
 /** Returns the expression that renders the latest Python execution output. */
 function outputExpression(text: string, ok: boolean): string { return `window.__djangoShellOverlaySetOutput ? window.__djangoShellOverlaySetOutput(${JSON.stringify(text)}, ${JSON.stringify(ok)}) : 'overlay-not-installed'`; }
+
+/** Returns the expression that removes renderer-owned overlay DOM and editor resources. */
+function disposeExpression(): string { return `(function(){const root=document.getElementById("django-shell-overlay");if(window.__dsoDisposeOverlay){return window.__dsoDisposeOverlay(root);}if(root&&root.parentElement){root.parentElement.removeChild(root);return "removed";}return "no-overlay";})()`; }
 
 /** Returns the expression that clears stale renderer overlay state after backend restart. */
 function resetExpression(initialText: string): string { return `(function(){window.__djangoShellOverlayInitialText=${JSON.stringify(initialText)};window.__djangoShellOverlayPrelude="";if(window.__djangoShellOverlayReset){return window.__djangoShellOverlayReset(window.__djangoShellOverlayInitialText);}const root=document.getElementById("django-shell-overlay");try{const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(model&&model.setValue){model.setValue(window.__djangoShellOverlayInitialText);}}catch(eResetModel){}return window.__djangoShellOverlayHide?window.__djangoShellOverlayHide():'overlay-not-installed';})()`; }

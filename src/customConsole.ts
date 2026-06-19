@@ -30,6 +30,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private overlayBackingReset: Promise<void> | undefined;
   private overlayPrelude: string[] = [];
   private overlayPromise: Promise<WorkbenchOverlay> | undefined;
+  private overlayShutdownPromise: Promise<void> | undefined;
   private registerOverlayCommands = true;
   private runtimeReady = false;
   private runtimeGeneration = 0;
@@ -179,6 +180,9 @@ export class CustomDjangoConsole implements vscode.Disposable {
 
   /** Loads the CDP-backed workbench overlay only when Python editor features are used. */
   private async ensureOverlay(): Promise<WorkbenchOverlay> {
+    if (this.overlayShutdownPromise) {
+      await this.overlayShutdownPromise;
+    }
     if (this.overlay) {
       return this.overlay;
     }
@@ -186,13 +190,22 @@ export class CustomDjangoConsole implements vscode.Disposable {
       throw new Error("Django Shell console has not been activated.");
     }
     if (!this.overlayPromise) {
+      const panel = this.panel;
       this.overlayPromise = import("./workbenchOverlay").then(async ({ WorkbenchOverlay }) => {
         const overlay = new WorkbenchOverlay(this.logger);
         overlay.activate(this.activationContext!, (code) => this.executePython(code), { registerCommands: this.registerOverlayCommands });
+        if (panel && panel !== this.panel) {
+          await overlay.shutdown();
+          throw new Error("Django Shell console closed before overlay finished loading.");
+        }
         if (this.lastEditorGeometry) {
           overlay.updateGeometry(this.lastEditorGeometry);
         }
         if (this.overlayPrelude.length) { await overlay.updatePrelude(this.overlayPrelude); }
+        if (panel && panel !== this.panel) {
+          await overlay.shutdown();
+          throw new Error("Django Shell console closed before overlay finished loading.");
+        }
         this.overlay = overlay;
         return overlay;
       }).finally(() => {
@@ -200,6 +213,40 @@ export class CustomDjangoConsole implements vscode.Disposable {
       });
     }
     return this.overlayPromise;
+  }
+
+  /** Releases the workbench overlay when the owning console webview is gone. */
+  private releaseOverlay(): void {
+    const overlay = this.overlay;
+    const pending = this.overlayPromise;
+    this.overlay = undefined;
+    this.overlayPromise = undefined;
+    this.lastEditorGeometry = undefined;
+    this.overlayPrelude = [];
+    if (overlay) {
+      this.trackOverlayShutdown(overlay.shutdown());
+      return;
+    }
+    if (pending) {
+      this.trackOverlayShutdown(pending.then((loaded) => {
+        if (this.overlay === loaded) {
+          this.overlay = undefined;
+        }
+        return loaded.shutdown();
+      }));
+    }
+  }
+
+  /** Tracks asynchronous overlay shutdown without leaking unhandled failures. */
+  private trackOverlayShutdown(work: Promise<void>): void {
+    const tracked = work.catch((error: unknown) => {
+      this.logger?.log("overlay.shutdown.error", { error: error instanceof Error ? error.message : String(error) });
+    }).finally(() => {
+      if (this.overlayShutdownPromise === tracked) {
+        this.overlayShutdownPromise = undefined;
+      }
+    });
+    this.overlayShutdownPromise = tracked;
   }
 
   /** Clears stale generated overlay files without loading the workbench overlay. */
@@ -530,7 +577,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.panelVisible = false;
     this.runtimeReady = false;
     this.runtimeGeneration += 1;
-    this.overlay?.hide();
+    this.releaseOverlay();
     this.clearInspectionCache();
     this.clearRuntimeRefreshTimer();
     this.clearPreludeRetryTimer();
