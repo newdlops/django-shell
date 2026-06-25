@@ -981,6 +981,7 @@ def _execute_code(namespace, code, filename=None, line_offset=0):
     stderr = io.StringIO()
     result = None
     compile_filename = filename or "<django-shell-input>"
+    _debug_current_thread()
     _progress_begin(code, emit=bool(_STATE.get("progress_emit")))
     namespace["_djs_progress_iter"] = _progress_iter
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -1009,6 +1010,19 @@ def _execute_code(namespace, code, filename=None, line_offset=0):
         except Exception:
             _progress_finish(False)
             return {"ok": False, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "traceback": traceback.format_exc()}
+
+
+def _debug_current_thread():
+    """Registers the backend request thread with debugpy when a debugger is attached."""
+    debugpy = sys.modules.get("debugpy")
+    if not debugpy:
+        return
+    try:
+        connected = getattr(debugpy, "is_client_connected", lambda: True)()
+        if connected and hasattr(debugpy, "debug_this_thread"):
+            debugpy.debug_this_thread()
+    except Exception:
+        pass
 
 
 def _split_last_expression(tree):

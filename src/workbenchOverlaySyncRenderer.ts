@@ -12,6 +12,15 @@ export function overlaySyncRendererSource(): string {
 
     const __DSO_INPUT_MARKER = "# --- django shell input ---";
 
+    /** Reads the full Monaco model text for source-backed debug binding. */
+    function __dsoFullEditorText(editor) {
+      try {
+        const model = editor && editor.getModel && editor.getModel();
+        return model && model.getValue ? String(model.getValue() || "") : "";
+      } catch (eFullText) {}
+      return "";
+    }
+
     /** Posts one renderer diagnostic event through the extension bridge. */
     function __dsoLog(post, event, fields) {
       try { post(Object.assign({ type: "log", event: event }, fields || {})); } catch (eLog) {}
@@ -487,7 +496,8 @@ export function overlaySyncRendererSource(): string {
     function __dsoRunCode(post, code, root, editor, range) {
       window.__dsoLastRunOutcome = { chars: String(code || "").length, pending: true };
       const hostRange = __dsoHostRange(root, range);
-      return Promise.resolve(post({ type: "run", code: code, range: hostRange })).then(function (response) {
+      const text = __dsoFullEditorText(editor);
+      return Promise.resolve(post({ type: "run", code: code, range: hostRange, text: text })).then(function (response) {
         if (response && response.type === "opaque") { window.__dsoLastRunOutcome = { executed: true, opaque: true }; return { executed: true }; }
         if (!response || !response.json || response.ok === false) { window.__dsoLastRunOutcome = { executed: false, status: response && response.status }; return __dsoRunWebviewFallback(code, range); }
         return response.json().then(function (outcome) { window.__dsoLastRunOutcome = outcome || { executed: false }; return window.__dsoLastRunOutcome; }).catch(function (error) { window.__dsoLastRunOutcome = { error: String(error && error.message || error), executed: false }; return window.__dsoLastRunOutcome; });
@@ -506,7 +516,8 @@ export function overlaySyncRendererSource(): string {
     /** Uses the custom console webview bridge when localhost fetch is unavailable. */
     function __dsoRunWebviewFallback(code, range) {
       const frame = typeof __dsoFindWebviewFrame === "function" ? __dsoFindWebviewFrame() : null;
-      const message = { code: code, range: __dsoHostRange(document.getElementById("django-shell-overlay"), range), type: "overlayRunPython" };
+      const root = document.getElementById("django-shell-overlay");
+      const message = { code: code, range: __dsoHostRange(root, range), text: root && root.__djangoShellEditor ? __dsoFullEditorText(root.__djangoShellEditor) : "", type: "overlayRunPython" };
       let sent = 0;
       const postTo = function (target) { if (!target || sent > 16) { return; } try { target.postMessage(message, "*"); sent++; } catch (ePost) {} try { for (let index = 0; target.frames && index < target.frames.length; index++) { postTo(target.frames[index]); } } catch (eFrames) {} };
       postTo(frame && frame.contentWindow); postTo(frame);
@@ -598,6 +609,31 @@ export function overlaySyncRendererSource(): string {
       root.__dsoBreakpointLines = window.__dsoOverlayBreakpointLines;
       const editor = root.__djangoShellEditor;
       return editor ? window.__dsoApplyOverlayBreakpoints(root, editor) : "breakpoints:" + root.__dsoBreakpointLines.length;
+    };
+
+    /** Draws the current paused debugger line for a one-based user-input line. */
+    window.__dsoApplyOverlayDebugLine = function (root, editor) {
+      const model = editor && editor.getModel && editor.getModel();
+      if (!root || !editor || !model || !editor.deltaDecorations) { return "missing-editor"; }
+      const visibleLine = Math.floor(Number(root.__dsoDebugLine || window.__dsoOverlayDebugLine || 0));
+      const modelLine = visibleLine > 0 ? (Number(root.__dsoInputStartLine) || 1) + visibleLine - 1 : 0;
+      const decorations = modelLine >= 1 && modelLine <= model.getLineCount() ? [{
+        options: { className: "dso-debug-line", isWholeLine: true, linesDecorationsClassName: "dso-debug-rail" },
+        range: { endColumn: model.getLineMaxColumn ? model.getLineMaxColumn(modelLine) : 1, endLineNumber: modelLine, startColumn: 1, startLineNumber: modelLine }
+      }] : [];
+      try { root.__dsoDebugLineDecorationIds = editor.deltaDecorations(root.__dsoDebugLineDecorationIds || [], decorations); } catch (eDebugDecorations) { root.__dsoDebugLineDecorationIds = []; }
+      try { if (modelLine && editor.revealLineInCenterIfOutsideViewport) { editor.revealLineInCenterIfOutsideViewport(modelLine); } } catch (eRevealDebugLine) {}
+      return "debug-line:" + (decorations.length ? visibleLine : 0);
+    };
+
+    /** Stores the current paused debugger line and applies it to the live editor. */
+    window.__dsoSetOverlayDebugLine = function (line) {
+      const root = document.getElementById("django-shell-overlay");
+      window.__dsoOverlayDebugLine = Math.max(0, Math.floor(Number(line) || 0));
+      if (!root) { return "debug-line:" + window.__dsoOverlayDebugLine; }
+      root.__dsoDebugLine = window.__dsoOverlayDebugLine;
+      const editor = root.__djangoShellEditor;
+      return editor ? window.__dsoApplyOverlayDebugLine(root, editor) : "debug-line:" + root.__dsoDebugLine;
     };
 
     /** Returns the clicked visible line when a Monaco mouse event targets the gutter. */

@@ -192,6 +192,9 @@ function handleHostMessage(message) {
   if (message.type === "overlayRunPython" && typeof message.code === "string") {
     const lineOffset = overlayLineOffset(message.range);
     const payload = { code: message.code, type: "runPython" };
+    if (typeof message.text === "string") {
+      payload.text = message.text;
+    }
     if (lineOffset !== undefined) {
       payload.lineOffset = lineOffset;
     }

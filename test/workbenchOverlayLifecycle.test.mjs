@@ -59,3 +59,12 @@ test("overlay bridge toggles generated console source breakpoints", () => {
   assert.ok(overlaySource.includes("new vscode.SourceBreakpoint"));
   assert.ok(overlaySource.includes("this.memoryDocument.inputStartLine()"));
 });
+
+test("overlay renderer exposes a paused debug line marker", () => {
+  const syncSource = fs.readFileSync(new URL("../src/workbenchOverlaySyncRenderer.ts", import.meta.url), "utf8");
+
+  assert.ok(overlaySource.includes("updateDebugFrame"));
+  assert.ok(overlaySource.includes("debugLineExpression"));
+  assert.ok(syncSource.includes("__dsoSetOverlayDebugLine"));
+  assert.ok(syncSource.includes("dso-debug-line"));
+});

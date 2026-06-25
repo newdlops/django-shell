@@ -112,6 +112,17 @@ export class WorkbenchOverlay implements vscode.Disposable {
     });
   }
 
+  /** Updates the highlighted paused debugger line inside the overlay editor. */
+  async updateDebugFrame(frame?: { line: number; path?: string }): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected) {
+      return;
+    }
+    const visibleLine = frame && this.isOverlayFrame(frame.path) ? frame.line - this.memoryDocument.inputStartLine() : 0;
+    await this.evalInWorkbench(debugLineExpression(visibleLine >= 1 ? visibleLine : 0)).catch((error: unknown) => {
+      this.logger?.log("overlay.debug.line.error", { error: error instanceof Error ? error.message : String(error) });
+    });
+  }
+
   /** Reads the current user-visible overlay text from the renderer when possible. */
   async currentVisibleText(): Promise<string> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected) {
@@ -156,6 +167,11 @@ export class WorkbenchOverlay implements vscode.Disposable {
         this.logger?.log("overlay.text.replace.retry.error", { error: error instanceof Error ? error.message : String(error) });
       });
     }
+  }
+
+  /** Synchronizes the full visible editor text into backing files without changing renderer contents. */
+  async syncVisibleText(text: string): Promise<void> {
+    await this.memoryDocument.sync(text);
   }
 
   /** Posts a backend execution result to the overlay output area. */
@@ -281,6 +297,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
   }
   /** Returns one-based enabled breakpoint lines for the generated console source file. */
   private sourceBreakpointLines(): number[] { const target = this.memoryDocument.editorUri.toString(); return vscode.debug.breakpoints.filter((breakpoint): breakpoint is vscode.SourceBreakpoint => breakpoint instanceof vscode.SourceBreakpoint && breakpoint.enabled && breakpoint.location.uri.toString() === target).map((breakpoint) => breakpoint.location.range.start.line + 1).sort((left, right) => left - right); }
+  /** Returns whether a paused frame belongs to this overlay's generated source file. */
+  private isOverlayFrame(pathOrUri: string | undefined): boolean { return !!pathOrUri && (pathOrUri === this.memoryDocument.editorUri.fsPath || pathOrUri === this.memoryDocument.editorUri.toString()); }
   /** Starts the local HTTP bridge used by the renderer run button. */
   private async ensureServer(): Promise<{ port: number; token: string }> {
     if (this.server && this.serverPort !== undefined) {
@@ -333,8 +351,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
         return;
       }
       if (payload?.type === "run" && typeof payload.code === "string") {
-        this.logger?.log("overlay.bridge.run", textFields(payload.code));
-        await this.memoryDocument.sync(payload.code); this.scheduleGeneratedCleanup();
+        this.logger?.log("overlay.bridge.run", { ...textFields(payload.code), fullText: typeof payload.text === "string" ? textFields(payload.text).lines : 0 });
+        await this.memoryDocument.sync(typeof payload.text === "string" ? payload.text : payload.code); this.scheduleGeneratedCleanup();
         const range = payload.range as { start?: unknown } | undefined;
         const lineOffset = this.relativeLineOffset(range?.start);
         const work = this.runHandler?.(payload.code, lineOffset);
@@ -642,6 +660,9 @@ function outputExpression(text: string, ok: boolean): string { return `window.__
 
 /** Returns the expression that refreshes visible overlay breakpoint markers. */
 function breakpointExpression(visibleLines: number[]): string { return `window.__dsoSetOverlayBreakpoints ? window.__dsoSetOverlayBreakpoints(${JSON.stringify(visibleLines)}) : 'overlay-breakpoints-missing'`; }
+
+/** Returns the expression that refreshes the paused debugger line marker. */
+function debugLineExpression(visibleLine: number): string { return `window.__dsoSetOverlayDebugLine ? window.__dsoSetOverlayDebugLine(${JSON.stringify(visibleLine)}) : 'overlay-debug-line-missing'`; }
 
 /** Returns the expression that reads only user-visible overlay text. */
 function visibleTextReadExpression(): string { return `(function(){return window.__dsoGetOverlayVisibleText ? JSON.stringify({ok:true,text:window.__dsoGetOverlayVisibleText()}) : JSON.stringify({ok:false});})()`; }

@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 import type { BackendClient, BackendExecutionResult, BackendProgressSnapshot, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransportMode } from "./backendClient";
 import { registerCustomConsoleDebugEvents } from "./customConsoleDebugEvents";
 import { webviewHtml } from "./customConsoleHtml";
+import type { DebugFrameInfo } from "./debugInspector";
 import { DEBUG_CONTROL_ACTIONS, type DebugControlAction, debugControlDetail, debugControlState, isDebugControlAction, runDebugControl } from "./debugControls";
 import { DEBUGPY_MARKER_PREFIX, buildDebugpyBootstrapCode, buildDjangoShellDebugConfiguration, findAvailableLoopbackPort, parseDebugpyBootstrapResult } from "./debugShell";
 import { DiagnosticLogger } from "./diagnostics";
@@ -78,7 +79,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
         vscode.commands.registerCommand("djangoShell.newOverlayTab", () => this.newOverlayTab())
       );
     }
-    registerCustomConsoleDebugEvents(this.disposables, { getSession: () => this.debugSession, logger: this.logger, postInfo: (info) => this.post({ info, type: "debugInfo" }), postStatus: (state, detail) => this.postDebugStatus(state, detail), refreshBreakpoints: () => this.refreshBreakpointUi(), setSession: (session) => { this.debugSession = session; } });
+    registerCustomConsoleDebugEvents(this.disposables, { getSession: () => this.debugSession, logger: this.logger, postInfo: (info) => this.postDebugInfo(info), postStatus: (state, detail) => this.postDebugStatus(state, detail), refreshBreakpoints: () => this.refreshBreakpointUi(), setSession: (session) => { this.debugSession = session; } });
     context.subscriptions.push(this);
   }
 
@@ -551,6 +552,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     }
     if (typed.type === "runPython" && typeof typed.code === "string") {
       const lineOffset = typeof typed.lineOffset === "number" && Number.isInteger(typed.lineOffset) ? this.defaultExecutionLineOffset() + Math.max(0, typed.lineOffset) : undefined;
+      if (typeof typed.text === "string") { await this.overlay?.syncVisibleText(typed.text); }
       await this.executePython(typed.code, lineOffset);
       return;
     }
@@ -865,6 +867,12 @@ export class CustomDjangoConsole implements vscode.Disposable {
   /** Posts debugger attach state to the custom console webview. */
   private postDebugStatus(state: "attached" | "error" | "idle" | "paused" | "running" | "starting", detail = ""): void {
     this.post({ detail, state, type: "debugStatus" });
+  }
+
+  /** Posts paused debugger frame details and mirrors the current line into the overlay editor. */
+  private postDebugInfo(info: DebugFrameInfo): void {
+    this.post({ info, type: "debugInfo" });
+    void this.overlay?.updateDebugFrame(info.frame);
   }
 
   /** Returns the configured default model-browser transport, validated (defaults to ORM). */
