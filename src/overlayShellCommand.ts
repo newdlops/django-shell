@@ -4,7 +4,7 @@ import { DiagnosticLogger } from "./diagnostics";
 import { lintOverlayRange } from "./overlayLint";
 import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
 
-type RunHandler = (code: string) => Promise<boolean>;
+type RunHandler = (code: string, lineOffset?: number) => Promise<boolean>;
 
 export interface OverlayShellCommandOptions {
   registerCommands?: boolean;
@@ -47,7 +47,7 @@ export class OverlayShellCommandController implements vscode.Disposable {
       payload = executionPayload(editor.document, editor.selection, this.inputStartLine);
     }
     this.logger?.log("overlay.command.enter", { chars: payload.code.length, end: payload.end + 1, inputStartLine: this.inputStartLine + 1, lines: lineCount(payload.code), start: payload.start + 1 });
-    if (!await this.runHandler(payload.code)) {
+    if (!await this.runHandler(payload.code, payload.start)) {
       this.logger?.log("overlay.command.enter.incomplete", { end: payload.end + 1, inputStartLine: this.inputStartLine + 1, lines: lineCount(payload.code), start: payload.start + 1 });
       await vscode.commands.executeCommand("type", { text: `\n${nextIndent(editor.document, payload.end)}` });
       return;
@@ -106,7 +106,7 @@ export function registerOverlayShellCommand(documents: OverlayMemoryDocument, ru
 }
 
 /** Returns selected source or the logical Python block at the cursor. */
-function executionPayload(document: vscode.TextDocument, selection: vscode.Selection, inputStartLine: number): { code: string; end: number; range: vscode.Range; start: number } {
+export function executionPayload(document: vscode.TextDocument, selection: vscode.Selection, inputStartLine: number): { code: string; end: number; range: vscode.Range; start: number } {
   if (!selection.isEmpty) {
     return {
       code: document.getText(selection).trimEnd(),
@@ -192,7 +192,7 @@ function cellEndLine(document: vscode.TextDocument, lineNumber: number, floor: n
 }
 
 /** Returns the first non-empty source line after one execution unit. */
-function nextInputUnitLine(document: vscode.TextDocument, endLine: number): number | undefined {
+export function nextInputUnitLine(document: vscode.TextDocument, endLine: number): number | undefined {
   for (let line = endLine + 1; line < document.lineCount; line += 1) {
     if (document.lineAt(line).text.trim()) {
       return line;
@@ -202,7 +202,7 @@ function nextInputUnitLine(document: vscode.TextDocument, endLine: number): numb
 }
 
 /** Moves an editor cursor to the first visible source column on one line. */
-function moveEditorToLine(editor: vscode.TextEditor, line: number): void {
+export function moveEditorToLine(editor: vscode.TextEditor, line: number): void {
   const text = editor.document.lineAt(line).text;
   const column = text.match(/^\s*/)?.[0].length ?? 0;
   const position = new vscode.Position(line, column);
@@ -373,7 +373,7 @@ function indentation(line: string): number {
 }
 
 /** Moves the cursor to the next shell input line after execution. */
-async function advanceAfterRun(editor: vscode.TextEditor): Promise<void> {
+export async function advanceAfterRun(editor: vscode.TextEditor): Promise<void> {
   let target = editor.document.lineCount - 1;
   const last = editor.document.lineAt(target);
   if (last.text.trim()) {
@@ -386,7 +386,7 @@ async function advanceAfterRun(editor: vscode.TextEditor): Promise<void> {
 }
 
 /** Returns the indentation that should be used after one Python line. */
-function nextIndent(document: vscode.TextDocument, lineNumber: number): string {
+export function nextIndent(document: vscode.TextDocument, lineNumber: number): string {
   const text = document.lineAt(Math.min(lineNumber, document.lineCount - 1)).text;
   const base = text.match(/^\s*/)?.[0] ?? "";
   return isBlockHeader(text) || bracketDelta(text) > 0 ? `${base}    ` : base;
@@ -456,6 +456,6 @@ function bracketDelta(line: string, depth = 0): number {
 }
 
 /** Returns a compact line count for diagnostics. */
-function lineCount(text: string): number {
+export function lineCount(text: string): number {
   return text ? text.split(/\r?\n/).length : 0;
 }

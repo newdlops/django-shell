@@ -3,6 +3,7 @@
 import * as vscode from "vscode";
 import type { BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransport, BackendTransportMode } from "./backendClient";
 import type { CustomDjangoConsole } from "./customConsole";
+import { DEBUG_CONTROL_ACTIONS } from "./debugControls";
 import { DiagnosticLogger } from "./diagnostics";
 import type { BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelComputed, BackendModelCount, BackendModelList, BackendModelLookup, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { ModelBrowser } from "./modelBrowser";
@@ -190,6 +191,12 @@ function registerCustomConsoleEntryPoints(context: vscode.ExtensionContext, diag
     vscode.commands.registerCommand("djangoShell.openConsole", async () => {
       await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).openConsole();
     }),
+    vscode.commands.registerCommand("djangoShell.debugShell", async () => {
+      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).debugShell();
+    }),
+    vscode.commands.registerCommand("djangoShell.newOverlayTab", async () => {
+      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).newOverlayTab();
+    }),
     vscode.commands.registerCommand("djangoShell.showOverlayEditor", async () => {
       await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).showOverlayEditor();
     }),
@@ -204,7 +211,10 @@ function registerCustomConsoleEntryPoints(context: vscode.ExtensionContext, diag
     }),
     vscode.commands.registerCommand("djangoShell.overlayInsertNewline", async () => {
       await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).insertOverlayNewline();
-    })
+    }),
+    ...DEBUG_CONTROL_ACTIONS.map((action) => vscode.commands.registerCommand(`djangoShell.debug.${action}`, async () => {
+      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).controlDebugger(action);
+    }))
   );
 }
 

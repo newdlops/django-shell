@@ -12,6 +12,11 @@ interface OverlayBackingUris {
   editor: vscode.Uri;
 }
 
+/** Returns the workspace-local Python file used as the executable console input document. */
+export function overlayEditorUri(): vscode.Uri {
+  return overlayBackingUris().editor;
+}
+
 /** Replaces stale generated overlay files with empty editor and analysis text. */
 export async function resetOverlayBackingFiles(): Promise<void> {
   const uris = overlayBackingUris();

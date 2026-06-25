@@ -51,3 +51,36 @@ test("contributes an overlay skip command and Alt Enter keybinding", () => {
   assert.equal(binding?.key, "alt+enter");
   assert.match(binding?.when ?? "", /djangoShell\.overlayVisible/);
 });
+
+test("contributes a command for debugging the active Django shell", () => {
+  const commands = manifest.contributes.commands.map((item) => item.command);
+  const palette = manifest.contributes.menus.commandPalette.map((item) => item.command);
+  const runtimeTitle = manifest.contributes.menus["view/title"].find((item) => item.command === "djangoShell.debugShell");
+
+  assert.ok(commands.includes("djangoShell.debugShell"));
+  assert.ok(manifest.activationEvents.includes("onCommand:djangoShell.debugShell"));
+  assert.ok(palette.includes("djangoShell.debugShell"));
+  assert.equal(runtimeTitle?.when, "view == djangoShell.runtimeInspector");
+});
+
+test("contributes basic debugger control commands for the custom console", () => {
+  const commands = manifest.contributes.commands.map((item) => item.command);
+  const controls = ["continue", "pause", "stepOver", "stepInto", "stepOut", "restart", "stop"];
+
+  for (const control of controls) {
+    assert.ok(commands.includes(`djangoShell.debug.${control}`));
+    assert.ok(manifest.activationEvents.includes(`onCommand:djangoShell.debug.${control}`));
+  }
+});
+
+test("contributes a custom console overlay tab command without standalone file-tab bindings", () => {
+  const commands = manifest.contributes.commands.map((item) => item.command);
+  const palette = manifest.contributes.menus.commandPalette.map((item) => item.command);
+  const fileTabBindings = manifest.contributes.keybindings.filter((item) => String(item.command).includes("pythonTab"));
+
+  assert.ok(commands.includes("djangoShell.newOverlayTab"));
+  assert.ok(palette.includes("djangoShell.newOverlayTab"));
+  assert.ok(manifest.activationEvents.includes("onCommand:djangoShell.newOverlayTab"));
+  assert.equal(commands.includes("djangoShell.openPythonTab"), false);
+  assert.equal(fileTabBindings.length, 0);
+});

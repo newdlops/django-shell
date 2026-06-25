@@ -27,3 +27,17 @@ test("confirmed console overlays do not fall back to unrelated webview frames", 
   assert.ok(frameRendererSource.includes("root.__dsoHadConsoleFrame = true"));
   assert.ok(frameRendererSource.includes("!owned && root.__dsoHadConsoleFrame && !rects.length"));
 });
+
+test("renderer relative ranges are offset to backing console file lines", () => {
+  const offsetHelper = overlaySource.slice(overlaySource.indexOf("private relativeLineOffset"));
+
+  assert.ok(offsetHelper.includes("this.memoryDocument.inputStartLine()"));
+  assert.ok(overlaySource.includes("this.relativeLineOffset(payload.start ?? 1)"));
+  assert.ok(overlaySource.includes("this.relativeLineOffset(range?.start)"));
+});
+
+test("overlay bridge toggles generated console source breakpoints", () => {
+  assert.ok(overlaySource.includes('payload?.type === "toggleBreakpoint"'));
+  assert.ok(overlaySource.includes("new vscode.SourceBreakpoint"));
+  assert.ok(overlaySource.includes("this.memoryDocument.inputStartLine()"));
+});

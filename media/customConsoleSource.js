@@ -12,11 +12,16 @@ const setupCell = document.getElementById("setupCell");
 const status = document.getElementById("status");
 const currentOutput = document.getElementById("currentOutput");
 const currentOutputLabel = document.getElementById("currentOutputLabel");
+const debugButtons = Array.from(document.querySelectorAll("[data-action=debug-shell]"));
+const debugControlButtons = Array.from(document.querySelectorAll("[data-debug-control]"));
+const debugStatus = document.getElementById("debugStatus");
+const newOverlayTabButtons = Array.from(document.querySelectorAll("[data-action=new-overlay-tab]"));
 const outputList = document.getElementById("outputList");
 const editorAnchor = document.getElementById("editorAnchor");
 const inputPrompt = document.getElementById("inputPrompt");
 const inputPromptText = inputPrompt && inputPrompt.querySelector(".promptMark");
 const pythonCell = document.getElementById("pythonCell");
+const pythonTabs = document.getElementById("pythonTabs");
 const statusText = document.getElementById("statusText");
 const transport = document.getElementById("transport");
 const transportInfo = document.getElementById("transportInfo");
@@ -28,6 +33,14 @@ let pendingExecution = 0;
 const runningOutputs = new Map();
 let snapshotWritten = false;
 let e2eSawShellPrompt = false;
+let debugAttached = false;
+let debugBusy = false;
+let debugDetail = "";
+let debugState = "idle";
+let breakpointCount = 0;
+let overlayTabActive = "overlay-1";
+let overlayTabs = [{ id: "overlay-1", label: "1" }];
+let runtimeReady = false;
 let terminal;
 
 /** Starts the webview client after the DOM has been created by the extension host. */
@@ -37,9 +50,20 @@ function main() {
   wirePythonCell();
   wireCellResizers();
   window.addEventListener("message", (event) => handleHostMessage(event.data || {}));
+  for (const button of debugButtons) {
+    button.addEventListener("click", requestDebugShell);
+  }
+  for (const button of debugControlButtons) {
+    button.addEventListener("click", () => requestDebugControl(button.dataset.debugControl));
+  }
+  for (const button of newOverlayTabButtons) {
+    button.addEventListener("click", newOverlayTab);
+  }
   focusTerminalButton.addEventListener("click", () => terminal.focus());
   document.getElementById("restart").addEventListener("click", () => vscode.postMessage({ type: "restart" }));
   transport?.addEventListener("change", () => vscode.postMessage({ mode: transport.value, type: "setTransport" }));
+  setDebugStatus("idle", "");
+  renderOverlayTabs();
   vscode.postMessage({ type: "ready" });
 }
 
@@ -162,7 +186,12 @@ function refreshAfterCellResize(target) {
 /** Handles one message from the extension host. */
 function handleHostMessage(message) {
   if (message.type === "overlayRunPython" && typeof message.code === "string") {
-    vscode.postMessage({ code: message.code, type: "runPython" });
+    const lineOffset = overlayLineOffset(message.range);
+    const payload = { code: message.code, type: "runPython" };
+    if (lineOffset !== undefined) {
+      payload.lineOffset = lineOffset;
+    }
+    vscode.postMessage(payload);
   }
   if (message.type === "terminalData" && typeof message.data === "string") {
     snapshotWritten = true;
@@ -174,6 +203,15 @@ function handleHostMessage(message) {
   if (message.type === "transport" && transport) {
     transport.value = message.mode || "pty";
     transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">● ORM cell</span>' : message.active === "tcp" ? '<span class="on">● socket</span>' : message.active === "pty" ? '<span class="pty">● terminal</span>' : '<span class="off">○ not connected</span>';
+  }
+  if (message.type === "debugStatus") {
+    setDebugStatus(String(message.state || "idle"), String(message.detail || ""));
+  }
+  if (message.type === "breakpoints") {
+    setBreakpointStatus(Number(message.count) || 0);
+  }
+  if (message.type === "overlayTabs") {
+    setOverlayTabs(message.tabs, message.active);
   }
   if (message.type === "pythonStarted" && Number.isFinite(message.execution)) {
     pendingExecution = message.execution;
@@ -198,12 +236,25 @@ function handleHostMessage(message) {
   }
 }
 
+/** Converts the Monaco 1-based execution range into a Python compile line offset. */
+function overlayLineOffset(range) {
+  const start = range && Number(range.start);
+  return Number.isFinite(start) ? Math.max(0, Math.floor(start) - 1) : undefined;
+}
+
 /** Updates the status label and writes the initial terminal snapshot once. */
 function updateStatus(snapshot) {
+  runtimeReady = Boolean(snapshot.ready);
   status.dataset.ready = snapshot.ready ? "true" : "false";
   setSetupReady(Boolean(snapshot.ready));
   setPythonReady(Boolean(snapshot.ready));
   statusText.textContent = snapshot.ready ? "Python 3 / Django ready" : `${snapshot.state} / ${snapshot.mode}`;
+  if (!runtimeReady) {
+    setDebugStatus("idle", "");
+  } else {
+    updateDebugControls();
+  }
+  updateOverlayTabControls();
   if (snapshot.state === "starting" && !snapshot.text) {
     terminal.clear();
     snapshotWritten = false;
@@ -247,6 +298,161 @@ function setInputPrompt(text) {
 /** Enables Python input only after the setup terminal has attached the backend. */
 function setPythonReady(ready) {
   pythonCell?.classList.toggle("disabled", !ready);
+}
+
+/** Sends a debug attach request to the extension host when the shell is ready. */
+function requestDebugShell() {
+  if (!runtimeReady || debugBusy) {
+    return;
+  }
+  if (debugAttached) {
+    vscode.postMessage({ type: "stopDebugShell" });
+    return;
+  }
+  setDebugStatus("starting", "attaching");
+  vscode.postMessage({ type: "debugShell" });
+}
+
+/** Requests one basic VS Code debugger action for the attached shell session. */
+function requestDebugControl(action) {
+  if (!runtimeReady || !debugAttached || debugBusy || !action) {
+    return;
+  }
+  const nextState = action === "pause" ? "paused" : action === "stop" ? "idle" : "running";
+  setDebugStatus(nextState, debugControlLabel(action));
+  vscode.postMessage({ action, type: "debugControl" });
+}
+
+/** Updates debugger status text and button affordances from host state. */
+function setDebugStatus(state, detail) {
+  debugState = state;
+  debugDetail = detail;
+  debugBusy = state === "starting";
+  debugAttached = state === "attached" || state === "paused" || state === "running";
+  if (debugStatus) {
+    debugStatus.dataset.state = state;
+    debugStatus.textContent = debugStatusText(debugState, debugDetail);
+  }
+  updateDebugControls();
+}
+
+/** Updates the debugger status label with the visible breakpoint count. */
+function setBreakpointStatus(count) {
+  breakpointCount = Math.max(0, Math.floor(count));
+  if (debugStatus) {
+    debugStatus.textContent = debugStatusText(debugState, debugDetail);
+  }
+}
+
+/** Enables or disables debugger actions based on shell and attach state. */
+function updateDebugControls() {
+  for (const button of debugButtons) {
+    button.disabled = !runtimeReady || debugBusy;
+    button.dataset.state = debugBusy ? "starting" : debugAttached ? "attached" : "idle";
+    button.title = !runtimeReady ? "Start Django shell before debugging" : debugAttached ? "Stop Django Shell debugger" : "Debug current shell";
+    button.setAttribute("aria-label", button.title);
+    const label = button.querySelector(".buttonLabel");
+    if (label) {
+      label.textContent = debugAttached ? "Stop" : debugBusy ? "Debugging" : "Debug";
+    }
+  }
+  for (const button of debugControlButtons) {
+    const action = button.dataset.debugControl || "";
+    button.disabled = !runtimeReady || !debugAttached || debugBusy;
+    button.dataset.active = (debugState === "paused" && action === "pause") || (debugState === "running" && action === "continue") ? "true" : "false";
+  }
+}
+
+/** Requests a new overlay tab backed by the current shell runtime. */
+function newOverlayTab() {
+  if (!runtimeReady) {
+    return;
+  }
+  vscode.postMessage({ type: "newOverlayTab" });
+}
+
+/** Enables or disables overlay tab controls. */
+function updateOverlayTabControls() {
+  for (const button of newOverlayTabButtons) {
+    button.disabled = !runtimeReady;
+  }
+  if (pythonTabs) {
+    pythonTabs.setAttribute("aria-disabled", runtimeReady ? "false" : "true");
+  }
+  renderOverlayTabs();
+}
+
+/** Updates the local tab strip model from the extension host. */
+function setOverlayTabs(tabs, active) {
+  const normalized = Array.isArray(tabs) ? tabs.map(normalizeOverlayTab).filter(Boolean) : [];
+  overlayTabs = normalized.length ? normalized : [{ id: "overlay-1", label: "1" }];
+  overlayTabActive = overlayTabs.some((tab) => tab.id === active) ? active : overlayTabs[0].id;
+  renderOverlayTabs();
+}
+
+/** Returns a safe tab strip item for webview rendering. */
+function normalizeOverlayTab(tab) {
+  if (!tab || typeof tab.id !== "string") {
+    return undefined;
+  }
+  return { id: tab.id, label: String(tab.label || tab.id).slice(0, 12) };
+}
+
+/** Renders the overlay tab strip inside the Python cell toolbar. */
+function renderOverlayTabs() {
+  if (!pythonTabs) {
+    return;
+  }
+  pythonTabs.textContent = "";
+  for (const tab of overlayTabs) {
+    const button = document.createElement("button");
+    button.className = `pythonTab${tab.id === overlayTabActive ? " active" : ""}`;
+    button.type = "button";
+    button.role = "tab";
+    button.dataset.tabId = tab.id;
+    button.disabled = !runtimeReady;
+    button.setAttribute("aria-selected", tab.id === overlayTabActive ? "true" : "false");
+    button.textContent = tab.label;
+    button.addEventListener("click", () => switchOverlayTab(tab.id));
+    pythonTabs.appendChild(button);
+  }
+}
+
+/** Requests activation of an existing overlay tab. */
+function switchOverlayTab(tabId) {
+  if (!runtimeReady || tabId === overlayTabActive) {
+    if (runtimeReady) {
+      showOverlayEditor();
+    }
+    return;
+  }
+  vscode.postMessage({ tabId, type: "switchOverlayTab" });
+}
+
+/** Returns compact debugger state copy for the top bar. */
+function debugStatusText(state, detail) {
+  const suffix = breakpointCount ? ` · ${breakpointCount} breakpoint${breakpointCount === 1 ? "" : "s"}` : "";
+  if (state === "starting") {
+    return `debugger attaching${suffix}`;
+  }
+  if (state === "attached") {
+    return detail ? `debugger ${detail}${suffix}` : `debugger attached${suffix}`;
+  }
+  if (state === "running") {
+    return detail ? `debugger ${detail}${suffix}` : `debugger running${suffix}`;
+  }
+  if (state === "paused") {
+    return detail ? `debugger ${detail}${suffix}` : `debugger paused${suffix}`;
+  }
+  if (state === "error") {
+    return detail ? `debugger ${detail}${suffix}` : `debugger failed${suffix}`;
+  }
+  return `debugger idle${suffix}`;
+}
+
+/** Formats a debugger action name for compact status text. */
+function debugControlLabel(action) {
+  return String(action).replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`);
 }
 
 /** Shows the workbench overlay editor used for Python input. */

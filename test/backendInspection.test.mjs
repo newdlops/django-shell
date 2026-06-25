@@ -306,6 +306,27 @@ test("reports progress for running Python for-loops without waiting for the exec
   assert.equal(payload.final.ok, true);
 });
 
+test("uses request filename and line offset as the compiled shell input location", { skip: !PYTHON }, () => {
+  const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
+  const script = [
+    "import importlib.util, json",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    `filename=${JSON.stringify(filename)}`,
+    "response=mod._run_request({}, 'tok', {'token':'tok','kind':'execute','code':'raise RuntimeError(\"breakpoint-file\")','filename':filename,'lineOffset':5}, set())",
+    "print(json.dumps(response))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.match(payload.traceback, /breakpoint-file/);
+  assert.match(payload.traceback, /line 6/);
+  assert.ok(payload.traceback.includes(filename), payload.traceback);
+});
+
 function pythonExecutable() {
   const candidates = [process.env.DJANGO_SHELL_E2E_PYTHON, process.env.DJLS_E2E_BASE_PYTHON, "/Users/lky/.asdf/installs/python/3.11.15/bin/python3.11", "/usr/bin/python3", "python3"].filter(Boolean);
   return candidates.find((candidate) => childProcess.spawnSync(candidate, ["--version"], { encoding: "utf8" }).status === 0);

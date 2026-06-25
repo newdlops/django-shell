@@ -102,6 +102,51 @@ export function overlaySyncRendererSource(): string {
       return userText;
     }
 
+    /** Returns only user-visible source from the active overlay editor. */
+    window.__dsoGetOverlayVisibleText = function () {
+      const root = document.getElementById("django-shell-overlay");
+      const editor = root && root.__djangoShellEditor;
+      const model = editor && editor.getModel && editor.getModel();
+      return model ? __dsoUserText(model.getValue(), root) : String(window.__djangoShellOverlayInitialText || "");
+    };
+
+    /** Replaces only user-visible source while preserving hidden generated prefix state. */
+    window.__dsoSetOverlayVisibleText = function (text) {
+      const userText = String(text || "");
+      window.__djangoShellOverlayInitialText = userText;
+      const root = document.getElementById("django-shell-overlay");
+      const editor = root && root.__djangoShellEditor;
+      const model = editor && editor.getModel && editor.getModel();
+      window.__dsoPendingOverlayVisibleText = userText;
+      if (!root || !editor || !model) { return "queued"; }
+      const oldVisibility = root.style.visibility;
+      root.__dsoMultilineMode = false;
+      root.__dsoLastEnterRunAt = 0;
+      root.style.visibility = "hidden";
+      root.__dsoSuppressModelSync = true;
+      root.__dsoPreludeRepairing = true;
+      try {
+        root.__dsoPreludeText = root.__dsoPreludeText !== undefined ? root.__dsoPreludeText : String(window.__djangoShellOverlayPrelude || "");
+        const prefix = root.__dsoUseVisiblePrelude ? __dsoCanonicalPrefix(root) : __dsoDiagnosticPrefix(root, userText);
+        root.__dsoProtectedPrefix = prefix;
+        model.setValue(prefix + userText);
+      } finally {
+        root.__dsoPreludeRepairing = false;
+        root.__dsoSuppressModelSync = false;
+      }
+      try { window.__dsoApplyPreludeHiddenArea && window.__dsoApplyPreludeHiddenArea(root, editor); } catch (eApplyVisibleText) {}
+      try {
+        const startLine = root.__dsoUserStartLine || __dsoFindInputStartLine(model);
+        editor.setPosition && editor.setPosition({ column: 1, lineNumber: startLine });
+        editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(startLine);
+      } catch (eVisibleCursor) {}
+      try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eVisibleBreakpoints) {}
+      delete window.__dsoPendingOverlayVisibleText;
+      root.__dsoHasAppliedInitialText = true;
+      root.style.visibility = oldVisibility || "visible";
+      return "ok";
+    };
+
     /** Restores the generated prefix if an edit crosses the hidden boundary. */
     function __dsoRepairPrefix(root, editor, post) {
       const model = editor && editor.getModel && editor.getModel();
@@ -329,13 +374,23 @@ export function overlaySyncRendererSource(): string {
         return;
       }
       const toLine = model.getLineCount();
+      let edited = false;
       try {
         editor.executeEdits("django-shell-enter", [{
           forceMoveMarkers: true,
           range: { endColumn: model.getLineMaxColumn(toLine), endLineNumber: toLine, startColumn: model.getLineMaxColumn(last), startLineNumber: last },
           text: "\\n\\n"
         }]);
+        edited = model.getLineCount() > toLine;
       } catch (eEdit) {}
+      if (!edited && model.getValue && model.setValue) {
+        try {
+          const lines = String(model.getValue() || "").split(/\\r?\\n/);
+          model.setValue(lines.slice(0, last).join("\\n") + "\\n\\n");
+          edited = true;
+          __dsoLog(post, "cursor.advance.fallback", { cellEnd: last, source: source });
+        } catch (eFallbackEdit) {}
+      }
       const target = model.getLineCount();
       try { editor.setPosition({ column: 1, lineNumber: target }); } catch (eSetPosition) {}
       try { editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(target); } catch (eReveal) {}
@@ -429,18 +484,29 @@ export function overlaySyncRendererSource(): string {
     }
 
     /** Posts one execution request and returns the extension host decision. */
-    function __dsoRunCode(post, code, root, editor) {
+    function __dsoRunCode(post, code, root, editor, range) {
       window.__dsoLastRunOutcome = { chars: String(code || "").length, pending: true };
-      return Promise.resolve(post({ type: "run", code: code })).then(function (response) {
+      const hostRange = __dsoHostRange(root, range);
+      return Promise.resolve(post({ type: "run", code: code, range: hostRange })).then(function (response) {
         if (response && response.type === "opaque") { window.__dsoLastRunOutcome = { executed: true, opaque: true }; return { executed: true }; }
-        if (!response || !response.json || response.ok === false) { window.__dsoLastRunOutcome = { executed: false, status: response && response.status }; return __dsoRunWebviewFallback(code); }
+        if (!response || !response.json || response.ok === false) { window.__dsoLastRunOutcome = { executed: false, status: response && response.status }; return __dsoRunWebviewFallback(code, range); }
         return response.json().then(function (outcome) { window.__dsoLastRunOutcome = outcome || { executed: false }; return window.__dsoLastRunOutcome; }).catch(function (error) { window.__dsoLastRunOutcome = { error: String(error && error.message || error), executed: false }; return window.__dsoLastRunOutcome; });
-      }).catch(function (error) { window.__dsoLastRunOutcome = { error: String(error && error.message || error), executed: false }; return __dsoRunWebviewFallback(code); });
+      }).catch(function (error) { window.__dsoLastRunOutcome = { error: String(error && error.message || error), executed: false }; return __dsoRunWebviewFallback(code, range); });
+    }
+    /** Converts raw Monaco model lines to user-input relative lines for extension-host source mapping. */
+    function __dsoHostRange(root, range) {
+      if (!range) { return null; }
+      return { end: __dsoRelativeUserLine(root, range.end || range.start || 1), start: __dsoRelativeUserLine(root, range.start || 1) };
+    }
+    /** Converts one raw Monaco model line to a one-based user-input relative line. */
+    function __dsoRelativeUserLine(root, line) {
+      const startLine = Number(root && root.__dsoInputStartLine) || 1;
+      return Math.max(1, Math.floor(Number(line) || 1) - startLine + 1);
     }
     /** Uses the custom console webview bridge when localhost fetch is unavailable. */
-    function __dsoRunWebviewFallback(code) {
+    function __dsoRunWebviewFallback(code, range) {
       const frame = typeof __dsoFindWebviewFrame === "function" ? __dsoFindWebviewFrame() : null;
-      const message = { code: code, type: "overlayRunPython" };
+      const message = { code: code, range: __dsoHostRange(document.getElementById("django-shell-overlay"), range), type: "overlayRunPython" };
       let sent = 0;
       const postTo = function (target) { if (!target || sent > 16) { return; } try { target.postMessage(message, "*"); sent++; } catch (ePost) {} try { for (let index = 0; target.frames && index < target.frames.length; index++) { postTo(target.frames[index]); } } catch (eFrames) {} };
       postTo(frame && frame.contentWindow); postTo(frame);
@@ -482,6 +548,82 @@ export function overlaySyncRendererSource(): string {
     /** Returns the payload that Enter would run from the current editor state. */
     function __dsoPreviewPayload(root, editor) {
       return root && root.__dsoMultilineMode ? __dsoMultilinePayload(root, editor) : __dsoEnterPayload(root, editor);
+    }
+
+    /** Returns normalized one-based breakpoint lines relative to user input. */
+    function __dsoRelativeBreakpointLines(lines) {
+      const seen = Object.create(null);
+      return (Array.isArray(lines) ? lines : []).map(function (line) { return Math.floor(Number(line)); }).filter(function (line) {
+        if (!Number.isFinite(line) || line < 1 || seen[line]) { return false; }
+        seen[line] = true;
+        return true;
+      });
+    }
+
+    /** Maps user-input relative breakpoint lines to raw Monaco model lines. */
+    function __dsoModelBreakpointLines(root, lines, model) {
+      const limit = model && model.getLineCount ? model.getLineCount() : Number.MAX_SAFE_INTEGER;
+      const startLine = Number(root && root.__dsoInputStartLine) || 1;
+      return __dsoRelativeBreakpointLines(lines).map(function (line) { return startLine + line - 1; }).filter(function (line) {
+        return line >= 1 && line <= limit;
+      });
+    }
+
+    /** Draws breakpoint glyphs for the latest VS Code breakpoint state. */
+    window.__dsoApplyOverlayBreakpoints = function (root, editor) {
+      const model = editor && editor.getModel && editor.getModel();
+      if (!root || !editor || !model || !editor.deltaDecorations) { return "missing-editor"; }
+      const lines = __dsoModelBreakpointLines(root, root.__dsoBreakpointLines || window.__dsoOverlayBreakpointLines || [], model);
+      const decorations = lines.map(function (line) {
+        return {
+          options: { className: "dso-breakpoint-line", glyphMarginClassName: "dso-breakpoint-glyph", isWholeLine: true, linesDecorationsClassName: "dso-breakpoint-rail" },
+          range: { endColumn: model.getLineMaxColumn ? model.getLineMaxColumn(line) : 1, endLineNumber: line, startColumn: 1, startLineNumber: line }
+        };
+      });
+      try { if (editor.updateOptions) { editor.updateOptions({ glyphMargin: true }); } } catch (eGlyphOptions) {}
+      try {
+        root.__dsoBreakpointDecorationIds = editor.deltaDecorations(root.__dsoBreakpointDecorationIds || [], decorations);
+      } catch (eBreakpointDecorations) {
+        root.__dsoBreakpointDecorationIds = [];
+      }
+      root.__dsoBreakpointModelLines = lines;
+      return "breakpoints:" + lines.length;
+    };
+
+    /** Stores breakpoint lines from the extension host and applies them to the live editor. */
+    window.__dsoSetOverlayBreakpoints = function (lines) {
+      const root = document.getElementById("django-shell-overlay");
+      window.__dsoOverlayBreakpointLines = __dsoRelativeBreakpointLines(lines);
+      if (!root) { return "breakpoints:" + window.__dsoOverlayBreakpointLines.length; }
+      root.__dsoBreakpointLines = window.__dsoOverlayBreakpointLines;
+      const editor = root.__djangoShellEditor;
+      return editor ? window.__dsoApplyOverlayBreakpoints(root, editor) : "breakpoints:" + root.__dsoBreakpointLines.length;
+    };
+
+    /** Returns the clicked visible line when a Monaco mouse event targets the gutter. */
+    function __dsoBreakpointMouseLine(event) {
+      const target = event && event.target;
+      const position = target && target.position;
+      const type = target && target.type;
+      const detail = String(target && target.detail || "");
+      if (!position || !Number.isFinite(position.lineNumber)) { return 0; }
+      return type === 2 || type === 3 || type === 4 || /glyph|margin|line/i.test(detail) ? position.lineNumber : 0;
+    }
+
+    /** Installs gutter click breakpoint toggling on the overlay editor. */
+    function __dsoInstallBreakpointToggle(root, editor, post) {
+      if (!root || !editor || root.__dsoBreakpointToggleEditor === editor) { return; }
+      try { root.__dsoBreakpointToggleDisposable && root.__dsoBreakpointToggleDisposable.dispose && root.__dsoBreakpointToggleDisposable.dispose(); } catch (eDisposeBreakpointToggle) {}
+      root.__dsoBreakpointToggleEditor = editor;
+      try { if (editor.updateOptions) { editor.updateOptions({ glyphMargin: true }); } } catch (eGlyphToggleOptions) {}
+      if (!editor.onMouseDown) { return; }
+      root.__dsoBreakpointToggleDisposable = editor.onMouseDown(function (event) {
+        const line = __dsoBreakpointMouseLine(event);
+        if (!line) { return; }
+        try { event.event && event.event.preventDefault && event.event.preventDefault(); } catch (ePreventBreakpoint) {}
+        try { event.event && event.event.stopPropagation && event.event.stopPropagation(); } catch (eStopBreakpoint) {}
+        try { post({ type: "toggleBreakpoint", line: __dsoRelativeUserLine(root, line) }); } catch (ePostBreakpoint) {}
+      });
     }
 
     /** Returns Monaco decorations for the currently executable Python input range. */
@@ -580,6 +722,8 @@ export function overlaySyncRendererSource(): string {
         __dsoLog(post, "enter.install.skip", { hasNode: false });
         return;
       }
+      __dsoInstallBreakpointToggle(root, editor, post);
+      try { window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eApplyBreakpoints) {}
       __dsoLog(post, "enter.install", { hasNode: true, sameEditor: root.__dsoEnterEditor === editor });
       const execute = function (event, source, allowContinuation) {
         const inputStartLine = root.__dsoInputStartLine || 1;
@@ -623,7 +767,7 @@ export function overlaySyncRendererSource(): string {
           return true;
         }
         __dsoLog(post, "enter.execute.request", { chars: payload.code.length, end: payload.range ? payload.range.end : 0, inputStartLine: inputStartLine, lines: __dsoLineCount(payload.code), multiline: multilineMode, source: source, start: payload.range ? payload.range.start : 0 });
-        __dsoRunCode(post, payload.code, root, editor).then(function (outcome) {
+        __dsoRunCode(post, payload.code, root, editor, payload.range).then(function (outcome) {
           if (outcome && outcome.executed === false) {
             __dsoLog(post, "enter.incomplete", { chars: payload.code.length, inputStartLine: inputStartLine, source: source });
             if (allowContinuation !== false) { __dsoInsertNewline(editor, post, source + "-incomplete"); }

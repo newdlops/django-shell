@@ -18,10 +18,13 @@ async function run() {
   const opened = await waitForSnapshot((snapshot) => snapshot.panelOpen && snapshot.hasEditorAnchor);
   assert.equal(opened.panelVisible, true);
   assert.equal(opened.hasCellResizers, true);
+  assert.equal(opened.hasDebugButton, true);
+  assert.equal(opened.hasDebugControls, true);
   assert.equal(opened.hasNotebookChrome, true);
   assert.equal(opened.hasPythonDisabledState, true);
   assert.equal(opened.hasPythonIcon, true);
   assert.equal(opened.hasPythonRunButton, false);
+  assert.equal(opened.hasOverlayTabButton, true);
   assert.equal(opened.hasSetupAutoMinimize, true);
   const overlayText = await waitForOverlayText((value) => value.editor.includes("# --- django shell input ---") && value.analysis === "");
   assert.equal(overlayText.editor.includes("# --- django shell input ---"), true);

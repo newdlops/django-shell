@@ -80,6 +80,7 @@ export function overlayCleanupRendererSource(): string {
       __dsoDisposeValue(root.__dsoPreludeModelDisposable);
       __dsoDisposeValue(root.__dsoPreludeKeyDisposable);
       __dsoDisposeValue(root.__dsoSemanticDisposable);
+      __dsoDisposeValue(root.__dsoBreakpointToggleDisposable);
       __dsoStopOverlayObservers(root);
       __dsoForgetOverlayCapture(editor);
       __dsoDisposeValue(editor);

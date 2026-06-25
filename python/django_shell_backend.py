@@ -306,8 +306,10 @@ def _run_request(namespace, token, request, initial_names):
         return {"ok": False, "stdout": "", "stderr": "Request code must be a string.", "traceback": ""}
     if request.get("kind") == "complete":
         return _check_complete(code)
+    filename = request.get("filename")
+    line_offset = request.get("lineOffset")
     with _EXECUTION_LOCK:
-        return _execute_code(namespace, code)
+        return _execute_code(namespace, code, filename if isinstance(filename, str) and filename else None, line_offset if isinstance(line_offset, int) else 0)
 
 
 def _check_complete(code):
@@ -973,29 +975,32 @@ def _truncate(text, limit=180):
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
-def _execute_code(namespace, code):
+def _execute_code(namespace, code, filename=None, line_offset=0):
     """Executes Python code and captures stdout, stderr, repr result, and traceback."""
     stdout = io.StringIO()
     stderr = io.StringIO()
     result = None
+    compile_filename = filename or "<django-shell-input>"
     _progress_begin(code, emit=bool(_STATE.get("progress_emit")))
     namespace["_djs_progress_iter"] = _progress_iter
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         try:
-            tree = ast.parse(code, filename="<django-shell-input>", mode="exec")
+            tree = ast.parse(code, filename=compile_filename, mode="exec")
             tree = _progress_instrument_tree(tree)
+            if line_offset > 0:
+                ast.increment_lineno(tree, line_offset)
             body, expression = _split_last_expression(tree)
             if body:
                 tree.body = body
                 ast.fix_missing_locations(tree)
-                exec(compile(tree, "<django-shell-input>", "exec"), namespace)
+                exec(compile(tree, compile_filename, "exec"), namespace)
             if expression is None:
                 if not body:
-                    exec(compile(tree, "<django-shell-input>", "exec"), namespace)
+                    exec(compile(tree, compile_filename, "exec"), namespace)
             else:
                 expr = ast.Expression(expression.value)
                 ast.fix_missing_locations(expr)
-                value = eval(compile(expr, "<django-shell-input>", "eval"), namespace)
+                value = eval(compile(expr, compile_filename, "eval"), namespace)
                 if value is not None:
                     namespace["_"] = value
                     result = pprint.pformat(value, width=120, compact=False)

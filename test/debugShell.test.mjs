@@ -1,0 +1,51 @@
+// Unit tests for Django shell debugger bootstrap helpers.
+
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import test from "node:test";
+
+const require = createRequire(import.meta.url);
+const {
+  DEBUGPY_MARKER_PREFIX,
+  buildDebugpyBootstrapCode,
+  buildDjangoShellDebugConfiguration,
+  parseDebugpyBootstrapResult
+} = require("../out/debugShell.js");
+
+test("builds a reusable debugpy bootstrap that emits a marker", () => {
+  const code = buildDebugpyBootstrapCode("127.0.0.1", 56789, DEBUGPY_MARKER_PREFIX, ["/vscode/debugpy/bundled/libs"]);
+
+  assert.match(code, /import debugpy as _djs_debugpy/);
+  assert.match(code, /_djs_debugpy\.listen\(\(_djs_debug_host, _djs_debug_port\)\)/);
+  assert.match(code, /_django_shell_debugpy_endpoint/);
+  assert.match(code, new RegExp(DEBUGPY_MARKER_PREFIX));
+  assert.match(code, /\/vscode\/debugpy\/bundled\/libs/);
+  assert.match(code, /_djs_debug_sys\.path\.insert/);
+  assert.match(code, /PYTHONBREAKPOINT/);
+  assert.match(code, /_djs_debug_sys\.breakpointhook = _djs_debugpy\.breakpoint/);
+  assert.match(code, /56789/);
+});
+
+test("parses debugpy endpoint markers and failures", () => {
+  const ok = parseDebugpyBootstrapResult(`noise\n${DEBUGPY_MARKER_PREFIX}{"ok":true,"host":"127.0.0.1","port":56789,"reused":false}\n`);
+  const failed = parseDebugpyBootstrapResult(`${DEBUGPY_MARKER_PREFIX}{"ok":false,"error":"ImportError('debugpy')"}\n`);
+
+  assert.deepEqual(ok, { endpoint: { host: "127.0.0.1", port: 56789, reused: false }, ok: true });
+  assert.equal(failed.ok, false);
+  assert.match(failed.error ?? "", /debugpy/);
+});
+
+test("builds a Python attach configuration for the live shell endpoint", () => {
+  const configuration = buildDjangoShellDebugConfiguration({ host: "127.0.0.1", port: 56789, reused: true }, "/workspace/app");
+
+  assert.deepEqual(configuration, {
+    connect: { host: "127.0.0.1", port: 56789 },
+    cwd: "/workspace/app",
+    django: true,
+    justMyCode: false,
+    name: "Django Shell",
+    pathMappings: [{ localRoot: "/workspace/app", remoteRoot: "/workspace/app" }],
+    request: "attach",
+    type: "python"
+  });
+});

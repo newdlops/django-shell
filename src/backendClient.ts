@@ -137,9 +137,11 @@ export interface BackendRequestPayload {
   code?: string;
   cursor?: unknown;
   exclude?: string[];
+  filename?: string;
   filters?: BackendModelFilter[];
   groupBy?: string[];
   kind: string;
+  lineOffset?: number;
   lightweight?: boolean;
   limit?: number;
   model?: string;
@@ -203,8 +205,8 @@ export class BackendClient {
   }
 
   /** Executes Python code in the backend namespace and returns captured output. */
-  execute(code: string): Promise<BackendExecutionResult> {
-    return this.request({ code, kind: "execute" }, parseBackendResponse);
+  execute(code: string, filename?: string, lineOffset?: number): Promise<BackendExecutionResult> {
+    return this.request({ code, filename, kind: "execute", lineOffset }, parseBackendResponse);
   }
 
   /** Returns the latest running Python progress snapshot when the socket can be polled. */

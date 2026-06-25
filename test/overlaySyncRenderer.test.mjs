@@ -5,8 +5,13 @@ import { createRequire } from "node:module";
 import test from "node:test";
 
 const require = createRequire(import.meta.url);
+const { overlayRendererSource } = require("../out/workbenchOverlayRenderer.js");
 const { overlaySyncRendererSource } = require("../out/workbenchOverlaySyncRenderer.js");
 const { overlayPythonRangeRendererSource } = require("../out/workbenchOverlayPythonRangeRenderer.js");
+
+test("emits parseable workbench overlay renderer source", () => {
+  assert.equal(typeof Function(overlayRendererSource("file:///tmp/console-cell.py")), "function");
+});
 
 test("runs Python from lightweight Monaco Enter handling", async () => {
   const source = overlaySyncRendererSource();
@@ -29,7 +34,10 @@ test("runs Python from lightweight Monaco Enter handling", async () => {
   assert.equal(typeof keyHandler, "function");
   keyHandler(monacoEnterEvent());
   await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(posts.some((payload) => payload.type === "run" && payload.code === "x = 1"));
+  const runPayload = posts.find((payload) => payload.type === "run" && payload.code === "x = 1");
+  assert.ok(runPayload);
+  assert.deepEqual(runPayload.range, { end: 1, start: 1 });
+  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 3 });
 });
 
 test("preserves pasted multiline source with internal blank lines", async () => {
@@ -92,7 +100,9 @@ test("keeps import block continuation after an earlier cell separator", async ()
   keyHandler(monacoEnterEvent());
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.ok(posts.some((payload) => payload.type === "run" && payload.code === "import os\n\n\nprint(os.name)"));
+  const runPayload = posts.find((payload) => payload.type === "run" && payload.code === "import os\n\n\nprint(os.name)");
+  assert.ok(runPayload);
+  assert.deepEqual(runPayload.range, { end: 7, start: 4 });
 });
 
 test("previews the current Enter execution range with editor decorations", () => {
@@ -113,6 +123,54 @@ test("previews the current Enter execution range with editor decorations", () =>
   assert.equal(rangeDecoration.range.endLineNumber, 7);
   assert.equal(editor.options.lineNumbers(4), ">>>");
   assert.equal(editor.options.lineNumbers(5), "...");
+});
+
+test("draws breakpoint glyphs and posts gutter breakpoint toggles", () => {
+  const source = overlaySyncRendererSource();
+  const state = { overlayRoot: undefined };
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner, setBreakpoints: window.__dsoSetOverlayBreakpoints };`)(window, document, () => undefined);
+  let mouseHandler;
+  const editor = fakeEditor(fakeModel("one\ntwo\nthree\nfour\n"));
+  editor.onMouseDown = (callback) => { mouseHandler = callback; return { dispose() {} }; };
+  const posts = [];
+  const root = { __djangoShellEditor: editor };
+  state.overlayRoot = root;
+
+  api.installEnterRunner(root, editor, (payload) => {
+    posts.push(payload);
+    return { json: async () => ({ executed: true }) };
+  });
+  assert.equal(api.setBreakpoints([2, 4, 99]), "breakpoints:2");
+  mouseHandler({ event: { preventDefault() {}, stopPropagation() {} }, target: { position: { lineNumber: 3 }, type: 2 } });
+
+  assert.equal(editor.decorations.filter((item) => item.options.glyphMarginClassName === "dso-breakpoint-glyph").length, 2);
+  assert.deepEqual(posts.find((payload) => payload.type === "toggleBreakpoint"), { line: 3, type: "toggleBreakpoint" });
+});
+
+test("maps relative breakpoint lines onto hidden-prelude model lines", () => {
+  const source = overlaySyncRendererSource();
+  const state = { overlayRoot: undefined };
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner, setBreakpoints: window.__dsoSetOverlayBreakpoints };`)(window, document, () => undefined);
+  let mouseHandler;
+  const editor = fakeEditor(fakeModel("pass\n# --- django shell input ---\none\ntwo\nthree\n"));
+  editor.onMouseDown = (callback) => { mouseHandler = callback; return { dispose() {} }; };
+  const posts = [];
+  const root = { __djangoShellEditor: editor, __dsoInputStartLine: 3 };
+  state.overlayRoot = root;
+
+  api.installEnterRunner(root, editor, (payload) => {
+    posts.push(payload);
+    return { json: async () => ({ executed: true }) };
+  });
+  assert.equal(api.setBreakpoints([1, 2]), "breakpoints:2");
+  mouseHandler({ event: { preventDefault() {}, stopPropagation() {} }, target: { position: { lineNumber: 4 }, type: 2 } });
+
+  assert.deepEqual(editor.decorations.filter((item) => item.options.glyphMarginClassName === "dso-breakpoint-glyph").map((item) => item.range.startLineNumber), [3, 4]);
+  assert.deepEqual(posts.find((payload) => payload.type === "toggleBreakpoint"), { line: 2, type: "toggleBreakpoint" });
 });
 
 test("skips the current execution range on Alt Enter without running Python", () => {
@@ -275,7 +333,7 @@ function fakeEditor(model, position = { column: 1, lineNumber: 1 }) {
     onKeyDown: () => ({ dispose() {} }),
     revealLineInCenterIfOutsideViewport() {},
     setPosition(next) { position = next; if (this.cursorListener) { this.cursorListener(); } },
-    updateOptions(options) { this.options = options; }
+    updateOptions(options) { this.options = { ...(this.options || {}), ...options }; }
   };
   return editor;
 }

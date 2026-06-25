@@ -9433,11 +9433,16 @@ var setupCell = document.getElementById("setupCell");
 var status = document.getElementById("status");
 var currentOutput = document.getElementById("currentOutput");
 var currentOutputLabel = document.getElementById("currentOutputLabel");
+var debugButtons = Array.from(document.querySelectorAll("[data-action=debug-shell]"));
+var debugControlButtons = Array.from(document.querySelectorAll("[data-debug-control]"));
+var debugStatus = document.getElementById("debugStatus");
+var newOverlayTabButtons = Array.from(document.querySelectorAll("[data-action=new-overlay-tab]"));
 var outputList = document.getElementById("outputList");
 var editorAnchor = document.getElementById("editorAnchor");
 var inputPrompt = document.getElementById("inputPrompt");
 var inputPromptText = inputPrompt && inputPrompt.querySelector(".promptMark");
 var pythonCell = document.getElementById("pythonCell");
+var pythonTabs = document.getElementById("pythonTabs");
 var statusText = document.getElementById("statusText");
 var transport = document.getElementById("transport");
 var transportInfo = document.getElementById("transportInfo");
@@ -9448,6 +9453,14 @@ var pendingExecution = 0;
 var runningOutputs = /* @__PURE__ */ new Map();
 var snapshotWritten = false;
 var e2eSawShellPrompt = false;
+var debugAttached = false;
+var debugBusy = false;
+var debugDetail = "";
+var debugState = "idle";
+var breakpointCount = 0;
+var overlayTabActive = "overlay-1";
+var overlayTabs = [{ id: "overlay-1", label: "1" }];
+var runtimeReady = false;
 var terminal;
 function main() {
   ensureStyle();
@@ -9455,9 +9468,20 @@ function main() {
   wirePythonCell();
   wireCellResizers();
   window.addEventListener("message", (event) => handleHostMessage(event.data || {}));
+  for (const button of debugButtons) {
+    button.addEventListener("click", requestDebugShell);
+  }
+  for (const button of debugControlButtons) {
+    button.addEventListener("click", () => requestDebugControl(button.dataset.debugControl));
+  }
+  for (const button of newOverlayTabButtons) {
+    button.addEventListener("click", newOverlayTab);
+  }
   focusTerminalButton.addEventListener("click", () => terminal.focus());
   document.getElementById("restart").addEventListener("click", () => vscode.postMessage({ type: "restart" }));
   transport?.addEventListener("change", () => vscode.postMessage({ mode: transport.value, type: "setTransport" }));
+  setDebugStatus("idle", "");
+  renderOverlayTabs();
   vscode.postMessage({ type: "ready" });
 }
 function mountTerminal() {
@@ -9560,7 +9584,12 @@ function refreshAfterCellResize(target) {
 }
 function handleHostMessage(message) {
   if (message.type === "overlayRunPython" && typeof message.code === "string") {
-    vscode.postMessage({ code: message.code, type: "runPython" });
+    const lineOffset = overlayLineOffset(message.range);
+    const payload = { code: message.code, type: "runPython" };
+    if (lineOffset !== void 0) {
+      payload.lineOffset = lineOffset;
+    }
+    vscode.postMessage(payload);
   }
   if (message.type === "terminalData" && typeof message.data === "string") {
     snapshotWritten = true;
@@ -9572,6 +9601,15 @@ function handleHostMessage(message) {
   if (message.type === "transport" && transport) {
     transport.value = message.mode || "pty";
     transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">\u25CF ORM cell</span>' : message.active === "tcp" ? '<span class="on">\u25CF socket</span>' : message.active === "pty" ? '<span class="pty">\u25CF terminal</span>' : '<span class="off">\u25CB not connected</span>';
+  }
+  if (message.type === "debugStatus") {
+    setDebugStatus(String(message.state || "idle"), String(message.detail || ""));
+  }
+  if (message.type === "breakpoints") {
+    setBreakpointStatus(Number(message.count) || 0);
+  }
+  if (message.type === "overlayTabs") {
+    setOverlayTabs(message.tabs, message.active);
   }
   if (message.type === "pythonStarted" && Number.isFinite(message.execution)) {
     pendingExecution = message.execution;
@@ -9595,11 +9633,22 @@ function handleHostMessage(message) {
     }
   }
 }
+function overlayLineOffset(range) {
+  const start = range && Number(range.start);
+  return Number.isFinite(start) ? Math.max(0, Math.floor(start) - 1) : void 0;
+}
 function updateStatus(snapshot) {
+  runtimeReady = Boolean(snapshot.ready);
   status.dataset.ready = snapshot.ready ? "true" : "false";
   setSetupReady(Boolean(snapshot.ready));
   setPythonReady(Boolean(snapshot.ready));
   statusText.textContent = snapshot.ready ? "Python 3 / Django ready" : `${snapshot.state} / ${snapshot.mode}`;
+  if (!runtimeReady) {
+    setDebugStatus("idle", "");
+  } else {
+    updateDebugControls();
+  }
+  updateOverlayTabControls();
   if (snapshot.state === "starting" && !snapshot.text) {
     terminal.clear();
     snapshotWritten = false;
@@ -9637,6 +9686,135 @@ function setInputPrompt(text) {
 }
 function setPythonReady(ready) {
   pythonCell?.classList.toggle("disabled", !ready);
+}
+function requestDebugShell() {
+  if (!runtimeReady || debugBusy) {
+    return;
+  }
+  if (debugAttached) {
+    vscode.postMessage({ type: "stopDebugShell" });
+    return;
+  }
+  setDebugStatus("starting", "attaching");
+  vscode.postMessage({ type: "debugShell" });
+}
+function requestDebugControl(action) {
+  if (!runtimeReady || !debugAttached || debugBusy || !action) {
+    return;
+  }
+  const nextState = action === "pause" ? "paused" : action === "stop" ? "idle" : "running";
+  setDebugStatus(nextState, debugControlLabel(action));
+  vscode.postMessage({ action, type: "debugControl" });
+}
+function setDebugStatus(state, detail) {
+  debugState = state;
+  debugDetail = detail;
+  debugBusy = state === "starting";
+  debugAttached = state === "attached" || state === "paused" || state === "running";
+  if (debugStatus) {
+    debugStatus.dataset.state = state;
+    debugStatus.textContent = debugStatusText(debugState, debugDetail);
+  }
+  updateDebugControls();
+}
+function setBreakpointStatus(count) {
+  breakpointCount = Math.max(0, Math.floor(count));
+  if (debugStatus) {
+    debugStatus.textContent = debugStatusText(debugState, debugDetail);
+  }
+}
+function updateDebugControls() {
+  for (const button of debugButtons) {
+    button.disabled = !runtimeReady || debugBusy;
+    button.dataset.state = debugBusy ? "starting" : debugAttached ? "attached" : "idle";
+    button.title = !runtimeReady ? "Start Django shell before debugging" : debugAttached ? "Stop Django Shell debugger" : "Debug current shell";
+    button.setAttribute("aria-label", button.title);
+    const label = button.querySelector(".buttonLabel");
+    if (label) {
+      label.textContent = debugAttached ? "Stop" : debugBusy ? "Debugging" : "Debug";
+    }
+  }
+  for (const button of debugControlButtons) {
+    const action = button.dataset.debugControl || "";
+    button.disabled = !runtimeReady || !debugAttached || debugBusy;
+    button.dataset.active = debugState === "paused" && action === "pause" || debugState === "running" && action === "continue" ? "true" : "false";
+  }
+}
+function newOverlayTab() {
+  if (!runtimeReady) {
+    return;
+  }
+  vscode.postMessage({ type: "newOverlayTab" });
+}
+function updateOverlayTabControls() {
+  for (const button of newOverlayTabButtons) {
+    button.disabled = !runtimeReady;
+  }
+  if (pythonTabs) {
+    pythonTabs.setAttribute("aria-disabled", runtimeReady ? "false" : "true");
+  }
+  renderOverlayTabs();
+}
+function setOverlayTabs(tabs, active) {
+  const normalized = Array.isArray(tabs) ? tabs.map(normalizeOverlayTab).filter(Boolean) : [];
+  overlayTabs = normalized.length ? normalized : [{ id: "overlay-1", label: "1" }];
+  overlayTabActive = overlayTabs.some((tab) => tab.id === active) ? active : overlayTabs[0].id;
+  renderOverlayTabs();
+}
+function normalizeOverlayTab(tab) {
+  if (!tab || typeof tab.id !== "string") {
+    return void 0;
+  }
+  return { id: tab.id, label: String(tab.label || tab.id).slice(0, 12) };
+}
+function renderOverlayTabs() {
+  if (!pythonTabs) {
+    return;
+  }
+  pythonTabs.textContent = "";
+  for (const tab of overlayTabs) {
+    const button = document.createElement("button");
+    button.className = `pythonTab${tab.id === overlayTabActive ? " active" : ""}`;
+    button.type = "button";
+    button.role = "tab";
+    button.dataset.tabId = tab.id;
+    button.disabled = !runtimeReady;
+    button.setAttribute("aria-selected", tab.id === overlayTabActive ? "true" : "false");
+    button.textContent = tab.label;
+    button.addEventListener("click", () => switchOverlayTab(tab.id));
+    pythonTabs.appendChild(button);
+  }
+}
+function switchOverlayTab(tabId) {
+  if (!runtimeReady || tabId === overlayTabActive) {
+    if (runtimeReady) {
+      showOverlayEditor();
+    }
+    return;
+  }
+  vscode.postMessage({ tabId, type: "switchOverlayTab" });
+}
+function debugStatusText(state, detail) {
+  const suffix = breakpointCount ? ` \xB7 ${breakpointCount} breakpoint${breakpointCount === 1 ? "" : "s"}` : "";
+  if (state === "starting") {
+    return `debugger attaching${suffix}`;
+  }
+  if (state === "attached") {
+    return detail ? `debugger ${detail}${suffix}` : `debugger attached${suffix}`;
+  }
+  if (state === "running") {
+    return detail ? `debugger ${detail}${suffix}` : `debugger running${suffix}`;
+  }
+  if (state === "paused") {
+    return detail ? `debugger ${detail}${suffix}` : `debugger paused${suffix}`;
+  }
+  if (state === "error") {
+    return detail ? `debugger ${detail}${suffix}` : `debugger failed${suffix}`;
+  }
+  return `debugger idle${suffix}`;
+}
+function debugControlLabel(action) {
+  return String(action).replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`);
 }
 function showOverlayEditor() {
   if (pythonCell?.classList.contains("disabled")) {
