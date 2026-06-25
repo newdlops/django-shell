@@ -3,6 +3,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import type { BackendClient, BackendExecutionResult, BackendProgressSnapshot, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransportMode } from "./backendClient";
+import { registerCustomConsoleDebugEvents } from "./customConsoleDebugEvents";
 import { webviewHtml } from "./customConsoleHtml";
 import { DEBUG_CONTROL_ACTIONS, type DebugControlAction, debugControlDetail, debugControlState, isDebugControlAction, runDebugControl } from "./debugControls";
 import { DEBUGPY_MARKER_PREFIX, buildDebugpyBootstrapCode, buildDjangoShellDebugConfiguration, findAvailableLoopbackPort, parseDebugpyBootstrapResult } from "./debugShell";
@@ -77,17 +78,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
         vscode.commands.registerCommand("djangoShell.newOverlayTab", () => this.newOverlayTab())
       );
     }
-    this.disposables.push(
-      vscode.debug.onDidStartDebugSession((session) => this.handleDebugSessionStarted(session)),
-      vscode.debug.onDidTerminateDebugSession((session) => this.handleDebugSessionTerminated(session)),
-      vscode.debug.onDidChangeBreakpoints(() => this.refreshBreakpointUi()),
-      vscode.debug.onDidChangeActiveDebugSession((session) => {
-        if (session?.id === this.debugSession?.id) { this.postDebugStatus("attached", "active"); }
-      }),
-      vscode.debug.onDidChangeActiveStackItem((item) => {
-        if (this.debugSession && item && item.session.id === this.debugSession.id) { this.postDebugStatus("frameId" in item ? "paused" : "attached"); }
-      })
-    );
+    registerCustomConsoleDebugEvents(this.disposables, { getSession: () => this.debugSession, logger: this.logger, postInfo: (info) => this.post({ info, type: "debugInfo" }), postStatus: (state, detail) => this.postDebugStatus(state, detail), refreshBreakpoints: () => this.refreshBreakpointUi(), setSession: (session) => { this.debugSession = session; } });
     context.subscriptions.push(this);
   }
 
@@ -258,6 +249,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       hasCellResizers: html.includes("data-resize-target=\"terminal\"") && html.includes("data-resize-target=\"editor\""),
       hasDebugButton: html.includes("data-action=\"debug-shell\"") && html.includes("codicon-debug-start"),
       hasDebugControls: html.includes("data-debug-control=\"continue\"") && html.includes("data-debug-control=\"stepOver\"") && html.includes("data-debug-control=\"stop\""),
+      hasDebugInfoPanel: html.includes("id=\"debugInfo\"") && html.includes("id=\"debugVariables\""),
       hasOverlayTabButton: html.includes("data-action=\"new-overlay-tab\"") && html.includes("id=\"pythonTabs\""),
       hasNotebookChrome: html.includes("class=\"statusDot\"") && html.includes("class=\"promptMark\""),
       hasPythonDisabledState: html.includes("inputCell disabled") && html.includes("editorLock"),
@@ -640,25 +632,6 @@ export class CustomDjangoConsole implements vscode.Disposable {
   /** Returns the default line offset from hidden prelude plus the shell input marker. */
   private defaultExecutionLineOffset(): number {
     return Math.max(1, this.overlayPrelude.length + 1);
-  }
-
-  /** Reflects VS Code debugger starts in the custom console UI. */
-  private handleDebugSessionStarted(session: vscode.DebugSession): void {
-    if (session.type !== "python" || session.configuration.name !== "Django Shell") {
-      return;
-    }
-    this.debugSession = session;
-    this.postDebugStatus("attached", "active");
-    this.refreshBreakpointUi();
-  }
-
-  /** Reflects VS Code debugger termination in the custom console UI. */
-  private handleDebugSessionTerminated(session: vscode.DebugSession): void {
-    if (this.debugSession?.id !== session.id) {
-      return;
-    }
-    this.debugSession = undefined;
-    this.postDebugStatus("idle", "ended");
   }
 
   /** Refreshes breakpoint count in the webview and visible markers in the overlay editor. */

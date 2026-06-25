@@ -30,6 +30,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   private generatedCleanupTimer: ReturnType<typeof setTimeout> | undefined;
   private shutdownPromise: Promise<void> | undefined;
   private readonly token = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  private workbenchWindowId: number | undefined;
   private ws: WebSocket | undefined;
   private geometry: WorkbenchOverlayGeometry | undefined;
   private readonly memoryDocument: OverlayMemoryDocument;
@@ -218,7 +219,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
       if (reconnect && this.ws?.readyState !== WebSocket.OPEN) {
         await this.ensureCdpSocket();
       }
-      const report = await this.evalInWorkbench(disposeExpression());
+      const report = await this.evalInWorkbench(disposeExpression(this.token));
       this.logger?.log("overlay.dispose.renderer", { report });
     } catch (error) {
       this.logger?.log(errorEvent, { error: error instanceof Error ? error.message : String(error) });
@@ -387,7 +388,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   /** Evaluates JavaScript inside the focused workbench renderer. */
   private async evalInWorkbench(expression: string): Promise<string> {
     await this.ensureCdpSocket();
-    const script = mainProcessEvalExpression(expression);
+    const script = mainProcessEvalExpression(expression, this.workbenchWindowId);
     const response = await this.send("Runtime.evaluate", {
       awaitPromise: true,
       expression: script,
@@ -401,7 +402,17 @@ export class WorkbenchOverlay implements vscode.Disposable {
     if (exception) {
       throw new Error(exception.exception?.description || exception.text || "CDP Runtime.evaluate failed.");
     }
-    return String(response.result?.result?.value ?? "");
+    return this.recordWorkbenchWindow(String(response.result?.result?.value ?? ""));
+  }
+
+  /** Remembers the BrowserWindow id selected during the first successful overlay evaluation. */
+  private recordWorkbenchWindow(raw: string): string {
+    const match = /^__DSO_WINDOW_ID__:(\d+)\n([\s\S]*)$/.exec(raw);
+    if (!match) {
+      return raw;
+    }
+    this.workbenchWindowId = Number(match[1]);
+    return match[2] ?? "";
   }
 
   /** Sends one CDP request and waits for its response. */
@@ -554,8 +565,8 @@ function tabUri(tab: vscode.Tab): vscode.Uri | undefined {
   return input?.uri;
 }
 
-/** Wraps renderer JavaScript so it runs inside the focused workbench window. */
-function mainProcessEvalExpression(rendererExpression: string): string {
+/** Wraps renderer JavaScript so it runs inside the owning workbench window. */
+function mainProcessEvalExpression(rendererExpression: string, windowId?: number): string {
   const wrappedRendererExpression = `
     (async function () {
       try {
@@ -573,16 +584,22 @@ function mainProcessEvalExpression(rendererExpression: string): string {
       if (!req) { return "no-main-require"; }
       const BW = req("electron").BrowserWindow;
       const wins = BW.getAllWindows().filter((win) => /workbench\\.(?:esm\\.)?html/.test(win.webContents.getURL()));
+      const requestedId = ${JSON.stringify(windowId ?? null)};
+      const requested = requestedId ? BW.fromId(requestedId) : undefined;
       const focused = BW.getFocusedWindow();
-      const target = wins.includes(focused) ? focused : wins[0];
-      if (!target) { return "no-workbench-window"; }
+      const target = requested && wins.includes(requested) ? requested : (requestedId ? undefined : (wins.includes(focused) ? focused : (wins.length === 1 ? wins[0] : undefined)));
+      if (!target) { return requestedId ? "no-owned-workbench-window:" + requestedId : "no-focused-workbench-window:" + wins.length; }
+      if (!requestedId) {
+        const orphanCleanup = "try{const root=document.getElementById('django-shell-overlay');if(root&&!root.__dsoOwnerToken){if(window.__dsoDisposeOverlay){window.__dsoDisposeOverlay(root,true);}else{root.remove();}}}catch(e){}";
+        await Promise.all(wins.filter(function (win) { return win !== target; }).map(function (win) { return win.webContents.executeJavaScript(orphanCleanup, true).catch(function () { return undefined; }); }));
+      }
       var value;
       try {
         value = await target.webContents.executeJavaScript(${JSON.stringify(wrappedRendererExpression)}, true);
       } catch (error) {
         return "renderer-execute-error:" + String(error && (error.stack || error.message) || error);
       }
-      return value === undefined || value === null ? "" : String(value);
+      return "__DSO_WINDOW_ID__:" + target.id + "\\n" + (value === undefined || value === null ? "" : String(value));
     })()
   `.trim();
 }
@@ -593,13 +610,17 @@ function patchExpression(port: number, token: string, modelUri: string, initialT
     (function () {
       window.__djangoShellOverlayBridge = { port: ${JSON.stringify(port)}, token: ${JSON.stringify(token)} };
       window.__djangoShellOverlayModelUri = ${JSON.stringify(modelUri)};
+      window.__djangoShellOverlayOwnerToken = ${JSON.stringify(token)};
       window.__djangoShellOverlayInitialText = ${JSON.stringify(initialText)};
       window.__djangoShellOverlayUseVisiblePrelude = false;
       window.__djangoShellOverlayGeometry = ${JSON.stringify(geometry ?? null)};
       window.__djangoShellOverlayPrelude = ${JSON.stringify(prelude)};
       if (!window.__djangoShellOverlayPatched || window.__djangoShellOverlayPatchVersion !== ${RENDERER_PATCH_VERSION}) { try {
         var stale = document.getElementById("django-shell-overlay");
-        if (stale && stale.parentElement) { stale.parentElement.removeChild(stale); }
+        if (stale && stale.__dsoOwnerToken !== window.__djangoShellOverlayOwnerToken) {
+          if (window.__dsoDisposeOverlay) { window.__dsoDisposeOverlay(stale, true); }
+          else if (stale.parentElement) { stale.parentElement.removeChild(stale); }
+        }
       } catch (eStaleOverlay) {} }
       window.__djangoShellOverlayPatched = true;
       window.__djangoShellOverlayPatchVersion = ${RENDERER_PATCH_VERSION};
@@ -632,7 +653,7 @@ function modelTextReadExpression(): string { return `(function(){const root=docu
 function visibleTextWriteExpression(text: string): string { return `window.__dsoSetOverlayVisibleText ? window.__dsoSetOverlayVisibleText(${JSON.stringify(text)}) : 'overlay-visible-text-missing'`; }
 
 /** Returns the expression that removes renderer-owned overlay DOM and editor resources. */
-function disposeExpression(): string { return `(function(){const root=document.getElementById("django-shell-overlay");if(window.__dsoDisposeOverlay){return window.__dsoDisposeOverlay(root);}if(root&&root.parentElement){root.parentElement.removeChild(root);return "removed";}return "no-overlay";})()`; }
+function disposeExpression(token: string): string { return `(function(){const root=document.getElementById("django-shell-overlay");if(root&&root.__dsoOwnerToken&&root.__dsoOwnerToken!==${JSON.stringify(token)}){return "owner-mismatch";}window.__djangoShellOverlayOwnerToken=${JSON.stringify(token)};if(window.__dsoDisposeOverlay){return window.__dsoDisposeOverlay(root);}if(root&&root.parentElement){root.parentElement.removeChild(root);return "removed";}return "no-overlay";})()`; }
 
 /** Returns the expression that clears stale renderer overlay state after backend restart. */
 function resetExpression(initialText: string): string { return `(function(){window.__djangoShellOverlayInitialText=${JSON.stringify(initialText)};window.__djangoShellOverlayPrelude="";if(window.__djangoShellOverlayReset){return window.__djangoShellOverlayReset(window.__djangoShellOverlayInitialText);}const root=document.getElementById("django-shell-overlay");try{const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(model&&model.setValue){model.setValue(window.__djangoShellOverlayInitialText);}}catch(eResetModel){}return window.__djangoShellOverlayHide?window.__djangoShellOverlayHide():'overlay-not-installed';})()`; }

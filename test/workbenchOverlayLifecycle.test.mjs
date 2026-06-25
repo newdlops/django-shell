@@ -28,6 +28,24 @@ test("confirmed console overlays do not fall back to unrelated webview frames", 
   assert.ok(frameRendererSource.includes("!owned && root.__dsoHadConsoleFrame && !rects.length"));
 });
 
+test("overlay CDP evaluation stays bound to the owning VS Code window", () => {
+  assert.ok(overlaySource.includes("private workbenchWindowId"));
+  assert.ok(overlaySource.includes("BW.fromId(requestedId)"));
+  assert.ok(overlaySource.includes("no-focused-workbench-window"));
+  assert.ok(overlaySource.includes("root&&!root.__dsoOwnerToken"));
+  assert.equal(overlaySource.includes("wins.includes(focused) ? focused : wins[0]"), false);
+});
+
+test("renderer overlay root carries an owner token before reuse or disposal", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+  const cleanupSource = fs.readFileSync(new URL("../src/workbenchOverlayCleanupRenderer.ts", import.meta.url), "utf8");
+
+  assert.ok(overlaySource.includes("__djangoShellOverlayOwnerToken"));
+  assert.ok(rendererSource.includes("root.__dsoOwnerToken = window.__djangoShellOverlayOwnerToken"));
+  assert.ok(rendererSource.includes("owner-mismatch"));
+  assert.ok(cleanupSource.includes("owner-mismatch"));
+});
+
 test("renderer relative ranges are offset to backing console file lines", () => {
   const offsetHelper = overlaySource.slice(overlaySource.indexOf("private relativeLineOffset"));
 

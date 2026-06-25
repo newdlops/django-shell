@@ -424,6 +424,10 @@ export function overlayRendererSource(modelUri: string): string {
     window.__djangoShellOverlayShow = function (geometry) {
       __dsoEnsureStyle();
       let root = document.getElementById("django-shell-overlay");
+      if (root && root.__dsoOwnerToken && root.__dsoOwnerToken !== window.__djangoShellOverlayOwnerToken) {
+        try { window.__dsoDisposeOverlay ? window.__dsoDisposeOverlay(root, true) : root.remove(); } catch (eStaleOwner) {}
+        root = null;
+      }
       const wasShown = !!(root && root.style.display !== "none" && root.style.visibility !== "hidden" && root.__djangoShellEditor);
       if (!root) {
         root = document.createElement("section");
@@ -434,6 +438,8 @@ export function overlayRendererSource(modelUri: string): string {
           if (root.__dsoRunCurrentInput) { root.__dsoRunCurrentInput(); return; } __dsoPost({ type: "run", code: __dsoUserText(__dsoEditorValue(root.__djangoShellEditor), root) });
         });
       }
+      root.__dsoOwnerToken = window.__djangoShellOverlayOwnerToken;
+      try { root.dataset.djangoShellOverlayOwner = String(window.__djangoShellOverlayOwnerToken || ""); } catch (eOwnerDataset) {}
       root.__dsoUseVisiblePrelude = !!window.__djangoShellOverlayUseVisiblePrelude;
       root.style.display = "block";
       if (!root.__dsoGeometryTimer) { root.__dsoGeometryTimer = window.setInterval(function () { if (root.style.display !== "none" && !__dsoApplyGeometry(root, window.__djangoShellOverlayGeometry) && root.__dsoHadConsoleFrame && window.__dsoDisposeOverlay) { window.__dsoDisposeOverlay(root); } }, 250); }
@@ -453,12 +459,14 @@ export function overlayRendererSource(modelUri: string): string {
       const root = document.getElementById("django-shell-overlay");
       window.__djangoShellOverlayGeometry = geometry || null;
       if (!root) { return "no-overlay"; }
+      if (root.__dsoOwnerToken && root.__dsoOwnerToken !== window.__djangoShellOverlayOwnerToken) { return "owner-mismatch"; }
       __dsoApplyGeometry(root, geometry);
       return "ok";
     };
     window.__djangoShellOverlaySetOutput = function (text, ok) {
       const root = document.getElementById("django-shell-overlay");
       if (!root) { return "no-overlay"; }
+      if (root.__dsoOwnerToken && root.__dsoOwnerToken !== window.__djangoShellOverlayOwnerToken) { return "owner-mismatch"; }
       const output = root.querySelector(".django-shell-overlay-output");
       output.className = ok ? "django-shell-overlay-output" : "django-shell-overlay-output error";
       output.textContent = String(text || "");

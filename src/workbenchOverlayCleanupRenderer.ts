@@ -68,9 +68,10 @@ export function overlayCleanupRendererSource(): string {
     }
 
     /** Disposes all listeners and models owned by the overlay root. */
-    window.__dsoDisposeOverlay = function (root) {
+    window.__dsoDisposeOverlay = function (root, force) {
       root = root || document.getElementById("django-shell-overlay");
       if (!root) { return "no-overlay"; }
+      if (!force && root.__dsoOwnerToken && root.__dsoOwnerToken !== window.__djangoShellOverlayOwnerToken) { return "owner-mismatch"; }
       const editor = root.__djangoShellEditor;
       const model = __dsoOverlayModel(editor);
       __dsoRememberOverlayText(root, editor);
@@ -94,6 +95,7 @@ export function overlayCleanupRendererSource(): string {
     /** Clears stale shell input before tearing down the overlay for a fresh backend. */
     window.__djangoShellOverlayReset = function (initialText) {
       const root = document.getElementById("django-shell-overlay");
+      if (root && root.__dsoOwnerToken && root.__dsoOwnerToken !== window.__djangoShellOverlayOwnerToken) { return "owner-mismatch"; }
       __dsoResetOverlayText(root, initialText);
       return window.__dsoDisposeOverlay(root);
     };

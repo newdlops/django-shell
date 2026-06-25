@@ -9435,7 +9435,11 @@ var currentOutput = document.getElementById("currentOutput");
 var currentOutputLabel = document.getElementById("currentOutputLabel");
 var debugButtons = Array.from(document.querySelectorAll("[data-action=debug-shell]"));
 var debugControlButtons = Array.from(document.querySelectorAll("[data-debug-control]"));
+var debugInfo = document.getElementById("debugInfo");
+var debugLocation = document.getElementById("debugLocation");
+var debugSourceLine = document.getElementById("debugSourceLine");
 var debugStatus = document.getElementById("debugStatus");
+var debugVariables = document.getElementById("debugVariables");
 var newOverlayTabButtons = Array.from(document.querySelectorAll("[data-action=new-overlay-tab]"));
 var outputList = document.getElementById("outputList");
 var editorAnchor = document.getElementById("editorAnchor");
@@ -9605,6 +9609,9 @@ function handleHostMessage(message) {
   if (message.type === "debugStatus") {
     setDebugStatus(String(message.state || "idle"), String(message.detail || ""));
   }
+  if (message.type === "debugInfo") {
+    setDebugInfo(message.info || {});
+  }
   if (message.type === "breakpoints") {
     setBreakpointStatus(Number(message.count) || 0);
   }
@@ -9715,6 +9722,9 @@ function setDebugStatus(state, detail) {
     debugStatus.dataset.state = state;
     debugStatus.textContent = debugStatusText(debugState, debugDetail);
   }
+  if (state !== "paused") {
+    setDebugInfo({ state });
+  }
   updateDebugControls();
 }
 function setBreakpointStatus(count) {
@@ -9812,6 +9822,66 @@ function debugStatusText(state, detail) {
     return detail ? `debugger ${detail}${suffix}` : `debugger failed${suffix}`;
   }
   return `debugger idle${suffix}`;
+}
+function setDebugInfo(info) {
+  if (!debugInfo || !debugLocation || !debugSourceLine || !debugVariables) {
+    return;
+  }
+  const state = String(info.state || "idle");
+  debugInfo.dataset.state = state;
+  debugVariables.textContent = "";
+  if (state !== "paused" && state !== "error") {
+    debugInfo.hidden = true;
+    return;
+  }
+  debugInfo.hidden = false;
+  const frame = info.frame || {};
+  debugLocation.textContent = state === "error" ? "Debug inspection failed" : debugLocationText(frame);
+  debugSourceLine.textContent = String(info.error || frame.sourceLine || "");
+  appendDebugScope("Line variables", info.focusVariables || []);
+  for (const scope of info.scopes || []) {
+    appendDebugScope(scope.total ? `${scope.name} (${scope.total})` : scope.name, scope.variables || []);
+  }
+  if (!debugVariables.children.length) {
+    appendDebugMessage("No variables reported for this frame");
+  }
+}
+function appendDebugScope(title, variables) {
+  if (!variables.length || !debugVariables) {
+    return;
+  }
+  const label = document.createElement("div");
+  label.className = "debugScopeTitle";
+  label.textContent = title;
+  debugVariables.appendChild(label);
+  for (const variable of variables) {
+    debugVariables.appendChild(debugVariableElement(variable));
+  }
+}
+function debugVariableElement(variable) {
+  const row = document.createElement("div");
+  const name = document.createElement("span");
+  const value = document.createElement("span");
+  row.className = "debugVar";
+  name.className = "debugVarName";
+  value.className = "debugVarValue";
+  name.textContent = String(variable.name || "");
+  value.textContent = String(variable.value || "");
+  row.title = variable.type ? `${name.textContent}: ${value.textContent} (${variable.type})` : `${name.textContent}: ${value.textContent}`;
+  row.append(name, value);
+  return row;
+}
+function appendDebugMessage(text) {
+  const message = document.createElement("div");
+  message.className = "debugScopeTitle";
+  message.textContent = text;
+  debugVariables.appendChild(message);
+}
+function debugLocationText(frame) {
+  const path = String(frame.path || frame.name || "Paused");
+  const file = path.split(/[\\/]/).pop() || path;
+  const suffix = frame.line ? `:${frame.line}${frame.column ? `:${frame.column}` : ""}` : "";
+  return `${file}${suffix}${frame.name ? ` \xB7 ${frame.name}` : ""}`;
 }
 function debugControlLabel(action) {
   return String(action).replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`);
