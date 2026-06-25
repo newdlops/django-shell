@@ -13,14 +13,18 @@ import pprint
 import socketserver
 import sys
 import threading
+import time
 import traceback
 import types
 
 _READY_PREFIX = "__DJANGO_SHELL_BACKEND_READY__"
 _FAILED_PREFIX = "__DJANGO_SHELL_BACKEND_FAILED__"
 _RESPONSE_PREFIX = "__DJANGO_SHELL_BACKEND_RESPONSE__"
+_PROGRESS_PREFIX = "__DJANGO_SHELL_BACKEND_PROGRESS__"
 _STATE = {}
 _EXECUTION_LOCK = threading.Lock()
+_PROGRESS_LOCK = threading.Lock()
+_PROGRESS_INTERVAL_SECONDS = 0.25
 
 
 class _Server(socketserver.ThreadingTCPServer):
@@ -68,6 +72,7 @@ def start(namespace, token):
         if _autoimport_enabled():
             autoimported += _autoimport_django_namespace(namespace)
         _register_transform_lookups()
+        _install_queryset_progress()
         server = _STATE.get("server")
         if server is None:
             server = _Server((_bind_host(), 0), _Handler)
@@ -270,6 +275,8 @@ def _run_request(namespace, token, request, initial_names):
         return _inspect_runtime(namespace, initial_names, request)
     if request.get("kind") == "prelude":
         return _inspect_prelude(namespace, initial_names)
+    if request.get("kind") == "progress":
+        return _progress_snapshot()
     if request.get("kind") == "children":
         return _inspect_children(namespace, request.get("path"))
     if request.get("kind") == "models":
@@ -971,9 +978,12 @@ def _execute_code(namespace, code):
     stdout = io.StringIO()
     stderr = io.StringIO()
     result = None
+    _progress_begin(code, emit=bool(_STATE.get("progress_emit")))
+    namespace["_djs_progress_iter"] = _progress_iter
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         try:
             tree = ast.parse(code, filename="<django-shell-input>", mode="exec")
+            tree = _progress_instrument_tree(tree)
             body, expression = _split_last_expression(tree)
             if body:
                 tree.body = body
@@ -989,8 +999,10 @@ def _execute_code(namespace, code):
                 if value is not None:
                     namespace["_"] = value
                     result = pprint.pformat(value, width=120, compact=False)
+            _progress_finish(True)
             return {"ok": True, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "result": result}
         except Exception:
+            _progress_finish(False)
             return {"ok": False, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "traceback": traceback.format_exc()}
 
 
@@ -999,6 +1011,211 @@ def _split_last_expression(tree):
     if not tree.body or not isinstance(tree.body[-1], ast.Expr):
         return tree.body, None
     return tree.body[:-1], tree.body[-1]
+
+
+class _ProgressTransformer(ast.NodeTransformer):
+    """Wraps Python for-loop iterables so the UI can poll processed item counts."""
+
+    def visit_For(self, node):
+        """Adds a progress wrapper around one synchronous for-loop iterable."""
+        self.generic_visit(node)
+        if _progress_for_iter_handled_elsewhere(node.iter):
+            return node
+        node.iter = ast.Call(
+            func=ast.Name(id="_djs_progress_iter", ctx=ast.Load()),
+            args=[node.iter, ast.Constant(value=_progress_iter_label(node.iter)), ast.Constant(value=getattr(node, "lineno", 0))],
+            keywords=[],
+        )
+        return node
+
+
+def _progress_for_iter_handled_elsewhere(node):
+    """Returns whether an iterable expression already has a more specific progress hook."""
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "iterator"
+
+
+def _progress_instrument_tree(tree):
+    """Returns an AST where for-loops update the shared progress snapshot."""
+    instrumented = _ProgressTransformer().visit(tree)
+    ast.fix_missing_locations(instrumented)
+    return instrumented
+
+
+def _progress_iter_label(node):
+    """Returns a compact display label for one for-loop iterable expression."""
+    try:
+        text = ast.unparse(node)
+    except Exception:
+        text = "iterable"
+    return _truncate(text.replace("\n", " "), 120)
+
+
+def _progress_begin(code, emit=False):
+    """Starts a shared progress snapshot for one backend execution."""
+    now = time.time()
+    with _PROGRESS_LOCK:
+        _STATE["progress_emit"] = bool(emit)
+        _STATE["progress"] = {"active": True, "current": 0, "done": False, "elapsed": 0, "kind": "execute", "label": "Preparing Python cell", "line": 0, "startedAt": now, "total": None, "updatedAt": now}
+    _progress_emit()
+
+
+def _progress_finish(ok):
+    """Marks the current progress snapshot as complete."""
+    now = time.time()
+    with _PROGRESS_LOCK:
+        progress = dict(_STATE.get("progress") or {})
+        started = progress.get("startedAt") or now
+        progress.update({"active": False, "done": True, "elapsed": max(0, now - started), "ok": bool(ok), "updatedAt": now})
+        _STATE["progress"] = progress
+    _progress_emit()
+
+
+def _progress_snapshot():
+    """Returns the latest execution progress without waiting on the execution lock."""
+    now = time.time()
+    with _PROGRESS_LOCK:
+        progress = dict(_STATE.get("progress") or {})
+    if not progress:
+        return {"active": False, "done": True, "ok": True}
+    started = progress.get("startedAt") or now
+    current = progress.get("current")
+    total = progress.get("total")
+    progress["elapsed"] = max(0, now - started)
+    if isinstance(current, (int, float)) and isinstance(total, (int, float)) and total > 0:
+        progress["percent"] = min(100, max(0, current * 100 / total))
+    return progress
+
+
+def _progress_update(**fields):
+    """Merges fields into the shared progress snapshot."""
+    now = time.time()
+    with _PROGRESS_LOCK:
+        progress = dict(_STATE.get("progress") or {})
+        started = progress.get("startedAt") or now
+        progress.update(fields)
+        progress.update({"active": True, "done": False, "elapsed": max(0, now - started), "updatedAt": now})
+        _STATE["progress"] = progress
+    _progress_emit()
+
+
+def _progress_iter(iterable, label="", line=0, total=None):
+    """Yields an iterable while publishing processed item counts for UI polling."""
+    detail = _progress_iter_detail(iterable, label)
+    _progress_update(current=0, detail=detail, label="Counting iterable", line=line, total=None)
+    total = _progress_iter_total(iterable) if total is None else total
+    current = 0
+    started = time.time()
+    last_update = 0
+    _progress_update(current=0, detail=detail, label="Iterating", line=line, total=total)
+    previous_wrapping = _STATE.get("progress_iter_wrapping")
+    _STATE["progress_iter_wrapping"] = True
+    try:
+        for item in iterable:
+            current += 1
+            now = time.time()
+            if current <= 10 or now - last_update >= _PROGRESS_INTERVAL_SECONDS:
+                elapsed = max(0.001, now - started)
+                _progress_update(current=current, detail=detail, label="Iterating", line=line, rate=current / elapsed, total=total)
+                last_update = now
+            yield item
+    finally:
+        _STATE["progress_iter_wrapping"] = previous_wrapping
+    elapsed = max(0.001, time.time() - started)
+    _progress_update(current=current, detail=detail, label="Finished iterable", line=line, rate=current / elapsed, total=total)
+
+
+def _progress_iter_total(iterable):
+    """Returns a cheap total for common iterables, including Django QuerySets."""
+    try:
+        from django.db.models.query import QuerySet
+
+        if isinstance(iterable, QuerySet):
+            return int(iterable.count())
+    except Exception:
+        pass
+    try:
+        return len(iterable)
+    except Exception:
+        return None
+
+
+def _progress_iter_detail(iterable, label):
+    """Returns a compact human-readable label for the current iterable."""
+    try:
+        from django.db.models.query import QuerySet
+
+        if isinstance(iterable, QuerySet):
+            model = getattr(iterable, "model", None)
+            model_label = getattr(getattr(model, "_meta", None), "label", None)
+            return f"{model_label or 'QuerySet'}: {label}"
+    except Exception:
+        pass
+    return label or type(iterable).__name__
+
+
+def _progress_emit():
+    """Writes a progress marker to the real terminal stream when PTY streaming is active."""
+    if not _STATE.get("progress_emit"):
+        return
+    try:
+        stream = getattr(sys, "__stdout__", None) or sys.stdout
+        stream.write(_PROGRESS_PREFIX + json.dumps(_progress_snapshot()) + "\n")
+        stream.flush()
+    except Exception:
+        pass
+
+
+def _install_queryset_progress():
+    """Patches Django QuerySet iteration so ORM work can report processed rows while progress is active."""
+    if _STATE.get("queryset_progress_installed"):
+        return
+    try:
+        from django.db.models.query import QuerySet
+    except Exception:
+        return
+    original_iter = QuerySet.__iter__
+    original_iterator = QuerySet.iterator
+
+    def _iter(self):
+        """Returns the normal QuerySet iterator, wrapped with progress when a cell is active."""
+        return _progress_queryset_iterable(self, original_iter(self))
+
+    def _iterator(self, *args, **kwargs):
+        """Returns QuerySet.iterator(), wrapped with progress when a cell is active."""
+        return _progress_queryset_iterable(self, original_iterator(self, *args, **kwargs))
+
+    QuerySet.__iter__ = _iter
+    QuerySet.iterator = _iterator
+    _STATE["queryset_progress_installed"] = True
+
+
+def _progress_queryset_iterable(queryset, iterable):
+    """Wraps a QuerySet iterable with progress metadata when progress is currently active."""
+    if not _progress_enabled() or _STATE.get("progress_iter_wrapping"):
+        return iterable
+    total = None
+    try:
+        total = int(queryset.count())
+    except Exception:
+        pass
+    return _progress_iter(iterable, _progress_queryset_label(queryset), 0, total)
+
+
+def _progress_enabled():
+    """Returns whether an execution is currently publishing progress."""
+    with _PROGRESS_LOCK:
+        progress = _STATE.get("progress") or {}
+        return bool(progress.get("active"))
+
+
+def _progress_queryset_label(queryset):
+    """Returns a compact label for one Django QuerySet."""
+    try:
+        model = getattr(queryset, "model", None)
+        model_label = getattr(getattr(model, "_meta", None), "label", None)
+        return model_label or "QuerySet"
+    except Exception:
+        return "QuerySet"
 
 
 def _print_marker(prefix, payload):
@@ -1525,7 +1742,14 @@ def _pty_serve(namespace, token, request_json, request_id, initial_names):
         request = json.loads(request_json)
     except Exception:
         request = {}
-    response = _run_request(namespace, token, request, initial_names)
+    _progress_begin(str(request.get("kind") or "request"), emit=True)
+    try:
+        response = _run_request(namespace, token, request, initial_names)
+        _progress_finish(bool(isinstance(response, dict) and response.get("ok", True)))
+    except Exception:
+        response = {"ok": False, "stdout": "", "stderr": "", "traceback": traceback.format_exc()}
+        _progress_finish(False)
+    _STATE["progress_emit"] = False
     if isinstance(response, dict):
         limit = 750000
         for key in ("stdout", "stderr", "result", "traceback", "error"):

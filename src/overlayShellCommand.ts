@@ -104,13 +104,121 @@ function documentInputStartLine(document: vscode.TextDocument, fallback: number)
 /** Returns the logical Python statement or block around the cursor. */
 function executionRange(document: vscode.TextDocument, lineNumber: number, inputStartLine: number): { end: number; start: number } {
   const floor = Math.max(0, inputStartLine);
-  const cursor = nonBlankCursorLine(document, Math.max(floor, lineNumber), floor);
-  const start = statementStart(document, cursor, floor);
-  let end = statementEnd(document, start, cursor);
+  let cursor = Math.min(document.lineCount - 1, Math.max(floor, lineNumber));
+  while (cursor > floor && !document.lineAt(cursor).text.trim()) {
+    cursor -= 1;
+  }
+  if (!document.lineAt(cursor).text.trim()) {
+    return { end: cursor, start: cursor };
+  }
+  let start = cellStartLine(document, cursor, floor);
+  let end = cellEndLine(document, cursor, floor);
+  while (start <= end && !document.lineAt(start).text.trim()) {
+    start += 1;
+  }
   while (end > start && !document.lineAt(end).text.trim()) {
     end -= 1;
   }
   return { end, start };
+}
+
+/** Returns the first line of the current shell input unit, preserving single blank lines inside pasted source. */
+function cellStartLine(document: vscode.TextDocument, lineNumber: number, floor: number): number {
+  let blankRun = 0;
+  for (let index = lineNumber - 1; index >= floor; index -= 1) {
+    if (!document.lineAt(index).text.trim()) {
+      blankRun += 1;
+      if (blankRun >= 2) {
+        if (isImportBlockGap(document, floor, index)) {
+          blankRun = 0;
+          continue;
+        }
+        return index + 2;
+      }
+    } else {
+      blankRun = 0;
+    }
+  }
+  return floor;
+}
+
+/** Returns the last line of the current shell input unit, preserving single blank lines inside pasted source. */
+function cellEndLine(document: vscode.TextDocument, lineNumber: number, floor: number): number {
+  let blankRun = 0;
+  for (let index = lineNumber + 1; index < document.lineCount; index += 1) {
+    if (!document.lineAt(index).text.trim()) {
+      blankRun += 1;
+      if (blankRun >= 2) {
+        if (isImportBlockGap(document, floor, index)) {
+          blankRun = 0;
+          continue;
+        }
+        return index - 2;
+      }
+    } else {
+      blankRun = 0;
+    }
+  }
+  return document.lineCount - 1;
+}
+
+/** Returns true when a two-blank gap follows the leading import block. */
+function isImportBlockGap(document: vscode.TextDocument, floor: number, blankLine: number): boolean {
+  const previous = previousNonBlankLine(document, blankLine - 1, floor);
+  const blockFloor = previousCellFloor(document, floor, previous);
+  return previous >= blockFloor && isImportBlockPrefix(document, blockFloor, previous);
+}
+
+/** Returns the nearest non-empty line at or above one line. */
+function previousNonBlankLine(document: vscode.TextDocument, lineNumber: number, floor: number): number {
+  for (let index = lineNumber; index >= floor; index -= 1) {
+    if (document.lineAt(index).text.trim()) {
+      return index;
+    }
+  }
+  return floor - 1;
+}
+
+/** Returns the line after the nearest prior two-blank cell separator. */
+function previousCellFloor(document: vscode.TextDocument, floor: number, lineNumber: number): number {
+  let blankRun = 0;
+  for (let index = lineNumber - 1; index >= floor; index -= 1) {
+    if (!document.lineAt(index).text.trim()) {
+      blankRun += 1;
+      if (blankRun >= 2) {
+        return index + 2;
+      }
+    } else {
+      blankRun = 0;
+    }
+  }
+  return floor;
+}
+
+/** Returns true when all leading non-comment code through one line is Python imports. */
+function isImportBlockPrefix(document: vscode.TextDocument, floor: number, endLine: number): boolean {
+  let sawImport = false;
+  let importContinuation = false;
+  let depth = 0;
+  for (let index = floor; index <= endLine; index += 1) {
+    const text = document.lineAt(index).text;
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    if (!importContinuation && !isImportStart(trimmed)) {
+      return false;
+    }
+    sawImport = true;
+    depth = Math.max(0, depth + bracketDelta(text, depth));
+    importContinuation = depth > 0 || /\\\s*$/.test(text.trimEnd());
+  }
+  return sawImport && depth === 0;
+}
+
+/** Returns true when a trimmed Python line starts an import statement. */
+function isImportStart(line: string): boolean {
+  return /^(?:import\s+\S|from\s+\S+\s+import\b)/.test(line);
 }
 
 /** Returns the closest non-empty cursor line without crossing the prelude boundary. */

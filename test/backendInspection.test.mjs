@@ -273,6 +273,39 @@ test("emits an error marker when forcing a cell result's repr raises (lazy Query
   assert.equal(payload.tbHasError, true, "the marker traceback must carry the underlying error");
 });
 
+test("reports progress for running Python for-loops without waiting for the execution lock", { skip: !PYTHON }, () => {
+  const script = [
+    "import importlib.util, json, threading, time",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "namespace={}",
+    "result={}",
+    "code='import time\\nseen=[]\\nfor item in range(5):\\n    time.sleep(0.05)\\n    seen.append(item)\\nlen(seen)'",
+    "thread=threading.Thread(target=lambda: result.setdefault('value', mod._execute_code(namespace, code)))",
+    "thread.start()",
+    "time.sleep(0.12)",
+    "progress=mod._run_request(namespace, 'tok', {'token':'tok','kind':'progress'}, set())",
+    "thread.join(2)",
+    "final=mod._run_request(namespace, 'tok', {'token':'tok','kind':'progress'}, set())",
+    "print(json.dumps({'doneAlive': thread.is_alive(), 'final': final, 'progress': progress, 'result': result.get('value')}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.doneAlive, false);
+  assert.equal(payload.result.ok, true);
+  assert.equal(payload.result.result, "5");
+  assert.equal(payload.progress.active, true);
+  assert.equal(payload.progress.total, 5);
+  assert.ok(payload.progress.current >= 1, `expected progress current >= 1, got ${payload.progress.current}`);
+  assert.equal(payload.progress.line, 3);
+  assert.equal(payload.progress.detail, "range(5)");
+  assert.equal(payload.final.done, true);
+  assert.equal(payload.final.ok, true);
+});
+
 function pythonExecutable() {
   const candidates = [process.env.DJANGO_SHELL_E2E_PYTHON, process.env.DJLS_E2E_BASE_PYTHON, "/Users/lky/.asdf/installs/python/3.11.15/bin/python3.11", "/usr/bin/python3", "python3"].filter(Boolean);
   return candidates.find((candidate) => childProcess.spawnSync(candidate, ["--version"], { encoding: "utf8" }).status === 0);

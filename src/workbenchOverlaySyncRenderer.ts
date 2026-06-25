@@ -214,16 +214,108 @@ export function overlaySyncRendererSource(): string {
       const inputStartLine = (root && root.__dsoInputStartLine) || 1;
       const position = editor.getPosition && editor.getPosition();
       const cursorLine = position ? position.lineNumber : model.getLineCount();
-      let endLine = cursorLine;
-      if (!model.getLineContent(endLine).trim()) { endLine--; }
-      if (endLine < inputStartLine || !model.getLineContent(endLine).trim()) { return { code: "", range: null }; }
-      let startLine = endLine;
-      while (startLine > inputStartLine && model.getLineContent(startLine - 1).trim()) { startLine--; }
-      while (endLine < model.getLineCount() && model.getLineContent(endLine + 1).trim()) { endLine++; }
+      let probeLine = Math.min(Math.max(inputStartLine, cursorLine), model.getLineCount());
+      while (probeLine > inputStartLine && !model.getLineContent(probeLine).trim()) { probeLine--; }
+      if (probeLine < inputStartLine || !model.getLineContent(probeLine).trim()) { return { code: "", range: null }; }
+      let startLine = __dsoCellStartLine(model, probeLine, inputStartLine);
+      let endLine = __dsoCellEndLine(model, probeLine, inputStartLine);
+      while (startLine <= endLine && !model.getLineContent(startLine).trim()) { startLine++; }
+      while (endLine > startLine && !model.getLineContent(endLine).trim()) { endLine--; }
       return {
         code: model.getValueInRange({ startLineNumber: startLine, startColumn: 1, endLineNumber: endLine, endColumn: model.getLineMaxColumn(endLine) }).trimEnd(),
         range: { end: endLine, start: startLine }
       };
+    }
+
+    /** Returns the first line of the current shell input unit, preserving single blank lines inside pasted source. */
+    function __dsoCellStartLine(model, lineNumber, floor) {
+      let blankRun = 0;
+      for (let index = lineNumber - 1; index >= floor; index--) {
+        if (!model.getLineContent(index).trim()) {
+          blankRun++;
+          if (blankRun >= 2) {
+            if (__dsoCellImportBlockGap(model, floor, index)) {
+              blankRun = 0;
+              continue;
+            }
+            return index + 2;
+          }
+        } else {
+          blankRun = 0;
+        }
+      }
+      return floor;
+    }
+
+    /** Returns the last line of the current shell input unit, preserving single blank lines inside pasted source. */
+    function __dsoCellEndLine(model, lineNumber, floor) {
+      let blankRun = 0;
+      for (let index = lineNumber + 1; index <= model.getLineCount(); index++) {
+        if (!model.getLineContent(index).trim()) {
+          blankRun++;
+          if (blankRun >= 2) {
+            if (__dsoCellImportBlockGap(model, floor, index)) {
+              blankRun = 0;
+              continue;
+            }
+            return index - 2;
+          }
+        } else {
+          blankRun = 0;
+        }
+      }
+      return model.getLineCount();
+    }
+
+    /** Returns true when a two-blank gap follows the leading import block. */
+    function __dsoCellImportBlockGap(model, floor, blankLine) {
+      const previous = __dsoCellPreviousNonBlankLine(model, blankLine - 1, floor);
+      const blockFloor = __dsoCellPreviousCellFloor(model, floor, previous);
+      return previous >= blockFloor && __dsoCellImportBlockPrefix(model, blockFloor, previous);
+    }
+
+    /** Returns the nearest non-empty line at or above one line. */
+    function __dsoCellPreviousNonBlankLine(model, lineNumber, floor) {
+      for (let index = lineNumber; index >= floor; index--) {
+        if (model.getLineContent(index).trim()) { return index; }
+      }
+      return floor - 1;
+    }
+
+    /** Returns the line after the nearest prior two-blank cell separator. */
+    function __dsoCellPreviousCellFloor(model, floor, lineNumber) {
+      let blankRun = 0;
+      for (let index = lineNumber - 1; index >= floor; index--) {
+        if (!model.getLineContent(index).trim()) {
+          blankRun++;
+          if (blankRun >= 2) { return index + 2; }
+        } else {
+          blankRun = 0;
+        }
+      }
+      return floor;
+    }
+
+    /** Returns true when all leading non-comment code through one line is Python imports. */
+    function __dsoCellImportBlockPrefix(model, floor, endLine) {
+      let sawImport = false;
+      let importContinuation = false;
+      let depth = 0;
+      for (let index = floor; index <= endLine; index++) {
+        const text = model.getLineContent(index);
+        const trimmed = text.trim();
+        if (!trimmed || trimmed.indexOf("#") === 0) { continue; }
+        if (!importContinuation && !__dsoCellImportStart(trimmed)) { return false; }
+        sawImport = true;
+        depth = Math.max(0, depth + __dsoBracketDelta(text, depth));
+        importContinuation = depth > 0 || /\\\\\\s*$/.test(text.trimEnd());
+      }
+      return sawImport && depth === 0;
+    }
+
+    /** Returns true when a trimmed Python line starts an import statement. */
+    function __dsoCellImportStart(line) {
+      return /^(?:import\\s+\\S|from\\s+\\S+\\s+import\\b)/.test(line);
     }
 
     /** Preserves the executed cell, then drops the cursor on a fresh prompt below it. */
@@ -341,6 +433,72 @@ export function overlaySyncRendererSource(): string {
       return __dsoHasVisiblePopup(".suggest-widget,.parameter-hints-widget");
     }
 
+    /** Returns the payload that Enter would run from the current editor state. */
+    function __dsoPreviewPayload(root, editor) {
+      return root && root.__dsoMultilineMode ? __dsoMultilinePayload(root, editor) : __dsoEnterPayload(root, editor);
+    }
+
+    /** Returns Monaco decorations for the currently executable Python input range. */
+    function __dsoExecutionRangeDecorations(model, payload) {
+      if (!model || !payload || !payload.range || !String(payload.code || "").trim()) { return []; }
+      const start = Math.max(1, payload.range.start || 1);
+      const end = Math.max(start, payload.range.end || start);
+      const endColumn = model.getLineMaxColumn ? model.getLineMaxColumn(end) : 1;
+      const decorations = [{
+        options: { className: "dso-exec-range", isWholeLine: true, linesDecorationsClassName: "dso-exec-range-rail" },
+        range: { endColumn: endColumn, endLineNumber: end, startColumn: 1, startLineNumber: start }
+      }, {
+        options: { className: "dso-exec-range-start", isWholeLine: true },
+        range: { endColumn: model.getLineMaxColumn ? model.getLineMaxColumn(start) : 1, endLineNumber: start, startColumn: 1, startLineNumber: start }
+      }];
+      if (end > start) {
+        decorations.push({
+          options: { className: "dso-exec-range-end", isWholeLine: true },
+          range: { endColumn: endColumn, endLineNumber: end, startColumn: 1, startLineNumber: end }
+        });
+      }
+      return decorations;
+    }
+
+    /** Refreshes the visible preview of the range Enter will execute. */
+    function __dsoUpdateExecutionRangePreview(root, editor) {
+      const model = editor && editor.getModel && editor.getModel();
+      if (!root || !editor || !model || !editor.deltaDecorations) { return; }
+      const payload = __dsoPreviewPayload(root, editor);
+      const decorations = __dsoExecutionRangeDecorations(model, payload);
+      const preview = payload && payload.range ? { end: payload.range.end, start: payload.range.start } : null;
+      const previewKey = preview ? preview.start + ":" + preview.end : "";
+      try {
+        root.__dsoExecutionRangeDecorationIds = editor.deltaDecorations(root.__dsoExecutionRangeDecorationIds || [], decorations);
+        root.__dsoExecutionRangePreview = preview;
+        if (root.__dsoExecutionRangePreviewKey !== previewKey) {
+          root.__dsoExecutionRangePreviewKey = previewKey;
+          if (editor.updateOptions) {
+            editor.updateOptions({ lineNumbers: function (line) { return __dsoPromptForLine(model, root.__dsoInputStartLine || __dsoFindInputStartLine(model), line, root); } });
+          }
+        }
+      } catch (eDecorations) {
+        root.__dsoExecutionRangeDecorationIds = [];
+      }
+    }
+
+    /** Installs live execution-range preview decorations on the overlay editor. */
+    function __dsoInstallExecutionRangePreview(root, editor) {
+      const model = editor && editor.getModel && editor.getModel();
+      if (!root || !editor || !model || !editor.deltaDecorations) { return function () {}; }
+      const update = function () { __dsoUpdateExecutionRangePreview(root, editor); };
+      const cursorDisposable = editor.onDidChangeCursorPosition ? editor.onDidChangeCursorPosition(update) : null;
+      const modelDisposable = model.onDidChangeContent ? model.onDidChangeContent(update) : null;
+      update();
+      return function () {
+        try { cursorDisposable && cursorDisposable.dispose && cursorDisposable.dispose(); } catch (eCursorDispose) {}
+        try { modelDisposable && modelDisposable.dispose && modelDisposable.dispose(); } catch (eModelDispose) {}
+        try { root.__dsoExecutionRangeDecorationIds = editor.deltaDecorations(root.__dsoExecutionRangeDecorationIds || [], []); } catch (eClearDecorations) {}
+        root.__dsoExecutionRangePreview = null;
+        root.__dsoExecutionRangePreviewKey = "";
+      };
+    }
+
     /** Returns a compact DOM label for key-event diagnostics. */
     function __dsoNodeLabel(node) {
       if (!node) { return ""; }
@@ -454,9 +612,10 @@ export function overlaySyncRendererSource(): string {
         if (raw.ctrlKey || raw.altKey || raw.isComposing || suggest) { return; }
         execute(event, source, true);
       };
-      root.__dsoCurrentInputPayload = function () { return __dsoEnterPayload(root, editor); };
+      root.__dsoCurrentInputPayload = function () { return __dsoPreviewPayload(root, editor); };
       root.__dsoRunCurrentInput = function () { return execute(null, "host-command-cmd", false) ? "requested" : "empty"; };
       window.__dsoRunCurrentOverlayInput = function () { const activeRoot = document.getElementById("django-shell-overlay"); return activeRoot && activeRoot.__dsoRunCurrentInput ? activeRoot.__dsoRunCurrentInput() : "missing-root"; };
+      const previewCleanup = __dsoInstallExecutionRangePreview(root, editor);
       try {
         if (typeof editor.addCommand === "function") {
           const monacoApi = (globalThis.monaco && globalThis.monaco.KeyMod && globalThis.monaco.KeyCode) ? globalThis.monaco : ((window.monaco && window.monaco.KeyMod && window.monaco.KeyCode) ? window.monaco : null);
@@ -490,6 +649,7 @@ export function overlaySyncRendererSource(): string {
         window.removeEventListener("keydown", windowListener, true);
         document.removeEventListener("keydown", docListener, true);
         node.removeEventListener("keydown", nodeListener, true);
+        try { previewCleanup && previewCleanup(); } catch (ePreviewCleanup) {}
       };
     };
     window.__djangoShellOverlaySetPrelude = function (text) {

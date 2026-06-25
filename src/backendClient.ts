@@ -14,7 +14,6 @@ import {
 import { aggregatesNeedPython, buildAggregateOrm, buildCommitOrm, buildComputedOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, buildRowsOrm } from "./modelOrm";
 
 const TCP_CONNECT_TIMEOUT_MS = 1500;
-const TCP_RESPONSE_TIMEOUT_MS = 30000;
 // Max length of a reconstructed ORM cell we'll TYPE into the shell. A literal cell is written as one line, and a tty
 // input queue (MAX_INPUT, ~1KB on macOS) silently drops bytes past it → the cell arrives truncated, IPython sits at a
 // continuation prompt, and the serialized PTY queue hangs. Reads whose cell exceeds this fall back to the socket/`_djs_rpc`
@@ -32,6 +31,20 @@ export interface BackendExecutionResult {
   stderr: string;
   stdout: string;
   traceback?: string;
+}
+
+export interface BackendProgressSnapshot {
+  active: boolean;
+  current?: number;
+  detail?: string;
+  done?: boolean;
+  elapsed?: number;
+  label?: string;
+  line?: number;
+  ok?: boolean;
+  percent?: number;
+  rate?: number;
+  total?: number | null;
 }
 
 export interface BackendCompletenessResult {
@@ -192,6 +205,16 @@ export class BackendClient {
   /** Executes Python code in the backend namespace and returns captured output. */
   execute(code: string): Promise<BackendExecutionResult> {
     return this.request({ code, kind: "execute" }, parseBackendResponse);
+  }
+
+  /** Returns the latest running Python progress snapshot when the socket can be polled. */
+  progress(): Promise<BackendProgressSnapshot> {
+    return this.request({ kind: "progress" }, parseProgressResponse, false);
+  }
+
+  /** Returns whether progress polling can run without queuing behind the interactive PTY cell. */
+  canPollProgress(): boolean {
+    return this.mode !== "pty" && !this.tcpUnavailable;
   }
 
   /** Checks whether Python source is complete without executing it. */
@@ -359,7 +382,6 @@ export class BackendClient {
       const host = connectHost(this.endpoint.host);
       const socket = net.createConnection({ host, port: this.endpoint.port });
       let buffer = "";
-      let responseTimer: NodeJS.Timeout | undefined;
       let settled = false;
       const connectTimer = setTimeout(() => {
         fail(new Error(`Timed out connecting to Django shell backend after ${TCP_CONNECT_TIMEOUT_MS}ms.`));
@@ -368,9 +390,6 @@ export class BackendClient {
       socket.setEncoding("utf8");
       socket.on("connect", () => {
         clearTimeout(connectTimer);
-        responseTimer = setTimeout(() => {
-          fail(new Error(`Timed out waiting for Django shell backend response after ${TCP_RESPONSE_TIMEOUT_MS}ms.`));
-        }, TCP_RESPONSE_TIMEOUT_MS);
         socket.write(`${JSON.stringify({ ...payload, token: this.endpoint.token })}\n`);
       });
       socket.on("data", (chunk) => {
@@ -395,9 +414,6 @@ export class BackendClient {
         }
         settled = true;
         clearTimeout(connectTimer);
-        if (responseTimer) {
-          clearTimeout(responseTimer);
-        }
         socket.destroy();
         reject(error);
       }
@@ -409,9 +425,6 @@ export class BackendClient {
         }
         settled = true;
         clearTimeout(connectTimer);
-        if (responseTimer) {
-          clearTimeout(responseTimer);
-        }
         socket.end();
         resolve(value);
       }
@@ -516,6 +529,24 @@ function parseBackendResponse(buffer: string): BackendExecutionResult {
   const line = buffer.split(/\r?\n/, 1)[0] ?? "";
   const parsed = JSON.parse(line) as Partial<BackendExecutionResult>;
   return { ok: Boolean(parsed.ok), result: parsed.result, stderr: parsed.stderr ?? "", stdout: parsed.stdout ?? "", traceback: parsed.traceback };
+}
+
+/** Parses the latest backend execution progress snapshot. */
+function parseProgressResponse(buffer: string): BackendProgressSnapshot {
+  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendProgressSnapshot>;
+  return {
+    active: Boolean(parsed.active),
+    current: typeof parsed.current === "number" ? parsed.current : undefined,
+    detail: typeof parsed.detail === "string" ? parsed.detail : undefined,
+    done: Boolean(parsed.done),
+    elapsed: typeof parsed.elapsed === "number" ? parsed.elapsed : undefined,
+    label: typeof parsed.label === "string" ? parsed.label : undefined,
+    line: typeof parsed.line === "number" ? parsed.line : undefined,
+    ok: typeof parsed.ok === "boolean" ? parsed.ok : undefined,
+    percent: typeof parsed.percent === "number" ? parsed.percent : undefined,
+    rate: typeof parsed.rate === "number" ? parsed.rate : undefined,
+    total: typeof parsed.total === "number" || parsed.total === null ? parsed.total : undefined
+  };
 }
 
 /** Parses a backend completeness check response. */

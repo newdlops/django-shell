@@ -9445,6 +9445,7 @@ var fitAddon;
 var geometryFrame = 0;
 var lastGeometryKey = "";
 var pendingExecution = 0;
+var runningOutputs = /* @__PURE__ */ new Map();
 var snapshotWritten = false;
 var e2eSawShellPrompt = false;
 var terminal;
@@ -9575,9 +9576,13 @@ function handleHostMessage(message) {
   if (message.type === "pythonStarted" && Number.isFinite(message.execution)) {
     pendingExecution = message.execution;
     setInputPrompt(`In [${pendingExecution}]:`);
+    showRunningOutput(pendingExecution, String(message.code || ""));
   }
   if (message.type === "pythonResult") {
-    showOutput(message.execution || pendingExecution, cleanPythonResult(message.text), Boolean(message.ok));
+    showOutput(message.execution || pendingExecution, cleanPythonResult(message.text), Boolean(message.ok), String(message.code || ""));
+  }
+  if (message.type === "pythonProgress" && Number.isFinite(message.execution)) {
+    showProgress(message.execution, message.progress || {});
   }
   if (message.type === "resetPythonCell") {
     resetPythonCell();
@@ -9672,22 +9677,152 @@ function editorGeometry() {
     width: rect.width
   };
 }
-function showOutput(count, result, ok) {
+function showRunningOutput(count, code) {
   currentOutput.classList.remove("outputHidden");
   currentOutputLabel.textContent = "Outputs";
-  const item = document.createElement("section");
-  item.className = "outputItem";
-  const label = document.createElement("div");
-  label.className = "outputItemLabel";
-  label.textContent = `Out[${count || ""}]:`;
-  const body = document.createElement("pre");
+  const item = outputItemFor(count) || createOutputItem(count, code);
+  item.classList.add("running");
+  const status2 = item.querySelector("[data-role=status]");
+  const body = item.querySelector("[data-role=result]");
+  const startedAt = Date.now();
+  item.dataset.startedAt = String(startedAt);
+  if (status2) {
+    status2.textContent = elapsedText(startedAt);
+  }
+  if (body) {
+    body.className = "result pending";
+    body.textContent = "Running...";
+  }
+  stopOutputTimer(count);
+  runningOutputs.set(count, window.setInterval(() => updateRunningOutput(count), 1e3));
+  currentOutput.scrollTop = currentOutput.scrollHeight;
+}
+function showOutput(count, result, ok, code) {
+  currentOutput.classList.remove("outputHidden");
+  currentOutputLabel.textContent = "Outputs";
+  stopOutputTimer(count);
+  const item = outputItemFor(count) || createOutputItem(count, code);
+  item.classList.remove("running");
+  const header = item.querySelector("[data-role=header-label]");
+  if (header) {
+    header.textContent = `In [${count || ""}] -> Out[${count || ""}]`;
+  }
+  const status2 = item.querySelector("[data-role=status]");
+  if (status2) {
+    status2.textContent = item.dataset.startedAt ? `${durationText(Number(item.dataset.startedAt))} total` : "complete";
+  }
+  const label = item.querySelector("[data-role=out-label]");
+  if (label) {
+    label.textContent = `Out[${count || ""}]:`;
+  }
+  const body = item.querySelector("[data-role=result]");
+  if (!body) {
+    return;
+  }
   body.className = ok ? "result" : "result error";
   body.textContent = result;
+  currentOutput.scrollTop = currentOutput.scrollHeight;
+  vscode.postMessage({ ...e2eCellState("output"), execution: count || 0, ok: Boolean(ok), text: result, type: "e2eOutputRendered" });
+}
+function showProgress(count, progress) {
+  const item = outputItemFor(count);
+  if (!item || !item.classList.contains("running")) {
+    return;
+  }
+  const status2 = item.querySelector("[data-role=status]");
+  const body = item.querySelector("[data-role=result]");
+  if (status2 && item.dataset.startedAt) {
+    status2.textContent = elapsedText(Number(item.dataset.startedAt));
+  }
+  if (body) {
+    body.className = "result pending";
+    body.textContent = progressText(progress);
+  }
+}
+function createOutputItem(count, code) {
+  const item = document.createElement("section");
+  item.className = "outputItem";
+  item.dataset.execution = String(count || "");
+  const header = document.createElement("div");
+  header.className = "outputHeader";
+  const headerLabel = document.createElement("span");
+  headerLabel.dataset.role = "header-label";
+  headerLabel.textContent = `In [${count || ""}] -> running`;
+  const status2 = document.createElement("span");
+  status2.className = "outputStatus";
+  status2.dataset.role = "status";
+  const spacer = document.createElement("span");
+  spacer.className = "grow";
+  header.appendChild(headerLabel);
+  header.appendChild(spacer);
+  header.appendChild(status2);
+  const source = document.createElement("pre");
+  source.className = "inputSource";
+  source.dataset.role = "source";
+  source.textContent = code;
+  const label = document.createElement("div");
+  label.className = "outputItemLabel";
+  label.dataset.role = "out-label";
+  label.textContent = `Out[${count || ""}]:`;
+  const body = document.createElement("pre");
+  body.className = "result pending";
+  body.dataset.role = "result";
+  item.appendChild(header);
+  item.appendChild(source);
   item.appendChild(label);
   item.appendChild(body);
   outputList.appendChild(item);
-  currentOutput.scrollTop = currentOutput.scrollHeight;
-  vscode.postMessage({ ...e2eCellState("output"), execution: count || 0, ok: Boolean(ok), text: result, type: "e2eOutputRendered" });
+  return item;
+}
+function outputItemFor(count) {
+  return outputList.querySelector(`.outputItem[data-execution="${String(count || "")}"]`);
+}
+function updateRunningOutput(count) {
+  const item = outputItemFor(count);
+  const status2 = item && item.querySelector("[data-role=status]");
+  if (!item || !status2 || !item.dataset.startedAt) {
+    stopOutputTimer(count);
+    return;
+  }
+  status2.textContent = elapsedText(Number(item.dataset.startedAt));
+}
+function stopOutputTimer(count) {
+  const timer = runningOutputs.get(count);
+  if (!timer) {
+    return;
+  }
+  window.clearInterval(timer);
+  runningOutputs.delete(count);
+}
+function elapsedText(startedAt) {
+  return `running ${durationText(startedAt)}`;
+}
+function durationText(startedAt) {
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1e3));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+function progressText(progress) {
+  const label = progress.label || "Running";
+  const detail = progress.detail ? `
+${progress.detail}` : "";
+  const current = Number.isFinite(progress.current) ? Math.max(0, Math.floor(progress.current)) : void 0;
+  const total = Number.isFinite(progress.total) ? Math.max(0, Math.floor(progress.total)) : void 0;
+  const line = Number.isFinite(progress.line) && progress.line > 0 ? `line ${Math.floor(progress.line)} \xB7 ` : "";
+  const rate = Number.isFinite(progress.rate) && progress.rate > 0 ? ` \xB7 ${formatRate(progress.rate)}/s` : "";
+  if (current !== void 0 && total !== void 0 && total > 0) {
+    const percent = Number.isFinite(progress.percent) ? progress.percent : current * 100 / total;
+    return `${line}${label}: ${current} / ${total} items (${Math.min(100, percent).toFixed(1)}%)${rate}${detail}`;
+  }
+  if (current !== void 0) {
+    return `${line}${label}: ${current} items${rate}${detail}`;
+  }
+  return `${line}${label}${detail}`;
+}
+function formatRate(value) {
+  return value >= 10 ? String(Math.round(value)) : value.toFixed(1);
 }
 function e2eCellState(reason) {
   const promptText = String(inputPromptText?.textContent || "");
@@ -9697,6 +9832,9 @@ function e2eCellState(reason) {
   return { cellText, hasShellPrompt, outputClientHeight: currentOutput?.clientHeight || 0, outputCount: outputList?.children.length || 0, outputScrollHeight: currentOutput?.scrollHeight || 0, outputScrollTop: currentOutput?.scrollTop || 0, outputVisible: !currentOutput?.classList.contains("outputHidden"), promptText, reason, sawShellPrompt: e2eSawShellPrompt };
 }
 function clearOutput() {
+  for (const count of runningOutputs.keys()) {
+    stopOutputTimer(count);
+  }
   currentOutput.classList.add("outputHidden");
   outputList.textContent = "";
 }

@@ -2,7 +2,7 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
-import type { BackendClient, BackendExecutionResult, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransportMode } from "./backendClient";
+import type { BackendClient, BackendExecutionResult, BackendProgressSnapshot, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransportMode } from "./backendClient";
 import { webviewHtml } from "./customConsoleHtml";
 import { DiagnosticLogger } from "./diagnostics";
 import { closeWorkspaceGeneratedOverlayTabs, scheduleWorkspaceGeneratedOverlayTabCleanup } from "./generatedOverlayTabs";
@@ -35,11 +35,13 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private runtimeReady = false;
   private runtimeGeneration = 0;
   private runtimeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly pythonProgressTimers = new Map<number, ReturnType<typeof setInterval>>();
+  private activePythonExecution: number | undefined;
   private session: NotebookPtySession | undefined;
   private sessionDisposables: vscode.Disposable[] = [];
   private executionCount = 1;
   private lastRenderedOutput: Record<string, unknown> | undefined;
-  private lastPythonResult: { execution: number; ok: boolean; text: string } | undefined;
+  private lastPythonResult: { code: string; execution: number; ok: boolean; text: string } | undefined;
   private panelVisible = false;
   private selectedTransport: BackendTransportMode | undefined;
   private preludeRetryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -280,6 +282,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     });
     this.sessionDisposables.push(
       this.session.onDidData((data) => this.post({ data, type: "terminalData" })),
+      this.session.onDidProgress((progress) => this.handleSessionProgress(progress)),
       this.session.onDidChange((snapshot) => this.handleSessionSnapshot(snapshot))
     );
     this.session.start();
@@ -370,10 +373,10 @@ export class CustomDjangoConsole implements vscode.Disposable {
     const backend = this.session?.backend;
     if (!backend) {
       const execution = this.executionCount++;
-      this.post({ execution, type: "pythonStarted" });
       const text = "Backend is not ready. Enter Django shell in the setup terminal first.";
-      this.lastPythonResult = { execution, ok: false, text };
-      this.post({ execution, ok: false, text, type: "pythonResult" });
+      this.lastPythonResult = { code, execution, ok: false, text };
+      this.post({ code, execution, type: "pythonStarted" });
+      this.post({ code, execution, ok: false, text, type: "pythonResult" });
       void this.overlay?.postOutput(text, false);
       return false;
     }
@@ -382,17 +385,81 @@ export class CustomDjangoConsole implements vscode.Disposable {
       return false;
     }
     const execution = this.executionCount++;
-    this.post({ execution, type: "pythonStarted" });
-    const result = await backend.execute(code);
+    this.activePythonExecution = execution;
+    this.post({ code, execution, type: "pythonStarted" });
+    this.startPythonProgress(execution, backend);
+    const result = await this.executeBackendPython(backend, code);
+    this.stopPythonProgress(execution);
+    if (this.activePythonExecution === execution) {
+      this.activePythonExecution = undefined;
+    }
     this.clearInspectionCache();
     const text = executionText(result);
-    this.lastPythonResult = { execution, ok: result.ok, text };
-    this.post({ execution, ok: result.ok, text, type: "pythonResult" });
+    this.lastPythonResult = { code, execution, ok: result.ok, text };
+    this.post({ code, execution, ok: result.ok, text, type: "pythonResult" });
     void this.overlay?.postOutput(text, result.ok);
     this.postTransport();
     this.scheduleRuntimeRefresh();
     void closeWorkspaceGeneratedOverlayTabs().catch(() => undefined);
     return true;
+  }
+
+  /** Executes backend Python and converts transport failures into a rendered shell error. */
+  private async executeBackendPython(backend: BackendClient, code: string): Promise<BackendExecutionResult> {
+    try {
+      return await backend.execute(code);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger?.log("python.execute.error", { chars: code.length, error: message, lines: lineCount(code) });
+      return { ok: false, stderr: message, stdout: "" };
+    }
+  }
+
+  /** Starts polling backend loop progress for one running Python execution. */
+  private startPythonProgress(execution: number, backend: BackendClient): void {
+    this.stopPythonProgress(execution);
+    if (!backend.canPollProgress()) {
+      return;
+    }
+    const poll = () => {
+      void backend.progress().then((progress) => this.postPythonProgress(execution, progress), () => undefined);
+    };
+    const timer = setInterval(poll, 700);
+    this.pythonProgressTimers.set(execution, timer);
+    setTimeout(poll, 300);
+  }
+
+  /** Posts one progress snapshot when it still belongs to a running output item. */
+  private postPythonProgress(execution: number, progress: BackendProgressSnapshot): void {
+    if (!this.pythonProgressTimers.has(execution)) {
+      return;
+    }
+    this.post({ execution, progress, type: "pythonProgress" });
+  }
+
+  /** Routes streamed PTY progress to the currently running Python output item. */
+  private handleSessionProgress(progress: BackendProgressSnapshot): void {
+    if (this.activePythonExecution === undefined) {
+      return;
+    }
+    this.post({ execution: this.activePythonExecution, progress, type: "pythonProgress" });
+  }
+
+  /** Stops progress polling for one Python execution. */
+  private stopPythonProgress(execution: number): void {
+    const timer = this.pythonProgressTimers.get(execution);
+    if (!timer) {
+      return;
+    }
+    clearInterval(timer);
+    this.pythonProgressTimers.delete(execution);
+  }
+
+  /** Stops every in-flight progress poller. */
+  private stopAllPythonProgress(): void {
+    for (const execution of [...this.pythonProgressTimers.keys()]) {
+      this.stopPythonProgress(execution);
+    }
   }
 
   /** Shows the workbench overlay editor without failing the webview flow. */
@@ -511,6 +578,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.executionCount = 1; this.lastPythonResult = undefined;
     this.clearInspectionCache();
     this.clearRuntimeRefreshTimer();
+    this.stopAllPythonProgress();
     this.post({ type: "resetPythonCell" });
     this.overlayPrelude = [];
     if (this.overlay) {
@@ -580,6 +648,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.releaseOverlay();
     this.clearInspectionCache();
     this.clearRuntimeRefreshTimer();
+    this.stopAllPythonProgress();
     this.clearPreludeRetryTimer();
     this.preludeRetryAttempt = 0;
   }

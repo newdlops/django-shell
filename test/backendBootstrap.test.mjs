@@ -11,12 +11,14 @@ import zlib from "node:zlib";
 const require = createRequire(import.meta.url);
 const {
   BACKEND_FAILED_PREFIX,
+  BACKEND_PROGRESS_PREFIX,
   BACKEND_READY_PREFIX,
   BACKEND_RESPONSE_PREFIX,
   buildBackendBootstrap,
   buildBackendBootstrapCommand,
   buildInlineBackendBootstrapCommand,
   parseBackendFailedMarker,
+  parseBackendProgressMarkers,
   parseBackendReadyMarker,
   parseBackendResponseMarkers
 } = require("../out/backendBootstrap.js");
@@ -89,5 +91,18 @@ test("parses multiple complete PTY response markers and preserves an incomplete 
 
   assert.equal(parsed.markers.length, 2);
   assert.deepEqual(parsed.markers.map((marker) => marker.chunk?.index), [0, 1]);
+  assert.equal(parsed.rest, partial);
+});
+
+test("parses progress markers independently from normal terminal output", () => {
+  const first = `${BACKEND_PROGRESS_PREFIX}${JSON.stringify({ active: true, current: 3, total: 10 })}\r\n`;
+  const second = `${BACKEND_PROGRESS_PREFIX}${JSON.stringify({ active: false, done: true, ok: true })}\n`;
+  const partial = `${BACKEND_PROGRESS_PREFIX}{"active":true`;
+
+  const parsed = parseBackendProgressMarkers(`noise\n${first}>>> ${second}${partial}`);
+
+  assert.equal(parsed.markers.length, 2);
+  assert.deepEqual(parsed.markers.map((marker) => marker.active), [true, false]);
+  assert.equal(parsed.markers[0].current, 3);
   assert.equal(parsed.rest, partial);
 });

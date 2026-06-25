@@ -4,8 +4,8 @@ import { randomBytes } from "crypto";
 import * as pty from "node-pty";
 import * as vscode from "vscode";
 import { SerializedAsyncQueue } from "./asyncQueue";
-import { BackendClient, BackendRequestPayload, BackendTransportMode } from "./backendClient";
-import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BackendBootstrapCommand, BackendPtyResponse, backendBootstrapPayload, buildBackendBootstrapCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendReadyMarker, parseBackendResponseMarkers } from "./backendBootstrap";
+import { BackendClient, BackendProgressSnapshot, BackendRequestPayload, BackendTransportMode } from "./backendClient";
+import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BackendBootstrapCommand, BackendPtyResponse, backendBootstrapPayload, buildBackendBootstrapCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendProgressMarkers, parseBackendReadyMarker, parseBackendResponseMarkers } from "./backendBootstrap";
 import { buildPtyBackendRequest, buildPtyExecuteCell, firstPathEntry, isSecretPrompt, safeCommand, trimTerminalText } from "./notebookPtyText";
 import { DiagnosticLogger } from "./diagnostics";
 import { buildShellEnv } from "./env";
@@ -14,7 +14,7 @@ import { getShellLaunch } from "./shellLaunch";
 import { appendShellTranscript } from "./shellTranscript";
 import { DjangoTerminalMode, InputLineTracker, detectPrimaryPythonPrompt, isDjangoShellCommand, nextModeForOutput, nextModeForSubmittedLine } from "./terminalState";
 
-const KEEPALIVE_IDLE_MS = 45000; const KEEPALIVE_INTERVAL_MS = 30000; const KEEPALIVE_USER_IDLE_MS = 15000; const PTY_REQUEST_TIMEOUT_MS = 90000;
+const KEEPALIVE_IDLE_MS = 45000; const KEEPALIVE_INTERVAL_MS = 30000; const KEEPALIVE_USER_IDLE_MS = 15000;
 
 export interface NotebookPtyOptions {
   autoActivateWorkspaceVenv: boolean;
@@ -42,6 +42,7 @@ export class NotebookPtySession implements vscode.Disposable {
   private client: BackendClient | undefined;
   private readonly changeEmitter = new vscode.EventEmitter<NotebookTerminalSnapshot>();
   private readonly dataEmitter = new vscode.EventEmitter<string>();
+  private readonly progressEmitter = new vscode.EventEmitter<BackendProgressSnapshot>();
   private displayText = "";
   private generation = 0;
   private inputTracker = new InputLineTracker();
@@ -53,13 +54,14 @@ export class NotebookPtySession implements vscode.Disposable {
   private outputTail = "";
   private process: pty.IPty | undefined;
   private readonly ptyQueue = new SerializedAsyncQueue();
-  private readonly ptyRequests = new Map<string, { reject: (error: Error) => void; resolve: (buffer: string) => void; timer: NodeJS.Timeout }>();
-  private pendingCell: { reject: (error: Error) => void; resolve: (buffer: string) => void; timer: NodeJS.Timeout } | undefined;
+  private readonly ptyRequests = new Map<string, { reject: (error: Error) => void; resolve: (buffer: string) => void; timer?: NodeJS.Timeout }>();
+  private pendingCell: { reject: (error: Error) => void; resolve: (buffer: string) => void; timer?: NodeJS.Timeout } | undefined;
   private ipython = false;
   private cellCapture = false;
   private bootstrapRetried = false;
   private bootstrapRetryPending = false;
   private ptyRequestBuffer = "";
+  private ptyProgressBuffer = "";
   private readonly ptyResponseChunks = new Map<string, { chunks: string[]; count: number }>();
   private ptyRequestSeq = 1;
   private shellLogTail = "";
@@ -71,6 +73,7 @@ export class NotebookPtySession implements vscode.Disposable {
 
   readonly onDidChange = this.changeEmitter.event;
   readonly onDidData = this.dataEmitter.event;
+  readonly onDidProgress = this.progressEmitter.event;
 
   /** Stores launch options for the embedded notebook terminal. */
   constructor(private readonly options: NotebookPtyOptions) {}
@@ -189,6 +192,7 @@ export class NotebookPtySession implements vscode.Disposable {
     this.rejectPtyRequests("Django shell PTY session disposed.");
     this.dataEmitter.dispose();
     this.changeEmitter.dispose();
+    this.progressEmitter.dispose();
   }
 
   /** Returns the latest renderable terminal state. */
@@ -208,6 +212,8 @@ export class NotebookPtySession implements vscode.Disposable {
     }
     if (this.ptyRequests.size || this.pendingCell) {
       this.ptyRequestBuffer = `${this.ptyRequestBuffer}${data}`;
+      this.ptyProgressBuffer = `${this.ptyProgressBuffer}${data}`;
+      this.inspectPtyProgress();
       this.inspectPtyResponses();
     }
     this.mode = nextModeForOutput(this.mode, this.outputTail);
@@ -313,25 +319,18 @@ export class NotebookPtySession implements vscode.Disposable {
       // Type the user's literal code as the cell so the shell's raw_cell stays pure; the bootstrap-installed
       // capture hook emits the response marker (no wrapper). IPython handles multi-line cells; the plain REPL
       // only captures one statement per prompt, so multi-line plain-shell code falls through to the wrapper.
-      if ((payload.kind === "execute" || payload.kind === "ormcell") && typeof payload.code === "string" && this.cellCapture && (this.ipython || !payload.code.includes("\n"))) {
-        const timer = setTimeout(() => {
-          this.pendingCell = undefined;
-          reject(new Error(`Timed out waiting for Django shell backend PTY response after ${PTY_REQUEST_TIMEOUT_MS}ms.`));
-        }, PTY_REQUEST_TIMEOUT_MS);
+      if ((payload.kind === "execute" || payload.kind === "ormcell") && typeof payload.code === "string" && this.cellCapture && (this.ipython || !payload.code.includes("\n")) && !wantsPtyProgress(payload)) {
         this.ptyRequestBuffer = "";
-        this.pendingCell = { reject, resolve, timer };
+        this.ptyProgressBuffer = "";
+        this.pendingCell = { reject, resolve };
         this.options.diagnosticLogger?.log("backend.pty.request", { code: typeof payload.code === "string" ? payload.code.slice(0, 200) : undefined, kind: payload.kind, literalCell: true, queueMs: started - queuedAt, sessionId: this.options.sessionId });
         this.process.write(buildPtyExecuteCell(payload.code, this.ipython));
         return;
       }
       const id = `${Date.now().toString(36)}-${this.ptyRequestSeq++}`;
-      const timer = setTimeout(() => {
-        this.ptyRequests.delete(id);
-        this.options.diagnosticLogger?.log("backend.pty.timeout", { id, kind: payload.kind, ms: Date.now() - started, sessionId: this.options.sessionId, timeoutMs: PTY_REQUEST_TIMEOUT_MS });
-        reject(new Error(`Timed out waiting for Django shell backend PTY response after ${PTY_REQUEST_TIMEOUT_MS}ms.`));
-      }, PTY_REQUEST_TIMEOUT_MS);
       this.ptyRequestBuffer = "";
-      this.ptyRequests.set(id, { reject, resolve, timer });
+      this.ptyProgressBuffer = "";
+      this.ptyRequests.set(id, { reject, resolve });
       this.options.diagnosticLogger?.log("backend.pty.request", { code: typeof payload.code === "string" ? payload.code.slice(0, 200) : undefined, id, kind: payload.kind, lightweight: payload.lightweight, queueMs: started - queuedAt, sessionId: this.options.sessionId });
       this.process.write(buildPtyBackendRequest(id, payload, this.token));
     }));
@@ -396,6 +395,17 @@ export class NotebookPtySession implements vscode.Disposable {
     }
   }
 
+  /** Emits streamed backend progress markers received while a PTY request is running. */
+  private inspectPtyProgress(): void {
+    const parsed = parseBackendProgressMarkers(this.ptyProgressBuffer);
+    this.ptyProgressBuffer = parsed.rest;
+    for (const marker of parsed.markers) {
+      if (marker && typeof marker === "object") {
+        this.progressEmitter.fire(marker as BackendProgressSnapshot);
+      }
+    }
+  }
+
   /** Handles one complete PTY response marker, assembling chunked responses when needed. */
   private handlePtyResponseMarker(marker: BackendPtyResponse): void {
     if (marker.chunk) {
@@ -435,7 +445,7 @@ export class NotebookPtySession implements vscode.Disposable {
   private resolvePtyResponse(id: string, response: unknown): void {
     const pending = this.ptyRequests.get(id);
     if (pending) {
-      clearTimeout(pending.timer);
+      if (pending.timer) { clearTimeout(pending.timer); }
       this.ptyRequests.delete(id);
       pending.resolve(`${JSON.stringify(response)}\n`);
       return;
@@ -444,7 +454,7 @@ export class NotebookPtySession implements vscode.Disposable {
     if (this.pendingCell) {
       const cell = this.pendingCell;
       this.pendingCell = undefined;
-      clearTimeout(cell.timer);
+      if (cell.timer) { clearTimeout(cell.timer); }
       cell.resolve(`${JSON.stringify(response)}\n`);
     }
   }
@@ -452,13 +462,14 @@ export class NotebookPtySession implements vscode.Disposable {
   /** Rejects and clears every pending PTY backend request. */
   private rejectPtyRequests(message: string): void {
     for (const [id, pending] of this.ptyRequests) {
-      clearTimeout(pending.timer);
+      if (pending.timer) { clearTimeout(pending.timer); }
       pending.reject(new Error(`${message} ${id}`));
     }
     this.ptyRequests.clear();
     this.ptyResponseChunks.clear();
+    this.ptyProgressBuffer = "";
     if (this.pendingCell) {
-      clearTimeout(this.pendingCell.timer);
+      if (this.pendingCell.timer) { clearTimeout(this.pendingCell.timer); }
       this.pendingCell.reject(new Error(message));
       this.pendingCell = undefined;
     }
@@ -486,6 +497,7 @@ export class NotebookPtySession implements vscode.Disposable {
     this.mode = "shell";
     this.outputTail = "";
     this.process = undefined;
+    this.ptyProgressBuffer = "";
     this.ptyRequestBuffer = "";
     this.ptyResponseChunks.clear();
     this.spawnedAt = 0;
@@ -538,4 +550,12 @@ export class NotebookPtySession implements vscode.Disposable {
   private detachBackendForShellExit(): void {
     this.stopKeepalive(); this.client = undefined; this.ipython = false; this.cellCapture = false; this.suppressBackendOutput = false; this.token = ""; this.state = "starting"; this.rejectPtyRequests("Django shell backend detached."); this.fireChange();
   }
+}
+
+/** Returns whether a PTY execute request should use the instrumentable RPC path instead of a literal cell. */
+function wantsPtyProgress(payload: BackendRequestPayload): boolean {
+  if (payload.kind !== "execute" || typeof payload.code !== "string") {
+    return false;
+  }
+  return /\bfor\b|\.iterator\s*\(|\.objects\b|QuerySet\b/.test(payload.code);
 }

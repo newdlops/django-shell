@@ -5,6 +5,7 @@ import { deflateSync } from "zlib";
 export const BACKEND_READY_PREFIX = "__DJANGO_SHELL_BACKEND_READY__";
 export const BACKEND_FAILED_PREFIX = "__DJANGO_SHELL_BACKEND_FAILED__";
 export const BACKEND_RESPONSE_PREFIX = "__DJANGO_SHELL_BACKEND_RESPONSE__";
+export const BACKEND_PROGRESS_PREFIX = "__DJANGO_SHELL_BACKEND_PROGRESS__";
 // Printed by the env/disk bootstrap when it can load NEITHER the spawn-env payload NOR a local runtime file — i.e. a remote
 // shell (SSH, kubectl/docker exec). A CLEAN signal (no FileNotFoundError traceback in the server pre_run_cell audit) that
 // tells the extension to retry with the inline bootstrap that embeds the source.
@@ -33,6 +34,11 @@ export interface BackendPtyResponseChunk {
 
 export interface BackendPtyResponseParseResult {
   markers: BackendPtyResponse[];
+  rest: string;
+}
+
+export interface BackendProgressParseResult {
+  markers: unknown[];
   rest: string;
 }
 
@@ -125,22 +131,33 @@ export function parseBackendResponseMarker(output: string): BackendPtyResponse |
 
 /** Parses every complete PTY backend response marker from terminal output and keeps an incomplete tail. */
 export function parseBackendResponseMarkers(output: string): BackendPtyResponseParseResult {
-  const markers: BackendPtyResponse[] = [];
+  const parsed = parsePrefixedJsonLines<BackendPtyResponse>(output, BACKEND_RESPONSE_PREFIX);
+  return { markers: parsed.markers, rest: parsed.rest };
+}
+
+/** Parses every complete progress marker from terminal output and keeps an incomplete tail. */
+export function parseBackendProgressMarkers(output: string): BackendProgressParseResult {
+  return parsePrefixedJsonLines<unknown>(output, BACKEND_PROGRESS_PREFIX);
+}
+
+/** Parses complete JSON marker lines with the given prefix. */
+function parsePrefixedJsonLines<T>(output: string, prefix: string): { markers: T[]; rest: string } {
+  const markers: T[] = [];
   let searchFrom = 0;
   let consumed = 0;
   for (;;) {
-    const index = output.indexOf(BACKEND_RESPONSE_PREFIX, searchFrom);
+    const index = output.indexOf(prefix, searchFrom);
     if (index < 0) {
       break;
     }
-    const start = index + BACKEND_RESPONSE_PREFIX.length;
+    const start = index + prefix.length;
     const end = lineEndIndex(output, start);
     if (end < 0) {
       break;
     }
     const raw = output.slice(start, end).trim();
     try {
-      markers.push(JSON.parse(raw) as BackendPtyResponse);
+      markers.push(JSON.parse(raw) as T);
     } catch {
       // Ignore malformed marker-looking output; later complete markers can still resolve the request.
     }

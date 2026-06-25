@@ -1995,6 +1995,9 @@ var ALL_PAGE_SIZE = 1e9;
 var state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, filters: [], order: [], annotations: [], model: "", pinned: /* @__PURE__ */ new Set(), widths: {}, computed: {}, computedActive: /* @__PURE__ */ new Set(), aggregateActive: false, aggregateGroupBy: [], aggregateColumns: [] };
 var pendingRelated = /* @__PURE__ */ new Map();
 var relRequestId = 0;
+var progressLabel = "";
+var progressStartedAt = 0;
+var progressTimer = 0;
 var editor = createEditor({
   post: (message) => vscode.postMessage(message),
   reload: () => send({ type: "reload" }),
@@ -2040,7 +2043,7 @@ if (els.pageSize) {
 els.addFilter.addEventListener("click", () => filterBar.addTerm());
 els.applyFilter.addEventListener("click", () => applyQuery());
 els.clearFilter.addEventListener("click", () => clearQuery());
-els.count.addEventListener("click", () => vscode.postMessage({ type: "requestCount" }));
+els.count.addEventListener("click", () => send({ type: "requestCount" }));
 els.groupToggle.addEventListener("click", () => toggleColumnPanel());
 els.addGroupBy.addEventListener("click", () => columnBuilder.addGroupBy());
 els.addAggregate.addEventListener("click", () => columnBuilder.addTerm());
@@ -2093,6 +2096,7 @@ function handleMessage(message) {
   } else if (message.type === "computed") {
     onComputed(message);
   } else if (message.type === "count") {
+    stopProgress();
     els.countinfo.textContent = message.ok ? `\xB7 total ${message.count}` : `\xB7 count failed`;
     logSql(`count ${state.model}`, message.sql, message.orm);
   } else if (message.type === "aggregate") {
@@ -2114,7 +2118,7 @@ function renderLoading(message) {
   els.subtitle.textContent = message.label || "";
   els.gridwrap.innerHTML = "";
   els.gridwrap.appendChild(el("div", { className: "empty" }, "Loading\u2026"));
-  els.status.textContent = "";
+  startProgress("Loading model data");
   els.more.disabled = true;
 }
 function onSchema(schema) {
@@ -2206,6 +2210,7 @@ function columnAttnames(columns) {
   return (columns || []).map((column) => column.attname).join(",");
 }
 function onRows(message) {
+  stopProgress();
   const rows = message.rows || {};
   if (!rows.ok) {
     renderError(rows.error || "Could not load rows.");
@@ -2391,6 +2396,7 @@ function toggleComputed(field, button) {
   virtual.refresh();
 }
 function onComputed(message) {
+  stopProgress();
   if (!state.computedActive.has(message.field)) {
     return;
   }
@@ -2433,7 +2439,62 @@ function pageSizeValue() {
   return value === "all" ? ALL_PAGE_SIZE : parsed > 0 ? parsed : 50;
 }
 function send(message) {
+  const label = progressLabelForMessage(message);
+  if (label) {
+    startProgress(label);
+  }
   vscode.postMessage({ ...message, pageSize: pageSizeValue() });
+}
+function progressLabelForMessage(message) {
+  if (message.type === "runQuery") {
+    return "Running query";
+  }
+  if (message.type === "loadMore") {
+    return "Loading more rows";
+  }
+  if (message.type === "reload") {
+    return "Reloading rows";
+  }
+  if (message.type === "requestCount") {
+    return "Counting rows";
+  }
+  if (message.type === "aggregate") {
+    return "Summarizing rows";
+  }
+  if (message.type === "applyQuery") {
+    return "Loading rows";
+  }
+  return "";
+}
+function startProgress(label) {
+  progressLabel = label;
+  progressStartedAt = Date.now();
+  updateProgress();
+  if (progressTimer) {
+    window.clearInterval(progressTimer);
+  }
+  progressTimer = window.setInterval(updateProgress, 1e3);
+}
+function updateProgress() {
+  if (!progressLabel || !progressStartedAt) {
+    return;
+  }
+  els.status.textContent = `${progressLabel} \xB7 ${durationText(progressStartedAt)} elapsed`;
+}
+function stopProgress() {
+  if (progressTimer) {
+    window.clearInterval(progressTimer);
+    progressTimer = 0;
+  }
+  progressLabel = "";
+  progressStartedAt = 0;
+}
+function durationText(startedAt) {
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1e3));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
 }
 function clearQuery() {
   filterBar.clear();
@@ -2476,7 +2537,7 @@ function applyColumns(filtersOverride) {
     state.aggregateGroupBy = groupBy;
     state.annotations = [];
     els.status.textContent = `Summarizing\u2026${drillNote}`;
-    vscode.postMessage({ type: "aggregate", aggregates, filters: state.filters, groupBy });
+    send({ type: "aggregate", aggregates, filters: state.filters, groupBy });
   } else {
     exitAggregateView();
     state.annotations = terms;
@@ -2498,6 +2559,7 @@ function exitAggregateView() {
   state.aggregateColumns = [];
 }
 function onAggregate(message) {
+  stopProgress();
   const result = message.result || {};
   logSql(`aggregate ${state.model}`, result.sql, result.orm);
   if (!result.ok) {
@@ -2587,6 +2649,7 @@ function insertDetailRow(afterRow, content) {
   return tr;
 }
 function renderError(messageText) {
+  stopProgress();
   els.gridwrap.innerHTML = "";
   els.gridwrap.appendChild(el("div", { className: "err" }, messageText || "Error"));
   els.status.textContent = "";

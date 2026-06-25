@@ -51,8 +51,11 @@ button:disabled{opacity:.55;cursor:default}
 .outputHidden{display:none}
 .outputLabel{padding:6px 10px 0;color:var(--vscode-descriptionForeground);font-family:var(--vscode-editor-font-family);font-size:12px}
 .outputList{display:grid;gap:0;padding:4px 0 8px}.outputItem{border-top:1px solid var(--vscode-panel-border)}
+.outputHeader{display:flex;align-items:center;gap:8px;padding:5px 10px 0;color:var(--vscode-descriptionForeground);font-family:var(--vscode-editor-font-family);font-size:12px}.outputHeader .grow{flex:1}.outputStatus{font-family:var(--vscode-font-family);font-size:11px}.outputItem.running .outputStatus{color:var(--vscode-testing-iconQueued,var(--vscode-descriptionForeground))}
 .outputItemLabel{padding:5px 10px 0;color:var(--vscode-descriptionForeground);font-family:var(--vscode-editor-font-family);font-size:12px}
+.inputSource{margin:3px 10px 2px;padding:5px 8px;max-height:260px;overflow:auto;border-left:2px solid var(--vscode-panel-border);background:var(--vscode-textCodeBlock-background,var(--vscode-editorWidget-background));font-family:var(--vscode-editor-font-family);font-size:var(--vscode-editor-font-size);line-height:1.45;white-space:pre-wrap;tab-size:4}
 .result{margin:0;padding:4px 10px 8px;white-space:pre;overflow:visible;min-width:max-content;background:var(--vscode-editor-background)}
+.result.pending{color:var(--vscode-descriptionForeground);font-style:italic}
 .result.error{color:var(--vscode-errorForeground)}
 </style>
 </head>

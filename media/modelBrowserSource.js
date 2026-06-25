@@ -25,6 +25,9 @@ const ALL_PAGE_SIZE = 1000000000;
 const state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, filters: [], order: [], annotations: [], model: "", pinned: new Set(), widths: {}, computed: {}, computedActive: new Set(), aggregateActive: false, aggregateGroupBy: [], aggregateColumns: [] };
 const pendingRelated = new Map();
 let relRequestId = 0;
+let progressLabel = "";
+let progressStartedAt = 0;
+let progressTimer = 0;
 
 const editor = createEditor({
   post: (message) => vscode.postMessage(message),
@@ -69,7 +72,7 @@ if (els.pageSize) {
 els.addFilter.addEventListener("click", () => filterBar.addTerm());
 els.applyFilter.addEventListener("click", () => applyQuery());
 els.clearFilter.addEventListener("click", () => clearQuery());
-els.count.addEventListener("click", () => vscode.postMessage({ type: "requestCount" }));
+els.count.addEventListener("click", () => send({ type: "requestCount" }));
 els.groupToggle.addEventListener("click", () => toggleColumnPanel());
 els.addGroupBy.addEventListener("click", () => columnBuilder.addGroupBy());
 els.addAggregate.addEventListener("click", () => columnBuilder.addTerm());
@@ -119,6 +122,7 @@ function handleMessage(message) {
   } else if (message.type === "computed") {
     onComputed(message);
   } else if (message.type === "count") {
+    stopProgress();
     els.countinfo.textContent = message.ok ? `· total ${message.count}` : `· count failed`;
     logSql(`count ${state.model}`, message.sql, message.orm);
   } else if (message.type === "aggregate") {
@@ -141,7 +145,7 @@ function renderLoading(message) {
   els.subtitle.textContent = message.label || "";
   els.gridwrap.innerHTML = "";
   els.gridwrap.appendChild(el("div", { className: "empty" }, "Loading…"));
-  els.status.textContent = "";
+  startProgress("Loading model data");
   els.more.disabled = true;
 }
 
@@ -250,6 +254,7 @@ function columnAttnames(columns) {
 }
 
 function onRows(message) {
+  stopProgress();
   const rows = message.rows || {};
   if (!rows.ok) {
     renderError(rows.error || "Could not load rows.");
@@ -454,6 +459,7 @@ function toggleComputed(field, button) {
 
 /** Stores a fetched @property column's values (pk→cell) and repaints, ignoring late responses for a since-deactivated column. */
 function onComputed(message) {
+  stopProgress();
   if (!state.computedActive.has(message.field)) {
     return;
   }
@@ -502,7 +508,72 @@ function pageSizeValue() {
 }
 
 function send(message) {
+  const label = progressLabelForMessage(message);
+  if (label) {
+    startProgress(label);
+  }
   vscode.postMessage({ ...message, pageSize: pageSizeValue() });
+}
+
+/** Returns the visible progress label for a request initiated from this webview. */
+function progressLabelForMessage(message) {
+  if (message.type === "runQuery") {
+    return "Running query";
+  }
+  if (message.type === "loadMore") {
+    return "Loading more rows";
+  }
+  if (message.type === "reload") {
+    return "Reloading rows";
+  }
+  if (message.type === "requestCount") {
+    return "Counting rows";
+  }
+  if (message.type === "aggregate") {
+    return "Summarizing rows";
+  }
+  if (message.type === "applyQuery") {
+    return "Loading rows";
+  }
+  return "";
+}
+
+/** Starts an elapsed progress message for long-running model or ORM queries. */
+function startProgress(label) {
+  progressLabel = label;
+  progressStartedAt = Date.now();
+  updateProgress();
+  if (progressTimer) {
+    window.clearInterval(progressTimer);
+  }
+  progressTimer = window.setInterval(updateProgress, 1000);
+}
+
+/** Updates the footer with the latest elapsed progress message. */
+function updateProgress() {
+  if (!progressLabel || !progressStartedAt) {
+    return;
+  }
+  els.status.textContent = `${progressLabel} · ${durationText(progressStartedAt)} elapsed`;
+}
+
+/** Stops the active elapsed progress message. */
+function stopProgress() {
+  if (progressTimer) {
+    window.clearInterval(progressTimer);
+    progressTimer = 0;
+  }
+  progressLabel = "";
+  progressStartedAt = 0;
+}
+
+/** Formats a compact duration from one start timestamp. */
+function durationText(startedAt) {
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
 }
 
 function clearQuery() {
@@ -552,7 +623,7 @@ function applyColumns(filtersOverride) {
     state.aggregateGroupBy = groupBy;
     state.annotations = [];
     els.status.textContent = `Summarizing…${drillNote}`;
-    vscode.postMessage({ type: "aggregate", aggregates, filters: state.filters, groupBy });
+    send({ type: "aggregate", aggregates, filters: state.filters, groupBy });
   } else {
     exitAggregateView();
     state.annotations = terms;
@@ -580,6 +651,7 @@ function exitAggregateView() {
 
 /** Renders an aggregate response as a read-only result table in place of the row grid. */
 function onAggregate(message) {
+  stopProgress();
   const result = message.result || {};
   logSql(`aggregate ${state.model}`, result.sql, result.orm);
   if (!result.ok) {
@@ -680,6 +752,7 @@ function insertDetailRow(afterRow, content) {
 }
 
 function renderError(messageText) {
+  stopProgress();
   els.gridwrap.innerHTML = "";
   els.gridwrap.appendChild(el("div", { className: "err" }, messageText || "Error"));
   els.status.textContent = "";
