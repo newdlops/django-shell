@@ -342,6 +342,52 @@ export function overlaySyncRendererSource(): string {
       __dsoLog(post, "cursor.advance", { cellEnd: last, end: range.end, source: source, start: range.start, targetLine: target });
     }
 
+    /** Returns the first non-empty source line after one execution unit. */
+    function __dsoNextInputUnitLine(model, endLine) {
+      for (let line = endLine + 1; line <= model.getLineCount(); line++) {
+        if (model.getLineContent(line).trim()) { return line; }
+      }
+      return 0;
+    }
+
+    /** Returns the column for the first non-whitespace character on a line. */
+    function __dsoFirstTextColumn(model, lineNumber) {
+      const match = String(model.getLineContent(lineNumber) || "").match(/^\\s*/);
+      return (match ? match[0].length : 0) + 1;
+    }
+
+    /** Moves the cursor past the current execution unit without running Python. */
+    function __dsoSkipCurrentInput(root, editor, post, source) {
+      const model = editor && editor.getModel && editor.getModel();
+      const payload = model ? __dsoPreviewPayload(root, editor) : null;
+      if (!model || !payload || !payload.range) { return "empty"; }
+      const end = Math.max(1, Math.min(model.getLineCount(), payload.range.end || 1));
+      const nextLine = __dsoNextInputUnitLine(model, end);
+      if (nextLine) {
+        try { editor.setPosition && editor.setPosition({ column: __dsoFirstTextColumn(model, nextLine), lineNumber: nextLine }); } catch (eNextPosition) {}
+        try { editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(nextLine); } catch (eNextReveal) {}
+        root.__dsoMultilineMode = false;
+        __dsoUpdateExecutionRangePreview(root, editor);
+        __dsoLog(post, "enter.skip", { end: end, source: source, targetLine: nextLine });
+        return "skipped";
+      }
+      try {
+        const toLine = model.getLineCount();
+        editor.executeEdits("django-shell-skip", [{
+          forceMoveMarkers: true,
+          range: { endColumn: model.getLineMaxColumn(toLine), endLineNumber: toLine, startColumn: model.getLineMaxColumn(end), startLineNumber: end },
+          text: "\\n\\n"
+        }]);
+      } catch (eEdit) {}
+      const target = Math.min(model.getLineCount(), end + 2);
+      try { editor.setPosition && editor.setPosition({ column: 1, lineNumber: target }); } catch (eSetPosition) {}
+      try { editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(target); } catch (eReveal) {}
+      root.__dsoMultilineMode = false;
+      __dsoUpdateExecutionRangePreview(root, editor);
+      __dsoLog(post, "enter.skip", { end: end, source: source, targetLine: target });
+      return "skipped";
+    }
+
     /** Inserts a newline inside the overlay editor without invoking VS Code global commands. */
     function __dsoInsertNewline(editor, post, source) {
       const model = editor.getModel && editor.getModel();
@@ -605,6 +651,16 @@ export function overlaySyncRendererSource(): string {
           __dsoInsertNewline(editor, post, source);
           return;
         }
+        if (raw.altKey && !raw.ctrlKey && !raw.metaKey && !raw.shiftKey && !raw.isComposing) {
+          if (event.preventDefault) { event.preventDefault(); }
+          if (event.stopPropagation) { event.stopPropagation(); }
+          if (event.stopImmediatePropagation) { event.stopImmediatePropagation(); }
+          if (raw.preventDefault) { raw.preventDefault(); }
+          if (raw.stopPropagation) { raw.stopPropagation(); }
+          if (raw.stopImmediatePropagation) { raw.stopImmediatePropagation(); }
+          __dsoSkipCurrentInput(root, editor, post, source + "-skip");
+          return;
+        }
         if (raw.metaKey) {
           execute(event, source + "-cmd", false);
           return;
@@ -614,7 +670,9 @@ export function overlaySyncRendererSource(): string {
       };
       root.__dsoCurrentInputPayload = function () { return __dsoPreviewPayload(root, editor); };
       root.__dsoRunCurrentInput = function () { return execute(null, "host-command-cmd", false) ? "requested" : "empty"; };
+      root.__dsoSkipCurrentInput = function () { return __dsoSkipCurrentInput(root, editor, post, "host-command-skip"); };
       window.__dsoRunCurrentOverlayInput = function () { const activeRoot = document.getElementById("django-shell-overlay"); return activeRoot && activeRoot.__dsoRunCurrentInput ? activeRoot.__dsoRunCurrentInput() : "missing-root"; };
+      window.__dsoSkipCurrentOverlayInput = function () { const activeRoot = document.getElementById("django-shell-overlay"); return activeRoot && activeRoot.__dsoSkipCurrentInput ? activeRoot.__dsoSkipCurrentInput() : "missing-root"; };
       const previewCleanup = __dsoInstallExecutionRangePreview(root, editor);
       try {
         if (typeof editor.addCommand === "function") {

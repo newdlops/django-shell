@@ -95,6 +95,8 @@ export class CustomDjangoConsole implements vscode.Disposable {
 
   /** Runs the current overlay input through the renderer-owned editor command. */
   async runCurrentOverlayInput(): Promise<string> { return (await this.ensureOverlay()).runCurrentInput(); }
+  /** Skips the current overlay input through the renderer-owned editor command. */
+  async skipCurrentOverlayInput(): Promise<string> { return (await this.ensureOverlay()).skipCurrentInput(); }
   /** Accepts Enter from the file-backed overlay command facade. */ async acceptOverlayInput(): Promise<void> { await (await this.ensureOverlay()).acceptInput(); }
   /** Inserts an indented newline from the file-backed overlay command facade. */ async insertOverlayNewline(): Promise<void> { await (await this.ensureOverlay()).insertNewline(); }
 

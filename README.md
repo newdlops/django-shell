@@ -83,7 +83,7 @@ Open the folder that contains `manage.py`, then run the console command. The nat
    ```
 
 4. Wait until the Python input cell is enabled — the extension has detected the interactive prompt and attached its backend.
-5. Type Python in the input editor and run it with **Enter** (or `Ctrl/Cmd+Enter`).
+5. Type Python in the input editor and run it with **Enter** (or `Ctrl/Cmd+Enter`). Use `Alt+Enter` to skip the highlighted execution unit without running it.
 
 Code runs in the **same live namespace** as the attached shell. From there you can also open the **Models** view (activity bar) to browse tables, or run **`Django Shell: Run ORM Query`** to tabulate a custom query.
 
@@ -103,7 +103,7 @@ Code runs in the **same live namespace** as the attached shell. From there you c
 ### Workbench overlay editor
 
 - A workbench-hosted Python editor overlay provides a full editing surface (not just a single-line input) backed by an in-memory document, with its own renderers for prelude views, diagnostics, semantic highlighting, and completion widgets.
-- Enter runs the current logical input when no completion/parameter widget is active; Shift+Enter inserts a newline; Ctrl/Cmd+Enter always runs.
+- Enter runs the current logical input when no completion/parameter widget is active; Shift+Enter inserts a newline; Ctrl/Cmd+Enter always runs; Alt+Enter skips the highlighted execution unit without running it.
 
 ### IntelliSense model
 
@@ -185,6 +185,7 @@ Opens a **single reusable panel** that renders the result of **your own ORM code
 | `Django Shell: Open Console` | Open the primary custom console. |
 | `Django Shell: Show Overlay Editor` | Show the workbench-hosted Python overlay editor. |
 | `Django Shell: Run Current Python Input` | Run the current logical Python input block from the overlay. |
+| `Django Shell: Skip Current Python Input` | Move past the highlighted Python input block without running it. |
 | `Django Shell: Browse Model Data` | Open the model data browser grid (prompts for a model). |
 | `Django Shell: Run ORM Query` | Open the custom ORM query console panel. |
 | `Django Shell: Refresh Model Catalog` | Refresh the Models catalog view. |
@@ -202,6 +203,7 @@ In the overlay editor:
 | Enter | Run the current Python input when completion/parameter widgets are not active. |
 | Shift+Enter | Insert a newline. |
 | Ctrl+Enter / Cmd+Enter | Run the current Python input. |
+| Alt+Enter | Skip the highlighted Python input without running it. |
 
 In the ORM query console: **Ctrl/Cmd+Enter** runs the query.
 

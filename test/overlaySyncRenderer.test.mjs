@@ -115,6 +115,28 @@ test("previews the current Enter execution range with editor decorations", () =>
   assert.equal(editor.options.lineNumbers(5), "...");
 });
 
+test("skips the current execution range on Alt Enter without running Python", () => {
+  const source = overlaySyncRendererSource();
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };`)(window, document, () => undefined);
+  let keyHandler;
+  const editor = fakeEditor(fakeModel("print('old')\n\n\nprint('next')\n"), { column: 1, lineNumber: 1 });
+  editor.onKeyDown = (callback) => { keyHandler = callback; return { dispose() {} }; };
+  const posts = [];
+  const root = {};
+
+  api.installEnterRunner(root, editor, (payload) => {
+    posts.push(payload);
+    return { json: async () => ({ executed: true }) };
+  });
+  keyHandler(monacoEnterEvent({ altKey: true }));
+
+  assert.equal(posts.some((payload) => payload.type === "run"), false);
+  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 4 });
+  assert.deepEqual(root.__dsoExecutionRangePreview, { end: 4, start: 4 });
+});
+
 test("keeps continuation prompts across single blank lines inside pasted multiline input", () => {
   const source = overlayPythonRangeRendererSource();
   const api = Function(`${source}\nreturn { promptForLine: __dsoPromptForLine };`)();

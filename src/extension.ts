@@ -196,6 +196,9 @@ function registerCustomConsoleEntryPoints(context: vscode.ExtensionContext, diag
     vscode.commands.registerCommand("djangoShell.overlayRunCurrentInput", async () => {
       return (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).runCurrentOverlayInput();
     }),
+    vscode.commands.registerCommand("djangoShell.overlaySkipCurrentInput", async () => {
+      return (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).skipCurrentOverlayInput();
+    }),
     vscode.commands.registerCommand("djangoShell.overlayAcceptInput", async () => {
       await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).acceptOverlayInput();
     }),

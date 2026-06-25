@@ -41,3 +41,13 @@ test("contributes the additive model data browser command and catalog view", () 
   assert.ok(manifest.activationEvents.includes("onView:djangoShell.modelCatalog"));
   assert.ok(manifest.activationEvents.includes("onCommand:djangoShell.openModelData"));
 });
+
+test("contributes an overlay skip command and Alt Enter keybinding", () => {
+  const commands = manifest.contributes.commands.map((item) => item.command);
+  const binding = manifest.contributes.keybindings.find((item) => item.command === "djangoShell.overlaySkipCurrentInput");
+
+  assert.ok(commands.includes("djangoShell.overlaySkipCurrentInput"));
+  assert.ok(manifest.activationEvents.includes("onCommand:djangoShell.overlaySkipCurrentInput"));
+  assert.equal(binding?.key, "alt+enter");
+  assert.match(binding?.when ?? "", /djangoShell\.overlayVisible/);
+});

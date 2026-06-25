@@ -21,6 +21,7 @@ export class OverlayShellCommandController implements vscode.Disposable {
     if (options.registerCommands !== false) {
       this.disposables.push(vscode.commands.registerCommand("djangoShell.overlayAcceptInput", () => this.acceptInput()));
       this.disposables.push(vscode.commands.registerCommand("djangoShell.overlayInsertNewline", () => this.insertNewline()));
+      this.disposables.push(vscode.commands.registerCommand("djangoShell.overlaySkipCurrentInput", () => this.skipInput()));
     }
   }
 
@@ -61,6 +62,34 @@ export class OverlayShellCommandController implements vscode.Disposable {
     this.logger?.log("overlay.command.newline", { active: editor?.document.uri.toString() ?? "", inputStartLine: this.inputStartLine + 1 });
     const indent = editor?.document.uri.toString() === this.documents.editorUri.toString() ? nextIndent(editor.document, editor.selection.active.line) : "";
     await vscode.commands.executeCommand("type", { text: `\n${indent}` });
+  }
+
+  /** Moves past the active file-backed overlay input without executing it. */
+  async skipInput(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.uri.toString() !== this.documents.editorUri.toString()) {
+      this.logger?.log("overlay.command.skip.miss", { active: editor?.document.uri.toString() ?? "" });
+      return;
+    }
+    await this.documents.sync(editor.document.getText());
+    this.inputStartLine = documentInputStartLine(editor.document, this.documents.inputStartLine());
+    const payload = executionPayload(editor.document, editor.selection, this.inputStartLine);
+    if (!payload.code.trim()) {
+      this.logger?.log("overlay.command.skip.empty", { inputStartLine: this.inputStartLine + 1, line: editor.selection.active.line + 1 });
+      return;
+    }
+    const next = nextInputUnitLine(editor.document, payload.end);
+    if (next !== undefined) {
+      moveEditorToLine(editor, next);
+      this.logger?.log("overlay.command.skip", { end: payload.end + 1, inputStartLine: this.inputStartLine + 1, start: payload.start + 1, target: next + 1 });
+      return;
+    }
+    await editor.edit((edit) => {
+      const last = editor.document.lineCount - 1;
+      edit.replace(new vscode.Range(payload.end, editor.document.lineAt(payload.end).text.length, last, editor.document.lineAt(last).text.length), "\n\n");
+    });
+    moveEditorToLine(editor, Math.min(editor.document.lineCount - 1, payload.end + 2));
+    this.logger?.log("overlay.command.skip", { end: payload.end + 1, inputStartLine: this.inputStartLine + 1, start: payload.start + 1, target: editor.selection.active.line + 1 });
   }
 
   /** Releases command and document listeners. */
@@ -160,6 +189,25 @@ function cellEndLine(document: vscode.TextDocument, lineNumber: number, floor: n
     }
   }
   return document.lineCount - 1;
+}
+
+/** Returns the first non-empty source line after one execution unit. */
+function nextInputUnitLine(document: vscode.TextDocument, endLine: number): number | undefined {
+  for (let line = endLine + 1; line < document.lineCount; line += 1) {
+    if (document.lineAt(line).text.trim()) {
+      return line;
+    }
+  }
+  return undefined;
+}
+
+/** Moves an editor cursor to the first visible source column on one line. */
+function moveEditorToLine(editor: vscode.TextEditor, line: number): void {
+  const text = editor.document.lineAt(line).text;
+  const column = text.match(/^\s*/)?.[0].length ?? 0;
+  const position = new vscode.Position(line, column);
+  editor.selection = new vscode.Selection(position, position);
+  editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 }
 
 /** Returns true when a two-blank gap follows the leading import block. */

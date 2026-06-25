@@ -51,6 +51,7 @@
     "onCommand:djangoShell.openNotebookConsoleDeprecated",
     "onCommand:djangoShell.overlayAcceptInput",
     "onCommand:djangoShell.overlayInsertNewline",
+    "onCommand:djangoShell.overlaySkipCurrentInput",
     "onCommand:djangoShell.refreshInspector",
     "onCommand:djangoShell.refreshModelCatalog",
     "onCommand:djangoShell.runModelQuery",
@@ -87,6 +88,12 @@
         "title": "Django Shell: Run Current Python Input",
         "category": "Django Shell",
         "icon": "$(run)"
+      },
+      {
+        "command": "djangoShell.overlaySkipCurrentInput",
+        "title": "Django Shell: Skip Current Python Input",
+        "category": "Django Shell",
+        "icon": "$(debug-step-over)"
       },
       {
         "command": "djangoShell.showEnvironment",
@@ -250,6 +257,12 @@
         "command": "djangoShell.overlayRunCurrentInput",
         "key": "ctrl+enter",
         "mac": "cmd+enter",
+        "when": "djangoShell.overlayVisible"
+      },
+      {
+        "command": "djangoShell.overlaySkipCurrentInput",
+        "key": "alt+enter",
+        "mac": "alt+enter",
         "when": "djangoShell.overlayVisible"
       },
       {
