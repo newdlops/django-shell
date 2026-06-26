@@ -60,6 +60,9 @@ interface IncomingMessage {
 
 const VIEW_TYPE = "djangoShell.modelBrowser";
 const PAGE_SIZE = 50;
+const MODEL_REQUEST_TIMEOUT_MS = 8000;
+const MODEL_BUSY_MESSAGE = "Django shell is busy running or debugging Python. Try again after the current cell continues or finishes.";
+const MODEL_REQUEST_TIMEOUT = Symbol("modelRequestTimeout");
 
 /** Opens model-data browser tabs; each open creates an independent panel with its own state. */
 export class ModelBrowser implements vscode.Disposable {
@@ -137,6 +140,7 @@ class ModelBrowserPanel {
   private columns: BackendModelColumn[] = [];
   private relations: BackendModelRelation[] = [];
   private loadedRowCount = 0;
+  private loadGeneration = 0;
 
   /** Creates the webview panel for one model target and wires its message and dispose handlers. */
   constructor(
@@ -199,14 +203,15 @@ class ModelBrowserPanel {
     if (this.disposed) {
       return;
     }
+    const generation = this.nextLoadGeneration();
     this.panel.title = `${this.target.model} — data`;
     this.post({ label: this.target.label, model: `${this.target.app}.${this.target.model}`, type: "loading" });
     if (this.reconstructsViaOrmCell()) {
       // ORM and Terminal modes type the read as a literal cell (no schema RPC); the head is synthesized from the first page.
-      await this.loadPage(true);
+      await this.loadPage(true, generation);
     } else {
-      const schema = await this.source.modelSchema(this.target.app, this.target.model);
-      if (this.disposed) {
+      const schema = await this.withRequestTimeout("schema", this.source.modelSchema(this.target.app, this.target.model), generation);
+      if (!schema || !this.isCurrentLoad(generation)) {
         return;
       }
       if (!schema.ok) {
@@ -216,22 +221,23 @@ class ModelBrowserPanel {
       this.columns = schema.columns;
       this.relations = schema.relations;
       this.post({ schema, type: "schema" });
-      await this.loadPage(true);
+      await this.loadPage(true, generation);
     }
+    if (!this.isCurrentLoad(generation)) { return; }
     const transport = this.source.modelTransportInfo();
     this.post({ active: transport.active, mode: transport.mode, type: "transport" });
   }
 
   /** Loads one page of rows, resetting the grid or appending to it. */
-  private async loadPage(reset: boolean): Promise<void> {
+  private async loadPage(reset: boolean, generation = this.nextLoadGeneration()): Promise<void> {
     const query: ModelRowsQuery = { annotations: this.annotations, app: this.target.app, columns: this.columns, filters: this.filters, limit: this.pageSize, model: this.target.model, order: this.order, relations: this.relations };
     if (!reset && this.nextCursor !== undefined && this.nextCursor !== null) {
       query.cursor = this.nextCursor;
     } else if (!reset && this.nextOffset !== null) {
       query.offset = this.nextOffset;
     }
-    const rows = await this.source.modelRows(query);
-    if (this.disposed) {
+    const rows = await this.withRequestTimeout("rows", this.source.modelRows(query), generation);
+    if (!rows || !this.isCurrentLoad(generation)) {
       return;
     }
     this.nextCursor = rows.ok ? rows.nextCursor : undefined;
@@ -249,6 +255,24 @@ class ModelBrowserPanel {
     }
     this.logger?.log("model.browser.rows", { append: !reset, model: `${this.target.app}.${this.target.model}`, ok: rows.ok, rows: rows.rows.length });
     this.post({ append: !reset, filters: this.filters, order: this.order, rows, type: "rows" });
+  }
+
+  /** Returns the next generation id for model loads so late responses cannot update this panel. */
+  private nextLoadGeneration(): number { this.loadGeneration += 1; return this.loadGeneration; }
+
+  /** Returns whether a model load response still belongs to the current panel request. */
+  private isCurrentLoad(generation: number): boolean { return !this.disposed && generation === this.loadGeneration; }
+
+  /** Awaits one backend model request with a UI timeout so debug pauses and long cells do not leave the grid loading forever. */
+  private async withRequestTimeout<T>(kind: string, request: Promise<T>, generation: number): Promise<T | undefined> {
+    try {
+      const result = await Promise.race([request, new Promise<typeof MODEL_REQUEST_TIMEOUT>((resolve) => setTimeout(() => resolve(MODEL_REQUEST_TIMEOUT), MODEL_REQUEST_TIMEOUT_MS))]);
+      if (result !== MODEL_REQUEST_TIMEOUT) { return result; }
+      if (this.isCurrentLoad(generation)) { this.logger?.log("model.browser.timeout", { kind, model: `${this.target.app}.${this.target.model}`, ms: MODEL_REQUEST_TIMEOUT_MS }); this.post({ message: MODEL_BUSY_MESSAGE, type: "busy" }); }
+    } catch (error) {
+      if (this.isCurrentLoad(generation)) { this.post({ message: error instanceof Error ? error.message : String(error), type: "error" }); }
+    }
+    return undefined;
   }
 
   /** Routes one message from the webview to its handler. */

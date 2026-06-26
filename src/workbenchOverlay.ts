@@ -19,7 +19,7 @@ export interface WorkbenchOverlayGeometry { height: number; left: number; top: n
 interface OverlayBreakpointLocation { column?: number; line: number; }
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
-const RENDERER_PATCH_VERSION = 58;
+const RENDERER_PATCH_VERSION = 59;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -31,6 +31,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
   private server: http.Server | undefined;
   private serverPort: number | undefined;
   private generatedCleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastBreakpointToggleAt = 0;
+  private lastBreakpointToggleKey = "";
   private shutdownPromise: Promise<void> | undefined;
   private readonly token = Math.random().toString(36).slice(2) + Date.now().toString(36);
   private workbenchWindowId: number | undefined;
@@ -309,6 +311,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
   private scheduleGeneratedCleanup(): void { clearTimeout(this.generatedCleanupTimer); this.generatedCleanupTimer = setTimeout(() => { void closeGeneratedOverlayTabs([this.memoryDocument.analysisUri, this.memoryDocument.editorUri]).catch(() => undefined); }, 450); }
   /** Converts a one-based user-input line into the backing console-cell.py line offset. */
   private relativeLineOffset(relativeLine: unknown): number | undefined { return typeof relativeLine === "number" && Number.isFinite(relativeLine) ? Math.max(0, Math.floor(relativeLine) - 1) : undefined; }
+  /** Toggles a VS Code source breakpoint from a webview fallback payload. */
+  async toggleBreakpointFromVisibleLine(relativeLine: unknown, relativeColumn: unknown, inline: boolean): Promise<boolean> { return this.toggleBreakpoint(relativeLine, relativeColumn, inline); }
   /** Toggles a VS Code source breakpoint from one user-input relative overlay location. */
   private async toggleBreakpoint(relativeLine: unknown, relativeColumn: unknown, inline: boolean): Promise<boolean> {
     if (typeof relativeLine !== "number" || !Number.isFinite(relativeLine)) {
@@ -319,6 +323,10 @@ export class WorkbenchOverlay implements vscode.Disposable {
       return false;
     }
     const sourceColumn = inline && typeof relativeColumn === "number" && Number.isFinite(relativeColumn) ? Math.max(0, Math.floor(relativeColumn) - 1) : 0;
+    const toggleKey = `${sourceLine}:${sourceColumn}`;
+    const now = Date.now();
+    if (this.lastBreakpointToggleKey === toggleKey && now - this.lastBreakpointToggleAt < 1000) { await this.updateBreakpoints(this.sourceBreakpointLocations()); return true; }
+    this.lastBreakpointToggleKey = toggleKey; this.lastBreakpointToggleAt = now;
     const target = this.memoryDocument.editorUri.toString();
     const existing = vscode.debug.breakpoints.filter((breakpoint): breakpoint is vscode.SourceBreakpoint => breakpoint instanceof vscode.SourceBreakpoint && breakpoint.location.uri.toString() === target && breakpoint.location.range.start.line === sourceLine && breakpoint.location.range.start.character === sourceColumn);
     if (existing.length) {

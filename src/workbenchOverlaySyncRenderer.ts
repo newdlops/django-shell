@@ -514,14 +514,19 @@ export function overlaySyncRendererSource(): string {
       const startLine = Number(root && root.__dsoInputStartLine) || 1;
       return Math.max(1, Math.floor(Number(line) || 1) - startLine + 1);
     }
-    /** Uses the custom console webview bridge when localhost fetch is unavailable. */
-    function __dsoRunWebviewFallback(code, range) {
+    /** Posts one overlay fallback message to the owning custom console webview frames. */
+    function __dsoPostWebviewFallback(message) {
       const frame = typeof __dsoFindWebviewFrame === "function" ? __dsoFindWebviewFrame() : null;
-      const root = document.getElementById("django-shell-overlay");
-      const message = { code: code, range: __dsoHostRange(root, range), text: root && root.__djangoShellEditor ? __dsoFullEditorText(root.__djangoShellEditor) : "", type: "overlayRunPython" };
       let sent = 0;
       const postTo = function (target) { if (!target || sent > 16) { return; } try { target.postMessage(message, "*"); sent++; } catch (ePost) {} try { for (let index = 0; target.frames && index < target.frames.length; index++) { postTo(target.frames[index]); } } catch (eFrames) {} };
       postTo(frame && frame.contentWindow); postTo(frame);
+      return sent;
+    }
+    /** Uses the custom console webview bridge when localhost fetch is unavailable. */
+    function __dsoRunWebviewFallback(code, range) {
+      const root = document.getElementById("django-shell-overlay");
+      const message = { code: code, range: __dsoHostRange(root, range), text: root && root.__djangoShellEditor ? __dsoFullEditorText(root.__djangoShellEditor) : "", type: "overlayRunPython" };
+      const sent = __dsoPostWebviewFallback(message);
       if (!sent) { return Promise.resolve(window.__dsoLastRunOutcome = Object.assign({ executed: false, webview: "missing" }, window.__dsoLastRunOutcome || {})); }
       return Promise.resolve(window.__dsoLastRunOutcome = { executed: true, sent: sent, webview: "postMessage" });
     }

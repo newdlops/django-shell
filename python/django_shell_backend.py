@@ -26,6 +26,7 @@ _STATE = {}
 _EXECUTION_LOCK = threading.Lock()
 _PROGRESS_LOCK = threading.Lock()
 _PROGRESS_INTERVAL_SECONDS = 0.25
+_PTY_ORM_TABULATE_LIMIT = 1000
 _MISSING = object()
 
 
@@ -1906,20 +1907,22 @@ def _pty_tabulate_result(value):
             # Surface per-row annotation columns (e.g. annotate(Count('books')) / Window(...)) that Django sets on the
             # instance, skipping the internal djs_/__ aliases used for declared-@property filters.
             ann_names = [name for name in getattr(value.query, "annotation_select", {}) or {} if isinstance(name, str) and not name.startswith("djs_") and not name.startswith("__")]
-            rows = [_browse_serialize_row(dict({attname: getattr(instance, attname, None) for attname in concrete_names}, **{name: getattr(instance, name, None) for name in ann_names})) for instance in itertools.islice(value, 50001)]
+            rows = [_browse_serialize_row(dict({attname: getattr(instance, attname, None) for attname in concrete_names}, **{name: getattr(instance, name, None) for name in ann_names})) for instance in itertools.islice(value, _PTY_ORM_TABULATE_LIMIT + 1)]
+            has_more = len(rows) > _PTY_ORM_TABULATE_LIMIT
+            rows = rows[:_PTY_ORM_TABULATE_LIMIT]
             columns = _browse_columns(model) + [{"annotation": True, "attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "annotation"} for name in ann_names] + _browse_computed_columns(model)
-            return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
+            return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": has_more, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
         if isinstance(value, Model):
             model = type(value)
             concrete_names = [column["attname"] for column in _browse_columns(model)]
             row = _browse_serialize_row({attname: getattr(value, attname, None) for attname in concrete_names})
             return {"app": model._meta.app_label, "columns": _browse_columns(model) + _browse_computed_columns(model), "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [row]}
         if isinstance(value, QuerySet):
-            payload = _browse_tabulate(list(itertools.islice(value, 50001)), 0, 50000)
+            payload = _browse_tabulate(list(itertools.islice(value, _PTY_ORM_TABULATE_LIMIT + 1)), 0, _PTY_ORM_TABULATE_LIMIT)
             payload["ok"] = True
             payload.setdefault("relations", [])
             return payload
-        payload = _browse_tabulate(value, 0, 50000)
+        payload = _browse_tabulate(value, 0, _PTY_ORM_TABULATE_LIMIT)
         payload["ok"] = True
         payload.setdefault("relations", [])
         return payload
@@ -2264,9 +2267,21 @@ def _pty_is_rpc_line(line):
 # inspection functions, or serialization helpers above are modified.
 
 
+def _browse_parallel_context():
+    """Returns a no-op context for read-only model browser requests that may run beside cell execution."""
+    return contextlib.nullcontext()
+
+
+def _browse_rows_context(request):
+    """Returns the execution lock only when row annotations may read shell namespace aliases."""
+    annotations = request.get("annotations")
+    needs_namespace = any(isinstance(item, dict) and item.get("kind") == "annotate" for item in annotations) if isinstance(annotations, list) else False
+    return _EXECUTION_LOCK if needs_namespace else _browse_parallel_context()
+
+
 def _browse_models():
     """Returns the catalog of installed models as browsable tables."""
-    with _EXECUTION_LOCK:
+    with _browse_parallel_context():
         try:
             from django.apps import apps
 
@@ -2282,7 +2297,7 @@ def _browse_models():
 
 def _browse_schema(request):
     """Returns columns and expandable relations for one model without querying rows."""
-    with _EXECUTION_LOCK:
+    with _browse_parallel_context():
         try:
             model = _browse_resolve_model(request)
             meta = model._meta
@@ -2294,7 +2309,7 @@ def _browse_schema(request):
 def _browse_rows(namespace, request):
     """Returns one bounded page of rows (concrete columns only — no JOIN, no N+1), plus any per-row annotation columns
     (raw annotate expressions, relation/field aggregates, window functions, F-expression arithmetic) defined by the column builder."""
-    with _EXECUTION_LOCK:
+    with _browse_rows_context(request):
         try:
             model = _browse_resolve_model(request)
             attnames = [column["attname"] for column in _browse_columns(model)]
@@ -2348,7 +2363,7 @@ def _browse_rows(namespace, request):
 
 def _browse_related(request):
     """Returns related rows for one source row, fetched lazily on explicit expansion."""
-    with _EXECUTION_LOCK:
+    with _browse_parallel_context():
         try:
             model = _browse_resolve_model(request)
             field = _browse_find_relation(model, request.get("relation"))
@@ -2582,7 +2597,7 @@ def _browse_relation_subquery_meta(model, field):
 
 def _browse_filter_fields(request):
     """Returns the filterable field/relation tree for one model so the cascading filter UI can drill across relations."""
-    with _EXECUTION_LOCK:
+    with _browse_parallel_context():
         try:
             model = _browse_resolve_model(request)
             tree = _browse_filter_field_tree(model)
@@ -2739,7 +2754,7 @@ _BROWSE_LOOKUPS = frozenset({"exact", "iexact", "contains", "icontains", "gt", "
 
 def _browse_count(request):
     """Returns the row count for the current filter set, computed only on explicit request."""
-    with _EXECUTION_LOCK:
+    with _browse_parallel_context():
         try:
             model = _browse_resolve_model(request)
             attnames = [field.attname for field in model._meta.concrete_fields]
@@ -2771,7 +2786,7 @@ def _browse_aggregate(request):
     args (concrete columns and Count over a reverse/M2M relation) run as one GROUP BY/aggregate query; @property args are
     streamed object-by-object and aggregated in Python (a full scan), then merged with the DB results by group. Group-by
     and DB args are allowlisted against the live model graph (no injection); the result is a read-only grid."""
-    with _EXECUTION_LOCK:
+    with _browse_parallel_context():
         try:
             from django.db.models import Avg, Count, Max, Min, Sum
 
@@ -3729,7 +3744,7 @@ _BROWSE_INT_PK_TYPES = frozenset({"AutoField", "BigAutoField", "SmallAutoField",
 
 def _browse_lookup(request):
     """Searches a target model for foreign-key picker candidates: one bounded SELECT, no __str__/joins."""
-    with _EXECUTION_LOCK:
+    with _browse_parallel_context():
         try:
             model = _browse_resolve_model(request)
             if model is None:

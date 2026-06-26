@@ -56,16 +56,27 @@ test("builds a file-independent inline bootstrap that embeds the source for remo
   const bootstrap = buildInlineBackendBootstrapCommand(runtimePath, "remote-token");
 
   assert.equal(bootstrap.mode, "inline");
-  assert.match(bootstrap.command, /^exec\(/);
+  assert.match(bootstrap.command, /^globals\(\)\["/);
   assert.match(bootstrap.command, /remote-token/);
   assert.match(bootstrap.command, /\r$/);
   // Must not depend on the spawn env payload or the local on-disk path, which a remote shell cannot reach.
   assert.doesNotMatch(bootstrap.command, /DJANGO_SHELL_BACKEND_B64/);
   assert.ok(!bootstrap.command.includes(runtimePath), "inline bootstrap must not reference the local runtime path");
-  // The embedded blob must decompress back to the exact backend source (inner quotes are JSON-escaped in the command).
-  const embedded = bootstrap.command.match(/b64decode\(\\"([A-Za-z0-9+/=]+)\\"\)/);
-  assert.ok(embedded, "inline bootstrap must embed a base64 blob");
-  assert.equal(zlib.inflateSync(Buffer.from(embedded[1], "base64")).toString("utf8"), source);
+  // The streamed blob must decompress back to the exact backend source.
+  const lines = bootstrap.command.trimEnd().split("\r");
+  const payload = lines
+    .slice(1, -1)
+    .map((line) => {
+      const match = line.match(/^globals\(\)\.setdefault\("[^"]+",\[\]\)\.append\("([A-Za-z0-9+/=]+)"\)$/);
+      assert.ok(match, `inline chunk must be a standalone Python append statement: ${line}`);
+      return match[1];
+    })
+    .join("");
+  assert.match(lines[0], /^globals\(\)\["/);
+  assert.match(lines.at(-1), /^exec\(/);
+  assert.doesNotMatch(bootstrap.command, /\binput\(/);
+  assert.ok(lines.every((line) => line.length < 1200), "inline bootstrap must avoid one giant terminal input line");
+  assert.equal(zlib.inflateSync(Buffer.from(payload, "base64")).toString("utf8"), source);
 });
 
 test("returns no inline bootstrap when the local runtime source cannot be read", () => {

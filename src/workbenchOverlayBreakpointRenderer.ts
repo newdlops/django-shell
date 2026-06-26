@@ -272,8 +272,9 @@ export function overlayBreakpointRendererSource(): string {
       root.__dsoLastBreakpointToggleAt = now;
       __dsoLog(post, "breakpoint.toggle", { column: column, inline: !!inline, inputStartLine: Number(root.__dsoInputStartLine) || 1, line: line, rawColumn: rawColumn || 0, rawLine: rawLine, source: source });
       __dsoToggleLocalBreakpoint(root, line, column);
-      const request = post({ column: column, inline: !!inline, inputStartLine: Number(root.__dsoInputStartLine) || 1, line: line, rawColumn: rawColumn || 0, rawLine: rawLine, source: source, type: "toggleBreakpoint" });
-      try { if (request && request.catch) { request.catch(function (error) { __dsoLog(post, "breakpoint.toggle.error", { error: String(error && error.message || error), line: line, source: source }); }); } } catch (eBreakpointPostError) {}
+      const payload = { column: column, inline: !!inline, inputStartLine: Number(root.__dsoInputStartLine) || 1, line: line, rawColumn: rawColumn || 0, rawLine: rawLine, source: source, type: "toggleBreakpoint" };
+      const fallback = function (reason) { const sent = typeof __dsoPostWebviewFallback === "function" ? __dsoPostWebviewFallback(Object.assign({}, payload, { type: "overlayToggleBreakpoint" })) : 0; __dsoLog(post, "breakpoint.toggle.webview", { line: line, reason: String(reason || ""), sent: sent, source: source }); };
+      try { const request = post(payload); if (request && request.then) { request.then(function (response) { if (response && response.type === "opaque") { fallback("opaque"); return; } if (!response || response.ok === false) { fallback(response ? "status:" + response.status : "empty-response"); } }).catch(function (error) { fallback(error && error.message || error); }); } } catch (error) { fallback(error && error.message || error); }
       return true;
     }
 

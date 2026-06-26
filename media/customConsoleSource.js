@@ -16,6 +16,7 @@ const debugButtons = Array.from(document.querySelectorAll("[data-action=debug-sh
 const debugControlButtons = Array.from(document.querySelectorAll("[data-debug-control]"));
 const debugInfo = document.getElementById("debugInfo");
 const debugLocation = document.getElementById("debugLocation");
+const debugMode = document.getElementById("debugMode");
 const debugSourceLine = document.getElementById("debugSourceLine");
 const debugStatus = document.getElementById("debugStatus");
 const debugVariables = document.getElementById("debugVariables");
@@ -40,6 +41,7 @@ let e2eSawShellPrompt = false;
 let debugAttached = false;
 let debugBusy = false;
 let debugDetail = "";
+let debugDisplayMode = "file";
 let debugState = "idle";
 let breakpointCount = 0;
 let overlayTabActive = "overlay-1";
@@ -65,6 +67,7 @@ function main() {
   }
   focusTerminalButton.addEventListener("click", () => terminal.focus());
   document.getElementById("restart").addEventListener("click", () => vscode.postMessage({ type: "restart" }));
+  debugMode?.addEventListener("change", () => setDebugMode(debugMode.value, true));
   transport?.addEventListener("change", () => vscode.postMessage({ mode: transport.value, type: "setTransport" }));
   setDebugStatus("idle", "");
   renderOverlayTabs();
@@ -200,6 +203,9 @@ function handleHostMessage(message) {
     }
     vscode.postMessage(payload);
   }
+  if (message.type === "overlayToggleBreakpoint") {
+    vscode.postMessage({ column: Number(message.column) || 0, inline: Boolean(message.inline), inputStartLine: Number(message.inputStartLine) || 0, line: Number(message.line) || 0, rawColumn: Number(message.rawColumn) || 0, rawLine: Number(message.rawLine) || 0, source: String(message.source || "webview-fallback"), type: "overlayToggleBreakpoint" });
+  }
   if (message.type === "terminalData" && typeof message.data === "string") {
     snapshotWritten = true;
     terminal.write(message.data);
@@ -210,6 +216,9 @@ function handleHostMessage(message) {
   if (message.type === "transport" && transport) {
     transport.value = message.mode || "pty";
     transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">● ORM cell</span>' : message.active === "tcp" ? '<span class="on">● socket</span>' : message.active === "pty" ? '<span class="pty">● terminal</span>' : '<span class="off">○ not connected</span>';
+  }
+  if (message.type === "debugMode") {
+    setDebugMode(message.mode, false);
   }
   if (message.type === "debugStatus") {
     setDebugStatus(String(message.state || "idle"), String(message.detail || ""));
@@ -317,7 +326,18 @@ function requestDebugShell() {
     return;
   }
   setDebugStatus("starting", "attaching");
-  vscode.postMessage({ debugAttached, debugBusy, debugState, runtimeReady, type: "debugShell" });
+  vscode.postMessage({ debugAttached, debugBusy, debugMode: debugDisplayMode, debugState, runtimeReady, type: "debugShell" });
+}
+
+/** Updates the selected debugger display mode and optionally notifies the extension host. */
+function setDebugMode(mode, notify) {
+  debugDisplayMode = mode === "overlay" ? "overlay" : "file";
+  if (debugMode) {
+    debugMode.value = debugDisplayMode;
+  }
+  if (notify) {
+    vscode.postMessage({ debugMode: debugDisplayMode, type: "setDebugMode" });
+  }
 }
 
 /** Requests one basic VS Code debugger action for the attached shell session. */

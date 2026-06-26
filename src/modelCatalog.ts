@@ -16,6 +16,9 @@ interface CatalogMessage {
 const VIEW_ID = "djangoShell.modelCatalog";
 const CATALOG_LOAD_RETRIES = 4;
 const CATALOG_RETRY_BASE_MS = 500;
+const CATALOG_REQUEST_TIMEOUT_MS = 8000;
+const CATALOG_BUSY_MESSAGE = "Django shell is busy running or debugging Python. Try again after the current cell continues or finishes.";
+const CATALOG_REQUEST_TIMEOUT = Symbol("catalogRequestTimeout");
 
 /** Renders a searchable, filterable list of models that opens the data browser on selection. */
 export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -78,7 +81,13 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
     const started = Date.now();
     let list: BackendModelList;
     try {
-      list = await this.source.listModels();
+      const result = await Promise.race([this.source.listModels(), new Promise<typeof CATALOG_REQUEST_TIMEOUT>((resolve) => setTimeout(() => resolve(CATALOG_REQUEST_TIMEOUT), CATALOG_REQUEST_TIMEOUT_MS))]);
+      if (result === CATALOG_REQUEST_TIMEOUT) {
+        this.logger?.log("model.catalog.timeout", { attempt, ms: CATALOG_REQUEST_TIMEOUT_MS });
+        void this.view.webview.postMessage({ error: CATALOG_BUSY_MESSAGE, models: [], ok: false, type: "models" });
+        return;
+      }
+      list = result;
     } catch (error) {
       list = { error: error instanceof Error ? error.message : String(error), models: [], ok: false };
     }

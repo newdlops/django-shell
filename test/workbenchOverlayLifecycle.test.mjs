@@ -12,6 +12,7 @@ const customConsoleHtmlSource = fs.readFileSync(new URL("../src/customConsoleHtm
 const debugBreakpointsSource = fs.readFileSync(new URL("../src/debugBreakpoints.ts", import.meta.url), "utf8");
 const debugControlsSource = fs.readFileSync(new URL("../src/debugControls.ts", import.meta.url), "utf8");
 const debugEventsSource = fs.readFileSync(new URL("../src/customConsoleDebugEvents.ts", import.meta.url), "utf8");
+const debugFileModeSource = fs.readFileSync(new URL("../src/debugFileMode.ts", import.meta.url), "utf8");
 const debugInspectorSource = fs.readFileSync(new URL("../src/debugInspector.ts", import.meta.url), "utf8");
 const generatedTabsSource = fs.readFileSync(new URL("../src/generatedOverlayTabs.ts", import.meta.url), "utf8");
 const overlayMemorySource = fs.readFileSync(new URL("../src/overlayMemoryDocument.ts", import.meta.url), "utf8");
@@ -71,6 +72,20 @@ test("overlay bridge toggles generated console source breakpoints", () => {
   assert.ok(overlaySource.includes("vscode.Position(sourceLine, sourceColumn)"));
 });
 
+test("breakpoint toggles fall back through the custom console webview", () => {
+  const syncSource = fs.readFileSync(new URL("../src/workbenchOverlaySyncRenderer.ts", import.meta.url), "utf8");
+  const breakpointSource = fs.readFileSync(new URL("../src/workbenchOverlayBreakpointRenderer.ts", import.meta.url), "utf8");
+  const customConsoleClientSource = fs.readFileSync(new URL("../media/customConsoleSource.js", import.meta.url), "utf8");
+
+  assert.ok(syncSource.includes("__dsoPostWebviewFallback"));
+  assert.ok(breakpointSource.includes('type: "overlayToggleBreakpoint"'));
+  assert.ok(breakpointSource.includes('fallback("opaque")'));
+  assert.ok(customConsoleClientSource.includes('message.type === "overlayToggleBreakpoint"'));
+  assert.ok(customConsoleSource.includes('typed.type === "overlayToggleBreakpoint"'));
+  assert.ok(overlaySource.includes("toggleBreakpointFromVisibleLine"));
+  assert.ok(overlaySource.includes("lastBreakpointToggleKey"));
+});
+
 test("overlay reinjects when the renderer bridge port is stale", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
@@ -117,6 +132,24 @@ test("debugger controls live in the Python cell toolbar", () => {
   assert.ok(pythonToolbar.includes('data-debug-control="stop"'));
 });
 
+test("debugger display mode can switch between file and overlay debugging", () => {
+  const customConsoleClientSource = fs.readFileSync(new URL("../media/customConsoleSource.js", import.meta.url), "utf8");
+
+  assert.ok(customConsoleHtmlSource.includes('id="debugMode"'));
+  assert.ok(customConsoleHtmlSource.includes('value="file">Debug: File'));
+  assert.ok(customConsoleHtmlSource.includes('value="overlay">Debug: Overlay'));
+  assert.ok(customConsoleClientSource.includes('type: "setDebugMode"'));
+  assert.ok(customConsoleSource.includes('debugMode: DjangoShellDebugMode = DEFAULT_DEBUG_MODE'));
+  assert.ok(customConsoleSource.includes('this.debugMode === "file"'));
+  assert.ok(customConsoleSource.includes("prepareFileDebugInput"));
+  assert.ok(customConsoleSource.includes("set breakpoints"));
+  assert.ok(customConsoleSource.includes("runCurrentDebugInput"));
+  assert.ok(debugFileModeSource.includes("debug-cell.py"));
+  assert.ok(debugFileModeSource.includes("mirrorOverlayBreakpointsToDebugFile"));
+  assert.ok(debugFileModeSource.includes("existingKeys"));
+  assert.equal(debugFileModeSource.includes("removeBreakpoints(existing)"), false);
+});
+
 test("debug start clicks always reach the extension host for diagnostics", () => {
   const customConsoleClientSource = fs.readFileSync(new URL("../media/customConsoleSource.js", import.meta.url), "utf8");
   const debugStart = customConsoleClientSource.slice(customConsoleClientSource.indexOf("function requestDebugShell"), customConsoleClientSource.indexOf("function requestDebugControl"));
@@ -130,6 +163,11 @@ test("debug start clicks always reach the extension host for diagnostics", () =>
   assert.ok(customConsoleSource.includes("debug.shell.request"));
   assert.ok(customConsoleSource.includes("debug.shell.alreadyAttached"));
   assert.ok(customConsoleSource.includes("debug.shell.noBackend"));
+  assert.ok(customConsoleSource.includes("debugAttachPromise"));
+  assert.ok(customConsoleSource.includes("debug.shell.inFlight"));
+  assert.ok(customConsoleSource.includes("startDebugpyWithTimeout"));
+  assert.ok(customConsoleSource.includes("DEBUG_ATTACH_TIMEOUT_MS"));
+  assert.ok(customConsoleSource.includes("debugpyEndpoint = undefined"));
 });
 
 test("debug inspection prefers the generated overlay frame from stopped stacks", () => {
@@ -144,6 +182,11 @@ test("debug step-over refocus stays conditional so step-into can open source", (
   assert.ok(customConsoleSource.includes("debugControlOriginOverlay"));
   assert.ok(customConsoleSource.includes("this.debugControlOriginOverlay && this.lastDebugFrameOverlay"));
   assert.ok(customConsoleSource.includes("debug.overlay.refocus"));
+  assert.ok(customConsoleSource.includes("refocusDebugOverlay"));
+  assert.ok(customConsoleSource.includes("this.panel?.reveal(vscode.ViewColumn.One)"));
+  assert.ok(customConsoleSource.includes("shouldRefocusOverlay"));
+  assert.ok(debugEventsSource.includes("hooks.shouldRefocusOverlay()"));
+  assert.ok(debugEventsSource.includes("hooks.refocusOverlay()"));
   assert.ok(debugEventsSource.includes('preferOverlay: hooks.lastControlAction() !== "stepInto"'));
 });
 
@@ -170,7 +213,7 @@ test("analysis-only overlay sync keeps the executable console-cell file dirty", 
 
 test("generated overlay breakpoints are sent directly to the debug adapter", () => {
   assert.ok(customConsoleSource.includes('syncActiveDebugBreakpoints("execute"'));
-  assert.ok(customConsoleSource.includes("normalizeOverlayBreakpointLine"));
+  assert.ok(debugFileModeSource.includes("normalizeOverlayBreakpointLine"));
   assert.ok(debugBreakpointsSource.includes('customRequest("setBreakpoints"'));
   assert.ok(debugBreakpointsSource.includes("requestedBreakpoints.length - breakpoints.length"));
   assert.ok(debugBreakpointsSource.includes("sourceModified: true"));
@@ -178,7 +221,8 @@ test("generated overlay breakpoints are sent directly to the debug adapter", () 
 });
 
 test("debug attach runs the current overlay input after breakpoint sync", () => {
-  assert.ok(customConsoleSource.includes("runCurrentInput: () => this.runCurrentOverlayInput()"));
+  assert.ok(customConsoleSource.includes("runCurrentInput: () => this.runCurrentDebugInput()"));
+  assert.ok(customConsoleSource.includes("return this.runCurrentOverlayInput()"));
   assert.ok(debugEventsSource.includes("startDebuggedInput"));
   assert.ok(debugEventsSource.includes('hooks.syncBreakpoints("sessionStart")'));
   assert.ok(debugEventsSource.includes("hooks.runCurrentInput()"));

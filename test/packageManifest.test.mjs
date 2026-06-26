@@ -56,11 +56,13 @@ test("contributes a command for debugging the active Django shell", () => {
   const commands = manifest.contributes.commands.map((item) => item.command);
   const palette = manifest.contributes.menus.commandPalette.map((item) => item.command);
   const runtimeTitle = manifest.contributes.menus["view/title"].find((item) => item.command === "djangoShell.debugShell");
+  const editorTitle = manifest.contributes.menus["editor/title"].find((item) => item.command === "djangoShell.debugShell");
 
   assert.ok(commands.includes("djangoShell.debugShell"));
   assert.ok(manifest.activationEvents.includes("onCommand:djangoShell.debugShell"));
   assert.ok(palette.includes("djangoShell.debugShell"));
   assert.equal(runtimeTitle?.when, "view == djangoShell.runtimeInspector");
+  assert.equal(editorTitle?.when, "resourceFilename == 'debug-cell.py'");
 });
 
 test("contributes basic debugger control commands for the custom console", () => {

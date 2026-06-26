@@ -48,6 +48,8 @@ export interface BackendBootstrapCommand {
   mode: "env" | "inline";
 }
 
+const INLINE_BOOTSTRAP_CHUNK_SIZE = 900;
+
 /** Env var carrying the compressed backend source to the spawned shell out-of-band (never typed, so the shell-audit log stays clean). */
 export const BACKEND_PAYLOAD_ENV = "DJANGO_SHELL_BACKEND_B64";
 
@@ -88,13 +90,27 @@ export function buildInlineBackendBootstrapCommand(runtimePath: string, token: s
   if (!payload) {
     return undefined;
   }
+  const partsKey = `_djs_inline_parts_${token}`;
+  const partsLiteral = pythonString(partsKey);
   const python = [
     "import types as _djs_t,base64 as _djs_b,zlib as _djs_z",
-    `_djs_src=_djs_z.decompress(_djs_b.b64decode(${pythonString(payload)})).decode("utf-8")`,
+    `_djs_payload="".join(globals().pop(${partsLiteral},[]))`,
+    `_djs_src=_djs_z.decompress(_djs_b.b64decode(_djs_payload)).decode("utf-8")`,
     backendLoadStatements(token)
   ].join("; ");
-  const command = `exec(${pythonString(python)})\r`;
+  const initLine = `globals()[${partsLiteral}]=[]`;
+  const chunkLines = payloadChunks(payload).map((chunk) => `globals().setdefault(${partsLiteral},[]).append(${pythonString(chunk)})`);
+  const command = `${initLine}\r${chunkLines.join("\r")}\rexec(${pythonString(python)})\r`;
   return { bytes: command.length, command, mode: "inline" };
+}
+
+/** Splits the inline backend payload into short terminal input lines so remote IPython/kubectl PTYs do not choke on one huge line. */
+function payloadChunks(payload: string): string[] {
+  const chunks: string[] = [];
+  for (let index = 0; index < payload.length; index += INLINE_BOOTSTRAP_CHUNK_SIZE) {
+    chunks.push(payload.slice(index, index + INLINE_BOOTSTRAP_CHUNK_SIZE));
+  }
+  return chunks;
 }
 
 /** The shared `_djs_src`-loading tail: build the module, run start() (which wires `_djs_rpc`/initial names into the namespace), expose the module, and scrub the bootstrap line from history (kept LAST so IPython does not re-record it). */

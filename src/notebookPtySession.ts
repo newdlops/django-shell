@@ -5,7 +5,7 @@ import * as pty from "node-pty";
 import * as vscode from "vscode";
 import { SerializedAsyncQueue } from "./asyncQueue";
 import { BackendClient, BackendProgressSnapshot, BackendRequestPayload, BackendTransportMode } from "./backendClient";
-import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BackendBootstrapCommand, BackendPtyResponse, backendBootstrapPayload, buildBackendBootstrapCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendProgressMarkers, parseBackendReadyMarker, parseBackendResponseMarkers } from "./backendBootstrap";
+import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BACKEND_PROGRESS_PREFIX, BackendBootstrapCommand, BackendPtyResponse, backendBootstrapPayload, buildBackendBootstrapCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendProgressMarkers, parseBackendReadyMarker, parseBackendResponseMarkers } from "./backendBootstrap";
 import { buildPtyBackendRequest, buildPtyExecuteCell, firstPathEntry, isSecretPrompt, safeCommand, trimTerminalText } from "./notebookPtyText";
 import { DiagnosticLogger } from "./diagnostics";
 import { buildShellEnv } from "./env";
@@ -60,6 +60,7 @@ export class NotebookPtySession implements vscode.Disposable {
   private cellCapture = false;
   private bootstrapRetried = false;
   private bootstrapRetryPending = false;
+  private readonly bootstrapWriteTimers = new Set<NodeJS.Timeout>();
   private ptyRequestBuffer = "";
   private ptyProgressBuffer = "";
   private readonly ptyResponseChunks = new Map<string, { chunks: string[]; count: number }>();
@@ -188,6 +189,7 @@ export class NotebookPtySession implements vscode.Disposable {
   dispose(): void {
     this.generation += 1;
     this.stopKeepalive();
+    this.clearBootstrapWriteTimers();
     this.process?.kill();
     this.rejectPtyRequests("Django shell PTY session disposed.");
     this.dataEmitter.dispose();
@@ -215,6 +217,11 @@ export class NotebookPtySession implements vscode.Disposable {
       this.ptyProgressBuffer = `${this.ptyProgressBuffer}${data}`;
       this.inspectPtyProgress();
       this.inspectPtyResponses();
+    } else if (this.ptyProgressBuffer || data.includes(BACKEND_PROGRESS_PREFIX)) {
+      this.ptyProgressBuffer = `${this.ptyProgressBuffer}${data}`;
+      this.inspectPtyProgress();
+    } else {
+      this.ptyProgressBuffer = progressMarkerTail(data);
     }
     this.mode = nextModeForOutput(this.mode, this.outputTail);
     if (this.mode === "unknown-python") {
@@ -254,7 +261,42 @@ export class NotebookPtySession implements vscode.Disposable {
       sessionId: this.options.sessionId
     });
     this.suppressBackendOutput = true;
+    this.clearBootstrapWriteTimers();
+    if (bootstrap.mode === "inline") {
+      this.writeInlineBootstrapPaced(bootstrap.command);
+      return;
+    }
     this.process?.write(bootstrap.command);
+  }
+
+  /** Writes the remote inline bootstrap in paced lines so kubectl/IPython PTYs do not drop the queued payload. */
+  private writeInlineBootstrapPaced(command: string): void {
+    const lines = command.replace(/\r$/, "").split("\r");
+    const sessionGeneration = this.generation;
+    const writeLine = (index: number): void => {
+      if (sessionGeneration !== this.generation || !this.process || this.client) {
+        return;
+      }
+      this.process.write(`${lines[index]}\r`);
+      if (index + 1 >= lines.length) {
+        return;
+      }
+      const delay = index === 0 ? 350 : 20;
+      const timer = setTimeout(() => {
+        this.bootstrapWriteTimers.delete(timer);
+        writeLine(index + 1);
+      }, delay);
+      this.bootstrapWriteTimers.add(timer);
+    };
+    writeLine(0);
+  }
+
+  /** Cancels delayed inline bootstrap writes for a restarted or disposed PTY. */
+  private clearBootstrapWriteTimers(): void {
+    for (const timer of this.bootstrapWriteTimers) {
+      clearTimeout(timer);
+    }
+    this.bootstrapWriteTimers.clear();
   }
 
   /** Parses backend ready or failed markers from recent PTY output. */
@@ -398,7 +440,7 @@ export class NotebookPtySession implements vscode.Disposable {
   /** Emits streamed backend progress markers received while a PTY request is running. */
   private inspectPtyProgress(): void {
     const parsed = parseBackendProgressMarkers(this.ptyProgressBuffer);
-    this.ptyProgressBuffer = parsed.rest;
+    this.ptyProgressBuffer = progressMarkerTail(parsed.rest);
     for (const marker of parsed.markers) {
       if (marker && typeof marker === "object") {
         this.progressEmitter.fire(marker as BackendProgressSnapshot);
@@ -483,6 +525,7 @@ export class NotebookPtySession implements vscode.Disposable {
   /** Resets in-memory runtime state before a fresh PTY launch. */
   private resetRuntimeState(): void {
     this.stopKeepalive();
+    this.clearBootstrapWriteTimers();
     this.client = undefined;
     this.ipython = false;
     this.cellCapture = false;
@@ -558,4 +601,20 @@ function wantsPtyProgress(payload: BackendRequestPayload): boolean {
     return false;
   }
   return /\bfor\b|\.iterator\s*\(|\.objects\b|QuerySet\b/.test(payload.code);
+}
+
+/** Returns the progress marker tail worth keeping across PTY output chunks. */
+function progressMarkerTail(output: string): string {
+  const markerIndex = output.lastIndexOf(BACKEND_PROGRESS_PREFIX);
+  if (markerIndex >= 0) {
+    return output.slice(markerIndex);
+  }
+  const maxLength = Math.min(output.length, BACKEND_PROGRESS_PREFIX.length - 1);
+  for (let length = maxLength; length > 0; length -= 1) {
+    const suffix = output.slice(-length);
+    if (BACKEND_PROGRESS_PREFIX.startsWith(suffix)) {
+      return suffix;
+    }
+  }
+  return "";
 }

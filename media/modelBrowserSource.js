@@ -135,6 +135,8 @@ function handleMessage(message) {
     els.transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">● ORM cell</span>' : message.active === "tcp" ? '<span class="on">● socket</span>' : message.active === "pty" ? '<span class="pty">● terminal</span>' : '<span class="off">○ not connected</span>';
   } else if (message.type === "queryMode") {
     enterQueryMode((payload) => send(payload));
+  } else if (message.type === "busy") {
+    renderBusy(message.message);
   } else if (message.type === "error") {
     renderError(message.message);
   }
@@ -146,6 +148,17 @@ function renderLoading(message) {
   els.gridwrap.innerHTML = "";
   els.gridwrap.appendChild(el("div", { className: "empty" }, "Loading…"));
   startProgress("Loading model data");
+  els.more.disabled = true;
+}
+
+/** Shows a non-destructive busy state, preserving any loaded table instead of leaving a spinner active. */
+function renderBusy(messageText) {
+  stopProgress();
+  if (!document.getElementById("tbody")) {
+    els.gridwrap.innerHTML = "";
+    els.gridwrap.appendChild(el("div", { className: "empty" }, messageText || "Django shell is busy."));
+  }
+  els.status.textContent = messageText || "Django shell is busy.";
   els.more.disabled = true;
 }
 

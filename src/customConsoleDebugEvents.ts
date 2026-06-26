@@ -8,15 +8,18 @@ import type { DiagnosticLogger } from "./diagnostics";
 export type DebugStatusState = "attached" | "error" | "idle" | "paused" | "running" | "starting";
 
 interface DebugEventHooks {
+  consumeRunOnSessionStart(): boolean;
   getSession(): vscode.DebugSession | undefined;
   lastControlAction(): DebugControlAction | undefined;
   logger?: DiagnosticLogger;
   postInfo(info: DebugFrameInfo): void;
   postStatus(state: DebugStatusState, detail?: string): void;
+  refocusOverlay(): void;
   refreshBreakpoints(): void;
   runCurrentInput(): Promise<string>;
   setPausedThread(threadId: number | undefined): void;
   setSession(session: vscode.DebugSession | undefined): void;
+  shouldRefocusOverlay(): boolean;
   syncBreakpoints(reason: string): Promise<void>;
 }
 
@@ -28,6 +31,7 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
     generation += 1;
     const current = generation;
     if (item && "frameId" in item) { hooks.logger?.log("debug.active.frame", { frameId: item.frameId, threadId: item.threadId }); }
+    if (item && "frameId" in item && hooks.shouldRefocusOverlay()) { hooks.refocusOverlay(); }
     void refreshPausedFrame(item, hooks, () => current === generation);
   };
   const inspectStopped = (session: vscode.DebugSession, body: { reason?: string; threadId?: number } | undefined) => {
@@ -36,6 +40,7 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
     const current = generation;
     hooks.setPausedThread(body?.threadId);
     hooks.logger?.log("debug.dap.stopped", { reason: body?.reason ?? "", threadId: body?.threadId ?? 0 });
+    if (hooks.shouldRefocusOverlay()) { hooks.refocusOverlay(); }
     void logDebugStack(session, body?.threadId, hooks);
     void refreshStoppedThread(session, body, hooks, () => current === generation);
   };
@@ -43,7 +48,8 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
     vscode.debug.onDidStartDebugSession((session) => {
       if (!isDjangoShellSession(session)) { return; }
       hooks.logger?.log("debug.session.start", { sessionId: session.id });
-      hooks.setSession(session); hooks.postStatus("attached", "active"); clearInfo("attached"); hooks.refreshBreakpoints(); void startDebuggedInput(hooks);
+      hooks.setSession(session); hooks.postStatus("attached", "active"); clearInfo("attached"); hooks.refreshBreakpoints();
+      if (hooks.consumeRunOnSessionStart()) { void startDebuggedInput(hooks); } else { hooks.logger?.log("debug.session.start.skipRun", { sessionId: session.id }); }
     }),
     vscode.debug.onDidTerminateDebugSession((session) => {
       if (hooks.getSession()?.id !== session.id) { return; }

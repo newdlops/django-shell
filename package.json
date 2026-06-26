@@ -276,6 +276,13 @@
           "when": "false"
         }
       ],
+      "editor/title": [
+        {
+          "command": "djangoShell.debugShell",
+          "group": "navigation@1",
+          "when": "resourceFilename == 'debug-cell.py'"
+        }
+      ],
       "view/title": [
         {
           "command": "djangoShell.openConsole",
