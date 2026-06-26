@@ -8,6 +8,7 @@ import io
 import inspect
 import json
 import keyword
+import linecache
 import os
 import pprint
 import socketserver
@@ -25,6 +26,7 @@ _STATE = {}
 _EXECUTION_LOCK = threading.Lock()
 _PROGRESS_LOCK = threading.Lock()
 _PROGRESS_INTERVAL_SECONDS = 0.25
+_MISSING = object()
 
 
 class _Server(socketserver.ThreadingTCPServer):
@@ -308,8 +310,17 @@ def _run_request(namespace, token, request, initial_names):
         return _check_complete(code)
     filename = request.get("filename")
     line_offset = request.get("lineOffset")
+    source_text = request.get("sourceText")
+    breakpoint_lines = request.get("breakpointLines")
     with _EXECUTION_LOCK:
-        return _execute_code(namespace, code, filename if isinstance(filename, str) and filename else None, line_offset if isinstance(line_offset, int) else 0)
+        return _execute_code(
+            namespace,
+            code,
+            filename if isinstance(filename, str) and filename else None,
+            line_offset if isinstance(line_offset, int) else 0,
+            source_text if isinstance(source_text, str) else None,
+            breakpoint_lines if isinstance(breakpoint_lines, list) else None,
+        )
 
 
 def _check_complete(code):
@@ -975,14 +986,16 @@ def _truncate(text, limit=180):
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
-def _execute_code(namespace, code, filename=None, line_offset=0):
+def _execute_code(namespace, code, filename=None, line_offset=0, source_text=None, breakpoint_lines=None):
     """Executes Python code and captures stdout, stderr, repr result, and traceback."""
     stdout = io.StringIO()
     stderr = io.StringIO()
     result = None
     compile_filename = filename or "<django-shell-input>"
+    _install_debug_source_cache(compile_filename, source_text, code, line_offset)
     _debug_current_thread()
     _progress_begin(code, emit=bool(_STATE.get("progress_emit")))
+    namespace["_djs_debug_should_break"] = _debug_should_break
     namespace["_djs_progress_iter"] = _progress_iter
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         try:
@@ -990,26 +1003,371 @@ def _execute_code(namespace, code, filename=None, line_offset=0):
             tree = _progress_instrument_tree(tree)
             if line_offset > 0:
                 ast.increment_lineno(tree, line_offset)
-            body, expression = _split_last_expression(tree)
-            if body:
-                tree.body = body
-                ast.fix_missing_locations(tree)
-                exec(compile(tree, compile_filename, "exec"), namespace)
-            if expression is None:
-                if not body:
-                    exec(compile(tree, compile_filename, "exec"), namespace)
+            if breakpoint_lines is not None and _debug_can_wrap_tree(tree):
+                tree = _debug_breakpoint_tree(tree, breakpoint_lines)
+                result = _execute_debug_tree(namespace, tree, compile_filename)
             else:
-                expr = ast.Expression(expression.value)
-                ast.fix_missing_locations(expr)
-                value = eval(compile(expr, compile_filename, "eval"), namespace)
-                if value is not None:
-                    namespace["_"] = value
-                    result = pprint.pformat(value, width=120, compact=False)
+                tree = _debug_breakpoint_tree(tree, breakpoint_lines)
+                result = _execute_plain_tree(namespace, tree, compile_filename)
             _progress_finish(True)
             return {"ok": True, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "result": result}
         except Exception:
             _progress_finish(False)
             return {"ok": False, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "traceback": traceback.format_exc()}
+
+
+def _execute_plain_tree(namespace, tree, compile_filename):
+    """Executes a parsed tree with normal module-level shell semantics."""
+    result = None
+    body, expression = _split_last_expression(tree)
+    if body:
+        tree.body = body
+        ast.fix_missing_locations(tree)
+        exec(compile(tree, compile_filename, "exec"), namespace)
+    if expression is None:
+        if not body:
+            exec(compile(tree, compile_filename, "exec"), namespace)
+    else:
+        expr = ast.Expression(expression.value)
+        ast.fix_missing_locations(expr)
+        value = eval(compile(expr, compile_filename, "eval"), namespace)
+        if value is not None:
+            namespace["_"] = value
+            result = pprint.pformat(value, width=120, compact=False)
+    return result
+
+
+def _execute_debug_tree(namespace, tree, compile_filename):
+    """Executes a parsed tree through a named function frame visible to debugpy."""
+    result_name = "__djs_overlay_cell_result__"
+    function_name = "__djs_overlay_cell__"
+    previous_result = namespace.get(result_name, _MISSING)
+    previous_function = namespace.get(function_name, _MISSING)
+    try:
+        module = _debug_wrapper_tree(tree, function_name, result_name)
+        ast.fix_missing_locations(module)
+        exec(compile(module, compile_filename, "exec"), namespace)
+        value = namespace.get(result_name)
+        if value is not None:
+            namespace["_"] = value
+            return pprint.pformat(value, width=120, compact=False)
+        return None
+    finally:
+        _restore_namespace_value(namespace, result_name, previous_result)
+        _restore_namespace_value(namespace, function_name, previous_function)
+
+
+def _restore_namespace_value(namespace, name, previous):
+    """Restores one temporary namespace binding after debug wrapper execution."""
+    if previous is _MISSING:
+        namespace.pop(name, None)
+    else:
+        namespace[name] = previous
+
+
+def _debug_can_wrap_tree(tree):
+    """Returns whether a tree can run inside a debug-visible function frame."""
+    for statement in tree.body:
+        if isinstance(statement, ast.ImportFrom) and statement.module == "__future__":
+            return False
+        if isinstance(statement, ast.ImportFrom) and any(alias.name == "*" for alias in statement.names):
+            return False
+    return not _DebugWrapSafetyVisitor.has_unsafe_control_flow(tree)
+
+
+class _DebugWrapSafetyVisitor(ast.NodeVisitor):
+    """Detects module-scope nodes whose meaning would change inside a function."""
+
+    def __init__(self):
+        """Initializes the unsafe-node flag."""
+        self.unsafe = False
+
+    @classmethod
+    def has_unsafe_control_flow(cls, tree):
+        """Returns whether wrapping would make invalid module-scope control flow valid."""
+        visitor = cls()
+        visitor.visit(tree)
+        return visitor.unsafe
+
+    def visit_FunctionDef(self, node):
+        """Skips nested function bodies whose control flow already belongs to them."""
+        return
+
+    def visit_AsyncFunctionDef(self, node):
+        """Skips nested async function bodies whose control flow already belongs to them."""
+        return
+
+    def visit_Lambda(self, node):
+        """Skips lambda bodies whose control flow already belongs to them."""
+        return
+
+    def visit_Return(self, node):
+        """Marks module-level return as unsafe to wrap."""
+        self.unsafe = True
+
+    def visit_Yield(self, node):
+        """Marks module-level yield as unsafe to wrap."""
+        self.unsafe = True
+
+    def visit_YieldFrom(self, node):
+        """Marks module-level yield-from as unsafe to wrap."""
+        self.unsafe = True
+
+
+def _debug_wrapper_tree(tree, function_name, result_name):
+    """Builds a module that calls user code through one debug-visible function."""
+    body, expression = _split_last_expression(tree)
+    first = _first_statement_or_expression(body, expression)
+    function_body = _debug_wrapper_body(body, expression)
+    function = ast.FunctionDef(name=function_name, args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]), body=function_body, decorator_list=[])
+    if first:
+        ast.copy_location(function, first)
+    call = ast.Assign(targets=[ast.Name(id=result_name, ctx=ast.Store())], value=ast.Call(func=ast.Name(id=function_name, ctx=ast.Load()), args=[], keywords=[]))
+    if first:
+        ast.copy_location(call, first)
+    return ast.Module(body=[function, call], type_ignores=[])
+
+
+def _debug_wrapper_body(body, expression):
+    """Returns function statements that preserve shell globals and final expression output."""
+    statements = []
+    names = sorted(_DebugGlobalNameCollector.collect(body, expression))
+    first = _first_statement_or_expression(body, expression)
+    if names:
+        global_node = ast.Global(names=names)
+        if first:
+            ast.copy_location(global_node, first)
+        statements.append(global_node)
+    statements.extend(body)
+    if expression is not None:
+        return_node = ast.Return(value=expression.value)
+        ast.copy_location(return_node, expression)
+        statements.append(return_node)
+    elif not body:
+        pass_node = ast.Pass()
+        if first:
+            ast.copy_location(pass_node, first)
+        statements.append(pass_node)
+    return statements
+
+
+def _first_statement_or_expression(body, expression):
+    """Returns the first source-bearing node in a split shell tree."""
+    return body[0] if body else expression
+
+
+class _DebugGlobalNameCollector(ast.NodeVisitor):
+    """Collects names that module-level shell code binds into globals."""
+
+    def __init__(self):
+        """Initializes the bound-name set."""
+        self.names = set()
+
+    @classmethod
+    def collect(cls, body, expression):
+        """Returns all global names bound by wrapper-executed user code."""
+        collector = cls()
+        for statement in body:
+            collector.visit(statement)
+        if expression is not None:
+            collector.visit(expression.value)
+        return collector.names
+
+    def visit_FunctionDef(self, node):
+        """Collects a function definition name without entering its local body."""
+        self.names.add(node.name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in node.args.defaults + node.args.kw_defaults:
+            if default is not None:
+                self.visit(default)
+
+    def visit_AsyncFunctionDef(self, node):
+        """Collects an async function definition name without entering its local body."""
+        self.visit_FunctionDef(node)
+
+    def visit_ClassDef(self, node):
+        """Collects a class definition name and base expressions without entering its body."""
+        self.names.add(node.name)
+        for item in [*node.bases, *[keyword.value for keyword in node.keywords], *node.decorator_list]:
+            self.visit(item)
+
+    def visit_Lambda(self, node):
+        """Skips lambda-local bindings."""
+        return
+
+    def visit_ListComp(self, node):
+        """Visits comprehension inputs without collecting comprehension-local targets."""
+        self._visit_comprehension(node)
+
+    def visit_SetComp(self, node):
+        """Visits set comprehension inputs without collecting local targets."""
+        self._visit_comprehension(node)
+
+    def visit_DictComp(self, node):
+        """Visits dict comprehension inputs without collecting local targets."""
+        self._visit_comprehension(node)
+
+    def visit_GeneratorExp(self, node):
+        """Visits generator inputs without collecting generator-local targets."""
+        self._visit_comprehension(node)
+
+    def visit_Name(self, node):
+        """Collects store-context names."""
+        if isinstance(node.ctx, ast.Store):
+            self.names.add(node.id)
+
+    def visit_Import(self, node):
+        """Collects names bound by import statements."""
+        for alias in node.names:
+            self.names.add(alias.asname or alias.name.split(".", 1)[0])
+
+    def visit_ImportFrom(self, node):
+        """Collects names bound by from-import statements."""
+        for alias in node.names:
+            if alias.name != "*":
+                self.names.add(alias.asname or alias.name)
+
+    def _visit_comprehension(self, node):
+        """Visits comprehension expressions that can read outer names."""
+        for generator in node.generators:
+            self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for field in ("elt", "key", "value"):
+            value = getattr(node, field, None)
+            if value is not None:
+                self.visit(value)
+
+
+def _install_debug_source_cache(filename, source_text, code, line_offset):
+    """Installs source text in linecache so debugpy binds breakpoints to generated overlay code."""
+    if not filename or filename.startswith("<"):
+        return
+    text = source_text if isinstance(source_text, str) and source_text else ("\n" * max(0, int(line_offset or 0))) + code
+    if not text.endswith("\n"):
+        text += "\n"
+    linecache.cache[filename] = (len(text), None, text.splitlines(True), filename)
+
+
+def _debug_should_break():
+    """Returns whether an injected overlay breakpoint should call the debug hook."""
+    debugpy = sys.modules.get("debugpy")
+    if not debugpy:
+        return False
+    try:
+        if hasattr(debugpy, "debug_this_thread"):
+            debugpy.debug_this_thread()
+        connected = _debug_wait_for_client(debugpy)
+        if connected and hasattr(debugpy, "breakpoint"):
+            os.environ["PYTHONBREAKPOINT"] = "debugpy.breakpoint"
+            sys.breakpointhook = debugpy.breakpoint
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _debug_wait_for_client(debugpy, timeout=1.5):
+    """Waits briefly for the VS Code debug adapter to finish attaching."""
+    connected = getattr(debugpy, "is_client_connected", lambda: True)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if connected():
+                return True
+        except Exception:
+            return False
+        time.sleep(0.05)
+    try:
+        return bool(connected())
+    except Exception:
+        return False
+
+
+def _debug_breakpoint_tree(tree, breakpoint_lines):
+    """Injects debugpy breakpoint calls before statements whose source lines are active breakpoints."""
+    lines = _debug_breakpoint_lines(breakpoint_lines)
+    if not lines:
+        return tree
+    return _DebugBreakpointTransformer(lines).visit(tree)
+
+
+def _debug_breakpoint_lines(breakpoint_lines):
+    """Normalizes requested one-based source line numbers into a positive integer set."""
+    lines = set()
+    for line in breakpoint_lines or []:
+        try:
+            value = int(line)
+        except Exception:
+            continue
+        if value > 0:
+            lines.add(value)
+    return lines
+
+
+class _DebugBreakpointTransformer(ast.NodeTransformer):
+    """Adds breakpoint helper calls before statements on active source lines."""
+
+    def __init__(self, lines):
+        """Stores the normalized active source lines."""
+        self.lines = lines
+
+    def generic_visit(self, node):
+        """Visits children and injects breakpoint calls into statement lists."""
+        node = super().generic_visit(node)
+        for field in ("body", "orelse", "finalbody"):
+            statements = getattr(node, field, None)
+            if isinstance(statements, list):
+                setattr(node, field, self._with_breakpoints(statements))
+        return node
+
+    def _with_breakpoints(self, statements):
+        """Returns a statement list with helper calls inserted before matching source lines."""
+        injected = []
+        for statement in statements:
+            if self._matches_breakpoint(statement):
+                injected.append(_debug_breakpoint_statement(statement))
+            injected.append(statement)
+        return injected
+
+    def _matches_breakpoint(self, statement):
+        """Returns whether an active breakpoint line falls inside one statement span."""
+        start = int(getattr(statement, "lineno", 0) or 0)
+        end = int(getattr(statement, "end_lineno", start) or start)
+        return any(start <= line <= end for line in self.lines)
+
+
+def _debug_breakpoint_statement(statement):
+    """Builds an overlay-line breakpoint call guarded by the debugpy connection state."""
+    node = ast.If(
+        test=ast.Call(func=ast.Name(id="_djs_debug_should_break", ctx=ast.Load()), args=[], keywords=[]),
+        body=[ast.Expr(value=_debug_builtin_breakpoint_call())],
+        orelse=[],
+    )
+    return _debug_copy_location(node, statement)
+
+
+def _debug_builtin_breakpoint_call():
+    """Builds a builtins.breakpoint call without depending on user namespace names."""
+    return ast.Call(
+        func=ast.Attribute(
+            value=ast.Call(func=ast.Name(id="__import__", ctx=ast.Load()), args=[ast.Constant(value="builtins")], keywords=[]),
+            attr="breakpoint",
+            ctx=ast.Load(),
+        ),
+        args=[],
+        keywords=[],
+    )
+
+
+def _debug_copy_location(node, source):
+    """Copies source location metadata onto a node and its direct children."""
+    ast.copy_location(node, source)
+    for child in ast.walk(node):
+        if child is not node:
+            ast.copy_location(child, source)
+    return node
 
 
 def _debug_current_thread():

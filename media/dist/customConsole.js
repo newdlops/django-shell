@@ -9698,15 +9698,12 @@ function setPythonReady(ready) {
   pythonCell?.classList.toggle("disabled", !ready);
 }
 function requestDebugShell() {
-  if (!runtimeReady || debugBusy) {
-    return;
-  }
   if (debugAttached) {
-    vscode.postMessage({ type: "stopDebugShell" });
+    vscode.postMessage({ debugAttached, debugBusy, debugState, runtimeReady, type: "stopDebugShell" });
     return;
   }
   setDebugStatus("starting", "attaching");
-  vscode.postMessage({ type: "debugShell" });
+  vscode.postMessage({ debugAttached, debugBusy, debugState, runtimeReady, type: "debugShell" });
 }
 function requestDebugControl(action) {
   if (!runtimeReady || !debugAttached || debugBusy || !action) {
@@ -9738,7 +9735,7 @@ function setBreakpointStatus(count) {
 }
 function updateDebugControls() {
   for (const button of debugButtons) {
-    button.disabled = !runtimeReady || debugBusy;
+    button.disabled = false;
     button.dataset.state = debugBusy ? "starting" : debugAttached ? "attached" : "idle";
     button.title = !runtimeReady ? "Start Django shell before debugging" : debugAttached ? "Stop Django Shell debugger" : "Debug current shell";
     button.setAttribute("aria-label", button.title);
@@ -9833,11 +9830,17 @@ function setDebugInfo(info) {
   const state = String(info.state || "idle");
   debugInfo.dataset.state = state;
   debugVariables.textContent = "";
-  if (state !== "paused" && state !== "error") {
+  if (state === "idle") {
     debugInfo.hidden = true;
     return;
   }
   debugInfo.hidden = false;
+  if (state !== "paused" && state !== "error") {
+    debugLocation.textContent = `Debugger ${state}`;
+    debugSourceLine.textContent = "No paused Python frame";
+    appendDebugMessage("No frame reported");
+    return;
+  }
   const frame = info.frame || {};
   debugLocation.textContent = state === "error" ? "Debug inspection failed" : debugLocationText(frame);
   debugSourceLine.textContent = String(info.error || frame.sourceLine || "");

@@ -8,6 +8,10 @@ export type DebugControlAction = typeof DEBUG_CONTROL_ACTIONS[number];
 
 export type DebugControlUiState = "attached" | "idle" | "paused" | "running";
 
+export interface DebugControlResult {
+  threadId?: number;
+}
+
 const COMMANDS: Record<DebugControlAction, string> = {
   continue: "workbench.action.debug.continue",
   pause: "workbench.action.debug.pause",
@@ -48,11 +52,36 @@ export function debugControlDetail(action: DebugControlAction): string {
   return action.replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`);
 }
 
-/** Executes one debugger action against VS Code's active debug session. */
-export async function runDebugControl(action: DebugControlAction, session?: vscode.DebugSession): Promise<void> {
+/** Executes one debugger action against the Django shell debug adapter session. */
+export async function runDebugControl(action: DebugControlAction, session?: vscode.DebugSession, preferredThreadId?: number): Promise<DebugControlResult> {
   if (action === "stop" && session) {
     await vscode.debug.stopDebugging(session);
-    return;
+    return {};
+  }
+  if (session && action !== "restart") {
+    const threadId = preferredThreadId ?? await firstThreadId(session);
+    if (!threadId) {
+      throw new Error("Debugger is attached but no debug thread is available yet. Run a Python cell or use Pause first.");
+    }
+    await session.customRequest(dapRequest(action), { threadId });
+    return { threadId };
   }
   await vscode.commands.executeCommand(debugControlCommand(action));
+  return {};
+}
+
+/** Returns the first known DAP thread id for control requests. */
+async function firstThreadId(session: vscode.DebugSession): Promise<number | undefined> {
+  const response = await session.customRequest("threads", {}) as { threads?: Array<{ id: number }> };
+  return response.threads?.[0]?.id;
+}
+
+/** Maps one UI action to its standard DAP request name. */
+function dapRequest(action: DebugControlAction): string {
+  if (action === "continue") { return "continue"; }
+  if (action === "pause") { return "pause"; }
+  if (action === "stepInto") { return "stepIn"; }
+  if (action === "stepOut") { return "stepOut"; }
+  if (action === "stepOver") { return "next"; }
+  return debugControlCommand(action);
 }

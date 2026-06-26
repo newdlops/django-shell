@@ -1,7 +1,5 @@
 // Debugpy bootstrap helpers for attaching VS Code to the live Django shell.
 
-import * as net from "net";
-
 export const DEBUGPY_MARKER_PREFIX = "__DJANGO_SHELL_DEBUGPY__";
 
 export interface DebugpyEndpoint {
@@ -33,25 +31,6 @@ export interface DjangoShellDebugConfiguration {
   type: "python";
 }
 
-/** Finds a currently free loopback port for debugpy to bind inside the shell. */
-export function findAvailableLoopbackPort(host = "127.0.0.1"): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.on("error", reject);
-    server.listen(0, host, () => {
-      const address = server.address();
-      const port = typeof address === "object" && address ? address.port : 0;
-      server.close((error?: Error) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve(port);
-        }
-      });
-    });
-  });
-}
-
 /** Builds Python code that starts debugpy once and prints a parseable endpoint marker. */
 export function buildDebugpyBootstrapCode(host: string, port: number, marker = DEBUGPY_MARKER_PREFIX, searchPaths: string[] = []): string {
   return [
@@ -71,8 +50,12 @@ export function buildDebugpyBootstrapCode(host: string, port: number, marker = D
     "            import debugpy as _djs_debugpy",
     `        _djs_debug_host = ${pythonString(host)}`,
     `        _djs_debug_port = ${port}`,
-    "        _djs_debugpy.listen((_djs_debug_host, _djs_debug_port))",
-    "        _djs_debug_endpoint = (_djs_debug_host, _djs_debug_port)",
+    "        _djs_debug_requested = (_djs_debug_host, _djs_debug_port)",
+    "        _djs_debug_listen_result = _djs_debugpy.listen(_djs_debug_requested)",
+    "        if isinstance(_djs_debug_listen_result, (list, tuple)) and len(_djs_debug_listen_result) >= 2:",
+    "            _djs_debug_endpoint = (_djs_debug_listen_result[0] or _djs_debug_host, int(_djs_debug_listen_result[1]))",
+    "        else:",
+    "            _djs_debug_endpoint = _djs_debug_requested",
     "        globals()['_django_shell_debugpy_endpoint'] = _djs_debug_endpoint",
     "        _djs_debug_reused = False",
     "    else:",

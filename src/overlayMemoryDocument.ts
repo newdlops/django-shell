@@ -7,20 +7,13 @@ import { ensureIgnoredShadowDirectory } from "./filePythonShadow";
 
 export const INPUT_MARKER = "# --- django shell input ---";
 
-// Debounce (ms) for returning the analysis backing document to a clean (saved) state after live-analysis edits.
-// syncAnalysis() edits the OPEN doc via applyEdit on every keystroke-driven language request but, unlike the
-// session-boundary writes, never saves it — so the hidden doc sat dirty at rest and VS Code prompted to save
-// analysis.py on window reload / exit. The exit prompt fires before deactivate cleanup can run, so the doc must be
-// kept clean during normal operation: a short debounced save flushes it clean once typing pauses.
-const ANALYSIS_CLEAN_SAVE_DELAY_MS = 300;
-
 /** Maintains a Python TextDocument whose edits stay in memory after creation. */
 export class OverlayMemoryDocument implements vscode.Disposable {
-  private analysisPromise: Promise<vscode.TextDocument> | undefined;
+  private analysisDirty = false;
+  private editorDirty = false;
   private prelude = "";
   private text = "";
   private writeQueue: Promise<void> = Promise.resolve();
-  private cleanSaveTimer: ReturnType<typeof setTimeout> | undefined;
   readonly analysisUri: vscode.Uri;
   readonly editorUri: vscode.Uri;
 
@@ -33,27 +26,27 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   /** Opens the file document so file-only language extensions can attach to it. */
   activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(this);
-    void this.enqueueWrite(async () => { await Promise.all([this.writeEditor(), this.writeAnalysis(true)]); await this.saveOpenDocuments(); await this.persistGeneratedFiles(); });
+    void this.enqueueWrite(async () => { await Promise.all([this.writeEditor(), this.writeAnalysis()]); });
   }
 
   /** Returns the user-visible editor-to-analysis line delta. */
   lineOffset(): number {
-    return prefixLineCount(this.prelude) - 2;
+    return 0;
   }
 
-  /** Returns the zero-based first user-editable line. */
+  /** Returns the one-based first user-editable source line in console-cell.py. */
   inputStartLine(): number {
-    return prefixLineCount(this.prelude);
+    return 1;
   }
 
-  /** Returns the editor backing text including the protected input marker. */
+  /** Returns the editor backing text used for debugpy source binding. */
   fullText(): string {
     return this.editorText();
   }
 
-  /** Returns the editor model text that preserves the shell input boundary. */
+  /** Returns the user-visible source text written to console-cell.py. */
   editorText(): string {
-    return backingText(this.prelude, this.text);
+    return this.text;
   }
 
   /** Returns only user-visible Python cell text for the overlay model. */
@@ -76,11 +69,15 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     const userText = extractUserText(text, this.prelude);
     const changed = userText !== this.text;
     this.logger?.log("overlay.memory.sync", { ...textFields(userText), changed, fullLines: textFields(text).lines });
-    if (!changed) {
+    const needsAnalysis = changed || this.analysisDirty;
+    const needsEditor = changed || this.editorDirty;
+    if (!needsAnalysis && !needsEditor) {
       return;
     }
-    this.text = userText;
-    await this.enqueueWrite(async () => { await Promise.all([this.writeEditor(), this.writeAnalysis(true)]); await this.saveOpenDocuments(); await this.persistGeneratedFiles(); });
+    if (changed) {
+      this.text = userText;
+    }
+    await this.enqueueWrite(async () => { await Promise.all([needsEditor ? this.writeEditor() : undefined, needsAnalysis ? this.writeAnalysis() : undefined].filter((item): item is Promise<void> => !!item)); });
   }
 
   /** Records live typing without touching generated files before execution. */
@@ -92,6 +89,8 @@ export class OverlayMemoryDocument implements vscode.Disposable {
       return;
     }
     this.text = userText;
+    this.editorDirty = true;
+    this.analysisDirty = true;
   }
 
   /** Synchronizes only the hidden analysis document in memory for latency-sensitive providers. */
@@ -99,12 +98,15 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     const userText = extractUserText(text, this.prelude);
     const changed = userText !== this.text;
     this.logger?.log("overlay.memory.syncAnalysis", { ...textFields(userText), changed, fullLines: textFields(text).lines });
-    if (!changed) {
+    const needsAnalysis = changed || this.analysisDirty;
+    if (!needsAnalysis) {
       return;
     }
-    this.text = userText;
+    if (changed) {
+      this.text = userText;
+      this.editorDirty = true;
+    }
     await this.enqueueWrite(async () => { await this.writeAnalysis(); });
-    this.scheduleAnalysisCleanSave();
   }
 
   /** Updates editor-only hidden import text while analysis stays on user code. */
@@ -115,7 +117,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
       return;
     }
     this.prelude = prelude;
-    await this.enqueueWrite(async () => { await this.writeEditor(); await this.writeAnalysis(true); await this.saveOpenDocuments(); await this.persistGeneratedFiles(); });
+    await this.enqueueWrite(async () => { await this.writeEditor(); await this.writeAnalysis(); });
   }
 
   /** Clears user input and generated imports for a fresh shell session. */
@@ -124,7 +126,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     this.logger?.log("overlay.memory.reset", { changed });
     this.text = "";
     this.prelude = "";
-    await this.enqueueWrite(async () => { await Promise.all([this.writeEditor(), this.writeAnalysis(true)]); await this.saveOpenDocuments(); await this.persistGeneratedFiles(); });
+    await this.enqueueWrite(async () => { await Promise.all([this.writeEditor(), this.writeAnalysis()]); });
   }
 
   /** Serializes generated file edits so reset, prelude, and sync updates cannot race. */
@@ -134,58 +136,24 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     return next;
   }
 
-  /** Saves generated documents after session-boundary rewrites so later disk resets do not conflict. */
-  private async saveOpenDocuments(): Promise<void> {
-    const document = await this.analysisPromise;
-    if (document?.isDirty) { await document.save(); }
-  }
-
-  /** Debounces a save of the analysis doc so live-typing edits do not leave it dirty at rest (no exit save prompt). */
-  private scheduleAnalysisCleanSave(): void {
-    if (this.cleanSaveTimer) {
-      clearTimeout(this.cleanSaveTimer);
-    }
-    this.cleanSaveTimer = setTimeout(() => {
-      this.cleanSaveTimer = undefined;
-      void this.enqueueWrite(() => this.saveOpenDocuments());
-    }, ANALYSIS_CLEAN_SAVE_DELAY_MS);
-  }
-
-  /** Persists the current generated document state without depending on visible editor tabs. */
-  private async persistGeneratedFiles(): Promise<void> {
-    await Promise.all([
-      vscode.workspace.fs.writeFile(this.editorUri, Buffer.from(this.editorText(), "utf8")),
-      vscode.workspace.fs.writeFile(this.analysisUri, Buffer.from(this.analysisText(), "utf8"))
-    ]);
-  }
-
   /** Writes generated analysis text into the dirty editor document without saving it. */
   private async writeEditor(): Promise<void> {
     const text = this.editorText();
     this.logger?.log("overlay.memory.write", { ...textFields(text), kind: "editor", offset: this.lineOffset() });
     await ensureBackingFile(this.editorUri, text);
+    this.editorDirty = false;
   }
 
-  /** Writes only user Python cell text into the hidden analysis document. */
-  private async writeAnalysis(persistOnFailure = false): Promise<void> {
-    const document = await this.ensureAnalysisOpen();
+  /** Writes only user Python cell text into the hidden analysis file without opening a dirty editor document. */
+  private async writeAnalysis(): Promise<void> {
     const text = this.analysisText();
     this.logger?.log("overlay.memory.write", { ...textFields(text), kind: "analysis", offset: this.lineOffset() });
-    await writeDocument(document, this.analysisUri, text, persistOnFailure);
+    await ensureBackingFile(this.analysisUri, text);
+    this.analysisDirty = false;
   }
 
-  /** Releases provider event resources and cancels any pending debounced clean-save. */
-  dispose(): void { if (this.cleanSaveTimer) { clearTimeout(this.cleanSaveTimer); } }
-
-  /** Opens the generated analysis file document once for language providers. */
-  private async ensureAnalysisOpen(): Promise<vscode.TextDocument> {
-    if (!this.analysisPromise) {
-      await ensureBackingFile(this.analysisUri, this.analysisText());
-      this.analysisPromise = openPythonDocument(this.analysisUri);
-    }
-    return this.analysisPromise;
-  }
-
+  /** Releases provider event resources. */
+  dispose(): void {}
 }
 
 /** Returns a workspace-local file URI for generated editor identity. */
@@ -199,7 +167,7 @@ function textFields(text: string): { chars: number; lines: number } {
   return { chars: text.length, lines: text ? text.split(/\r?\n/).length : 0 };
 }
 
-/** Returns a full generated Python document from hidden imports and user text. */
+  /** Returns a full generated Python document from hidden imports and user text. */
 function backingText(prelude: string, userText: string): string {
   return `${prelude}${INPUT_MARKER}\n${userText}`;
 }
@@ -226,53 +194,12 @@ function extractUserText(text: string, prelude = ""): string {
   return userText;
 }
 
-/** Opens one Python document. */
-function openPythonDocument(uri: vscode.Uri): Promise<vscode.TextDocument> {
-  return Promise.resolve(vscode.workspace.openTextDocument(uri)).then((document) => {
-    return document.languageId === "python" ? document : Promise.resolve(vscode.languages.setTextDocumentLanguage(document, "python"));
-  });
-}
-
 /** Creates the backing file once so file-only extensions receive a file URI. */
 async function ensureBackingFile(uri: vscode.Uri, text: string): Promise<void> {
   const directory = path.dirname(uri.fsPath);
   await vscode.workspace.fs.createDirectory(vscode.Uri.file(directory));
   await ensureIgnoredShadowDirectory(directory);
   await vscode.workspace.fs.writeFile(uri, Buffer.from(text, "utf8"));
-}
-
-/** Replaces an open document's contents, optionally forcing disk persistence. */
-async function writeDocument(document: vscode.TextDocument, uri: vscode.Uri, text: string, persistOnFailure = false): Promise<void> {
-  if (await replaceDocumentText(document, uri, text)) {
-    return;
-  }
-  try {
-    if (await replaceDocumentText(await openPythonDocument(uri), uri, text)) {
-      return;
-    }
-  } catch (error) {
-    if (!persistOnFailure) {
-      throw error;
-    }
-  }
-  if (persistOnFailure) {
-    await vscode.workspace.fs.writeFile(uri, Buffer.from(text, "utf8"));
-  }
-}
-
-/** Applies one whole-document replacement and reports whether VS Code accepted it. */
-async function replaceDocumentText(document: vscode.TextDocument, uri: vscode.Uri, text: string): Promise<boolean> {
-  const current = document.getText();
-  if (current === text) {
-    return true;
-  }
-  const edit = new vscode.WorkspaceEdit();
-  edit.replace(uri, new vscode.Range(document.positionAt(0), document.positionAt(current.length)), text);
-  try {
-    return await vscode.workspace.applyEdit(edit);
-  } catch {
-    return false;
-  }
 }
 
 export const __test = { extractUserText };

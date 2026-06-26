@@ -20,7 +20,7 @@ async function run() {
   assert.equal(opened.hasCellResizers, true);
   assert.equal(opened.hasDebugButton, true);
   assert.equal(opened.hasDebugControls, true);
-  assert.equal(opened.hasDebugInfoPanel, true);
+  assert.equal(opened.hasDebugInfoPanel, false);
   assert.equal(opened.hasNotebookChrome, true);
   assert.equal(opened.hasPythonDisabledState, true);
   assert.equal(opened.hasPythonIcon, true);

@@ -285,8 +285,13 @@ test("reports progress for running Python for-loops without waiting for the exec
     "code='import time\\nseen=[]\\nfor item in range(5):\\n    time.sleep(0.05)\\n    seen.append(item)\\nlen(seen)'",
     "thread=threading.Thread(target=lambda: result.setdefault('value', mod._execute_code(namespace, code)))",
     "thread.start()",
-    "time.sleep(0.12)",
-    "progress=mod._run_request(namespace, 'tok', {'token':'tok','kind':'progress'}, set())",
+    "progress={}",
+    "deadline=time.time()+0.8",
+    "while time.time() < deadline:",
+    "    time.sleep(0.01)",
+    "    progress=mod._run_request(namespace, 'tok', {'token':'tok','kind':'progress'}, set())",
+    "    if progress.get('active') and progress.get('total') == 5 and progress.get('current', 0) >= 1:",
+    "        break",
     "thread.join(2)",
     "final=mod._run_request(namespace, 'tok', {'token':'tok','kind':'progress'}, set())",
     "print(json.dumps({'doneAlive': thread.is_alive(), 'final': final, 'progress': progress, 'result': result.get('value')}))"
@@ -309,22 +314,93 @@ test("reports progress for running Python for-loops without waiting for the exec
 test("uses request filename and line offset as the compiled shell input location", { skip: !PYTHON }, () => {
   const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
   const script = [
+    "import importlib.util, json, linecache",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    `filename=${JSON.stringify(filename)}`,
+    "source='header\\n# --- django shell input ---\\nfirst = 1\\nraise RuntimeError(\"breakpoint-file\")\\n'",
+    "response=mod._run_request({}, 'tok', {'token':'tok','kind':'execute','code':'raise RuntimeError(\"breakpoint-file\")','filename':filename,'lineOffset':3,'sourceText':source}, set())",
+    "print(json.dumps({'linecache': linecache.getline(filename, 4).strip(), 'response': response}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.linecache, 'raise RuntimeError("breakpoint-file")');
+  assert.equal(payload.response.ok, false);
+  assert.match(payload.response.traceback, /breakpoint-file/);
+  assert.match(payload.response.traceback, /line 4/);
+  assert.ok(payload.response.traceback.includes(filename), payload.response.traceback);
+});
+
+test("injects debug breakpoints on active overlay source lines", { skip: !PYTHON }, () => {
+  const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
+  const script = [
+    "import importlib.util, json, sys, types",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    `filename=${JSON.stringify(filename)}`,
+    "hits={'breakpoint': 0, 'thread': 0}",
+    "fake=types.SimpleNamespace(is_client_connected=lambda: True, breakpoint=lambda: hits.__setitem__('breakpoint', hits['breakpoint'] + 1), debug_this_thread=lambda: hits.__setitem__('thread', hits['thread'] + 1))",
+    "sys.modules['debugpy']=fake",
+    "namespace={'hits': hits}",
+    "request={'token':'tok','kind':'execute','code':'value = (1\\n + 1)\\nvalue','filename':filename,'lineOffset':4,'breakpointLines':[6]}",
+    "response=mod._run_request(namespace, 'tok', request, set())",
+    "print(json.dumps({'breakpoint': hits['breakpoint'], 'thread': hits['thread'], 'response': response, 'value': namespace.get('value')}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.breakpoint, 1);
+  assert.ok(payload.thread >= 1);
+  assert.equal(payload.response.ok, true);
+  assert.equal(payload.response.result, "2");
+  assert.equal(payload.value, 2);
+});
+
+test("debug execution creates a visible overlay stack frame", { skip: !PYTHON }, () => {
+  const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
+  const script = [
     "import importlib.util, json",
     `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
     "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
     "mod=importlib.util.module_from_spec(spec)",
     "spec.loader.exec_module(mod)",
     `filename=${JSON.stringify(filename)}`,
-    "response=mod._run_request({}, 'tok', {'token':'tok','kind':'execute','code':'raise RuntimeError(\"breakpoint-file\")','filename':filename,'lineOffset':5}, set())",
+    "request={'token':'tok','kind':'execute','code':'value = 1\\nraise RuntimeError(\"visible-frame\")','filename':filename,'lineOffset':4,'breakpointLines':[]}",
+    "response=mod._run_request({}, 'tok', request, set())",
     "print(json.dumps(response))"
   ].join("\n");
   const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.ok, false);
-  assert.match(payload.traceback, /breakpoint-file/);
-  assert.match(payload.traceback, /line 6/);
+  assert.match(payload.traceback, /__djs_overlay_cell__/);
+  assert.match(payload.traceback, /visible-frame/);
   assert.ok(payload.traceback.includes(filename), payload.traceback);
+});
+
+test("debug execution does not make invalid module-level return valid", { skip: !PYTHON }, () => {
+  const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
+  const script = [
+    "import importlib.util, json",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    `filename=${JSON.stringify(filename)}`,
+    "request={'token':'tok','kind':'execute','code':'return 1','filename':filename,'lineOffset':4,'breakpointLines':[]}",
+    "response=mod._run_request({}, 'tok', request, set())",
+    "print(json.dumps(response))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.match(payload.traceback, /outside function/);
 });
 
 function pythonExecutable() {

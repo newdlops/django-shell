@@ -23,6 +23,7 @@ export async function resetOverlayBackingFiles(): Promise<void> {
   const directory = path.dirname(uris.editor.fsPath);
   await vscode.workspace.fs.createDirectory(vscode.Uri.file(directory));
   await ensureIgnoredShadowDirectory(directory);
+  clearOverlayBreakpoints(uris.editor);
   await Promise.all([writeOverlayFile(uris.analysis, EMPTY_ANALYSIS_TEXT), writeOverlayFile(uris.editor, EMPTY_EDITOR_TEXT)]);
 }
 
@@ -46,4 +47,13 @@ async function writeOverlayFile(uri: vscode.Uri, text: string): Promise<void> {
     // Missing files are created below.
   }
   await vscode.workspace.fs.writeFile(uri, Buffer.from(text, "utf8"));
+}
+
+/** Clears stale breakpoints on the generated executable overlay file. */
+function clearOverlayBreakpoints(editorUri: vscode.Uri): void {
+  const target = editorUri.toString();
+  const breakpoints = vscode.debug.breakpoints.filter((breakpoint): breakpoint is vscode.SourceBreakpoint => breakpoint instanceof vscode.SourceBreakpoint && breakpoint.location.uri.toString() === target);
+  if (breakpoints.length) {
+    vscode.debug.removeBreakpoints(breakpoints);
+  }
 }

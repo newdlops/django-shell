@@ -7,6 +7,7 @@ import { OverlayMemoryDocument } from "./overlayMemoryDocument";
 import { OverlayPythonFeatureBridge } from "./overlayPythonFeatureBridge";
 import { closeGeneratedOverlayTabs, scheduleGeneratedOverlayTabCleanup } from "./generatedOverlayTabs";
 import { OverlayShellCommandController, registerOverlayShellCommand } from "./overlayShellCommand";
+import { overlayPreludeText } from "./overlayPrelude";
 import { logOverlayRendererPayload } from "./overlayRendererLog";
 import { findInspectorUrlForPid, findMainPid, waitForInspectorUrlForPid } from "./workbenchInspector";
 import { overlayRendererSource } from "./workbenchOverlayRenderer";
@@ -14,9 +15,11 @@ interface CdpResponse { error?: { message?: string }; id?: number; result?: { ex
 type PendingReply = (response: CdpResponse) => void; type RunHandler = (code: string, lineOffset?: number) => Promise<boolean>;
 /** Describes the Python cell editor anchor inside the custom webview viewport. */
 export interface WorkbenchOverlayGeometry { height: number; left: number; top: number; width: number; }
+/** Describes one one-based generated console-cell.py breakpoint location. */
+interface OverlayBreakpointLocation { column?: number; line: number; }
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
-const RENDERER_PATCH_VERSION = 47;
+const RENDERER_PATCH_VERSION = 58;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -89,27 +92,35 @@ export class WorkbenchOverlay implements vscode.Disposable {
 
   /** Updates editor-only hidden imports without changing raw analysis text. */
   async updatePrelude(importLines: string[]): Promise<void> {
-    const nextPrelude = preludeText(importLines);
+    const nextPrelude = overlayPreludeText(importLines);
     if (nextPrelude === this.prelude) {
       return;
     }
     this.prelude = nextPrelude;
     await this.memoryDocument.updatePrelude(this.prelude);
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) { return; }
-    void this.evalInWorkbench(preludeExpression(this.prelude)).catch((error: unknown) => {
+    const report = await this.evalInWorkbench(preludeExpression(this.prelude)).catch((error: unknown) => {
       this.logger?.log("overlay.prelude.error", { error: error instanceof Error ? error.message : String(error) });
+      return "";
     });
+    this.logger?.log("overlay.prelude.renderer", { report });
+    await this.updateBreakpoints(this.sourceBreakpointLocations());
   }
 
-  /** Updates visible breakpoint markers for one-based console-cell.py source lines. */
-  async updateBreakpoints(sourceLines: number[]): Promise<void> {
+  /** Updates visible breakpoint markers for one-based console-cell.py source locations. */
+  async updateBreakpoints(sourceBreakpoints: Array<number | OverlayBreakpointLocation>): Promise<void> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected) {
       return;
     }
-    const visibleLines = sourceLines.map((line) => Math.floor(line) - this.memoryDocument.inputStartLine()).filter((line) => line >= 1);
-    await this.evalInWorkbench(breakpointExpression(visibleLines)).catch((error: unknown) => {
+    await this.currentVisibleText().catch(() => undefined);
+    const visibleLineCount = lineCount(this.memoryDocument.visibleText());
+    const sourceLocations = sourceBreakpoints.map(sourceBreakpointLocation).filter((item): item is OverlayBreakpointLocation => !!item);
+    const visibleLocations = sourceLocations.filter((item) => item.line >= 1 && item.line <= visibleLineCount);
+    const report = await this.evalInWorkbench(breakpointExpression(visibleLocations)).catch((error: unknown) => {
       this.logger?.log("overlay.breakpoints.error", { error: error instanceof Error ? error.message : String(error) });
+      return "";
     });
+    this.logger?.log("overlay.breakpoints", { dropped: sourceLocations.length - visibleLocations.length, report, sourceLines: sourceLocations.length, visibleLineCount, visibleLines: visibleLocations.length });
   }
 
   /** Updates the highlighted paused debugger line inside the overlay editor. */
@@ -117,7 +128,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected) {
       return;
     }
-    const visibleLine = frame && this.isOverlayFrame(frame.path) ? frame.line - this.memoryDocument.inputStartLine() : 0;
+    const visibleLine = frame && this.isOverlayFrame(frame.path) ? frame.line : 0;
     await this.evalInWorkbench(debugLineExpression(visibleLine >= 1 ? visibleLine : 0)).catch((error: unknown) => {
       this.logger?.log("overlay.debug.line.error", { error: error instanceof Error ? error.message : String(error) });
     });
@@ -172,6 +183,12 @@ export class WorkbenchOverlay implements vscode.Disposable {
   /** Synchronizes the full visible editor text into backing files without changing renderer contents. */
   async syncVisibleText(text: string): Promise<void> {
     await this.memoryDocument.sync(text);
+  }
+
+  /** Returns the full generated source file text used by debugpy breakpoint binding. */
+  async currentSourceText(): Promise<string> {
+    await this.currentVisibleText().catch(() => undefined);
+    return this.memoryDocument.fullText();
   }
 
   /** Posts a backend execution result to the overlay output area. */
@@ -244,7 +261,13 @@ export class WorkbenchOverlay implements vscode.Disposable {
 
   /** Ensures the local bridge and renderer patch are available. */
   private async ensureInjected(): Promise<void> {
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    const bridge = await this.ensureServer();
+    let needsInject = this.ws?.readyState !== WebSocket.OPEN || !this.rendererInjected;
+    if (!needsInject) {
+      const state = await this.rendererPatchState();
+      needsInject = state.version !== String(RENDERER_PATCH_VERSION) || state.bridgePort !== String(bridge.port);
+    }
+    if (!needsInject) {
       return;
     }
     if (this.injectPromise) {
@@ -266,18 +289,28 @@ export class WorkbenchOverlay implements vscode.Disposable {
     }
     this.rendererInjected = true;
     this.logger?.log("overlay.inject", { report });
-    await this.updateBreakpoints(this.sourceBreakpointLines());
+    await this.updateBreakpoints(this.sourceBreakpointLocations());
   }
   /** Returns the renderer patch version currently installed in the workbench window. */
   private rendererPatchVersion(): Promise<string> {
     return this.evalInWorkbench("String(window.__djangoShellOverlayPatchVersion || '')").catch(() => "");
   }
+  /** Returns the renderer patch and bridge state currently installed in the workbench window. */
+  private async rendererPatchState(): Promise<{ bridgePort: string; version: string }> {
+    const raw = await this.evalInWorkbench("JSON.stringify({bridgePort:String((window.__djangoShellOverlayBridge||{}).port||''),version:String(window.__djangoShellOverlayPatchVersion||'')})").catch(() => "");
+    try {
+      const parsed = JSON.parse(raw) as { bridgePort?: unknown; version?: unknown };
+      return { bridgePort: String(parsed.bridgePort ?? ""), version: String(parsed.version ?? "") };
+    } catch {
+      return { bridgePort: "", version: "" };
+    }
+  }
   /** Debounces generated tab cleanup after overlay input settles. */
   private scheduleGeneratedCleanup(): void { clearTimeout(this.generatedCleanupTimer); this.generatedCleanupTimer = setTimeout(() => { void closeGeneratedOverlayTabs([this.memoryDocument.analysisUri, this.memoryDocument.editorUri]).catch(() => undefined); }, 450); }
   /** Converts a one-based user-input line into the backing console-cell.py line offset. */
-  private relativeLineOffset(relativeLine: unknown): number | undefined { return typeof relativeLine === "number" && Number.isFinite(relativeLine) ? this.memoryDocument.inputStartLine() + Math.max(0, Math.floor(relativeLine) - 1) : undefined; }
-  /** Toggles a VS Code source breakpoint from one user-input relative overlay line. */
-  private async toggleBreakpoint(relativeLine: unknown): Promise<boolean> {
+  private relativeLineOffset(relativeLine: unknown): number | undefined { return typeof relativeLine === "number" && Number.isFinite(relativeLine) ? Math.max(0, Math.floor(relativeLine) - 1) : undefined; }
+  /** Toggles a VS Code source breakpoint from one user-input relative overlay location. */
+  private async toggleBreakpoint(relativeLine: unknown, relativeColumn: unknown, inline: boolean): Promise<boolean> {
     if (typeof relativeLine !== "number" || !Number.isFinite(relativeLine)) {
       return false;
     }
@@ -285,20 +318,23 @@ export class WorkbenchOverlay implements vscode.Disposable {
     if (sourceLine === undefined) {
       return false;
     }
+    const sourceColumn = inline && typeof relativeColumn === "number" && Number.isFinite(relativeColumn) ? Math.max(0, Math.floor(relativeColumn) - 1) : 0;
     const target = this.memoryDocument.editorUri.toString();
-    const existing = vscode.debug.breakpoints.filter((breakpoint): breakpoint is vscode.SourceBreakpoint => breakpoint instanceof vscode.SourceBreakpoint && breakpoint.location.uri.toString() === target && breakpoint.location.range.start.line === sourceLine);
+    const existing = vscode.debug.breakpoints.filter((breakpoint): breakpoint is vscode.SourceBreakpoint => breakpoint instanceof vscode.SourceBreakpoint && breakpoint.location.uri.toString() === target && breakpoint.location.range.start.line === sourceLine && breakpoint.location.range.start.character === sourceColumn);
     if (existing.length) {
       vscode.debug.removeBreakpoints(existing);
     } else {
-      vscode.debug.addBreakpoints([new vscode.SourceBreakpoint(new vscode.Location(this.memoryDocument.editorUri, new vscode.Position(sourceLine, 0)), true)]);
+      vscode.debug.addBreakpoints([new vscode.SourceBreakpoint(new vscode.Location(this.memoryDocument.editorUri, new vscode.Position(sourceLine, sourceColumn)), true)]);
     }
-    await this.updateBreakpoints(this.sourceBreakpointLines());
+    await this.updateBreakpoints(this.sourceBreakpointLocations());
     return true;
   }
+  /** Returns one-based enabled breakpoint locations for the generated console source file. */
+  private sourceBreakpointLocations(): OverlayBreakpointLocation[] { const target = this.memoryDocument.editorUri.toString(); return vscode.debug.breakpoints.filter((breakpoint): breakpoint is vscode.SourceBreakpoint => breakpoint instanceof vscode.SourceBreakpoint && breakpoint.enabled && breakpoint.location.uri.toString() === target).map((breakpoint) => ({ column: breakpoint.location.range.start.character > 0 ? breakpoint.location.range.start.character + 1 : 0, line: breakpoint.location.range.start.line + 1 })).sort((left, right) => left.line - right.line || (left.column ?? 0) - (right.column ?? 0)); }
   /** Returns one-based enabled breakpoint lines for the generated console source file. */
-  private sourceBreakpointLines(): number[] { const target = this.memoryDocument.editorUri.toString(); return vscode.debug.breakpoints.filter((breakpoint): breakpoint is vscode.SourceBreakpoint => breakpoint instanceof vscode.SourceBreakpoint && breakpoint.enabled && breakpoint.location.uri.toString() === target).map((breakpoint) => breakpoint.location.range.start.line + 1).sort((left, right) => left - right); }
+  private sourceBreakpointLines(): number[] { return [...new Set(this.sourceBreakpointLocations().map((item) => item.line))].sort((left, right) => left - right); }
   /** Returns whether a paused frame belongs to this overlay's generated source file. */
-  private isOverlayFrame(pathOrUri: string | undefined): boolean { return !!pathOrUri && (pathOrUri === this.memoryDocument.editorUri.fsPath || pathOrUri === this.memoryDocument.editorUri.toString()); }
+  private isOverlayFrame(pathOrUri: string | undefined): boolean { const normalized = normalizeFramePath(pathOrUri); return !!normalized && normalized === this.memoryDocument.editorUri.fsPath; }
   /** Starts the local HTTP bridge used by the renderer run button. */
   private async ensureServer(): Promise<{ port: number; token: string }> {
     if (this.server && this.serverPort !== undefined) {
@@ -307,6 +343,12 @@ export class WorkbenchOverlay implements vscode.Disposable {
     await new Promise<void>((resolve, reject) => {
       const server = http.createServer((req, res) => {
         void this.handleBridgeRequest(req, res);
+      });
+      server.on("close", () => {
+        if (this.server === server) {
+          this.server = undefined;
+          this.serverPort = undefined;
+        }
       });
       server.once("error", reject);
       server.listen(0, "127.0.0.1", () => {
@@ -346,7 +388,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
         await this.memoryDocument.syncVolatile(payload.code);
       }
       if (payload?.type === "toggleBreakpoint") {
-        const toggled = await this.toggleBreakpoint(payload.line);
+        this.logger?.log("overlay.bridge.toggleBreakpoint", { column: Number(payload.column) || 0, inline: Boolean(payload.inline), inputStartLine: Number(payload.inputStartLine) || 0, line: Number(payload.line) || 0, rawColumn: Number(payload.rawColumn) || 0, rawLine: Number(payload.rawLine) || 0, source: String(payload.source || "") });
+        const toggled = await this.toggleBreakpoint(payload.line, payload.column, Boolean(payload.inline));
         res.writeHead(200, { ...CORS_HEADERS, "content-type": "application/json" }).end(JSON.stringify({ toggled }));
         return;
       }
@@ -546,6 +589,32 @@ function delay(ms: number): Promise<void> { return new Promise((resolve) => setT
 /** Returns compact size fields for text diagnostics. */
 function textFields(text: string): { chars: number; lines: number } { return { chars: text.length, lines: text ? text.split(/\r?\n/).length : 0 }; }
 
+/** Normalizes a source breakpoint line or location into one-based source coordinates. */
+function sourceBreakpointLocation(value: number | OverlayBreakpointLocation): OverlayBreakpointLocation | undefined {
+  const raw = typeof value === "number" ? { column: 0, line: value } : value;
+  const line = Math.floor(Number(raw.line));
+  const column = Math.max(0, Math.floor(Number(raw.column) || 0));
+  return Number.isFinite(line) && line > 0 ? { column, line } : undefined;
+}
+
+/** Returns a compact one-based line count for user-visible text. */
+function lineCount(text: string): number { return text ? text.split(/\r?\n/).length : 0; }
+
+/** Converts a DAP source path or file URI into a filesystem path for frame matching. */
+function normalizeFramePath(pathOrUri: string | undefined): string {
+  if (!pathOrUri) {
+    return "";
+  }
+  if (/^file:\/\//i.test(pathOrUri)) {
+    try {
+      return vscode.Uri.parse(pathOrUri).fsPath;
+    } catch {
+      return pathOrUri;
+    }
+  }
+  return pathOrUri;
+}
+
 /** Returns URI strings for tabs that already existed before warmup. */
 function snapshotTabUris(): Set<string> {
   const uris = new Set<string>();
@@ -659,7 +728,7 @@ function preludeExpression(prelude: string): string { return `window.__djangoShe
 function outputExpression(text: string, ok: boolean): string { return `window.__djangoShellOverlaySetOutput ? window.__djangoShellOverlaySetOutput(${JSON.stringify(text)}, ${JSON.stringify(ok)}) : 'overlay-not-installed'`; }
 
 /** Returns the expression that refreshes visible overlay breakpoint markers. */
-function breakpointExpression(visibleLines: number[]): string { return `window.__dsoSetOverlayBreakpoints ? window.__dsoSetOverlayBreakpoints(${JSON.stringify(visibleLines)}) : 'overlay-breakpoints-missing'`; }
+function breakpointExpression(visibleLocations: OverlayBreakpointLocation[]): string { return `window.__dsoSetOverlayBreakpoints ? window.__dsoSetOverlayBreakpoints(${JSON.stringify(visibleLocations.map((item) => item.column ? item : item.line))}) : 'overlay-breakpoints-missing'`; }
 
 /** Returns the expression that refreshes the paused debugger line marker. */
 function debugLineExpression(visibleLine: number): string { return `window.__dsoSetOverlayDebugLine ? window.__dsoSetOverlayDebugLine(${JSON.stringify(visibleLine)}) : 'overlay-debug-line-missing'`; }
@@ -678,10 +747,3 @@ function disposeExpression(token: string): string { return `(function(){const ro
 
 /** Returns the expression that clears stale renderer overlay state after backend restart. */
 function resetExpression(initialText: string): string { return `(function(){window.__djangoShellOverlayInitialText=${JSON.stringify(initialText)};window.__djangoShellOverlayPrelude="";if(window.__djangoShellOverlayReset){return window.__djangoShellOverlayReset(window.__djangoShellOverlayInitialText);}const root=document.getElementById("django-shell-overlay");try{const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(model&&model.setValue){model.setValue(window.__djangoShellOverlayInitialText);}}catch(eResetModel){}return window.__djangoShellOverlayHide?window.__djangoShellOverlayHide():'overlay-not-installed';})()`; }
-
-/** Builds hidden import text for Python analysis without touching disk. */
-function preludeText(importLines: string[]): string {
-  const seen = new Set<string>();
-  const lines = importLines.filter((line) => line && !seen.has(line) && seen.add(line)).slice(0, 5000);
-  return lines.length ? `# Django shell runtime imports for analysis.\n# ruff: noqa\n${lines.join("\n")}\n\n` : "";
-}

@@ -1,5 +1,6 @@
 // Renderer-side editor text synchronization for the Django shell overlay.
 import { overlayDiagnosticPrefixRendererSource } from "./workbenchOverlayDiagnosticPrefixRenderer";
+import { overlayBreakpointRendererSource } from "./workbenchOverlayBreakpointRenderer";
 import { overlayPreludeViewRendererSource } from "./workbenchOverlayPreludeViewRenderer";
 import { overlayPythonRangeRendererSource } from "./workbenchOverlayPythonRangeRenderer";
 /** Builds JavaScript that mirrors overlay Monaco text into the extension host. */
@@ -561,55 +562,7 @@ export function overlaySyncRendererSource(): string {
       return root && root.__dsoMultilineMode ? __dsoMultilinePayload(root, editor) : __dsoEnterPayload(root, editor);
     }
 
-    /** Returns normalized one-based breakpoint lines relative to user input. */
-    function __dsoRelativeBreakpointLines(lines) {
-      const seen = Object.create(null);
-      return (Array.isArray(lines) ? lines : []).map(function (line) { return Math.floor(Number(line)); }).filter(function (line) {
-        if (!Number.isFinite(line) || line < 1 || seen[line]) { return false; }
-        seen[line] = true;
-        return true;
-      });
-    }
-
-    /** Maps user-input relative breakpoint lines to raw Monaco model lines. */
-    function __dsoModelBreakpointLines(root, lines, model) {
-      const limit = model && model.getLineCount ? model.getLineCount() : Number.MAX_SAFE_INTEGER;
-      const startLine = Number(root && root.__dsoInputStartLine) || 1;
-      return __dsoRelativeBreakpointLines(lines).map(function (line) { return startLine + line - 1; }).filter(function (line) {
-        return line >= 1 && line <= limit;
-      });
-    }
-
-    /** Draws breakpoint glyphs for the latest VS Code breakpoint state. */
-    window.__dsoApplyOverlayBreakpoints = function (root, editor) {
-      const model = editor && editor.getModel && editor.getModel();
-      if (!root || !editor || !model || !editor.deltaDecorations) { return "missing-editor"; }
-      const lines = __dsoModelBreakpointLines(root, root.__dsoBreakpointLines || window.__dsoOverlayBreakpointLines || [], model);
-      const decorations = lines.map(function (line) {
-        return {
-          options: { className: "dso-breakpoint-line", glyphMarginClassName: "dso-breakpoint-glyph", isWholeLine: true, linesDecorationsClassName: "dso-breakpoint-rail" },
-          range: { endColumn: model.getLineMaxColumn ? model.getLineMaxColumn(line) : 1, endLineNumber: line, startColumn: 1, startLineNumber: line }
-        };
-      });
-      try { if (editor.updateOptions) { editor.updateOptions({ glyphMargin: true }); } } catch (eGlyphOptions) {}
-      try {
-        root.__dsoBreakpointDecorationIds = editor.deltaDecorations(root.__dsoBreakpointDecorationIds || [], decorations);
-      } catch (eBreakpointDecorations) {
-        root.__dsoBreakpointDecorationIds = [];
-      }
-      root.__dsoBreakpointModelLines = lines;
-      return "breakpoints:" + lines.length;
-    };
-
-    /** Stores breakpoint lines from the extension host and applies them to the live editor. */
-    window.__dsoSetOverlayBreakpoints = function (lines) {
-      const root = document.getElementById("django-shell-overlay");
-      window.__dsoOverlayBreakpointLines = __dsoRelativeBreakpointLines(lines);
-      if (!root) { return "breakpoints:" + window.__dsoOverlayBreakpointLines.length; }
-      root.__dsoBreakpointLines = window.__dsoOverlayBreakpointLines;
-      const editor = root.__djangoShellEditor;
-      return editor ? window.__dsoApplyOverlayBreakpoints(root, editor) : "breakpoints:" + root.__dsoBreakpointLines.length;
-    };
+    ${overlayBreakpointRendererSource()}
 
     /** Draws the current paused debugger line for a one-based user-input line. */
     window.__dsoApplyOverlayDebugLine = function (root, editor) {
@@ -635,32 +588,6 @@ export function overlaySyncRendererSource(): string {
       const editor = root.__djangoShellEditor;
       return editor ? window.__dsoApplyOverlayDebugLine(root, editor) : "debug-line:" + root.__dsoDebugLine;
     };
-
-    /** Returns the clicked visible line when a Monaco mouse event targets the gutter. */
-    function __dsoBreakpointMouseLine(event) {
-      const target = event && event.target;
-      const position = target && target.position;
-      const type = target && target.type;
-      const detail = String(target && target.detail || "");
-      if (!position || !Number.isFinite(position.lineNumber)) { return 0; }
-      return type === 2 || type === 3 || type === 4 || /glyph|margin|line/i.test(detail) ? position.lineNumber : 0;
-    }
-
-    /** Installs gutter click breakpoint toggling on the overlay editor. */
-    function __dsoInstallBreakpointToggle(root, editor, post) {
-      if (!root || !editor || root.__dsoBreakpointToggleEditor === editor) { return; }
-      try { root.__dsoBreakpointToggleDisposable && root.__dsoBreakpointToggleDisposable.dispose && root.__dsoBreakpointToggleDisposable.dispose(); } catch (eDisposeBreakpointToggle) {}
-      root.__dsoBreakpointToggleEditor = editor;
-      try { if (editor.updateOptions) { editor.updateOptions({ glyphMargin: true }); } } catch (eGlyphToggleOptions) {}
-      if (!editor.onMouseDown) { return; }
-      root.__dsoBreakpointToggleDisposable = editor.onMouseDown(function (event) {
-        const line = __dsoBreakpointMouseLine(event);
-        if (!line) { return; }
-        try { event.event && event.event.preventDefault && event.event.preventDefault(); } catch (ePreventBreakpoint) {}
-        try { event.event && event.event.stopPropagation && event.event.stopPropagation(); } catch (eStopBreakpoint) {}
-        try { post({ type: "toggleBreakpoint", line: __dsoRelativeUserLine(root, line) }); } catch (ePostBreakpoint) {}
-      });
-    }
 
     /** Returns Monaco decorations for the currently executable Python input range. */
     function __dsoExecutionRangeDecorations(model, payload) {
@@ -698,7 +625,7 @@ export function overlaySyncRendererSource(): string {
         if (root.__dsoExecutionRangePreviewKey !== previewKey) {
           root.__dsoExecutionRangePreviewKey = previewKey;
           if (editor.updateOptions) {
-            editor.updateOptions({ lineNumbers: function (line) { return __dsoPromptForLine(model, root.__dsoInputStartLine || __dsoFindInputStartLine(model), line, root); } });
+            editor.updateOptions({ glyphMargin: false, lineDecorationsWidth: 0, lineNumbers: function (line) { return __dsoPromptForLine(model, root.__dsoInputStartLine || __dsoFindInputStartLine(model), line, root); }, lineNumbersMinChars: 1 });
           }
         }
       } catch (eDecorations) {
@@ -758,7 +685,7 @@ export function overlaySyncRendererSource(): string {
         __dsoLog(post, "enter.install.skip", { hasNode: false });
         return;
       }
-      __dsoInstallBreakpointToggle(root, editor, post);
+      try { if (typeof __dsoInstallBreakpointToggle === "function") { __dsoInstallBreakpointToggle(root, editor, post); } } catch (eBreakpointInstall) { __dsoLog(post, "breakpoint.install.error", { error: String(eBreakpointInstall && eBreakpointInstall.message || eBreakpointInstall) }); }
       try { window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eApplyBreakpoints) {}
       __dsoLog(post, "enter.install", { hasNode: true, sameEditor: root.__dsoEnterEditor === editor });
       const execute = function (event, source, allowContinuation) {
@@ -899,7 +826,13 @@ export function overlaySyncRendererSource(): string {
         const oldVisibility = root.style.visibility;
         root.style.visibility = "hidden";
         try {
-          if (!root.__dsoUseVisiblePrelude) { root.__dsoPreludeText = String(text || ""); window.__dsoApplyPreludeHiddenArea(root, editor); return "ok"; }
+          if (!root.__dsoUseVisiblePrelude) {
+            root.__dsoPreludeText = String(text || "");
+            window.__dsoApplyPreludeHiddenArea(root, editor);
+            try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (ePreludeBreakpoints) {}
+            try { window.__dsoApplyOverlayDebugLine && window.__dsoApplyOverlayDebugLine(root, editor); } catch (ePreludeDebugLine) {}
+            return "ok";
+          }
           __dsoRepairPrefix(root, editor, __dsoPost);
           const current = model.getValue();
           const userText = __dsoUserText(current, root);
@@ -918,6 +851,8 @@ export function overlaySyncRendererSource(): string {
           const targetLine = Math.min(model.getLineCount(), (root.__dsoUserStartLine || 1) + relativeLine);
           const targetColumn = Math.min(model.getLineMaxColumn(targetLine), Math.max(1, position ? position.column : 1));
           try { editor.setPosition({ column: targetColumn, lineNumber: targetLine }); } catch (ePreludeCursor) {}
+          try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eVisiblePreludeBreakpoints) {}
+          try { window.__dsoApplyOverlayDebugLine && window.__dsoApplyOverlayDebugLine(root, editor); } catch (eVisiblePreludeDebugLine) {}
         } finally {
           root.style.visibility = oldVisibility || "visible";
         }

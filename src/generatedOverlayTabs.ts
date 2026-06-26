@@ -25,14 +25,15 @@ export function scheduleGeneratedOverlayTabCleanup(uris: vscode.Uri[]): void {
 }
 
 /** Closes visible tabs for the workspace-local generated overlay files. */
-export function closeWorkspaceGeneratedOverlayTabs(): Promise<void> {
+export function closeWorkspaceGeneratedOverlayTabs(includeExecutable = true): Promise<void> {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd());
-  return closeGeneratedOverlayTabs([
+  const uris = [
     vscode.Uri.joinPath(root, ".django-shell", "analysis.py"),
-    vscode.Uri.joinPath(root, ".django-shell", "console-cell.py"),
     vscode.Uri.joinPath(root, ".django-shell", "query-analysis.py"),
     vscode.Uri.joinPath(root, ".django-shell", "query-cell.py")
-  ]);
+  ];
+  if (includeExecutable) { uris.push(vscode.Uri.joinPath(root, ".django-shell", "console-cell.py")); }
+  return closeGeneratedOverlayTabs(uris);
 }
 
 /** Closes visible tabs for generated overlay files while keeping hidden documents open. */

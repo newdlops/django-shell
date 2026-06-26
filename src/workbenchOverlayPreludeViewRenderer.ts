@@ -11,7 +11,7 @@ export function overlayPreludeViewRendererSource(): string {
       try { __dsoInstallPreludeDomObservers(root, editor, startLine); } catch (eDomHide) {}
       __dsoApplyPreludeCssHide(root, startLine, editor);
       try { window.requestAnimationFrame(function () { __dsoApplyPreludeCssHide(root, startLine, editor); }); } catch (eCssLater) {}
-      try { if (editor && editor.updateOptions) { editor.updateOptions({ lineNumbers: function (line) { return __dsoPromptForLine(model, startLine, line, root); } }); } } catch (eLineNumbers) {}
+      try { if (editor && editor.updateOptions) { editor.updateOptions({ glyphMargin: false, lineDecorationsWidth: 0, lineNumbers: function (line) { return __dsoPromptForLine(model, startLine, line, root); }, lineNumbersMinChars: 1 }); } } catch (eLineNumbers) {}
       try { window.__dsoSchedulePreludeSemanticDecorations ? window.__dsoSchedulePreludeSemanticDecorations(root) : (window.__dsoRefreshPreludeSemanticDecorations && window.__dsoRefreshPreludeSemanticDecorations(root)); } catch (eSemanticRefresh) {}
     }
 

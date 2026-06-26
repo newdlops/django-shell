@@ -133,6 +133,7 @@ export interface BackendRequestPayload {
   aggregates?: ModelAggregateTerm[];
   annotations?: ModelAnnotationSpec[];
   app?: string;
+  breakpointLines?: number[];
   changes?: ModelCommitChange[];
   code?: string;
   cursor?: unknown;
@@ -151,6 +152,7 @@ export interface BackendRequestPayload {
   pk?: unknown;
   q?: string;
   relation?: string;
+  sourceText?: string;
   value?: unknown;
 }
 
@@ -205,8 +207,8 @@ export class BackendClient {
   }
 
   /** Executes Python code in the backend namespace and returns captured output. */
-  execute(code: string, filename?: string, lineOffset?: number): Promise<BackendExecutionResult> {
-    return this.request({ code, filename, kind: "execute", lineOffset }, parseBackendResponse);
+  execute(code: string, filename?: string, lineOffset?: number, sourceText?: string, breakpointLines?: number[]): Promise<BackendExecutionResult> {
+    return this.request({ breakpointLines, code, filename, kind: "execute", lineOffset, sourceText }, parseBackendResponse);
   }
 
   /** Returns the latest running Python progress snapshot when the socket can be polled. */
@@ -500,10 +502,11 @@ function isPtyFallbackKind(kind: string): boolean {
 
 /** Returns a smaller payload variant for the slower terminal fallback transport. */
 function ptyFallbackPayload(payload: BackendRequestPayload): BackendRequestPayload {
+  const next = payload.sourceText === undefined && payload.breakpointLines === undefined ? payload : { ...payload, breakpointLines: undefined, sourceText: undefined };
   if ((payload.kind === "rows" || payload.kind === "related" || payload.kind === "query") && (payload.limit === undefined || payload.limit > PTY_PAGE_LIMIT)) {
-    return { ...payload, limit: PTY_PAGE_LIMIT };
+    return { ...next, limit: PTY_PAGE_LIMIT };
   }
-  return payload;
+  return next;
 }
 
 /** Returns a safe error response when a request cannot cross the active transport. */

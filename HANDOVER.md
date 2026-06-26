@@ -1,5 +1,149 @@
 # Django Shell — Handover
 
+## 2026-06-26 Debug Overlay Handover
+
+### Current Goal
+
+Python cell overlay debugging must behave like a real editor debugger:
+
+- overlay gutter breakpoints must be visible and clickable;
+- inline breakpoints must be available through the overlay context menu;
+- breakpoints must bind to the generated `.django-shell/console-cell.py` source used by debugpy;
+- paused lines and step-over state should stay visible in the overlay;
+- step-over should remain in overlay code, while step-into may navigate into external source.
+
+The user is Korean-speaking. Reply in Korean unless explicitly asked otherwise.
+
+### Latest User-Visible Problem
+
+The user showed an overlay screenshot with:
+
+```python
+a=1
+b=2
+c=3
+d=4
+e=5
+f=6
+```
+
+Clicking near the `>>>` / `...` prompt gutter did not show a breakpoint, and no diagnostic log was emitted.
+
+Initial diagnosis was that the overlay breakpoint hit-test was too narrow. That was true, but the first fix did not appear in the UI because the workbench renderer patch version was not bumped, so the old injected renderer code remained active in the already-open VS Code window.
+
+### Latest Fix
+
+- `src/workbenchOverlayBreakpointRenderer.ts`
+  - Replaced the fixed `clientX <= 24` breakpoint-lane hit-test.
+  - The overlay now uses Monaco `editor.getLayoutInfo().contentLeft` as the gutter width.
+  - This makes clicks in the `>>>` / `...` prompt area count as breakpoint gutter clicks.
+  - Breakpoint dots now render through an overlay-owned prompt-gutter layer instead of depending on Monaco's line decoration lane.
+  - The overlay-owned prompt-gutter layer is display-only (`pointer-events: none`) so it cannot break editor UI hit targets.
+  - The prompt-gutter layer now renders above Monaco (`z-index: 80`) so red dots are not hidden by editor internals.
+  - Breakpoint clicks now optimistically update renderer-local markers before the extension-host round trip completes.
+  - Monaco breakpoint `linesDecorationsClassName` rails were removed so the UI does not show duplicate red dots.
+  - Document-level capture handles prompt-gutter clicks even when Monaco or another overlay element owns the actual target.
+  - Breakpoint listeners reinstall when the renderer patch is reapplied to the same Monaco editor instance.
+  - Breakpoint controls keep `lineDecorationsWidth: 0` and `lineNumbersMinChars: 1`; line-number CSS keeps exactly one prompt gap before user code.
+  - Added near-gutter skip diagnostics:
+    - `overlay.cell.breakpoint.click.skip`
+  - Successful toggles already log through:
+    - `overlay.cell.breakpoint.toggle`
+    - `overlay.bridge.toggleBreakpoint`
+
+- `src/workbenchOverlay.ts`
+  - Bumped `RENDERER_PATCH_VERSION` to `57`.
+  - This is load-bearing. Without this bump, an open VS Code renderer sees the old patch as current and does not inject the new hit-test code.
+  - Renderer injection now also checks the live bridge port, not only the patch version, so a stale `127.0.0.1:<port>` bridge gets refreshed instead of leaving the renderer to hit `ECONNREFUSED`.
+
+- `src/workbenchOverlayRenderer.ts`
+  - Records the failed bridge port in `window.__djangoShellOverlayBridgeFailedPort` when renderer-to-host `fetch` fails.
+  - Forces Monaco prompt line-number padding to one character with `.margin-view-overlays .line-numbers{min-width:0!important;overflow:visible!important;padding-right:1ch!important}` so `>>> a=1` keeps one readable gap without reintroducing the old wide gutter.
+
+- `test/overlaySyncRenderer.test.mjs`
+  - Added coverage for prompt-gutter-width breakpoint clicks.
+  - Added coverage for optimistic local breakpoint marker updates.
+  - Added coverage for document-level prompt-gutter breakpoint clicks with a display-only marker layer.
+  - Added coverage for near-gutter clicks that cannot resolve a model line and should log `breakpoint.click.skip`.
+  - Existing inline breakpoint context-menu coverage remains.
+
+### Verification
+
+Last run:
+
+```bash
+npm run check
+```
+
+Result: 119 tests passed.
+
+Also ran:
+
+```bash
+git diff --check
+```
+
+Result: exit code 0. It prints the recurring `fsmonitor_ipc__send_query` warning, but no whitespace errors.
+
+### Important Runtime Note
+
+Source changes in this repo do not affect the installed extension until the extension host or installed build is refreshed.
+
+For this latest fix specifically, the user should reopen the overlay or restart/reload the extension host so patch version `57` is injected. If the UI still behaves the same, first check whether the renderer actually reports patch version `57`.
+
+### If It Still Fails
+
+Check logs in this order:
+
+1. `overlay.show`
+   - Confirm a fresh renderer patch was injected.
+   - Confirm patch version is `57`.
+
+2. `overlay.cell.breakpoint.toggle`
+   - Renderer saw a click and converted it to a source location.
+
+3. `overlay.bridge.toggleBreakpoint`
+   - Extension host received the toggle and called VS Code breakpoint APIs.
+
+4. `overlay.cell.breakpoint.click.skip`
+   - Renderer saw a near-gutter click but could not resolve a Monaco line.
+   - Important fields: `x`, `laneLimit`, `inputStartLine`, `reason`.
+
+If none of these logs appear, the DOM capture listener is probably not installed or the click is landing outside `editor.getDomNode()`.
+
+If toggle logs appear but no marker is visible, inspect `window.__dsoSetOverlayBreakpoints` and `window.__dsoApplyOverlayBreakpoints`.
+
+If markers appear but debugpy does not stop, inspect:
+
+- `src/debugBreakpoints.ts`
+- DAP `setBreakpoints` request/response logs
+- `.django-shell/console-cell.py` contents
+- overlay source text vs generated backing file text
+- line offset between visible input and generated source
+
+### Files Most Relevant To Current Debug Work
+
+- `src/workbenchOverlay.ts`
+- `src/workbenchOverlayBreakpointRenderer.ts`
+- `src/workbenchOverlaySyncRenderer.ts`
+- `src/workbenchOverlayRenderer.ts`
+- `src/customConsole.ts`
+- `src/debugBreakpoints.ts`
+- `src/overlayPrelude.ts`
+- `test/overlaySyncRenderer.test.mjs`
+- `test/workbenchOverlayLifecycle.test.mjs`
+
+### Project Constraints
+
+- Keep code files at or below 1000 lines.
+- First line of every code file must be a purpose comment.
+- Every class/function/method in source code needs a JSDoc/docstring-style summary.
+- Run `npm run check` after code changes.
+- `src/customConsole.ts` is currently close to the line limit, around 998 lines. Do not add meaningful code there; create or extend smaller modules instead.
+- The worktree has many ongoing modified files. Do not revert unrelated changes.
+
+---
+
 Date: 2026-06-06. Covers the model-data-browser / ORM-mode work on branch
 `model-browser-orm-enhancements` (commit `09ab10c`, not merged, not pushed).
 

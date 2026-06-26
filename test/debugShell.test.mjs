@@ -16,7 +16,8 @@ test("builds a reusable debugpy bootstrap that emits a marker", () => {
   const code = buildDebugpyBootstrapCode("127.0.0.1", 56789, DEBUGPY_MARKER_PREFIX, ["/vscode/debugpy/bundled/libs"]);
 
   assert.match(code, /import debugpy as _djs_debugpy/);
-  assert.match(code, /_djs_debugpy\.listen\(\(_djs_debug_host, _djs_debug_port\)\)/);
+  assert.match(code, /_djs_debugpy\.listen\(_djs_debug_requested\)/);
+  assert.match(code, /_djs_debug_endpoint = \(_djs_debug_listen_result\[0\] or _djs_debug_host, int\(_djs_debug_listen_result\[1\]\)\)/);
   assert.match(code, /_django_shell_debugpy_endpoint/);
   assert.match(code, new RegExp(DEBUGPY_MARKER_PREFIX));
   assert.match(code, /\/vscode\/debugpy\/bundled\/libs/);
