@@ -65,6 +65,16 @@ test("contributes a command for debugging the active Django shell", () => {
   assert.equal(editorTitle?.when, "resourceFilename == 'debug-cell.py'");
 });
 
+test("contributes remote debugpy attach settings", () => {
+  const properties = manifest.contributes.configuration.properties;
+
+  assert.equal(properties["djangoShell.debug.listenHost"].default, "127.0.0.1");
+  assert.equal(properties["djangoShell.debug.listenPort"].default, 0);
+  assert.equal(properties["djangoShell.debug.connectHost"].default, "");
+  assert.equal(properties["djangoShell.debug.connectPort"].default, 0);
+  assert.equal(properties["djangoShell.debug.remoteRoot"].default, "");
+});
+
 test("contributes basic debugger control commands for the custom console", () => {
   const commands = manifest.contributes.commands.map((item) => item.command);
   const controls = ["continue", "pause", "stepOver", "stepInto", "stepOut", "restart", "stop"];

@@ -400,6 +400,31 @@
           "default": true,
           "description": "When true (default), Django Shell logs the shell session, backend requests, and overlay activity to its 'Django Shell' output channel for diagnosis. Set to false to disable."
         },
+        "djangoShell.debug.listenHost": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "markdownDescription": "Host passed to `debugpy.listen()` inside the Django shell. Keep `127.0.0.1` for local shells; use `0.0.0.0` only when the remote environment requires a non-loopback listener."
+        },
+        "djangoShell.debug.listenPort": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Port passed to `debugpy.listen()` inside the Django shell. `0` lets debugpy choose a free local port. Use a fixed port such as `5678` when pre-creating an SSH or Kubernetes port-forward."
+        },
+        "djangoShell.debug.connectHost": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Host VS Code connects to for the debugpy attach session. Empty uses the host reported by debugpy. For SSH/kubectl port-forwarding, set this to `127.0.0.1`."
+        },
+        "djangoShell.debug.connectPort": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Port VS Code connects to for the debugpy attach session. `0` uses the port reported by debugpy. For port-forwarding, set this to the local forwarded port."
+        },
+        "djangoShell.debug.remoteRoot": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Remote source root used in Python debug pathMappings. Empty maps the current workspace path to itself. Set this when the remote container path differs from the local workspace path."
+        },
         "djangoShell.modelBrowser.lookupExcludeFields": {
           "type": "array",
           "items": {

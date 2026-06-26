@@ -9,7 +9,8 @@ const {
   DEBUGPY_MARKER_PREFIX,
   buildDebugpyBootstrapCode,
   buildDjangoShellDebugConfiguration,
-  parseDebugpyBootstrapResult
+  parseDebugpyBootstrapResult,
+  readDjangoShellDebugOptions
 } = require("../out/debugShell.js");
 
 test("builds a reusable debugpy bootstrap that emits a marker", () => {
@@ -49,4 +50,18 @@ test("builds a Python attach configuration for the live shell endpoint", () => {
     request: "attach",
     type: "python"
   });
+});
+
+test("builds remote-friendly Python attach configuration from debug settings", () => {
+  const options = readDjangoShellDebugOptions({
+    get(key, fallback) {
+      return { connectHost: "127.0.0.1", connectPort: 45678, listenHost: "0.0.0.0", listenPort: 5678, remoteRoot: "/app" }[key] ?? fallback;
+    }
+  });
+  const configuration = buildDjangoShellDebugConfiguration({ host: "0.0.0.0", port: 5678, reused: false }, "/workspace/app", options);
+
+  assert.equal(options.listenHost, "0.0.0.0");
+  assert.equal(options.listenPort, 5678);
+  assert.deepEqual(configuration.connect, { host: "127.0.0.1", port: 45678 });
+  assert.deepEqual(configuration.pathMappings, [{ localRoot: "/workspace/app", remoteRoot: "/app" }]);
 });

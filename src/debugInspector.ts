@@ -38,8 +38,8 @@ const OVERLAY_SOURCE_SUFFIX = "/.django-shell/console-cell.py";
 const PYTHON_KEYWORDS = new Set(["and", "as", "assert", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "False", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass", "raise", "return", "True", "try", "while", "with", "yield"]);
 
 /** Reads the active paused stack frame and visible variables through DAP requests. */
-export async function inspectDebugFrame(session: vscode.DebugSession, item: vscode.DebugStackFrame): Promise<DebugFrameInfo> {
-  return inspectDebugFrameRef(session, item);
+export async function inspectDebugFrame(session: vscode.DebugSession, item: vscode.DebugStackFrame, options: DebugInspectOptions = {}): Promise<DebugFrameInfo> {
+  return inspectDebugFrameRef(session, item, options);
 }
 
 /** Reads the top paused stack frame for one stopped DAP thread. */
@@ -65,6 +65,10 @@ async function inspectDebugFrameRef(session: vscode.DebugSession, item: DebugFra
 async function stackFrameFor(session: vscode.DebugSession, item: DebugFrameRef, options: DebugInspectOptions): Promise<DapStackFrame | undefined> {
   const response = await session.customRequest("stackTrace", { levels: 30, startFrame: 0, threadId: item.threadId }) as { stackFrames?: DapStackFrame[] };
   const frames = response.stackFrames ?? [];
+  if (item.frameId && options.preferOverlay !== false) {
+    const overlay = frames.find(isOverlayStackFrame);
+    if (overlay) { return overlay; }
+  }
   return item.frameId ? frames.find((frame) => frame.id === item.frameId) ?? preferredStackFrame(frames, options) : preferredStackFrame(frames, options);
 }
 

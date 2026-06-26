@@ -427,6 +427,36 @@ test("injects debug breakpoints on active overlay source lines", { skip: !PYTHON
   assert.equal(payload.value, 2);
 });
 
+test("does not inject nested function breakpoints at the enclosing function definition", { skip: !PYTHON }, () => {
+  const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
+  const script = [
+    "import importlib.util, json, sys, types",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    `filename=${JSON.stringify(filename)}`,
+    "hits={'breakpoint': 0, 'thread': 0}",
+    "fake=types.SimpleNamespace(is_client_connected=lambda: True, breakpoint=lambda: hits.__setitem__('breakpoint', hits['breakpoint'] + 1), debug_this_thread=lambda: hits.__setitem__('thread', hits['thread'] + 1))",
+    "sys.modules['debugpy']=fake",
+    "namespace={}",
+    "code='def work():\\n    value = 1\\n    return value\\n'",
+    "define_response=mod._run_request(namespace, 'tok', {'token':'tok','kind':'execute','code':code,'filename':filename,'breakpointLines':[2]}, set())",
+    "define_hits=hits['breakpoint']",
+    "hits['breakpoint']=0",
+    "call_response=mod._run_request(namespace, 'tok', {'token':'tok','kind':'execute','code':code + '\\nresult = work()','filename':filename,'breakpointLines':[2]}, set())",
+    "print(json.dumps({'call': call_response, 'callHits': hits['breakpoint'], 'define': define_response, 'defineHits': define_hits, 'result': namespace.get('result')}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.define.ok, true);
+  assert.equal(payload.defineHits, 0);
+  assert.equal(payload.call.ok, true);
+  assert.equal(payload.callHits, 1);
+  assert.equal(payload.result, 1);
+});
+
 test("debug execution creates a visible overlay stack frame", { skip: !PYTHON }, () => {
   const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
   const script = [

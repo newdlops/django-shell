@@ -24,26 +24,45 @@ interface DebugEventHooks {
   syncBreakpoints(reason: string): Promise<void>;
 }
 
+interface DebugThreadEventBody {
+  allThreadsContinued?: boolean;
+  reason?: string;
+  threadId?: number;
+}
+
 /** Registers VS Code debug events that keep the custom console debugger panel current. */
 export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[], hooks: DebugEventHooks): void {
   let generation = 0;
+  let pausedThreadId: number | undefined;
   const clearInfo = (state: DebugPanelState) => hooks.postInfo({ focusVariables: [], scopes: [], state });
   const inspectStack = (item: vscode.DebugThread | vscode.DebugStackFrame | undefined) => {
+    if (shouldIgnoreActiveStackItem(item, pausedThreadId, hooks)) { hooks.logger?.log("debug.active.frame.ignore", { pausedThreadId: pausedThreadId ?? 0, threadId: item && "threadId" in item ? item.threadId : 0 }); hooks.refocusOverlay(); return; }
     generation += 1;
     const current = generation;
     if (item && "frameId" in item) { hooks.logger?.log("debug.active.frame", { frameId: item.frameId, threadId: item.threadId }); }
     if (item && "frameId" in item && hooks.shouldRefocusOverlay()) { hooks.refocusOverlay(); }
     void refreshPausedFrame(item, hooks, () => current === generation);
   };
-  const inspectStopped = (session: vscode.DebugSession, body: { reason?: string; threadId?: number } | undefined) => {
+  const inspectStopped = (session: vscode.DebugSession, body: DebugThreadEventBody | undefined) => {
     if (session.id !== hooks.getSession()?.id) { return; }
+    if (shouldIgnoreOverlayThreadEvent(body?.threadId, pausedThreadId, hooks)) { hooks.logger?.log("debug.dap.stopped.ignore", { pausedThreadId: pausedThreadId ?? 0, reason: body?.reason ?? "", threadId: body?.threadId ?? 0 }); hooks.refocusOverlay(); return; }
     generation += 1;
     const current = generation;
-    hooks.setPausedThread(body?.threadId);
+    pausedThreadId = body?.threadId;
+    hooks.setPausedThread(pausedThreadId);
     hooks.logger?.log("debug.dap.stopped", { reason: body?.reason ?? "", threadId: body?.threadId ?? 0 });
     if (hooks.shouldRefocusOverlay()) { hooks.refocusOverlay(); }
     void logDebugStack(session, body?.threadId, hooks);
     void refreshStoppedThread(session, body, hooks, () => current === generation);
+  };
+  const handleContinued = (body: DebugThreadEventBody | undefined) => {
+    if (shouldIgnoreContinuedThread(body, pausedThreadId, hooks)) { hooks.logger?.log("debug.dap.continued.ignore", { pausedThreadId: pausedThreadId ?? 0, threadId: body?.threadId ?? 0 }); return; }
+    pausedThreadId = undefined;
+    hooks.setPausedThread(undefined);
+    generation += 1;
+    hooks.logger?.log("debug.dap.continued", { threadId: body?.threadId ?? 0 });
+    hooks.postStatus("running", "continued");
+    clearInfo("running");
   };
   disposables.push(
     vscode.debug.onDidStartDebugSession((session) => {
@@ -65,8 +84,8 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
     }),
     vscode.debug.onDidReceiveDebugSessionCustomEvent((event) => {
       if (event.session.id !== hooks.getSession()?.id) { return; }
-      if (event.event === "continued") { generation += 1; hooks.logger?.log("debug.dap.continued", { threadId: (event.body as { threadId?: number } | undefined)?.threadId ?? 0 }); hooks.postStatus("running", "continued"); clearInfo("running"); return; }
-      if (event.event === "stopped") { inspectStopped(event.session, event.body as { reason?: string; threadId?: number } | undefined); }
+      if (event.event === "continued") { handleContinued(event.body as DebugThreadEventBody | undefined); return; }
+      if (event.event === "stopped") { inspectStopped(event.session, event.body as DebugThreadEventBody | undefined); }
     }),
     vscode.debug.registerDebugAdapterTrackerFactory("*", {
       /** Creates a tracker for Django Shell debugpy sessions only. */
@@ -82,7 +101,7 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
           onDidSendMessage(message) {
             const event = message as { body?: { reason?: string; threadId?: number }; event?: string; type?: string };
             if (event.type !== "event") { return; }
-            if (event.event === "continued") { generation += 1; hooks.logger?.log("debug.dap.continued", { threadId: event.body?.threadId ?? 0 }); hooks.postStatus("running", "continued"); clearInfo("running"); return; }
+            if (event.event === "continued") { handleContinued(event.body); return; }
             if (event.event === "stopped") { inspectStopped(session, event.body); }
           }
         };
@@ -90,6 +109,28 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
     }),
     vscode.debug.onDidChangeActiveStackItem(inspectStack)
   );
+}
+
+/** Returns whether an active-stack notification points away from the paused overlay thread. */
+function shouldIgnoreActiveStackItem(item: vscode.DebugThread | vscode.DebugStackFrame | undefined, pausedThreadId: number | undefined, hooks: DebugEventHooks): boolean {
+  if (!item && hooks.shouldRefocusOverlay() && typeof pausedThreadId === "number") {
+    return true;
+  }
+  const threadId = item && "threadId" in item ? item.threadId : undefined;
+  return shouldIgnoreOverlayThreadEvent(threadId, pausedThreadId, hooks);
+}
+
+/** Returns whether a continued event belongs to debugpy thread churn outside the overlay pause. */
+function shouldIgnoreContinuedThread(body: DebugThreadEventBody | undefined, pausedThreadId: number | undefined, hooks: DebugEventHooks): boolean {
+  if (body?.allThreadsContinued || hooks.lastControlAction() === "continue" || hooks.lastControlAction() === "stop" || hooks.lastControlAction() === "restart") {
+    return false;
+  }
+  return shouldIgnoreOverlayThreadEvent(body?.threadId, pausedThreadId, hooks);
+}
+
+/** Returns whether one thread event should not replace the current overlay debug frame. */
+function shouldIgnoreOverlayThreadEvent(threadId: number | undefined, pausedThreadId: number | undefined, hooks: DebugEventHooks): boolean {
+  return hooks.shouldRefocusOverlay() && typeof threadId === "number" && typeof pausedThreadId === "number" && threadId !== pausedThreadId;
 }
 
 /** Returns whether a debug session belongs to this extension's shell attach flow. */
@@ -166,7 +207,7 @@ async function refreshPausedFrame(item: vscode.DebugThread | vscode.DebugStackFr
   if (!("frameId" in item)) { return; }
   hooks.postStatus("paused", "breakpoint");
   try {
-    const info = await inspectDebugFrame(session, item);
+    const info = await inspectDebugFrame(session, item, { preferOverlay: hooks.lastControlAction() !== "stepInto" });
     if (isCurrent() && hooks.getSession()?.id === session.id) { hooks.logger?.log("debug.frame", frameFields(info)); hooks.postInfo(info); }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

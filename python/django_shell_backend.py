@@ -1390,7 +1390,28 @@ class _DebugBreakpointTransformer(ast.NodeTransformer):
         """Returns whether an active breakpoint line falls inside one statement span."""
         start = int(getattr(statement, "lineno", 0) or 0)
         end = int(getattr(statement, "end_lineno", start) or start)
+        if start in self.lines:
+            return True
+        if _debug_statement_owns_nested_lines(statement):
+            return False
         return any(start <= line <= end for line in self.lines)
+
+
+def _debug_statement_owns_nested_lines(statement):
+    """Returns whether a statement span mainly represents nested child statement lines."""
+    return isinstance(statement, (
+        ast.AsyncFor,
+        ast.AsyncFunctionDef,
+        ast.AsyncWith,
+        ast.ClassDef,
+        ast.For,
+        ast.FunctionDef,
+        ast.If,
+        ast.Match,
+        ast.Try,
+        ast.While,
+        ast.With,
+    ))
 
 
 def _debug_breakpoint_statement(statement):

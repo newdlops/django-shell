@@ -14,6 +14,18 @@ export interface DebugpyBootstrapResult {
   ok: boolean;
 }
 
+export interface DebugpyAttachOptions {
+  connectHost?: string;
+  connectPort?: number;
+  listenHost: string;
+  listenPort: number;
+  remoteRoot?: string;
+}
+
+export interface DebugpySettingsReader {
+  get<T>(section: string, defaultValue: T): T;
+}
+
 export interface DjangoShellDebugConfiguration {
   connect: {
     host: string;
@@ -70,6 +82,17 @@ export function buildDebugpyBootstrapCode(host: string, port: number, marker = D
   ].join("\n");
 }
 
+/** Reads debugger attach settings without depending on VS Code types in this helper module. */
+export function readDjangoShellDebugOptions(configuration: DebugpySettingsReader): DebugpyAttachOptions {
+  return {
+    connectHost: stringSetting(configuration.get("connectHost", "")),
+    connectPort: normalizeDebugpyPort(configuration.get("connectPort", 0)),
+    listenHost: stringSetting(configuration.get("listenHost", "127.0.0.1")) || "127.0.0.1",
+    listenPort: normalizeDebugpyPort(configuration.get("listenPort", 0)),
+    remoteRoot: stringSetting(configuration.get("remoteRoot", ""))
+  };
+}
+
 /** Parses the marker emitted by the debugpy bootstrap code. */
 export function parseDebugpyBootstrapResult(output: string, marker = DEBUGPY_MARKER_PREFIX): DebugpyBootstrapResult {
   const markerIndex = output.lastIndexOf(marker);
@@ -92,14 +115,17 @@ export function parseDebugpyBootstrapResult(output: string, marker = DEBUGPY_MAR
 }
 
 /** Builds the VS Code Python debug attach configuration for a shell debugpy endpoint. */
-export function buildDjangoShellDebugConfiguration(endpoint: DebugpyEndpoint, cwd: string): DjangoShellDebugConfiguration {
+export function buildDjangoShellDebugConfiguration(endpoint: DebugpyEndpoint, cwd: string, options?: Partial<DebugpyAttachOptions>): DjangoShellDebugConfiguration {
+  const connectHost = options?.connectHost || connectableDebugHost(endpoint.host);
+  const connectPort = options?.connectPort || endpoint.port;
+  const remoteRoot = options?.remoteRoot || cwd;
   return {
-    connect: { host: endpoint.host, port: endpoint.port },
+    connect: { host: connectHost, port: connectPort },
     cwd,
     django: true,
     justMyCode: false,
     name: "Django Shell",
-    pathMappings: [{ localRoot: cwd, remoteRoot: cwd }],
+    pathMappings: [{ localRoot: cwd, remoteRoot }],
     request: "attach",
     type: "python"
   };
@@ -113,4 +139,21 @@ function pythonString(value: string): string {
 /** Encodes JavaScript strings as a Python list literal. */
 function pythonStringArray(values: string[]): string {
   return `[${values.map((value) => pythonString(value)).join(", ")}]`;
+}
+
+/** Normalizes one debugger host value from config. */
+function stringSetting(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/** Normalizes one debugger port value, using zero to mean "let debugpy choose". */
+function normalizeDebugpyPort(value: unknown): number {
+  const port = Math.floor(Number(value));
+  return Number.isFinite(port) && port > 0 && port <= 65535 ? port : 0;
+}
+
+/** Converts listen-any addresses into a client-connectable loopback host. */
+function connectableDebugHost(host: string): string {
+  const value = stringSetting(host) || "127.0.0.1";
+  return value === "0.0.0.0" || value === "::" ? "127.0.0.1" : value;
 }

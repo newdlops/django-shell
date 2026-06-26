@@ -184,6 +184,16 @@ test("debug start clicks always reach the extension host for diagnostics", () =>
   assert.ok(customConsoleSource.includes("debugpyEndpoint = undefined"));
 });
 
+test("debug attach keeps model-browser transport independent from debugpy", () => {
+  assert.ok(customConsoleSource.includes("readDjangoShellDebugOptions"));
+  assert.ok(customConsoleSource.includes("debugOptions.listenPort"));
+  assert.ok(customConsoleSource.includes("debugOptions.listenHost"));
+  assert.ok(customConsoleSource.includes("forwardDebugpy(endpoint.endpoint.port)"));
+  assert.ok(customConsoleSource.includes("clearDebugpyPortForward()"));
+  assert.equal(customConsoleSource.includes('backend.setTransportMode("tcp")'), false);
+  assert.equal(customConsoleSource.includes('this.selectedTransport = "tcp"'), false);
+});
+
 test("debug inspection prefers the generated overlay frame from stopped stacks", () => {
   assert.ok(debugInspectorSource.includes("OVERLAY_SOURCE_SUFFIX"));
   assert.ok(debugInspectorSource.includes("preferredStackFrame"));
@@ -208,7 +218,18 @@ test("debug controls reuse the stopped thread instead of the first debugpy threa
   assert.ok(customConsoleSource.includes("setPausedThread: (threadId) => { this.debugThreadId = threadId; }"));
   assert.ok(customConsoleSource.includes("runDebugControl(action, this.debugSession, this.debugThreadId"));
   assert.ok(debugControlsSource.includes("preferredThreadId ?? await firstThreadId(session)"));
-  assert.ok(debugEventsSource.includes("hooks.setPausedThread(body?.threadId)"));
+  assert.ok(debugEventsSource.includes("hooks.setPausedThread(pausedThreadId)"));
+});
+
+test("overlay debug ignores debugpy events from non-overlay paused threads", () => {
+  assert.ok(debugEventsSource.includes("let pausedThreadId"));
+  assert.ok(debugEventsSource.includes("shouldIgnoreOverlayThreadEvent"));
+  assert.ok(debugEventsSource.includes("debug.dap.continued.ignore"));
+  assert.ok(debugEventsSource.includes("debug.dap.stopped.ignore"));
+  assert.ok(debugEventsSource.includes("debug.active.frame.ignore"));
+  assert.ok(debugEventsSource.includes("hooks.setPausedThread(undefined)"));
+  assert.ok(debugEventsSource.includes('inspectDebugFrame(session, item, { preferOverlay: hooks.lastControlAction() !== "stepInto" })'));
+  assert.ok(debugInspectorSource.includes("const overlay = frames.find(isOverlayStackFrame)"));
 });
 
 test("debug stop interrupts the active backend execution instead of only detaching", () => {

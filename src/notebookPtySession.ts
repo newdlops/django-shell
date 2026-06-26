@@ -9,6 +9,7 @@ import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BACKEND_PROGRESS_PREFIX, B
 import { buildPtyBackendRequest, buildPtyExecuteCell, firstPathEntry, isSecretPrompt, safeCommand, trimTerminalText } from "./notebookPtyText";
 import { DiagnosticLogger } from "./diagnostics";
 import { buildShellEnv } from "./env";
+import { type KubectlExecTarget, type KubectlPortForward, parseKubectlExecTarget, startKubectlPortForward } from "./kubectlPortForward";
 import { ensureNodePtyHelperExecutable } from "./ptyHelper";
 import { getShellLaunch } from "./shellLaunch";
 import { appendShellTranscript } from "./shellTranscript";
@@ -65,6 +66,8 @@ export class NotebookPtySession implements vscode.Disposable {
   private ptyProgressBuffer = "";
   private readonly ptyResponseChunks = new Map<string, { chunks: string[]; count: number }>();
   private ptyRequestSeq = 1;
+  private debugpyForward: KubectlPortForward | undefined;
+  private kubectlTarget: KubectlExecTarget | undefined;
   private shellLogTail = "";
   private spawnedAt = 0;
   private started = false;
@@ -189,6 +192,7 @@ export class NotebookPtySession implements vscode.Disposable {
   dispose(): void {
     this.generation += 1;
     this.stopKeepalive();
+    this.clearDebugpyPortForward();
     this.clearBootstrapWriteTimers();
     this.process?.kill();
     this.rejectPtyRequests("Django shell PTY session disposed.");
@@ -200,6 +204,25 @@ export class NotebookPtySession implements vscode.Disposable {
   /** Returns the latest renderable terminal state. */
   snapshot(): NotebookTerminalSnapshot {
     return { mode: this.mode, ready: Boolean(this.client), secretPrompt: isSecretPrompt(this.displayText), selectedSettingsModule: this.options.djangoSettingsModule ?? "", sessionId: this.options.sessionId, settingsCandidates: this.options.settingsCandidates ?? [], state: this.state, text: trimTerminalText(this.displayText) };
+  }
+
+  /** Starts an automatic kubectl port-forward for remote debugpy when the setup command exposed a kubectl exec target. */
+  async forwardDebugpy(remotePort: number): Promise<KubectlPortForward | undefined> {
+    if (!this.bootstrapRetried || !this.kubectlTarget) { return undefined; }
+    this.clearDebugpyPortForward();
+    try {
+      this.debugpyForward = await startKubectlPortForward(this.kubectlTarget, remotePort, this.options.diagnosticLogger);
+      return this.debugpyForward;
+    } catch (error) {
+      this.options.diagnosticLogger?.log("debug.kubectl.portForward.error", { error: error instanceof Error ? error.message : String(error), remotePort });
+      return undefined;
+    }
+  }
+
+  /** Stops any automatic debugpy kubectl port-forward process owned by this PTY session. */
+  clearDebugpyPortForward(): void {
+    this.debugpyForward?.dispose();
+    this.debugpyForward = undefined;
   }
 
   /** Processes PTY output, detects prompts, and attaches the backend once. */
@@ -526,6 +549,7 @@ export class NotebookPtySession implements vscode.Disposable {
   private resetRuntimeState(): void {
     this.stopKeepalive();
     this.clearBootstrapWriteTimers();
+    this.clearDebugpyPortForward();
     this.client = undefined;
     this.ipython = false;
     this.cellCapture = false;
@@ -533,6 +557,7 @@ export class NotebookPtySession implements vscode.Disposable {
     this.bootstrapRetryPending = false;
     this.displayText = "";
     this.inputTracker = new InputLineTracker();
+    this.kubectlTarget = undefined;
     this.lastDjangoCommandAt = 0;
     this.lastOutputAt = 0;
     this.lastPrimaryPromptAt = 0;
@@ -555,6 +580,7 @@ export class NotebookPtySession implements vscode.Disposable {
   private trackInput(data: string): void {
     for (const submitted of this.inputTracker.handleInput(data)) {
       const line = submitted.line.trim();
+      this.kubectlTarget = parseKubectlExecTarget(line) ?? this.kubectlTarget;
       const previousMode = this.mode;
       const nextMode = nextModeForSubmittedLine(this.mode, line);
       const djangoCandidate = isDjangoShellCommand(line);
