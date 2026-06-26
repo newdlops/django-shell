@@ -1,7 +1,7 @@
 // VS Code extension entrypoint for the Django shell custom console.
 
 import * as vscode from "vscode";
-import type { BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransport, BackendTransportMode } from "./backendClient";
+import type { BackendClient, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransport, BackendTransportMode } from "./backendClient";
 import type { CustomDjangoConsole } from "./customConsole";
 import { DEBUG_CONTROL_ACTIONS } from "./debugControls";
 import { DiagnosticLogger } from "./diagnostics";
@@ -52,47 +52,47 @@ class LazyRuntimeSource implements vscode.Disposable {
 
   /** Returns the model catalog or an idle status without starting a shell. */
   listModels(): Promise<BackendModelList> {
-    return this.console?.activeBackend?.models() ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, models: [], ok: false });
+    return this.withParallelModelReads((backend) => backend.models(), { error: MODEL_IDLE_MESSAGE, models: [], ok: false });
   }
 
   /** Returns model schema or an idle status without starting a shell. */
   modelSchema(app: string, model: string): Promise<BackendModelSchema> {
-    return this.console?.activeBackend?.modelSchema(app, model) ?? Promise.resolve({ columns: [], error: MODEL_IDLE_MESSAGE, ok: false, relations: [] });
+    return this.withParallelModelReads((backend) => backend.modelSchema(app, model), { columns: [], error: MODEL_IDLE_MESSAGE, ok: false, relations: [] });
   }
 
   /** Returns the filterable field/relation tree for one model, or an idle status without starting a shell. */
   modelFilterFields(app: string, model: string): Promise<BackendFilterFieldTree> {
-    return this.console?.activeBackend?.modelFilterFields(app, model) ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, fields: [], ok: false, relations: [] });
+    return this.withParallelModelReads((backend) => backend.modelFilterFields(app, model), { error: MODEL_IDLE_MESSAGE, fields: [], ok: false, relations: [] });
   }
 
   /** Returns a page of model rows or an idle status without starting a shell. */
   modelRows(query: ModelRowsQuery): Promise<BackendModelRows> {
-    return this.console?.activeBackend?.modelRows(query) ?? Promise.resolve({ columns: [], error: MODEL_IDLE_MESSAGE, hasMore: false, nextOffset: null, ok: false, orm: "", rows: [], sql: [] });
+    return this.withParallelModelReads((backend) => backend.modelRows(query), { columns: [], error: MODEL_IDLE_MESSAGE, hasMore: false, nextOffset: null, ok: false, orm: "", rows: [], sql: [] });
   }
 
   /** Returns related rows or an idle status without starting a shell. */
   modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows> {
-    return this.console?.activeBackend?.modelRelated(query) ?? Promise.resolve({ columns: [], error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, orm: "", rows: [], single: false, sql: [] });
+    return this.withParallelModelReads((backend) => backend.modelRelated(query), { columns: [], error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, orm: "", rows: [], single: false, sql: [] });
   }
 
   /** Returns one @property column's values for loaded rows, or an idle status without starting a shell. */
   modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed> {
-    return this.console?.activeBackend?.modelComputed(query) ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, ok: false, values: {} });
+    return this.withParallelModelReads((backend) => backend.modelComputed(query), { error: MODEL_IDLE_MESSAGE, ok: false, values: {} });
   }
 
   /** Returns foreign-key picker candidates or an idle status without starting a shell. */
   modelLookup(query: ModelLookupQuery): Promise<BackendModelLookup> {
-    return this.console?.activeBackend?.modelLookup(query) ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, rows: [], sql: [] });
+    return this.withParallelModelReads((backend) => backend.modelLookup(query), { error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, rows: [], sql: [] });
   }
 
   /** Returns the row count or an idle status without starting a shell. */
   modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
-    return this.console?.activeBackend?.modelCount(query) ?? Promise.resolve({ count: null, error: MODEL_IDLE_MESSAGE, ok: false, orm: "", sql: [] });
+    return this.withParallelModelReads((backend) => backend.modelCount(query), { count: null, error: MODEL_IDLE_MESSAGE, ok: false, orm: "", sql: [] });
   }
 
   /** Returns grouped/global aggregate results or an idle status without starting a shell. */
   modelAggregate(query: ModelAggregateQuery): Promise<BackendModelAggregate> {
-    return this.console?.activeBackend?.modelAggregate(query) ?? Promise.resolve({ columns: [], error: MODEL_IDLE_MESSAGE, groupBy: [], hasMore: false, ok: false, orm: "", rows: [], sql: [] });
+    return this.withParallelModelReads((backend) => backend.modelAggregate(query), { columns: [], error: MODEL_IDLE_MESSAGE, groupBy: [], hasMore: false, ok: false, orm: "", rows: [], sql: [] });
   }
 
   /** Commits staged edits or returns an idle status without starting a shell. */
@@ -114,6 +114,13 @@ class LazyRuntimeSource implements vscode.Disposable {
   modelTransportInfo(): { active: BackendTransport; mode: BackendTransportMode } {
     const backend = this.console?.activeBackend;
     return { active: backend?.transport ?? "none", mode: backend?.transportMode ?? "auto" };
+  }
+
+  /** Runs read-only model browser work without queueing behind the terminal while a cell is active. */
+  private withParallelModelReads<T>(work: (backend: BackendClient) => Promise<T>, fallback: T): Promise<T> {
+    const backend = this.console?.activeBackend;
+    if (!backend) { return Promise.resolve(fallback); }
+    return backend.withParallelModelReads(Boolean(this.console?.pythonBusy), () => work(backend));
   }
 
   /** Releases the active runtime event listener. */

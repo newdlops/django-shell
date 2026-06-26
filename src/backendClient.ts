@@ -50,6 +50,14 @@ export interface BackendProgressSnapshot {
   total?: number | null;
 }
 
+export interface BackendInterruptResult {
+  error?: string;
+  interrupted: boolean;
+  message?: string;
+  ok: boolean;
+  reason?: string;
+}
+
 export interface BackendCompletenessResult {
   complete: boolean;
   ok: boolean;
@@ -155,6 +163,7 @@ export interface BackendRequestPayload {
   pk?: unknown;
   q?: string;
   relation?: string;
+  reason?: string;
   sourceText?: string;
   value?: unknown;
 }
@@ -168,6 +177,7 @@ export type BackendTransportMode = "auto" | "orm" | "pty" | "tcp";
 /** Sends execution requests to the backend running inside the Django shell process. */
 export class BackendClient {
   private activeTransport: BackendTransport = "none";
+  private parallelModelReads = false;
   private tcpUnavailable = false;
   private mode: BackendTransportMode = "orm";
 
@@ -194,13 +204,24 @@ export class BackendClient {
     this.tcpUnavailable = this.mode === "pty" && this.tcpUnavailable;
   }
 
+  /** Runs model-browser reads through the socket while a Python cell owns the terminal stream. */
+  async withParallelModelReads<T>(enabled: boolean, task: () => Promise<T>): Promise<T> {
+    const previous = this.parallelModelReads;
+    this.parallelModelReads = enabled || previous;
+    try {
+      return await task();
+    } finally {
+      this.parallelModelReads = previous;
+    }
+  }
+
   /** Marks the loopback socket unreachable so requests skip it and use the PTY — e.g. a remote SSH/kubectl shell whose 127.0.0.1 is the pod's, not ours. */
   markSocketUnavailable(): void {
     this.tcpUnavailable = true;
   }
 
   /** Returns whether reads reconstruct as readable ORM cells (ORM + Terminal modes) instead of `_djs_rpc` plumbing. */
-  private get reconstructsViaOrmCell(): boolean { return this.mode === "orm" || this.mode === "pty"; }
+  private get reconstructsViaOrmCell(): boolean { return this.mode === "pty" || (this.mode === "orm" && !this.parallelModelReads); }
 
   /** Returns whether expensive runtime tree requests are safe for the active transport. */
   supportsRuntimeInspection(): boolean {
@@ -217,6 +238,25 @@ export class BackendClient {
   /** Returns the latest running Python progress snapshot when the socket can be polled. */
   progress(): Promise<BackendProgressSnapshot> {
     return this.request({ kind: "progress" }, parseProgressResponse, false);
+  }
+
+  /** Interrupts the current user execution over TCP without queueing behind the terminal fallback. */
+  interrupt(reason?: string): Promise<BackendInterruptResult> {
+    const started = Date.now();
+    const payload = { kind: "interrupt", reason };
+    return this.socketRequest(payload).then(
+      (buffer) => {
+        const parsed = parseInterruptResponse(buffer);
+        this.activeTransport = "tcp";
+        this.logRequest(payload.kind, started, parsed, buffer.length, undefined, "tcp");
+        return parsed;
+      },
+      (error: unknown) => {
+        const parsed = { error: error instanceof Error ? error.message : String(error), interrupted: false, ok: false, reason };
+        this.logRequest(payload.kind, started, parsed, 0, parsed.error, "tcp");
+        return parsed;
+      }
+    );
   }
 
   /** Returns whether progress polling can run without queuing behind the interactive PTY cell. */
@@ -454,6 +494,12 @@ export class BackendClient {
       return parse(kindErrorResponse(payload.kind, error instanceof Error ? error.message : "Terminal transport is unavailable."));
     }
     this.tcpUnavailable = true;
+    if (this.parallelModelReads && PARALLEL_MODEL_READ_KINDS.has(payload.kind)) {
+      const buffer = kindErrorResponse(payload.kind, PARALLEL_MODEL_READ_UNAVAILABLE);
+      const parsed = parse(buffer);
+      if (log) { this.logRequest(payload.kind, Date.now(), parsed, buffer.length, "parallel socket unavailable; not queued behind active cell", "none"); }
+      return parsed;
+    }
     // ORM/Terminal modes never type metadata plumbing into the shell (no command equivalent): suppress, don't emit `_djs_rpc`.
     const metadataSuppressed = this.reconstructsViaOrmCell && ORM_NO_PTY.has(payload.kind);
     if (metadataSuppressed || !isPtyFallbackKind(payload.kind)) {
@@ -493,9 +539,11 @@ function connectHost(host: string): string {
 }
 
 const PTY_FALLBACK_KINDS = new Set(["children", "complete", "environment", "execute", "inspect", "prelude", "models", "schema", "filterfields", "rows", "related", "count", "aggregate", "commit", "lookup", "query"]); // helpers: scrubbed _djs_rpc; execute: literal cell.
+const PARALLEL_MODEL_READ_KINDS = new Set(["models", "schema", "filterfields", "rows", "related", "computed", "lookup", "count", "aggregate"]);
 // Kinds ORM/Terminal modes never type over the terminal; schema is synthesized from the first row page, and the filter tree falls back to flat fields (see modelBrowser).
 const ORM_NO_PTY = new Set(["children", "environment", "inspect", "models", "prelude", "schema", "filterfields"]);
 const ORM_PTY_SUPPRESSED = "Kept out of the shell: this metadata is not typed into the terminal — switch the Link selector to Socket/Auto to fetch it.";
+const PARALLEL_MODEL_READ_UNAVAILABLE = "Model table reads need a second backend connection while Python is running; this shell only has the terminal stream.";
 const PTY_PAGE_LIMIT = 25;
 
 /** Returns whether one request kind can be serviced over the interactive PTY fallback. */
@@ -515,6 +563,13 @@ function ptyFallbackPayload(payload: BackendRequestPayload): BackendRequestPaylo
 /** Returns a safe error response when a request cannot cross the active transport. */
 function unsupportedPtyFallbackResponse(kind: string): string {
   return kindErrorResponse(kind, "Remote runtime inspection is disabled because the backend is only reachable through the interactive terminal.");
+}
+
+/** Parses a backend execution-interrupt response. */
+function parseInterruptResponse(buffer: string): BackendInterruptResult {
+  const line = buffer.split(/\r?\n/, 1)[0] ?? "";
+  const parsed = JSON.parse(line) as Partial<BackendInterruptResult>;
+  return { error: parsed.error, interrupted: Boolean(parsed.interrupted), message: parsed.message, ok: Boolean(parsed.ok), reason: parsed.reason };
 }
 
 /** Returns a kind-shaped error response carrying one message. */

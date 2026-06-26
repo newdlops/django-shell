@@ -82,7 +82,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
         vscode.commands.registerCommand("djangoShell.newOverlayTab", () => this.newOverlayTab())
       );
     }
-    registerCustomConsoleDebugEvents(this.disposables, { consumeRunOnSessionStart: () => this.consumeRunOnDebugSessionStart(), getSession: () => this.debugSession, lastControlAction: () => this.lastDebugControlAction, logger: this.logger, postInfo: (info) => this.postDebugInfo(info), postStatus: (state, detail) => this.postDebugStatus(state, detail), refocusOverlay: () => this.refocusDebugOverlay(undefined), refreshBreakpoints: () => this.refreshBreakpointUi(), runCurrentInput: () => this.runCurrentDebugInput(), setPausedThread: (threadId) => { this.debugThreadId = threadId; }, setSession: (session) => { this.debugSession = session; this.debugThreadId = undefined; }, shouldRefocusOverlay: () => this.debugMode === "overlay" && this.debugControlOriginOverlay && this.lastDebugFrameOverlay && this.lastDebugControlAction !== "stepInto", syncBreakpoints: (reason) => this.syncActiveDebugBreakpoints(reason) });
+    registerCustomConsoleDebugEvents(this.disposables, { consumeRunOnSessionStart: () => this.consumeRunOnDebugSessionStart(), getSession: () => this.debugSession, interruptExecution: (reason) => this.session?.backend?.interrupt(reason).then(() => undefined) ?? Promise.resolve(), lastControlAction: () => this.lastDebugControlAction, logger: this.logger, postInfo: (info) => this.postDebugInfo(info), postStatus: (state, detail) => this.postDebugStatus(state, detail), refocusOverlay: () => this.refocusDebugOverlay(undefined), refreshBreakpoints: () => this.refreshBreakpointUi(), runCurrentInput: () => this.runCurrentDebugInput(), setPausedThread: (threadId) => { this.debugThreadId = threadId; }, setSession: (session) => { this.debugSession = session; this.debugThreadId = undefined; }, shouldRefocusOverlay: () => this.debugMode === "overlay" && this.debugControlOriginOverlay && this.lastDebugFrameOverlay && this.lastDebugControlAction !== "stepInto", syncBreakpoints: (reason) => this.syncActiveDebugBreakpoints(reason) });
     context.subscriptions.push(this);
   }
 
@@ -125,7 +125,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     }
     this.lastDebugControlAction = action; this.debugControlOriginOverlay = this.lastDebugFrameOverlay; this.postDebugStatus(debugControlState(action), debugControlDetail(action));
     try {
-      const result = await runDebugControl(action, this.debugSession, this.debugThreadId);
+      const result = await runDebugControl(action, this.debugSession, this.debugThreadId, action === "stop" ? () => this.session?.backend?.interrupt("debugControl.stop") ?? Promise.resolve() : undefined);
       this.logger?.log("debug.control", { action, originOverlay: this.debugControlOriginOverlay, threadId: result.threadId ?? 0 });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -221,7 +221,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     return this.session.backend.children(pathSegments, kind);
   }
 
-  /** Returns the active backend client when a Django shell session is attached. */ get activeBackend(): BackendClient | undefined { return this.session?.backend; }
+  /** Returns the active backend client when a Django shell session is attached. */ get activeBackend(): BackendClient | undefined { return this.session?.backend; } /** Returns whether a Python cell is currently executing. */ get pythonBusy(): boolean { return this.activePythonExecution !== undefined; }
 
   /** Returns a compact state snapshot for extension host E2E tests. */
   e2eSnapshot(): Record<string, unknown> {
@@ -668,6 +668,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       this.postDebugStatus("idle");
       return;
     }
+    await this.session?.backend?.interrupt("debugWebview.stop");
     await vscode.debug.stopDebugging(this.debugSession);
   }
 

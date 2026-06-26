@@ -170,14 +170,12 @@ export function overlayBreakpointRendererSource(): string {
       return 19;
     }
 
-    /** Returns a breakpoint dot top coordinate relative to the overlay root. */
-    function __dsoBreakpointDotTop(root, editor, line) {
-      const rootRect = root && root.getBoundingClientRect ? root.getBoundingClientRect() : { top: 0 };
-      const node = editor && editor.getDomNode && editor.getDomNode();
-      const editorRect = node && node.getBoundingClientRect ? node.getBoundingClientRect() : { top: 0 };
-      const scrollTop = Number(editor && editor.getScrollTop && editor.getScrollTop()) || 0;
+    /** Returns a breakpoint dot top coordinate relative to the overlay root using cached frame geometry. */
+    function __dsoBreakpointDotTop(root, editor, line, metrics) {
+      const frame = metrics || {};
+      const scrollTop = Number(frame.scrollTop) || 0;
       const lineTop = editor && editor.getTopForLineNumber ? Number(editor.getTopForLineNumber(line)) - scrollTop : (line - 1) * 19;
-      return (Number(editorRect.top) || 0) - (Number(rootRect.top) || 0) + (Number.isFinite(lineTop) ? lineTop : 0);
+      return (Number(frame.editorTop) || 0) - (Number(frame.rootTop) || 0) + (Number.isFinite(lineTop) ? lineTop : 0);
     }
 
     /** Styles one breakpoint dot rendered outside Monaco's decoration lane. */
@@ -201,28 +199,37 @@ export function overlayBreakpointRendererSource(): string {
       const node = editor.getDomNode && editor.getDomNode();
       const rootRect = root && root.getBoundingClientRect ? root.getBoundingClientRect() : { height: 0, left: 0, top: 0 };
       const editorRect = node && node.getBoundingClientRect ? node.getBoundingClientRect() : { height: 0, left: 0, top: 0 };
-      layer.textContent = "";
+      const scrollTop = Number(editor && editor.getScrollTop && editor.getScrollTop()) || 0;
       layer.style.left = Math.round((Number(editorRect.left) || 0) - (Number(rootRect.left) || 0)) + "px";
       layer.style.top = "0px";
       layer.style.width = "18px";
       layer.style.height = Math.max(Number(rootRect.height) || 0, Number(editorRect.height) || 0, 1) + "px";
       const locations = root.__dsoBreakpointModelLocations || [];
+      const geometryKey = [Math.round(Number(rootRect.top) || 0), Math.round(Number(rootRect.left) || 0), Math.round(Number(rootRect.height) || 0), Math.round(Number(editorRect.top) || 0), Math.round(Number(editorRect.left) || 0), Math.round(Number(editorRect.height) || 0), Math.round(scrollTop)].join(":");
+      const locationKey = locations.map(function (item) { return item ? item.line + ":" + item.column : ""; }).join(",");
+      const renderKey = geometryKey + "|" + locationKey + "|" + (model.getLineCount ? model.getLineCount() : 0);
+      if (root.__dsoBreakpointLayerRenderKey === renderKey) { return; }
+      root.__dsoBreakpointLayerRenderKey = renderKey;
+      layer.textContent = "";
+      const metrics = { editorTop: Number(editorRect.top) || 0, rootTop: Number(rootRect.top) || 0, scrollTop: scrollTop };
+      const fragment = document.createDocumentFragment ? document.createDocumentFragment() : layer;
       locations.forEach(function (item) {
         if (!item || item.line < 1 || item.line > model.getLineCount()) { return; }
         const dot = document.createElement("span");
-        __dsoStyleBreakpointDot(dot, __dsoBreakpointDotTop(root, editor, item.line), __dsoBreakpointLineHeight(editor, item.line), !!item.column);
-        layer.appendChild(dot);
+        __dsoStyleBreakpointDot(dot, __dsoBreakpointDotTop(root, editor, item.line, metrics), __dsoBreakpointLineHeight(editor, item.line), !!item.column);
+        fragment.appendChild(dot);
       });
+      if (fragment !== layer) { layer.appendChild(fragment); }
     }
 
     /** Schedules a breakpoint layer refresh after scroll or layout changes settle. */
     function __dsoScheduleBreakpointLayer(root, editor) {
       if (!root) { return; }
-      window.clearTimeout(root.__dsoBreakpointLayerTimer);
-      root.__dsoBreakpointLayerTimer = window.setTimeout(function () {
-        root.__dsoBreakpointLayerTimer = 0;
+      if (root.__dsoBreakpointLayerFrame) { return; }
+      root.__dsoBreakpointLayerFrame = window.requestAnimationFrame(function () {
+        root.__dsoBreakpointLayerFrame = 0;
         try { __dsoRefreshBreakpointLayer(root, editor); } catch (eRefreshBreakpointLayer) {}
-      }, 0);
+      });
     }
 
     /** Estimates a model line from a client Y coordinate when Monaco lacks a target. */

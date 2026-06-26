@@ -33,12 +33,18 @@ test("model browser leaves loading state when the shell is busy or paused in deb
 });
 
 test("read-only model browser backend requests can run beside long cell execution", () => {
+  const backendClientSource = fs.readFileSync(new URL("../src/backendClient.ts", import.meta.url), "utf8");
+  const extensionSource = fs.readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");
   assert.ok(pythonBackendSource.includes("def _browse_parallel_context"));
   assert.ok(pythonBackendSource.includes("contextlib.nullcontext()"));
   assert.ok(pythonBackendSource.includes("def _browse_rows_context"));
   assert.ok(pythonBackendSource.includes('item.get("kind") == "annotate"'));
   assert.ok(pythonBackendSource.includes("with _browse_rows_context(request):"));
   assert.ok(pythonBackendSource.includes("with _browse_parallel_context():"));
+  assert.ok(customConsoleSource.includes("get pythonBusy()"));
+  assert.ok(backendClientSource.includes("withParallelModelReads"));
+  assert.ok(backendClientSource.includes("PARALLEL_MODEL_READ_KINDS"));
+  assert.ok(extensionSource.includes("backend.withParallelModelReads(Boolean(this.console?.pythonBusy)"));
 });
 
 test("remote terminal ORM mode avoids unbounded inline input and result capture", () => {

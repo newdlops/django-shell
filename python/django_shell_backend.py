@@ -3,6 +3,7 @@
 import ast
 import codeop
 import contextlib
+import ctypes
 import dataclasses
 import io
 import inspect
@@ -28,6 +29,10 @@ _PROGRESS_LOCK = threading.Lock()
 _PROGRESS_INTERVAL_SECONDS = 0.25
 _PTY_ORM_TABULATE_LIMIT = 1000
 _MISSING = object()
+
+
+class _ExecutionInterrupted(BaseException):
+    """Stops the current backend execution when the debugger or UI requests termination."""
 
 
 class _Server(socketserver.ThreadingTCPServer):
@@ -280,6 +285,8 @@ def _run_request(namespace, token, request, initial_names):
         return _inspect_prelude(namespace, initial_names)
     if request.get("kind") == "progress":
         return _progress_snapshot()
+    if request.get("kind") == "interrupt":
+        return _interrupt_execution(request)
     if request.get("kind") == "children":
         return _inspect_children(namespace, request.get("path"))
     if request.get("kind") == "models":
@@ -999,23 +1006,69 @@ def _execute_code(namespace, code, filename=None, line_offset=0, source_text=Non
     stderr = _StreamingCapture("stderr", progress_emit)
     namespace["_djs_debug_should_break"] = _debug_should_break
     namespace["_djs_progress_iter"] = _progress_iter
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-        try:
-            tree = ast.parse(code, filename=compile_filename, mode="exec")
-            tree = _progress_instrument_tree(tree)
-            if line_offset > 0:
-                ast.increment_lineno(tree, line_offset)
-            if breakpoint_lines is not None and _debug_can_wrap_tree(tree):
-                tree = _debug_breakpoint_tree(tree, breakpoint_lines)
-                result = _execute_debug_tree(namespace, tree, compile_filename)
-            else:
-                tree = _debug_breakpoint_tree(tree, breakpoint_lines)
-                result = _execute_plain_tree(namespace, tree, compile_filename)
-            _progress_finish(True)
-            return {"ok": True, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "result": result}
-        except Exception:
-            _progress_finish(False)
-            return {"ok": False, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "traceback": traceback.format_exc()}
+    _execution_mark_active()
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                tree = ast.parse(code, filename=compile_filename, mode="exec")
+                tree = _progress_instrument_tree(tree)
+                if line_offset > 0:
+                    ast.increment_lineno(tree, line_offset)
+                if breakpoint_lines is not None and _debug_can_wrap_tree(tree):
+                    tree = _debug_breakpoint_tree(tree, breakpoint_lines)
+                    result = _execute_debug_tree(namespace, tree, compile_filename)
+                else:
+                    tree = _debug_breakpoint_tree(tree, breakpoint_lines)
+                    result = _execute_plain_tree(namespace, tree, compile_filename)
+                _progress_finish(True)
+                return {"ok": True, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "result": result}
+            except (KeyboardInterrupt, _ExecutionInterrupted):
+                _progress_finish(False)
+                return {"ok": False, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "traceback": traceback.format_exc()}
+            except Exception:
+                _progress_finish(False)
+                return {"ok": False, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "traceback": traceback.format_exc()}
+    finally:
+        _execution_mark_inactive()
+
+
+def _execution_mark_active():
+    """Records the thread currently executing user Python code."""
+    with _PROGRESS_LOCK:
+        _STATE["execution_thread_id"] = threading.get_ident()
+
+
+def _execution_mark_inactive():
+    """Clears the current user execution thread marker."""
+    with _PROGRESS_LOCK:
+        _STATE.pop("execution_thread_id", None)
+
+
+def _interrupt_execution(request=None):
+    """Raises an internal interruption in the active user execution thread without waiting for the execution lock."""
+    reason = str((request or {}).get("reason") or "")
+    with _PROGRESS_LOCK:
+        thread_id = _STATE.get("execution_thread_id")
+    if not isinstance(thread_id, int):
+        return {"interrupted": False, "message": "No Python execution is running.", "ok": True, "reason": reason}
+    try:
+        changed = _raise_async_exception(thread_id, _ExecutionInterrupted)
+    except Exception as error:
+        return {"error": repr(error), "interrupted": False, "ok": False, "reason": reason}
+    if changed == 1:
+        _progress_update(label="Interrupting Python cell")
+        return {"interrupted": True, "ok": True, "reason": reason}
+    return {"error": "Execution thread was not found." if changed == 0 else "Async interrupt touched multiple threads and was rolled back.", "interrupted": False, "ok": False, "reason": reason}
+
+
+def _raise_async_exception(thread_id, exception_type):
+    """Raises one exception type asynchronously in a CPython thread and returns the affected thread count."""
+    setter = ctypes.pythonapi.PyThreadState_SetAsyncExc
+    setter.restype = ctypes.c_int
+    changed = setter(ctypes.c_ulong(thread_id), ctypes.py_object(exception_type))
+    if changed > 1:
+        setter(ctypes.c_ulong(thread_id), None)
+    return changed
 
 
 def _execute_plain_tree(namespace, tree, compile_filename):

@@ -53,8 +53,9 @@ export function debugControlDetail(action: DebugControlAction): string {
 }
 
 /** Executes one debugger action against the Django shell debug adapter session. */
-export async function runDebugControl(action: DebugControlAction, session?: vscode.DebugSession, preferredThreadId?: number): Promise<DebugControlResult> {
+export async function runDebugControl(action: DebugControlAction, session?: vscode.DebugSession, preferredThreadId?: number, interruptExecution?: () => Promise<unknown>): Promise<DebugControlResult> {
   if (action === "stop" && session) {
+    await interruptExecution?.();
     await vscode.debug.stopDebugging(session);
     return {};
   }

@@ -9,6 +9,7 @@ export function overlayRendererSource(modelUri: string): string {
     window.__djangoShellOverlayModelUri = window.__djangoShellOverlayModelUri || ${JSON.stringify(modelUri)};
     window.__dsoCaptures = window.__dsoCaptures || { widgets: [], insts: [], modelSvcs: [], ctors: [] };
     window.__dsoBadModelSvcs = window.__dsoBadModelSvcs || []; window.__dsoGoodModelSvcs = window.__dsoGoodModelSvcs || [];
+    window.__dsoWidgetCache = window.__dsoWidgetCache || (typeof WeakMap !== "undefined" ? new WeakMap() : null);
     /** Posts one renderer event to the extension-host bridge. */
     function __dsoPost(payload) {
       const bridge = window.__djangoShellOverlayBridge || {};
@@ -100,6 +101,8 @@ export function overlayRendererSource(modelUri: string): string {
     /** Searches a DOM node for an attached editor widget reference. */
     function __dsoFindWidgetOn(element) {
       if (!element) { return null; }
+      const cache = window.__dsoWidgetCache;
+      try { const cached = cache && cache.get(element); if (__dsoIsWidget(cached)) { return cached; } } catch (eWidgetCacheRead) {}
       const keys = [];
       const seen = Object.create(null);
       try {
@@ -114,10 +117,10 @@ export function overlayRendererSource(modelUri: string): string {
       for (let i = 0; i < keys.length; i++) {
         let value;
         try { value = element[keys[i]]; } catch (eRead) { continue; }
-        if (__dsoIsWidget(value)) { return value; }
+        if (__dsoIsWidget(value)) { try { cache && cache.set(element, value); } catch (eWidgetCacheWidget) {} return value; }
         try {
-          if (__dsoIsWidget(value && value.editor)) { return value.editor; }
-          if (__dsoIsWidget(value && value._editor)) { return value._editor; }
+          if (__dsoIsWidget(value && value.editor)) { try { cache && cache.set(element, value.editor); } catch (eWidgetCacheEditor) {} return value.editor; }
+          if (__dsoIsWidget(value && value._editor)) { try { cache && cache.set(element, value._editor); } catch (eWidgetCacheUnderscore) {} return value._editor; }
         } catch (eNested) {}
       }
       try {
@@ -125,7 +128,7 @@ export function overlayRendererSource(modelUri: string): string {
         for (let i = 0; i < symbols.length; i++) {
           let value;
           try { value = element[symbols[i]]; } catch (eSymbolRead) { continue; }
-          if (__dsoIsWidget(value)) { return value; }
+          if (__dsoIsWidget(value)) { try { cache && cache.set(element, value); } catch (eWidgetCacheSymbol) {} return value; }
         }
       } catch (eSymbols) {}
       return null;
@@ -133,6 +136,8 @@ export function overlayRendererSource(modelUri: string): string {
 
     /** Searches an editor DOM subtree and nearby ancestors for an editor widget reference. */
     function __dsoFindWidget(start) {
+      const cache = window.__dsoWidgetCache;
+      try { const cached = cache && start && cache.get(start); if (__dsoIsWidget(cached)) { return cached; } } catch (eFindWidgetCacheRead) {}
       const candidates = [];
       if (start) { candidates.push(start); }
       let parent = start && start.parentElement;
@@ -146,7 +151,7 @@ export function overlayRendererSource(modelUri: string): string {
       }
       for (let i = 0; i < candidates.length; i++) {
         const widget = __dsoFindWidgetOn(candidates[i]);
-        if (widget) { return widget; }
+        if (widget) { try { cache && start && cache.set(start, widget); } catch (eFindWidgetCacheSet) {} return widget; }
       }
       return null;
     }
@@ -366,6 +371,9 @@ export function overlayRendererSource(modelUri: string): string {
       const editor = root.__djangoShellEditor;
       if (!host || !editor || !editor.layout) { return; }
       const rect = host.getBoundingClientRect();
+      const layoutKey = Math.round(rect.width) + ":" + Math.round(rect.height);
+      if (root.__dsoLastEditorLayoutKey === layoutKey) { return; }
+      root.__dsoLastEditorLayoutKey = layoutKey;
       try { editor.layout({ width: Math.max(100, rect.width), height: Math.max(80, rect.height) }); } catch (eLayoutOverlay) {}
       try { window.__dsoScheduleWidgetClamp && window.__dsoScheduleWidgetClamp(root); } catch (eClampLayout) {}
     }

@@ -311,6 +311,38 @@ test("reports progress for running Python for-loops without waiting for the exec
   assert.equal(payload.final.ok, true);
 });
 
+test("interrupt request stops the active Python execution thread", { skip: !PYTHON }, () => {
+  const script = [
+    "import importlib.util, json, threading, time",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "namespace={'flag': []}",
+    "result={}",
+    "code='flag.append(\"start\")\\nwhile True:\\n    pass\\nflag.append(\"end\")'",
+    "thread=threading.Thread(target=lambda: result.setdefault('value', mod._run_request(namespace, 'tok', {'token':'tok','kind':'execute','code':code}, set())), daemon=True)",
+    "thread.start()",
+    "deadline=time.time()+1",
+    "while time.time() < deadline and not mod._STATE.get('execution_thread_id'):",
+    "    time.sleep(0.01)",
+    "interrupted=mod._run_request(namespace, 'tok', {'token':'tok','kind':'interrupt','reason':'test'}, set())",
+    "thread.join(2)",
+    "response=result.get('value') or {}",
+    "print(json.dumps({'alive': thread.is_alive(), 'flag': namespace['flag'], 'interrupted': interrupted, 'response': response, 'threadId': mod._STATE.get('execution_thread_id')}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.alive, false);
+  assert.deepEqual(payload.flag, ["start"]);
+  assert.equal(payload.interrupted.ok, true);
+  assert.equal(payload.interrupted.interrupted, true);
+  assert.equal(payload.response.ok, false);
+  assert.match(payload.response.traceback, /_ExecutionInterrupted|KeyboardInterrupt/);
+  assert.equal(payload.threadId, null);
+});
+
 test("streams stdout and stderr chunks while PTY progress emit is active", { skip: !PYTHON }, () => {
   const script = [
     "import importlib.util, io, json, sys",

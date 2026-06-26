@@ -121,6 +121,20 @@ test("overlay prompt gutter stays compact after breakpoint controls install", ()
   assert.equal(breakpointSource.includes("linesDecorationsClassName"), false);
 });
 
+test("overlay renderer caches expensive widget and breakpoint layout work", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+  const breakpointSource = fs.readFileSync(new URL("../src/workbenchOverlayBreakpointRenderer.ts", import.meta.url), "utf8");
+
+  assert.ok(rendererSource.includes("window.__dsoWidgetCache"));
+  assert.ok(rendererSource.includes("if (__dsoIsWidget(cached))"));
+  assert.ok(rendererSource.includes("cache && start && cache.set(start, widget)"));
+  assert.ok(rendererSource.includes("root.__dsoLastEditorLayoutKey === layoutKey"));
+  assert.ok(breakpointSource.includes("root.__dsoBreakpointLayerRenderKey === renderKey"));
+  assert.ok(breakpointSource.includes("root.__dsoBreakpointLayerFrame"));
+  assert.ok(breakpointSource.includes("window.requestAnimationFrame(function ()"));
+  assert.ok(breakpointSource.includes("document.createDocumentFragment"));
+});
+
 test("debugger controls live in the Python cell toolbar", () => {
   const header = customConsoleHtmlSource.slice(customConsoleHtmlSource.indexOf("<header"), customConsoleHtmlSource.indexOf("<main"));
   const pythonToolbar = customConsoleHtmlSource.slice(customConsoleHtmlSource.indexOf('id="pythonTabs"'), customConsoleHtmlSource.indexOf('id="editorAnchor"'));
@@ -192,9 +206,19 @@ test("debug step-over refocus stays conditional so step-into can open source", (
 
 test("debug controls reuse the stopped thread instead of the first debugpy thread", () => {
   assert.ok(customConsoleSource.includes("setPausedThread: (threadId) => { this.debugThreadId = threadId; }"));
-  assert.ok(customConsoleSource.includes("runDebugControl(action, this.debugSession, this.debugThreadId)"));
+  assert.ok(customConsoleSource.includes("runDebugControl(action, this.debugSession, this.debugThreadId"));
   assert.ok(debugControlsSource.includes("preferredThreadId ?? await firstThreadId(session)"));
   assert.ok(debugEventsSource.includes("hooks.setPausedThread(body?.threadId)"));
+});
+
+test("debug stop interrupts the active backend execution instead of only detaching", () => {
+  assert.ok(customConsoleSource.includes("backend?.interrupt(\"debugControl.stop\")"));
+  assert.ok(customConsoleSource.includes("backend?.interrupt(\"debugWebview.stop\")"));
+  assert.ok(customConsoleSource.includes("interruptExecution: (reason) => this.session?.backend?.interrupt(reason)"));
+  assert.ok(debugControlsSource.includes("await interruptExecution?.();"));
+  assert.ok(debugEventsSource.includes("onWillReceiveMessage(message)"));
+  assert.ok(debugEventsSource.includes("debugAdapter.${request.command}"));
+  assert.ok(debugEventsSource.includes("debugSessionTerminate"));
 });
 
 test("paused debug refocus does not close the executable console source tab", () => {

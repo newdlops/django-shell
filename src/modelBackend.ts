@@ -678,6 +678,9 @@ export function modelUnsupportedFallback(kind: string, error: string): string | 
   if (kind === "rows" || kind === "related") {
     return `${JSON.stringify({ columns: [], error, ok: false, rows: [] })}\n`;
   }
+  if (kind === "computed") {
+    return `${JSON.stringify({ error, ok: false, values: {} })}\n`;
+  }
   if (kind === "lookup") {
     return `${JSON.stringify({ error, ok: false, rows: [] })}\n`;
   }

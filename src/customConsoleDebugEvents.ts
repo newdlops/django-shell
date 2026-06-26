@@ -10,6 +10,7 @@ export type DebugStatusState = "attached" | "error" | "idle" | "paused" | "runni
 interface DebugEventHooks {
   consumeRunOnSessionStart(): boolean;
   getSession(): vscode.DebugSession | undefined;
+  interruptExecution(reason: string): Promise<void>;
   lastControlAction(): DebugControlAction | undefined;
   logger?: DiagnosticLogger;
   postInfo(info: DebugFrameInfo): void;
@@ -54,6 +55,7 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
     vscode.debug.onDidTerminateDebugSession((session) => {
       if (hooks.getSession()?.id !== session.id) { return; }
       hooks.logger?.log("debug.session.terminate", { sessionId: session.id });
+      void hooks.interruptExecution("debugSessionTerminate");
       generation += 1; hooks.setSession(undefined); hooks.postStatus("idle", "ended"); clearInfo("idle");
     }),
     vscode.debug.onDidChangeBreakpoints(() => { hooks.refreshBreakpoints(); void hooks.syncBreakpoints("breakpointsChanged"); }),
@@ -71,6 +73,11 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
       createDebugAdapterTracker(session) {
         if (!isDjangoShellSession(session)) { return undefined; }
         return {
+          /** Interrupts Python before debugpy disconnect resumes the stopped user thread. */
+          onWillReceiveMessage(message) {
+            const request = message as { command?: string; type?: string };
+            if (request.type === "request" && (request.command === "disconnect" || request.command === "terminate")) { void hooks.interruptExecution(`debugAdapter.${request.command}`); }
+          },
           /** Mirrors standard DAP stopped/continued events into the custom console UI. */
           onDidSendMessage(message) {
             const event = message as { body?: { reason?: string; threadId?: number }; event?: string; type?: string };
