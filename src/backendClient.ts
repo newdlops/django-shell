@@ -39,11 +39,14 @@ export interface BackendProgressSnapshot {
   detail?: string;
   done?: boolean;
   elapsed?: number;
+  kind?: string;
   label?: string;
   line?: number;
   ok?: boolean;
+  output?: string;
   percent?: number;
   rate?: number;
+  stream?: string;
   total?: number | null;
 }
 
@@ -545,11 +548,14 @@ function parseProgressResponse(buffer: string): BackendProgressSnapshot {
     detail: typeof parsed.detail === "string" ? parsed.detail : undefined,
     done: Boolean(parsed.done),
     elapsed: typeof parsed.elapsed === "number" ? parsed.elapsed : undefined,
+    kind: typeof parsed.kind === "string" ? parsed.kind : undefined,
     label: typeof parsed.label === "string" ? parsed.label : undefined,
     line: typeof parsed.line === "number" ? parsed.line : undefined,
     ok: typeof parsed.ok === "boolean" ? parsed.ok : undefined,
+    output: typeof parsed.output === "string" ? parsed.output : undefined,
     percent: typeof parsed.percent === "number" ? parsed.percent : undefined,
     rate: typeof parsed.rate === "number" ? parsed.rate : undefined,
+    stream: typeof parsed.stream === "string" ? parsed.stream : undefined,
     total: typeof parsed.total === "number" || parsed.total === null ? parsed.total : undefined
   };
 }

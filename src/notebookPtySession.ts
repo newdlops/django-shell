@@ -600,7 +600,7 @@ function wantsPtyProgress(payload: BackendRequestPayload): boolean {
   if (payload.kind !== "execute" || typeof payload.code !== "string") {
     return false;
   }
-  return /\bfor\b|\.iterator\s*\(|\.objects\b|QuerySet\b/.test(payload.code);
+  return /\bfor\b|\btqdm\s*\(|\.iterator\s*\(|\.objects\b|QuerySet\b/.test(payload.code);
 }
 
 /** Returns the progress marker tail worth keeping across PTY output chunks. */

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import test from "node:test";
 
 const customConsoleSource = fs.readFileSync(new URL("../src/customConsole.ts", import.meta.url), "utf8");
+const customConsoleClientSource = fs.readFileSync(new URL("../media/customConsoleSource.js", import.meta.url), "utf8");
 const debugEventsSource = fs.readFileSync(new URL("../src/customConsoleDebugEvents.ts", import.meta.url), "utf8");
 const modelBrowserSource = fs.readFileSync(new URL("../src/modelBrowser.ts", import.meta.url), "utf8");
 const modelBrowserClientSource = fs.readFileSync(new URL("../media/modelBrowserSource.js", import.meta.url), "utf8");
@@ -54,4 +55,12 @@ test("streamed backend progress markers are parsed outside PTY request mode", ()
   assert.ok(notebookPtySessionSource.includes("progressMarkerTail(data)"));
   assert.ok(notebookPtySessionSource.includes("progressMarkerTail(parsed.rest)"));
   assert.ok(notebookPtySessionSource.includes("this.inspectPtyProgress();"));
+  assert.ok(notebookPtySessionSource.includes("\\btqdm\\s*\\("));
+});
+
+test("remote PTY stdout and stderr progress chunks stay visible in running output", () => {
+  assert.ok(pythonBackendSource.includes("class _StreamingCapture"));
+  assert.ok(pythonBackendSource.includes('{"active": True, "kind": "output"'));
+  assert.ok(customConsoleClientSource.includes("function appendLiveOutput"));
+  assert.ok(customConsoleClientSource.includes('typeof progress.output === "string"'));
 });

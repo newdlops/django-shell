@@ -9456,6 +9456,7 @@ var geometryFrame = 0;
 var lastGeometryKey = "";
 var pendingExecution = 0;
 var runningOutputs = /* @__PURE__ */ new Map();
+var LIVE_OUTPUT_LIMIT = 2e4;
 var snapshotWritten = false;
 var e2eSawShellPrompt = false;
 var debugAttached = false;
@@ -9963,6 +9964,7 @@ function showRunningOutput(count, code) {
   }
   if (body) {
     body.className = "result pending";
+    delete body.dataset.streamed;
     body.textContent = "Running...";
   }
   stopOutputTimer(count);
@@ -9991,6 +9993,7 @@ function showOutput(count, result, ok, code) {
   if (!body) {
     return;
   }
+  delete body.dataset.streamed;
   body.className = ok ? "result" : "result error";
   body.textContent = result;
   currentOutput.scrollTop = currentOutput.scrollHeight;
@@ -10008,8 +10011,37 @@ function showProgress(count, progress) {
   }
   if (body) {
     body.className = "result pending";
+    if (typeof progress.output === "string") {
+      appendLiveOutput(body, cleanPythonResult(progress.output));
+      return;
+    }
+    if (body.dataset.streamed === "true") {
+      return;
+    }
     body.textContent = progressText(progress);
   }
+}
+function appendLiveOutput(body, text) {
+  if (!text) {
+    return;
+  }
+  if (body.dataset.streamed !== "true") {
+    body.textContent = "";
+    body.dataset.streamed = "true";
+  }
+  let next = body.textContent || "";
+  for (const char of text) {
+    if (char === "\r") {
+      const index = next.lastIndexOf("\n");
+      next = index >= 0 ? next.slice(0, index + 1) : "";
+    } else if (char === "\b") {
+      next = next.slice(0, -1);
+    } else if (char !== "\x07") {
+      next += char;
+    }
+  }
+  body.textContent = next.slice(-LIVE_OUTPUT_LIMIT) || "Running...";
+  currentOutput.scrollTop = currentOutput.scrollHeight;
 }
 function createOutputItem(count, code) {
   const item = document.createElement("section");

@@ -989,13 +989,14 @@ def _truncate(text, limit=180):
 
 def _execute_code(namespace, code, filename=None, line_offset=0, source_text=None, breakpoint_lines=None):
     """Executes Python code and captures stdout, stderr, repr result, and traceback."""
-    stdout = io.StringIO()
-    stderr = io.StringIO()
     result = None
     compile_filename = filename or "<django-shell-input>"
     _install_debug_source_cache(compile_filename, source_text, code, line_offset)
     _debug_current_thread()
-    _progress_begin(code, emit=bool(_STATE.get("progress_emit")))
+    progress_emit = bool(_STATE.get("progress_emit"))
+    _progress_begin(code, emit=progress_emit)
+    stdout = _StreamingCapture("stdout", progress_emit)
+    stderr = _StreamingCapture("stderr", progress_emit)
     namespace["_djs_debug_should_break"] = _debug_should_break
     namespace["_djs_progress_iter"] = _progress_iter
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -1464,6 +1465,37 @@ def _progress_snapshot():
     return progress
 
 
+class _StreamingCapture(io.StringIO):
+    """StringIO capture that can mirror live writes as progress output markers."""
+
+    def __init__(self, stream_name, emit=False):
+        """Stores the stream label and whether writes should be mirrored."""
+        super().__init__()
+        self._stream_name = stream_name
+        self._emit = bool(emit)
+
+    @property
+    def encoding(self):
+        """Returns the real terminal encoding for libraries that inspect stream capabilities."""
+        return getattr(getattr(sys, "__stdout__", None), "encoding", None) or "utf-8"
+
+    def isatty(self):
+        """Reports a tty-like stream while live output mirroring is active."""
+        return bool(self._emit)
+
+    def write(self, text):
+        """Captures text and mirrors it to the UI progress stream when enabled."""
+        value = str(text)
+        written = super().write(value)
+        if self._emit and value:
+            _progress_output(self._stream_name, value)
+        return written
+
+    def flush(self):
+        """Keeps file-like flush calls from progress libraries harmless."""
+        return None
+
+
 def _progress_update(**fields):
     """Merges fields into the shared progress snapshot."""
     now = time.time()
@@ -1535,9 +1567,21 @@ def _progress_emit():
     """Writes a progress marker to the real terminal stream when PTY streaming is active."""
     if not _STATE.get("progress_emit"):
         return
+    _progress_write_marker(_progress_snapshot())
+
+
+def _progress_output(stream_name, text):
+    """Writes one live stdout/stderr chunk as a progress marker."""
+    if not _STATE.get("progress_emit"):
+        return
+    _progress_write_marker({"active": True, "kind": "output", "output": text, "stream": stream_name})
+
+
+def _progress_write_marker(payload):
+    """Writes one JSON progress payload to the real terminal stream."""
     try:
         stream = getattr(sys, "__stdout__", None) or sys.stdout
-        stream.write(_PROGRESS_PREFIX + json.dumps(_progress_snapshot()) + "\n")
+        stream.write(_PROGRESS_PREFIX + json.dumps(payload) + "\n")
         stream.flush()
     except Exception:
         pass

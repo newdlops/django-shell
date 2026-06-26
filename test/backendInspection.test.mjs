@@ -311,6 +311,40 @@ test("reports progress for running Python for-loops without waiting for the exec
   assert.equal(payload.final.ok, true);
 });
 
+test("streams stdout and stderr chunks while PTY progress emit is active", { skip: !PYTHON }, () => {
+  const script = [
+    "import importlib.util, io, json, sys",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "buf=io.StringIO()",
+    "real=sys.__stdout__",
+    "sys.__stdout__=buf",
+    "try:",
+    "    mod._STATE['progress_emit']=True",
+    "    response=mod._execute_code({}, 'import sys\\nprint(\"hello-live\")\\nprint(\"err-live\", file=sys.stderr)')",
+    "finally:",
+    "    sys.__stdout__=real",
+    "markers=[]",
+    "for line in buf.getvalue().splitlines():",
+    "    if line.startswith(mod._PROGRESS_PREFIX):",
+    "        markers.append(json.loads(line[len(mod._PROGRESS_PREFIX):]))",
+    "outputs=[marker for marker in markers if marker.get('kind') == 'output']",
+    "stdout=''.join(marker.get('output', '') for marker in outputs if marker.get('stream') == 'stdout')",
+    "stderr=''.join(marker.get('output', '') for marker in outputs if marker.get('stream') == 'stderr')",
+    "print(json.dumps({'response': response, 'stderr': stderr, 'stdout': stdout}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.response.ok, true);
+  assert.equal(payload.response.stdout, "hello-live\n");
+  assert.equal(payload.response.stderr, "err-live\n");
+  assert.equal(payload.stdout, "hello-live\n");
+  assert.equal(payload.stderr, "err-live\n");
+});
+
 test("uses request filename and line offset as the compiled shell input location", { skip: !PYTHON }, () => {
   const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
   const script = [

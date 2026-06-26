@@ -36,6 +36,7 @@ let geometryFrame = 0;
 let lastGeometryKey = "";
 let pendingExecution = 0;
 const runningOutputs = new Map();
+const LIVE_OUTPUT_LIMIT = 20000;
 let snapshotWritten = false;
 let e2eSawShellPrompt = false;
 let debugAttached = false;
@@ -623,6 +624,7 @@ function showRunningOutput(count, code) {
   }
   if (body) {
     body.className = "result pending";
+    delete body.dataset.streamed;
     body.textContent = "Running...";
   }
   stopOutputTimer(count);
@@ -653,6 +655,7 @@ function showOutput(count, result, ok, code) {
   if (!body) {
     return;
   }
+  delete body.dataset.streamed;
   body.className = ok ? "result" : "result error";
   body.textContent = result;
   currentOutput.scrollTop = currentOutput.scrollHeight;
@@ -672,8 +675,39 @@ function showProgress(count, progress) {
   }
   if (body) {
     body.className = "result pending";
+    if (typeof progress.output === "string") {
+      appendLiveOutput(body, cleanPythonResult(progress.output));
+      return;
+    }
+    if (body.dataset.streamed === "true") {
+      return;
+    }
     body.textContent = progressText(progress);
   }
+}
+
+/** Appends live stdout/stderr while honoring carriage-return progress updates. */
+function appendLiveOutput(body, text) {
+  if (!text) {
+    return;
+  }
+  if (body.dataset.streamed !== "true") {
+    body.textContent = "";
+    body.dataset.streamed = "true";
+  }
+  let next = body.textContent || "";
+  for (const char of text) {
+    if (char === "\r") {
+      const index = next.lastIndexOf("\n");
+      next = index >= 0 ? next.slice(0, index + 1) : "";
+    } else if (char === "\b") {
+      next = next.slice(0, -1);
+    } else if (char !== "\u0007") {
+      next += char;
+    }
+  }
+  body.textContent = next.slice(-LIVE_OUTPUT_LIMIT) || "Running...";
+  currentOutput.scrollTop = currentOutput.scrollHeight;
 }
 
 /** Creates one output item with the executed input source preserved exactly. */
