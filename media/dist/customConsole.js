@@ -9439,6 +9439,7 @@ var debugInfo = document.getElementById("debugInfo");
 var debugLocation = document.getElementById("debugLocation");
 var debugMode = document.getElementById("debugMode");
 var debugSourceLine = document.getElementById("debugSourceLine");
+var debugStack = document.getElementById("debugStack");
 var debugStatus = document.getElementById("debugStatus");
 var debugVariables = document.getElementById("debugVariables");
 var newOverlayTabButtons = Array.from(document.querySelectorAll("[data-action=new-overlay-tab]"));
@@ -9843,11 +9844,12 @@ function debugStatusText(state, detail) {
   return `debugger idle${suffix}`;
 }
 function setDebugInfo(info) {
-  if (!debugInfo || !debugLocation || !debugSourceLine || !debugVariables) {
+  if (!debugInfo || !debugLocation || !debugSourceLine || !debugStack || !debugVariables) {
     return;
   }
   const state = String(info.state || "idle");
   debugInfo.dataset.state = state;
+  debugStack.textContent = "";
   debugVariables.textContent = "";
   if (state === "idle") {
     debugInfo.hidden = true;
@@ -9863,6 +9865,7 @@ function setDebugInfo(info) {
   const frame = info.frame || {};
   debugLocation.textContent = state === "error" ? "Debug inspection failed" : debugLocationText(frame);
   debugSourceLine.textContent = String(info.error || frame.sourceLine || "");
+  appendDebugStack(info.frames || []);
   appendDebugScope("Line variables", info.focusVariables || []);
   for (const scope of info.scopes || []) {
     appendDebugScope(scope.total ? `${scope.name} (${scope.total})` : scope.name, scope.variables || []);
@@ -9870,6 +9873,31 @@ function setDebugInfo(info) {
   if (!debugVariables.children.length) {
     appendDebugMessage("No variables reported for this frame");
   }
+}
+function appendDebugStack(frames) {
+  if (!debugStack || !frames.length) {
+    return;
+  }
+  const title = document.createElement("div");
+  title.className = "debugStackTitle";
+  title.textContent = "Stack";
+  debugStack.appendChild(title);
+  for (const frame of frames.slice(0, 8)) {
+    debugStack.appendChild(debugFrameElement(frame));
+  }
+}
+function debugFrameElement(frame) {
+  const row = document.createElement("div");
+  const name = document.createElement("span");
+  const location = document.createElement("span");
+  row.className = "debugFrame";
+  name.className = "debugFrameName";
+  location.className = "debugFrameLocation";
+  name.textContent = String(frame.name || "frame");
+  location.textContent = debugFrameLocation(frame);
+  row.title = `${name.textContent} ${location.textContent}`.trim();
+  row.append(name, location);
+  return row;
 }
 function appendDebugScope(title, variables) {
   if (!variables.length || !debugVariables) {
@@ -9907,6 +9935,11 @@ function debugLocationText(frame) {
   const file = path.split(/[\\/]/).pop() || path;
   const suffix = frame.line ? `:${frame.line}${frame.column ? `:${frame.column}` : ""}` : "";
   return `${file}${suffix}${frame.name ? ` \xB7 ${frame.name}` : ""}`;
+}
+function debugFrameLocation(frame) {
+  const path = String(frame.path || "");
+  const file = path.split(/[\\/]/).pop() || path || "unknown";
+  return `${file}${frame.line ? `:${frame.line}` : ""}`;
 }
 function debugControlLabel(action) {
   return String(action).replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`);

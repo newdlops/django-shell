@@ -15,7 +15,6 @@ interface DebugEventHooks {
   logger?: DiagnosticLogger;
   postInfo(info: DebugFrameInfo): void;
   postStatus(state: DebugStatusState, detail?: string): void;
-  refocusOverlay(): void;
   refreshBreakpoints(): void;
   runCurrentInput(): Promise<string>;
   setPausedThread(threadId: number | undefined): void;
@@ -36,22 +35,20 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
   let pausedThreadId: number | undefined;
   const clearInfo = (state: DebugPanelState) => hooks.postInfo({ focusVariables: [], scopes: [], state });
   const inspectStack = (item: vscode.DebugThread | vscode.DebugStackFrame | undefined) => {
-    if (shouldIgnoreActiveStackItem(item, pausedThreadId, hooks)) { hooks.logger?.log("debug.active.frame.ignore", { pausedThreadId: pausedThreadId ?? 0, threadId: item && "threadId" in item ? item.threadId : 0 }); hooks.refocusOverlay(); return; }
+    if (shouldIgnoreActiveStackItem(item, pausedThreadId, hooks)) { hooks.logger?.log("debug.active.frame.ignore", { pausedThreadId: pausedThreadId ?? 0, threadId: item && "threadId" in item ? item.threadId : 0 }); return; }
     generation += 1;
     const current = generation;
     if (item && "frameId" in item) { hooks.logger?.log("debug.active.frame", { frameId: item.frameId, threadId: item.threadId }); }
-    if (item && "frameId" in item && hooks.shouldRefocusOverlay()) { hooks.refocusOverlay(); }
     void refreshPausedFrame(item, hooks, () => current === generation);
   };
   const inspectStopped = (session: vscode.DebugSession, body: DebugThreadEventBody | undefined) => {
     if (session.id !== hooks.getSession()?.id) { return; }
-    if (shouldIgnoreOverlayThreadEvent(body?.threadId, pausedThreadId, hooks)) { hooks.logger?.log("debug.dap.stopped.ignore", { pausedThreadId: pausedThreadId ?? 0, reason: body?.reason ?? "", threadId: body?.threadId ?? 0 }); hooks.refocusOverlay(); return; }
+    if (shouldIgnoreOverlayThreadEvent(body?.threadId, pausedThreadId, hooks)) { hooks.logger?.log("debug.dap.stopped.ignore", { pausedThreadId: pausedThreadId ?? 0, reason: body?.reason ?? "", threadId: body?.threadId ?? 0 }); return; }
     generation += 1;
     const current = generation;
     pausedThreadId = body?.threadId;
     hooks.setPausedThread(pausedThreadId);
     hooks.logger?.log("debug.dap.stopped", { reason: body?.reason ?? "", threadId: body?.threadId ?? 0 });
-    if (hooks.shouldRefocusOverlay()) { hooks.refocusOverlay(); }
     void logDebugStack(session, body?.threadId, hooks);
     void refreshStoppedThread(session, body, hooks, () => current === generation);
   };

@@ -1,6 +1,7 @@
 // Debug control command helpers for the Django shell custom console.
 
 import * as vscode from "vscode";
+import type { DisposableDebugRequestSession } from "./debugAdapterTypes";
 
 export const DEBUG_CONTROL_ACTIONS = ["continue", "pause", "stepOver", "stepInto", "stepOut", "restart", "stop"] as const;
 
@@ -53,10 +54,10 @@ export function debugControlDetail(action: DebugControlAction): string {
 }
 
 /** Executes one debugger action against the Django shell debug adapter session. */
-export async function runDebugControl(action: DebugControlAction, session?: vscode.DebugSession, preferredThreadId?: number, interruptExecution?: () => Promise<unknown>): Promise<DebugControlResult> {
+export async function runDebugControl(action: DebugControlAction, session?: DisposableDebugRequestSession | vscode.DebugSession, preferredThreadId?: number, interruptExecution?: () => Promise<unknown>): Promise<DebugControlResult> {
   if (action === "stop" && session) {
     await interruptExecution?.();
-    await vscode.debug.stopDebugging(session);
+    if ("disconnect" in session && typeof session.disconnect === "function") { await session.disconnect(); } else { await vscode.debug.stopDebugging(session as vscode.DebugSession); }
     return {};
   }
   if (session && action !== "restart") {
@@ -72,7 +73,7 @@ export async function runDebugControl(action: DebugControlAction, session?: vsco
 }
 
 /** Returns the first known DAP thread id for control requests. */
-async function firstThreadId(session: vscode.DebugSession): Promise<number | undefined> {
+async function firstThreadId(session: DisposableDebugRequestSession | vscode.DebugSession): Promise<number | undefined> {
   const response = await session.customRequest("threads", {}) as { threads?: Array<{ id: number }> };
   return response.threads?.[0]?.id;
 }

@@ -1,6 +1,7 @@
 // Debug adapter inspection helpers for paused Django shell frames.
 
 import * as vscode from "vscode";
+import type { DebugRequestSession } from "./debugAdapterTypes";
 
 export type DebugPanelState = "attached" | "error" | "idle" | "paused" | "running";
 
@@ -17,10 +18,17 @@ export interface DebugScopeInfo {
   variables: DebugVariableInfo[];
 }
 
+export interface DebugStackFrameInfo {
+  line: number;
+  name: string;
+  path?: string;
+}
+
 export interface DebugFrameInfo {
   error?: string;
   focusVariables: DebugVariableInfo[];
   frame?: { column?: number; line: number; name: string; path?: string; sourceLine?: string };
+  frames?: DebugStackFrameInfo[];
   scopes: DebugScopeInfo[];
   state: DebugPanelState;
 }
@@ -38,12 +46,12 @@ const OVERLAY_SOURCE_SUFFIX = "/.django-shell/console-cell.py";
 const PYTHON_KEYWORDS = new Set(["and", "as", "assert", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "False", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass", "raise", "return", "True", "try", "while", "with", "yield"]);
 
 /** Reads the active paused stack frame and visible variables through DAP requests. */
-export async function inspectDebugFrame(session: vscode.DebugSession, item: vscode.DebugStackFrame, options: DebugInspectOptions = {}): Promise<DebugFrameInfo> {
+export async function inspectDebugFrame(session: DebugRequestSession, item: vscode.DebugStackFrame, options: DebugInspectOptions = {}): Promise<DebugFrameInfo> {
   return inspectDebugFrameRef(session, item, options);
 }
 
 /** Reads the top paused stack frame for one stopped DAP thread. */
-export async function inspectDebugThread(session: vscode.DebugSession, threadId?: number, options: DebugInspectOptions = {}): Promise<DebugFrameInfo> {
+export async function inspectDebugThread(session: DebugRequestSession, threadId?: number, options: DebugInspectOptions = {}): Promise<DebugFrameInfo> {
   const resolvedThreadId = threadId ?? await firstThreadId(session);
   if (!resolvedThreadId) {
     return { error: "No stopped debug thread was reported.", focusVariables: [], scopes: [], state: "error" };
@@ -52,19 +60,24 @@ export async function inspectDebugThread(session: vscode.DebugSession, threadId?
 }
 
 /** Reads a paused stack frame and visible variables through DAP requests. */
-async function inspectDebugFrameRef(session: vscode.DebugSession, item: DebugFrameRef, options: DebugInspectOptions = {}): Promise<DebugFrameInfo> {
-  const frame = await stackFrameFor(session, item, options);
+async function inspectDebugFrameRef(session: DebugRequestSession, item: DebugFrameRef, options: DebugInspectOptions = {}): Promise<DebugFrameInfo> {
+  const frames = await stackFramesFor(session, item.threadId);
+  const frame = stackFrameFor(frames, item, options);
   const sourceLine = frame ? await sourceLineFor(frame) : "";
   const frameId = frame?.id ?? item.frameId;
   const focusVariables = frameId ? await evaluateLineVariables(session, frameId, lineExpressions(sourceLine)) : [];
   const scopes = frameId ? await scopeVariables(session, frameId, new Set(focusVariables.map((variable) => variable.name))) : [];
-  return { focusVariables, frame: frame && { column: frame.column, line: frame.line, name: frame.name, path: sourcePathFor(frame), sourceLine }, scopes, state: "paused" };
+  return { focusVariables, frame: frame && { column: frame.column, line: frame.line, name: frame.name, path: sourcePathFor(frame), sourceLine }, frames: frames.slice(0, 8).map(stackFrameInfo), scopes, state: "paused" };
+}
+
+/** Returns the current DAP stack frames for a stopped thread. */
+async function stackFramesFor(session: DebugRequestSession, threadId: number): Promise<DapStackFrame[]> {
+  const response = await session.customRequest("stackTrace", { levels: 30, startFrame: 0, threadId }) as { stackFrames?: DapStackFrame[] };
+  return response.stackFrames ?? [];
 }
 
 /** Returns the DAP stack frame matching VS Code's active frame id. */
-async function stackFrameFor(session: vscode.DebugSession, item: DebugFrameRef, options: DebugInspectOptions): Promise<DapStackFrame | undefined> {
-  const response = await session.customRequest("stackTrace", { levels: 30, startFrame: 0, threadId: item.threadId }) as { stackFrames?: DapStackFrame[] };
-  const frames = response.stackFrames ?? [];
+function stackFrameFor(frames: DapStackFrame[], item: DebugFrameRef, options: DebugInspectOptions): DapStackFrame | undefined {
   if (item.frameId && options.preferOverlay !== false) {
     const overlay = frames.find(isOverlayStackFrame);
     if (overlay) { return overlay; }
@@ -84,8 +97,13 @@ function isOverlayStackFrame(frame: DapStackFrame): boolean {
   return normalized === "console-cell.py" || normalized.endsWith(OVERLAY_SOURCE_SUFFIX);
 }
 
+/** Returns a serializable stack frame preview for the custom console webview. */
+function stackFrameInfo(frame: DapStackFrame): DebugStackFrameInfo {
+  return { line: frame.line, name: frame.name, path: sourcePathFor(frame) };
+}
+
 /** Returns the first DAP thread id when a stopped event omits one. */
-async function firstThreadId(session: vscode.DebugSession): Promise<number | undefined> {
+async function firstThreadId(session: DebugRequestSession): Promise<number | undefined> {
   const response = await session.customRequest("threads", {}) as { threads?: DapThread[] };
   return response.threads?.[0]?.id;
 }
@@ -125,7 +143,7 @@ function normalizeSourcePath(value: string): string {
 }
 
 /** Evaluates variables referenced by the current source line in the paused frame. */
-async function evaluateLineVariables(session: vscode.DebugSession, frameId: number, expressions: string[]): Promise<DebugVariableInfo[]> {
+async function evaluateLineVariables(session: DebugRequestSession, frameId: number, expressions: string[]): Promise<DebugVariableInfo[]> {
   const variables: DebugVariableInfo[] = [];
   for (const expression of expressions.slice(0, MAX_FOCUS_VARIABLES)) {
     try {
@@ -139,7 +157,7 @@ async function evaluateLineVariables(session: vscode.DebugSession, frameId: numb
 }
 
 /** Returns compact variables for the current frame scopes. */
-async function scopeVariables(session: vscode.DebugSession, frameId: number, focusedNames: Set<string>): Promise<DebugScopeInfo[]> {
+async function scopeVariables(session: DebugRequestSession, frameId: number, focusedNames: Set<string>): Promise<DebugScopeInfo[]> {
   const response = await session.customRequest("scopes", { frameId }) as { scopes?: DapScope[] };
   const scopes: DebugScopeInfo[] = [];
   for (const scope of (response.scopes ?? []).filter((item) => !item.expensive).slice(0, 3)) {
@@ -150,7 +168,7 @@ async function scopeVariables(session: vscode.DebugSession, frameId: number, foc
 }
 
 /** Reads one DAP variablesReference with a bounded count. */
-async function variablesForReference(session: vscode.DebugSession, variablesReference: number): Promise<DebugVariableInfo[]> {
+async function variablesForReference(session: DebugRequestSession, variablesReference: number): Promise<DebugVariableInfo[]> {
   if (!variablesReference) {
     return [];
   }

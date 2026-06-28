@@ -18,6 +18,7 @@ const debugInfo = document.getElementById("debugInfo");
 const debugLocation = document.getElementById("debugLocation");
 const debugMode = document.getElementById("debugMode");
 const debugSourceLine = document.getElementById("debugSourceLine");
+const debugStack = document.getElementById("debugStack");
 const debugStatus = document.getElementById("debugStatus");
 const debugVariables = document.getElementById("debugVariables");
 const newOverlayTabButtons = Array.from(document.querySelectorAll("[data-action=new-overlay-tab]"));
@@ -483,11 +484,12 @@ function debugStatusText(state, detail) {
 
 /** Renders the paused stack frame and variable preview panel. */
 function setDebugInfo(info) {
-  if (!debugInfo || !debugLocation || !debugSourceLine || !debugVariables) {
+  if (!debugInfo || !debugLocation || !debugSourceLine || !debugStack || !debugVariables) {
     return;
   }
   const state = String(info.state || "idle");
   debugInfo.dataset.state = state;
+  debugStack.textContent = "";
   debugVariables.textContent = "";
   if (state === "idle") {
     debugInfo.hidden = true;
@@ -503,6 +505,7 @@ function setDebugInfo(info) {
   const frame = info.frame || {};
   debugLocation.textContent = state === "error" ? "Debug inspection failed" : debugLocationText(frame);
   debugSourceLine.textContent = String(info.error || frame.sourceLine || "");
+  appendDebugStack(info.frames || []);
   appendDebugScope("Line variables", info.focusVariables || []);
   for (const scope of info.scopes || []) {
     appendDebugScope(scope.total ? `${scope.name} (${scope.total})` : scope.name, scope.variables || []);
@@ -510,6 +513,35 @@ function setDebugInfo(info) {
   if (!debugVariables.children.length) {
     appendDebugMessage("No variables reported for this frame");
   }
+}
+
+/** Appends the current DAP stack preview without opening source tabs. */
+function appendDebugStack(frames) {
+  if (!debugStack || !frames.length) {
+    return;
+  }
+  const title = document.createElement("div");
+  title.className = "debugStackTitle";
+  title.textContent = "Stack";
+  debugStack.appendChild(title);
+  for (const frame of frames.slice(0, 8)) {
+    debugStack.appendChild(debugFrameElement(frame));
+  }
+}
+
+/** Creates one compact stack frame preview row. */
+function debugFrameElement(frame) {
+  const row = document.createElement("div");
+  const name = document.createElement("span");
+  const location = document.createElement("span");
+  row.className = "debugFrame";
+  name.className = "debugFrameName";
+  location.className = "debugFrameLocation";
+  name.textContent = String(frame.name || "frame");
+  location.textContent = debugFrameLocation(frame);
+  row.title = `${name.textContent} ${location.textContent}`.trim();
+  row.append(name, location);
+  return row;
 }
 
 /** Appends one titled group of debug variables. */
@@ -555,6 +587,13 @@ function debugLocationText(frame) {
   const file = path.split(/[\\/]/).pop() || path;
   const suffix = frame.line ? `:${frame.line}${frame.column ? `:${frame.column}` : ""}` : "";
   return `${file}${suffix}${frame.name ? ` · ${frame.name}` : ""}`;
+}
+
+/** Formats one DAP stack frame location for compact display. */
+function debugFrameLocation(frame) {
+  const path = String(frame.path || "");
+  const file = path.split(/[\\/]/).pop() || path || "unknown";
+  return `${file}${frame.line ? `:${frame.line}` : ""}`;
 }
 
 /** Formats a debugger action name for compact status text. */

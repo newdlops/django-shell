@@ -2,6 +2,7 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
+import type { DebugRequestSession } from "./debugAdapterTypes";
 import type { DiagnosticLogger } from "./diagnostics";
 
 interface DapBreakpoint {
@@ -22,7 +23,7 @@ export interface DebugBreakpointSyncRequest {
   lines: number[];
   logger?: DiagnosticLogger;
   reason: string;
-  session?: vscode.DebugSession;
+  session?: DebugRequestSession;
   sourceText?: string;
   uri: vscode.Uri;
 }

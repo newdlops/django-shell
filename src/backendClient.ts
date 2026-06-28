@@ -553,11 +553,16 @@ function isPtyFallbackKind(kind: string): boolean {
 
 /** Returns a smaller payload variant for the slower terminal fallback transport. */
 function ptyFallbackPayload(payload: BackendRequestPayload): BackendRequestPayload {
-  const next = payload.sourceText === undefined && payload.breakpointLines === undefined ? payload : { ...payload, breakpointLines: undefined, sourceText: undefined };
+  const next = payload.sourceText === undefined && payload.breakpointLines === undefined || hasDebugExecutionPayload(payload) ? payload : { ...payload, breakpointLines: undefined, sourceText: undefined };
   if ((payload.kind === "rows" || payload.kind === "related" || payload.kind === "query") && (payload.limit === undefined || payload.limit > PTY_PAGE_LIMIT)) {
     return { ...next, limit: PTY_PAGE_LIMIT };
   }
   return next;
+}
+
+/** Returns whether a PTY fallback execute request must preserve debug filename and breakpoint metadata. */
+function hasDebugExecutionPayload(payload: BackendRequestPayload): boolean {
+  return payload.kind === "execute" && Array.isArray(payload.breakpointLines);
 }
 
 /** Returns a safe error response when a request cannot cross the active transport. */

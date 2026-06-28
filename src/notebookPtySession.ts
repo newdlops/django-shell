@@ -384,7 +384,7 @@ export class NotebookPtySession implements vscode.Disposable {
       // Type the user's literal code as the cell so the shell's raw_cell stays pure; the bootstrap-installed
       // capture hook emits the response marker (no wrapper). IPython handles multi-line cells; the plain REPL
       // only captures one statement per prompt, so multi-line plain-shell code falls through to the wrapper.
-      if ((payload.kind === "execute" || payload.kind === "ormcell") && typeof payload.code === "string" && this.cellCapture && (this.ipython || !payload.code.includes("\n")) && !wantsPtyProgress(payload)) {
+      if ((payload.kind === "execute" || payload.kind === "ormcell") && typeof payload.code === "string" && this.cellCapture && (this.ipython || !payload.code.includes("\n")) && !wantsPtyProgress(payload) && !wantsPtyDebugWrapper(payload)) {
         this.ptyRequestBuffer = "";
         this.ptyProgressBuffer = "";
         this.pendingCell = { reject, resolve };
@@ -627,6 +627,11 @@ function wantsPtyProgress(payload: BackendRequestPayload): boolean {
     return false;
   }
   return /\bfor\b|\btqdm\s*\(|\.iterator\s*\(|\.objects\b|QuerySet\b/.test(payload.code);
+}
+
+/** Returns whether a PTY execute request must keep backend compile metadata for debugger breakpoints. */
+function wantsPtyDebugWrapper(payload: BackendRequestPayload): boolean {
+  return payload.kind === "execute" && Array.isArray(payload.breakpointLines);
 }
 
 /** Returns the progress marker tail worth keeping across PTY output chunks. */
