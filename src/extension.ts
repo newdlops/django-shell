@@ -3,6 +3,8 @@
 import * as vscode from "vscode";
 import type { BackendClient, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransport, BackendTransportMode } from "./backendClient";
 import type { CustomDjangoConsole } from "./customConsole";
+import { DebugAnalysisPanel } from "./debugAnalysisPanel";
+import { DebugAnalysisStore } from "./debugAnalysisStore";
 import { DEBUG_CONTROL_ACTIONS } from "./debugControls";
 import { DiagnosticLogger } from "./diagnostics";
 import type { BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelComputed, BackendModelCount, BackendModelList, BackendModelLookup, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
@@ -140,10 +142,14 @@ export function activate(context: vscode.ExtensionContext): void {
     channel.show(true);
   }
   const runtimeSource = new LazyRuntimeSource();
+  const debugAnalysis = new DebugAnalysisStore();
   const runtimeInspector = new RuntimeInspector(runtimeSource, diagnostics);
+  const debugAnalysisPanel = new DebugAnalysisPanel(debugAnalysis, diagnostics);
   context.subscriptions.push(runtimeSource);
+  context.subscriptions.push(debugAnalysis);
   runtimeInspector.activate(context);
-  registerCustomConsoleEntryPoints(context, diagnostics, runtimeSource);
+  debugAnalysisPanel.activate(context);
+  registerCustomConsoleEntryPoints(context, diagnostics, runtimeSource, debugAnalysis);
   const modelBrowser = new ModelBrowser(context.extensionPath, runtimeSource, diagnostics);
   modelBrowser.activate(context);
   const modelQueryConsole = new ModelQueryConsole(context.extensionPath, runtimeSource, diagnostics);
@@ -152,11 +158,11 @@ export function activate(context: vscode.ExtensionContext): void {
   modelCatalog.activate(context);
   if (process.env.DJANGO_SHELL_E2E === "1") {
     context.subscriptions.push(
-      vscode.commands.registerCommand("djangoShell.e2eEvaluateOverlay", async (expression: string) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).e2eEvaluateOverlay(expression)),
-      vscode.commands.registerCommand("djangoShell.e2eRestartKernel", async () => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).e2eRestartKernel()),
-      vscode.commands.registerCommand("djangoShell.e2eSetPrelude", async (lines: string[]) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).e2eSetPrelude(lines)),
-      vscode.commands.registerCommand("djangoShell.e2eWriteTerminal", async (data: string) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).e2eWriteTerminal(data)),
-      vscode.commands.registerCommand("djangoShell.e2eSnapshot", async () => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).e2eSnapshot())
+      vscode.commands.registerCommand("djangoShell.e2eEvaluateOverlay", async (expression: string) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).e2eEvaluateOverlay(expression)),
+      vscode.commands.registerCommand("djangoShell.e2eRestartKernel", async () => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).e2eRestartKernel()),
+      vscode.commands.registerCommand("djangoShell.e2eSetPrelude", async (lines: string[]) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).e2eSetPrelude(lines)),
+      vscode.commands.registerCommand("djangoShell.e2eWriteTerminal", async (data: string) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).e2eWriteTerminal(data)),
+      vscode.commands.registerCommand("djangoShell.e2eSnapshot", async () => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).e2eSnapshot())
     );
     return;
   }
@@ -193,42 +199,42 @@ function lazyOutputChannel(context: vscode.ExtensionContext): OutputChannelFacto
 }
 
 /** Registers public custom-console commands without loading PTY or overlay modules. */
-function registerCustomConsoleEntryPoints(context: vscode.ExtensionContext, diagnostics: DiagnosticLogger, runtimeSource: LazyRuntimeSource): void {
+function registerCustomConsoleEntryPoints(context: vscode.ExtensionContext, diagnostics: DiagnosticLogger, runtimeSource: LazyRuntimeSource, debugAnalysis: DebugAnalysisStore): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("djangoShell.openConsole", async () => {
-      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).openConsole();
+      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).openConsole();
     }),
     vscode.commands.registerCommand("djangoShell.debugShell", async () => {
-      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).debugShell();
+      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).debugShell();
     }),
     vscode.commands.registerCommand("djangoShell.newOverlayTab", async () => {
-      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).newOverlayTab();
+      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).newOverlayTab();
     }),
     vscode.commands.registerCommand("djangoShell.showOverlayEditor", async () => {
-      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).showOverlayEditor();
+      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).showOverlayEditor();
     }),
     vscode.commands.registerCommand("djangoShell.overlayRunCurrentInput", async () => {
-      return (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).runCurrentOverlayInput();
+      return (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).runCurrentOverlayInput();
     }),
     vscode.commands.registerCommand("djangoShell.overlaySkipCurrentInput", async () => {
-      return (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).skipCurrentOverlayInput();
+      return (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).skipCurrentOverlayInput();
     }),
     vscode.commands.registerCommand("djangoShell.overlayAcceptInput", async () => {
-      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).acceptOverlayInput();
+      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).acceptOverlayInput();
     }),
     vscode.commands.registerCommand("djangoShell.overlayInsertNewline", async () => {
-      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).insertOverlayNewline();
+      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).insertOverlayNewline();
     }),
     ...DEBUG_CONTROL_ACTIONS.map((action) => vscode.commands.registerCommand(`djangoShell.debug.${action}`, async () => {
-      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource)).controlDebugger(action);
+      await (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).controlDebugger(action);
     }))
   );
 }
 
 /** Returns the custom console runtime, loading node-pty and overlay code only on demand. */
-async function ensureCustomConsoleRuntime(context: vscode.ExtensionContext, diagnostics: DiagnosticLogger, runtimeSource: LazyRuntimeSource): Promise<CustomDjangoConsole> {
+async function ensureCustomConsoleRuntime(context: vscode.ExtensionContext, diagnostics: DiagnosticLogger, runtimeSource: LazyRuntimeSource, debugAnalysis: DebugAnalysisStore): Promise<CustomDjangoConsole> {
   if (!customConsoleRuntime) {
-    customConsoleRuntime = loadCustomConsoleRuntime(context, diagnostics, runtimeSource).catch((error) => {
+    customConsoleRuntime = loadCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis).catch((error) => {
       customConsoleRuntime = undefined;
       throw error;
     });
@@ -237,9 +243,9 @@ async function ensureCustomConsoleRuntime(context: vscode.ExtensionContext, diag
 }
 
 /** Imports and activates the custom console after a console-specific command. */
-async function loadCustomConsoleRuntime(context: vscode.ExtensionContext, diagnostics: DiagnosticLogger, runtimeSource: LazyRuntimeSource): Promise<CustomDjangoConsole> {
+async function loadCustomConsoleRuntime(context: vscode.ExtensionContext, diagnostics: DiagnosticLogger, runtimeSource: LazyRuntimeSource, debugAnalysis: DebugAnalysisStore): Promise<CustomDjangoConsole> {
   const { CustomDjangoConsole } = await import("./customConsole");
-  const customConsole = new CustomDjangoConsole(context.extensionPath, diagnostics);
+  const customConsole = new CustomDjangoConsole(context.extensionPath, diagnostics, debugAnalysis);
   customConsole.activate(context, { registerCommands: false });
   runtimeSource.bind(customConsole);
   return customConsole;

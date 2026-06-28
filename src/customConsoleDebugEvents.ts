@@ -29,11 +29,11 @@ interface DebugThreadEventBody {
   threadId?: number;
 }
 
-/** Registers VS Code debug events that keep the custom console debugger panel current. */
+/** Registers VS Code debug events that keep shell debug state synchronized. */
 export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[], hooks: DebugEventHooks): void {
   let generation = 0;
   let pausedThreadId: number | undefined;
-  const clearInfo = (state: DebugPanelState) => hooks.postInfo({ focusVariables: [], scopes: [], state });
+  const clearInfo = (state: DebugPanelState) => hooks.postInfo({ state });
   const inspectStack = (item: vscode.DebugThread | vscode.DebugStackFrame | undefined) => {
     if (shouldIgnoreActiveStackItem(item, pausedThreadId, hooks)) { hooks.logger?.log("debug.active.frame.ignore", { pausedThreadId: pausedThreadId ?? 0, threadId: item && "threadId" in item ? item.threadId : 0 }); return; }
     generation += 1;
@@ -194,11 +194,11 @@ function debugStackFrameFields(frame: { id: number; line: number; name: string; 
   return { id: frame.id, line: frame.line, name: frame.name, path: frame.source?.path ?? frame.source?.name ?? "" };
 }
 
-/** Refreshes paused frame location and variables if VS Code focuses a stack frame. */
+/** Refreshes paused frame location if VS Code focuses a stack frame. */
 async function refreshPausedFrame(item: vscode.DebugThread | vscode.DebugStackFrame | undefined, hooks: DebugEventHooks, isCurrent: () => boolean): Promise<void> {
   const session = hooks.getSession();
   if (!session || !item || item.session.id !== session.id) {
-    hooks.postInfo({ focusVariables: [], scopes: [], state: session ? "attached" : "idle" });
+    hooks.postInfo({ state: session ? "attached" : "idle" });
     return;
   }
   if (!("frameId" in item)) { return; }
@@ -209,7 +209,7 @@ async function refreshPausedFrame(item: vscode.DebugThread | vscode.DebugStackFr
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     hooks.logger?.log("debug.inspect.error", { error: message });
-    hooks.postInfo({ error: message, focusVariables: [], scopes: [], state: "error" });
+    hooks.postInfo({ error: message, state: "error" });
   }
 }
 
@@ -222,11 +222,11 @@ async function refreshStoppedThread(session: vscode.DebugSession, body: { reason
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     hooks.logger?.log("debug.stopped.inspect.error", { error: message });
-    hooks.postInfo({ error: message, focusVariables: [], scopes: [], state: "error" });
+    hooks.postInfo({ error: message, state: "error" });
   }
 }
 
 /** Returns compact diagnostic fields for one inspected debug frame. */
-function frameFields(info: DebugFrameInfo): { column: number; line: number; path: string; scopes: number; variables: number } {
-  return { column: info.frame?.column ?? 0, line: info.frame?.line ?? 0, path: info.frame?.path ?? "", scopes: info.scopes.length, variables: info.focusVariables.length };
+function frameFields(info: DebugFrameInfo): { column: number; frames: number; line: number; path: string } {
+  return { column: info.frame?.column ?? 0, frames: info.frames?.length ?? 0, line: info.frame?.line ?? 0, path: info.frame?.path ?? "" };
 }

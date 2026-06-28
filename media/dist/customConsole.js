@@ -9435,13 +9435,7 @@ var currentOutput = document.getElementById("currentOutput");
 var currentOutputLabel = document.getElementById("currentOutputLabel");
 var debugButtons = Array.from(document.querySelectorAll("[data-action=debug-shell]"));
 var debugControlButtons = Array.from(document.querySelectorAll("[data-debug-control]"));
-var debugInfo = document.getElementById("debugInfo");
-var debugLocation = document.getElementById("debugLocation");
 var debugMode = document.getElementById("debugMode");
-var debugSourceLine = document.getElementById("debugSourceLine");
-var debugStack = document.getElementById("debugStack");
-var debugStatus = document.getElementById("debugStatus");
-var debugVariables = document.getElementById("debugVariables");
 var newOverlayTabButtons = Array.from(document.querySelectorAll("[data-action=new-overlay-tab]"));
 var outputList = document.getElementById("outputList");
 var editorAnchor = document.getElementById("editorAnchor");
@@ -9462,10 +9456,8 @@ var snapshotWritten = false;
 var e2eSawShellPrompt = false;
 var debugAttached = false;
 var debugBusy = false;
-var debugDetail = "";
 var debugDisplayMode = "file";
 var debugState = "idle";
-var breakpointCount = 0;
 var overlayTabActive = "overlay-1";
 var overlayTabs = [{ id: "overlay-1", label: "1" }];
 var runtimeReady = false;
@@ -9623,12 +9615,6 @@ function handleHostMessage(message) {
   if (message.type === "debugStatus") {
     setDebugStatus(String(message.state || "idle"), String(message.detail || ""));
   }
-  if (message.type === "debugInfo") {
-    setDebugInfo(message.info || {});
-  }
-  if (message.type === "breakpoints") {
-    setBreakpointStatus(Number(message.count) || 0);
-  }
   if (message.type === "overlayTabs") {
     setOverlayTabs(message.tabs, message.active);
   }
@@ -9735,23 +9721,9 @@ function requestDebugControl(action) {
 }
 function setDebugStatus(state, detail) {
   debugState = state;
-  debugDetail = detail;
   debugBusy = state === "starting";
   debugAttached = state === "attached" || state === "paused" || state === "running";
-  if (debugStatus) {
-    debugStatus.dataset.state = state;
-    debugStatus.textContent = debugStatusText(debugState, debugDetail);
-  }
-  if (state !== "paused") {
-    setDebugInfo({ state });
-  }
   updateDebugControls();
-}
-function setBreakpointStatus(count) {
-  breakpointCount = Math.max(0, Math.floor(count));
-  if (debugStatus) {
-    debugStatus.textContent = debugStatusText(debugState, debugDetail);
-  }
 }
 function updateDebugControls() {
   for (const button of debugButtons) {
@@ -9823,123 +9795,6 @@ function switchOverlayTab(tabId) {
     return;
   }
   vscode.postMessage({ tabId, type: "switchOverlayTab" });
-}
-function debugStatusText(state, detail) {
-  const suffix = breakpointCount ? ` \xB7 ${breakpointCount} breakpoint${breakpointCount === 1 ? "" : "s"}` : "";
-  if (state === "starting") {
-    return `debugger attaching${suffix}`;
-  }
-  if (state === "attached") {
-    return detail ? `debugger ${detail}${suffix}` : `debugger attached${suffix}`;
-  }
-  if (state === "running") {
-    return detail ? `debugger ${detail}${suffix}` : `debugger running${suffix}`;
-  }
-  if (state === "paused") {
-    return detail ? `debugger ${detail}${suffix}` : `debugger paused${suffix}`;
-  }
-  if (state === "error") {
-    return detail ? `debugger ${detail}${suffix}` : `debugger failed${suffix}`;
-  }
-  return `debugger idle${suffix}`;
-}
-function setDebugInfo(info) {
-  if (!debugInfo || !debugLocation || !debugSourceLine || !debugStack || !debugVariables) {
-    return;
-  }
-  const state = String(info.state || "idle");
-  debugInfo.dataset.state = state;
-  debugStack.textContent = "";
-  debugVariables.textContent = "";
-  if (state === "idle") {
-    debugInfo.hidden = true;
-    return;
-  }
-  debugInfo.hidden = false;
-  if (state !== "paused" && state !== "error") {
-    debugLocation.textContent = `Debugger ${state}`;
-    debugSourceLine.textContent = "No paused Python frame";
-    appendDebugMessage("No frame reported");
-    return;
-  }
-  const frame = info.frame || {};
-  debugLocation.textContent = state === "error" ? "Debug inspection failed" : debugLocationText(frame);
-  debugSourceLine.textContent = String(info.error || frame.sourceLine || "");
-  appendDebugStack(info.frames || []);
-  appendDebugScope("Line variables", info.focusVariables || []);
-  for (const scope of info.scopes || []) {
-    appendDebugScope(scope.total ? `${scope.name} (${scope.total})` : scope.name, scope.variables || []);
-  }
-  if (!debugVariables.children.length) {
-    appendDebugMessage("No variables reported for this frame");
-  }
-}
-function appendDebugStack(frames) {
-  if (!debugStack || !frames.length) {
-    return;
-  }
-  const title = document.createElement("div");
-  title.className = "debugStackTitle";
-  title.textContent = "Stack";
-  debugStack.appendChild(title);
-  for (const frame of frames.slice(0, 8)) {
-    debugStack.appendChild(debugFrameElement(frame));
-  }
-}
-function debugFrameElement(frame) {
-  const row = document.createElement("div");
-  const name = document.createElement("span");
-  const location = document.createElement("span");
-  row.className = "debugFrame";
-  name.className = "debugFrameName";
-  location.className = "debugFrameLocation";
-  name.textContent = String(frame.name || "frame");
-  location.textContent = debugFrameLocation(frame);
-  row.title = `${name.textContent} ${location.textContent}`.trim();
-  row.append(name, location);
-  return row;
-}
-function appendDebugScope(title, variables) {
-  if (!variables.length || !debugVariables) {
-    return;
-  }
-  const label = document.createElement("div");
-  label.className = "debugScopeTitle";
-  label.textContent = title;
-  debugVariables.appendChild(label);
-  for (const variable of variables) {
-    debugVariables.appendChild(debugVariableElement(variable));
-  }
-}
-function debugVariableElement(variable) {
-  const row = document.createElement("div");
-  const name = document.createElement("span");
-  const value = document.createElement("span");
-  row.className = "debugVar";
-  name.className = "debugVarName";
-  value.className = "debugVarValue";
-  name.textContent = String(variable.name || "");
-  value.textContent = String(variable.value || "");
-  row.title = variable.type ? `${name.textContent}: ${value.textContent} (${variable.type})` : `${name.textContent}: ${value.textContent}`;
-  row.append(name, value);
-  return row;
-}
-function appendDebugMessage(text) {
-  const message = document.createElement("div");
-  message.className = "debugScopeTitle";
-  message.textContent = text;
-  debugVariables.appendChild(message);
-}
-function debugLocationText(frame) {
-  const path = String(frame.path || frame.name || "Paused");
-  const file = path.split(/[\\/]/).pop() || path;
-  const suffix = frame.line ? `:${frame.line}${frame.column ? `:${frame.column}` : ""}` : "";
-  return `${file}${suffix}${frame.name ? ` \xB7 ${frame.name}` : ""}`;
-}
-function debugFrameLocation(frame) {
-  const path = String(frame.path || "");
-  const file = path.split(/[\\/]/).pop() || path || "unknown";
-  return `${file}${frame.line ? `:${frame.line}` : ""}`;
 }
 function debugControlLabel(action) {
   return String(action).replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`);

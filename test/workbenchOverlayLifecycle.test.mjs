@@ -15,6 +15,9 @@ const debugControlsSource = fs.readFileSync(new URL("../src/debugControls.ts", i
 const directDebugAdapterSource = fs.readFileSync(new URL("../src/directDebugAdapterSession.ts", import.meta.url), "utf8");
 const debugEventsSource = fs.readFileSync(new URL("../src/customConsoleDebugEvents.ts", import.meta.url), "utf8");
 const debugFileModeSource = fs.readFileSync(new URL("../src/debugFileMode.ts", import.meta.url), "utf8");
+const debugFrameNavigationSource = fs.readFileSync(new URL("../src/debugFrameNavigation.ts", import.meta.url), "utf8");
+const debugAnalysisPanelSource = fs.readFileSync(new URL("../src/debugAnalysisPanel.ts", import.meta.url), "utf8");
+const debugAnalysisStoreSource = fs.readFileSync(new URL("../src/debugAnalysisStore.ts", import.meta.url), "utf8");
 const debugShellSource = fs.readFileSync(new URL("../src/debugShell.ts", import.meta.url), "utf8");
 const debugInspectorSource = fs.readFileSync(new URL("../src/debugInspector.ts", import.meta.url), "utf8");
 const generatedTabsSource = fs.readFileSync(new URL("../src/generatedOverlayTabs.ts", import.meta.url), "utf8");
@@ -99,12 +102,16 @@ test("overlay reinjects when the renderer bridge port is stale", () => {
 });
 
 test("overlay renderer exposes a paused debug line marker", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
   const syncSource = fs.readFileSync(new URL("../src/workbenchOverlaySyncRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("updateDebugFrame"));
+  assert.ok(overlaySource.includes("updateDebugInfo"));
   assert.ok(overlaySource.includes("debugLineExpression"));
   assert.ok(syncSource.includes("__dsoSetOverlayDebugLine"));
   assert.ok(syncSource.includes("dso-debug-line"));
+  assert.equal(rendererSource.includes("overlayDebugRendererSource"), false);
+  assert.equal(rendererSource.includes("__dsoBuildOverlayDebugPanel"), false);
+  assert.equal(overlaySource.includes('type === "debugVariables"'), false);
 });
 
 test("overlay prompt gutter stays compact after breakpoint controls install", () => {
@@ -206,37 +213,24 @@ test("debug inspection prefers the generated overlay frame from stopped stacks",
   assert.ok(debugInspectorSource.includes("normalizeSourcePath"));
 });
 
-test("overlay debug uses a direct DAP client instead of VS Code editor refocus", () => {
-  const directBranch = customConsoleSource.slice(customConsoleSource.indexOf("new DirectDebugAdapterSession"));
+test("overlay debug uses a direct DAP session so the shell overlay stays focused", () => {
   assert.ok(customConsoleSource.includes("overlayDebugSession"));
   assert.ok(customConsoleSource.includes("new DirectDebugAdapterSession"));
-  assert.ok(customConsoleSource.includes("await direct.attach"));
-  assert.ok(customConsoleSource.includes('this.syncActiveDebugBreakpoints("sessionStart", undefined, direct)'));
-  assert.ok(customConsoleSource.includes("await this.runCurrentDebugInput()"));
-  assert.ok(customConsoleSource.includes("session = this.overlayDebugSession ?? this.debugSession"));
-  assert.ok(directBranch.indexOf("await direct.attach") < directBranch.indexOf("this.overlayDebugSession = direct"));
-  assert.ok(customConsoleSource.includes("if (this.overlayDebugSession !== direct) { return; }"));
+  assert.ok(customConsoleSource.includes("debug.direct."));
+  assert.ok(customConsoleSource.includes("vscode.debug.startDebugging"));
+  assert.ok(customConsoleSource.includes("runCurrentInput: () => this.runCurrentDebugInput()"));
+  assert.ok(customConsoleSource.includes("await this.showOverlay(); try { await direct.attach"));
+  assert.ok(customConsoleSource.includes('if (this.debugMode === "overlay") { const direct = new DirectDebugAdapterSession'));
+  assert.ok(customConsoleSource.includes('await this.runCurrentDebugInput(); return;'));
   assert.ok(customConsoleSource.includes("this.debugpyEndpoint = undefined"));
-  assert.ok(customConsoleSource.includes('this.postDebugStatus("attached", result.ok ? "complete" : "stopped")'));
-  assert.ok(debugShellSource.includes("_djs_debug_socket.create_connection"));
-  assert.ok(debugShellSource.includes("globals()['_django_shell_debugpy_endpoint'] = None"));
+  assert.equal(debugShellSource.includes("_djs_debug_socket.create_connection"), false);
+  assert.ok(debugShellSource.includes("_djs_debug_reused = True"));
+  assert.ok(directDebugAdapterSource.includes(`customRequest("disconnect"`));
+  assert.ok(directDebugAdapterSource.includes("terminateDebuggee: false"));
   assert.ok(customConsoleSource.includes('this.debugMode === "overlay" && this.debugControlOriginOverlay'));
   assert.ok(customConsoleSource.includes('this.debugMode === "overlay" || this.lastDebugFrameOverlay'));
   assert.ok(customConsoleSource.includes('wasVisible || (this.debugMode === "overlay" && (this.debugSession || this.overlayDebugSession))'));
   assert.ok(customConsoleSource.includes('if (!(this.debugMode === "overlay" && (this.debugSession || this.overlayDebugSession))) { this.overlay?.hide(); }'));
-  assert.ok(directDebugAdapterSource.includes('customRequest("initialize"'));
-  assert.ok(directDebugAdapterSource.includes('customRequest("attach"'));
-  assert.ok(directDebugAdapterSource.includes('customRequest("configurationDone"'));
-  assert.ok(directDebugAdapterSource.includes("private attached = false"));
-  assert.ok(directDebugAdapterSource.includes('this.closeTransport(new Error("Debug adapter disconnected."))'));
-  assert.ok(directDebugAdapterSource.includes("debug.direct.attach.retry"));
-  assert.ok(directDebugAdapterSource.includes("this.closeTransport(error)"));
-  assert.ok(directDebugAdapterSource.includes("function isInitializeTimeout"));
-  assert.ok(directDebugAdapterSource.includes("INITIALIZE_TIMEOUT_MS"));
-  assert.ok(directDebugAdapterSource.includes("attachArguments(options)"));
-  assert.ok(directDebugAdapterSource.includes("justMyCode: options.justMyCode ?? true"));
-  assert.ok(directDebugAdapterSource.includes('path: "<django-shell-backend>"'));
-  assert.equal(directDebugAdapterSource.includes('customRequest("disconnect"'), false);
   assert.equal(customConsoleSource.includes("debug.overlay.refocus"), false);
   assert.equal(customConsoleSource.includes("refocusDebugOverlay"), false);
   assert.ok(customConsoleSource.includes("shouldRefocusOverlay"));
@@ -265,13 +259,30 @@ test("overlay debug ignores debugpy events from non-overlay paused threads", () 
   assert.ok(debugInspectorSource.includes("const overlay = frames.find(isOverlayStackFrame)"));
 });
 
-test("overlay debug mode renders its own stack and variable panel", () => {
-  assert.ok(customConsoleHtmlSource.includes('id="debugInfo"'));
-  assert.ok(customConsoleHtmlSource.includes('id="debugStack"'));
-  assert.ok(customConsoleHtmlSource.includes('id="debugVariables"'));
-  assert.ok(customConsoleHtmlSource.includes(".debugPanel"));
-  assert.ok(customConsoleClientSource.includes("appendDebugStack(info.frames || [])"));
-  assert.ok(customConsoleClientSource.includes("function debugFrameElement(frame)"));
+test("overlay step-in can reveal external source frames", () => {
+  assert.ok(customConsoleSource.includes('preferOverlay: this.lastDebugControlAction !== "stepInto"'));
+  assert.ok(customConsoleSource.includes('this.lastDebugControlAction === "stepInto"'));
+  assert.ok(customConsoleSource.includes("revealExternalDebugFrame(info, this.logger)"));
+  assert.ok(customConsoleSource.includes("isOverlayDebugFramePath(path)"));
+  assert.ok(debugFrameNavigationSource.includes("vscode.window.showTextDocument"));
+  assert.ok(debugFrameNavigationSource.includes("console-cell.py"));
+});
+
+test("overlay debug analysis renders in the Django Shell Activity Bar panel", () => {
+  assert.equal(customConsoleHtmlSource.includes('id="debugInfo"'), false);
+  assert.equal(customConsoleHtmlSource.includes(".debugPanel"), false);
+  assert.equal(customConsoleClientSource.includes('type: "debugVariables"'), false);
+  assert.ok(debugAnalysisPanelSource.includes('const VIEW_ID = "djangoShell.debugAnalysis"'));
+  assert.ok(debugAnalysisPanelSource.includes("implements vscode.TreeDataProvider<DebugAnalysisNode>"));
+  assert.ok(debugAnalysisPanelSource.includes("inspectDebugVariableChildren(reference)"));
+  assert.ok(debugAnalysisPanelSource.includes("scope.variables.map(variableNode)"));
+  assert.ok(debugAnalysisStoreSource.includes("setDebugAnalysisInfo(info: DebugFrameInfo)"));
+  assert.ok(debugAnalysisStoreSource.includes("setDebugAnalysisVariableResolver"));
+  assert.ok(debugInspectorSource.includes(`customRequest("variables"`));
+  assert.ok(debugInspectorSource.includes(`customRequest("scopes"`));
+  assert.ok(customConsoleSource.includes("inspectDebugVariables(session"));
+  assert.ok(customConsoleSource.includes("setDebugAnalysisInfo(info)"));
+  assert.ok(customConsoleSource.includes("setDebugAnalysisVariableResolver"));
   assert.ok(debugInspectorSource.includes("export interface DebugStackFrameInfo"));
   assert.ok(debugInspectorSource.includes("frames: frames.slice(0, 8).map(stackFrameInfo)"));
 });
@@ -293,8 +304,8 @@ test("debug stop interrupts the active backend execution instead of only detachi
   assert.ok(debugEventsSource.includes("debugSessionTerminate"));
 });
 
-test("paused overlay debug closes the executable console source tab", () => {
-  assert.ok(customConsoleSource.includes('closeWorkspaceGeneratedOverlayTabs(this.debugMode === "overlay")'));
+test("paused overlay debug keeps the executable console source tab out of cleanup", () => {
+  assert.ok(customConsoleSource.includes('closeWorkspaceGeneratedOverlayTabs(this.debugMode !== "overlay")'));
   assert.ok(generatedTabsSource.includes("includeExecutable = true"));
   assert.ok(generatedTabsSource.includes("if (includeExecutable)"));
   assert.ok(debugEventsSource.includes("debug.session.terminate"));
@@ -314,6 +325,8 @@ test("generated overlay breakpoints are sent directly to the debug adapter", () 
   assert.ok(debugBreakpointsSource.includes("requestedBreakpoints.length - breakpoints.length"));
   assert.ok(debugBreakpointsSource.includes("sourceModified: true"));
   assert.ok(debugBreakpointsSource.includes("debug.breakpoints.response"));
+  assert.ok(customConsoleSource.includes("debugBreakpoints(lines)"));
+  assert.ok(backendClientSource.includes('kind: "debugBreakpoints"'));
 });
 
 test("debug attach runs the current overlay input after breakpoint sync", () => {

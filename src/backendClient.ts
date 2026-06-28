@@ -58,6 +58,12 @@ export interface BackendInterruptResult {
   reason?: string;
 }
 
+export interface BackendDebugBreakpointsResult {
+  breakpointLines?: number[];
+  error?: string;
+  ok: boolean;
+}
+
 export interface BackendCompletenessResult {
   complete: boolean;
   ok: boolean;
@@ -253,6 +259,25 @@ export class BackendClient {
       },
       (error: unknown) => {
         const parsed = { error: error instanceof Error ? error.message : String(error), interrupted: false, ok: false, reason };
+        this.logRequest(payload.kind, started, parsed, 0, parsed.error, "tcp");
+        return parsed;
+      }
+    );
+  }
+
+  /** Updates active debug breakpoint guards over TCP without queueing behind running user code. */
+  debugBreakpoints(breakpointLines: number[]): Promise<BackendDebugBreakpointsResult> {
+    const started = Date.now();
+    const payload = { breakpointLines, kind: "debugBreakpoints" };
+    return this.socketRequest(payload).then(
+      (buffer) => {
+        const parsed = parseDebugBreakpointsResponse(buffer);
+        this.activeTransport = "tcp";
+        this.logRequest(payload.kind, started, parsed, buffer.length, undefined, "tcp");
+        return parsed;
+      },
+      (error: unknown) => {
+        const parsed = { error: error instanceof Error ? error.message : String(error), ok: false };
         this.logRequest(payload.kind, started, parsed, 0, parsed.error, "tcp");
         return parsed;
       }
@@ -575,6 +600,12 @@ function parseInterruptResponse(buffer: string): BackendInterruptResult {
   const line = buffer.split(/\r?\n/, 1)[0] ?? "";
   const parsed = JSON.parse(line) as Partial<BackendInterruptResult>;
   return { error: parsed.error, interrupted: Boolean(parsed.interrupted), message: parsed.message, ok: Boolean(parsed.ok), reason: parsed.reason };
+}
+
+/** Parses a live debug breakpoint guard update response. */
+function parseDebugBreakpointsResponse(buffer: string): BackendDebugBreakpointsResult {
+  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendDebugBreakpointsResult>;
+  return { breakpointLines: Array.isArray(parsed.breakpointLines) ? parsed.breakpointLines.filter((line): line is number => typeof line === "number") : undefined, error: parsed.error, ok: Boolean(parsed.ok) };
 }
 
 /** Returns a kind-shaped error response carrying one message. */

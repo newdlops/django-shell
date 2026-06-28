@@ -2,6 +2,7 @@
 import * as http from "http";
 import WebSocket from "ws";
 import * as vscode from "vscode";
+import type { DebugFrameInfo } from "./debugInspector";
 import { DiagnosticLogger } from "./diagnostics";
 import { OverlayMemoryDocument } from "./overlayMemoryDocument";
 import { OverlayPythonFeatureBridge } from "./overlayPythonFeatureBridge";
@@ -19,7 +20,7 @@ export interface WorkbenchOverlayGeometry { height: number; left: number; top: n
 interface OverlayBreakpointLocation { column?: number; line: number; }
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
-const RENDERER_PATCH_VERSION = 59;
+const RENDERER_PATCH_VERSION = 62;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -38,6 +39,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   private workbenchWindowId: number | undefined;
   private ws: WebSocket | undefined;
   private geometry: WorkbenchOverlayGeometry | undefined;
+  private geometryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly memoryDocument: OverlayMemoryDocument;
   private readonly featureBridge: OverlayPythonFeatureBridge;
   private prelude = ""; private shellCommands: OverlayShellCommandController | undefined;
@@ -88,6 +90,14 @@ export class WorkbenchOverlay implements vscode.Disposable {
   updateGeometry(geometry: WorkbenchOverlayGeometry): void {
     this.geometry = geometry;
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) { return; }
+    clearTimeout(this.geometryTimer);
+    this.geometryTimer = setTimeout(() => this.flushGeometry(), 80);
+  }
+
+  /** Applies the latest measured geometry after transient workbench layout churn settles. */
+  private flushGeometry(): void {
+    const geometry = this.geometry;
+    if (!geometry || !this.ws || this.ws.readyState !== WebSocket.OPEN) { return; }
     this.logger?.log("overlay.geometry", { height: Math.round(geometry.height), left: Math.round(geometry.left), top: Math.round(geometry.top), width: Math.round(geometry.width) });
     void this.evalInWorkbench(geometryExpression(geometry)).catch((error: unknown) => { this.logger?.log("overlay.geometry.error", { error: error instanceof Error ? error.message : String(error) }); });
   }
@@ -126,13 +136,13 @@ export class WorkbenchOverlay implements vscode.Disposable {
   }
 
   /** Updates the highlighted paused debugger line inside the overlay editor. */
-  async updateDebugFrame(frame?: { line: number; path?: string }): Promise<void> {
+  async updateDebugInfo(info: DebugFrameInfo): Promise<void> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected) {
       return;
     }
-    const visibleLine = frame && this.isOverlayFrame(frame.path) ? frame.line : 0;
+    const visibleLine = info.frame && this.isOverlayFrame(info.frame.path) ? info.frame.line : 0;
     await this.evalInWorkbench(debugLineExpression(visibleLine >= 1 ? visibleLine : 0)).catch((error: unknown) => {
-      this.logger?.log("overlay.debug.line.error", { error: error instanceof Error ? error.message : String(error) });
+      this.logger?.log("overlay.debug.info.error", { error: error instanceof Error ? error.message : String(error) });
     });
   }
 
@@ -238,7 +248,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
       disposable.dispose();
     }
     this.closeServer();
-    clearTimeout(this.generatedCleanupTimer); this.closeSocket("dispose");
+    clearTimeout(this.generatedCleanupTimer); clearTimeout(this.geometryTimer); this.closeSocket("dispose");
   }
 
   /** Requests renderer-owned overlay cleanup before local bridge resources vanish. */

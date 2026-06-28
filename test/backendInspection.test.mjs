@@ -427,6 +427,31 @@ test("injects debug breakpoints on active overlay source lines", { skip: !PYTHON
   assert.equal(payload.value, 2);
 });
 
+test("honors debug breakpoints added while a cell is already running", { skip: !PYTHON }, () => {
+  const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
+  const script = [
+    "import importlib.util, json, sys, types",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    `filename=${JSON.stringify(filename)}`,
+    "hits={'breakpoint': 0, 'thread': 0}",
+    "fake=types.SimpleNamespace(is_client_connected=lambda: True, breakpoint=lambda: hits.__setitem__('breakpoint', hits['breakpoint'] + 1), debug_this_thread=lambda: hits.__setitem__('thread', hits['thread'] + 1))",
+    "sys.modules['debugpy']=fake",
+    "namespace={'mod': mod}",
+    "code='for i in range(3):\\n    if i == 1:\\n        mod._debug_update_breakpoints({\"breakpointLines\": [4]})\\n    value = i\\n'",
+    "response=mod._run_request(namespace, 'tok', {'token':'tok','kind':'execute','code':code,'filename':filename,'breakpointLines':[]}, set())",
+    "print(json.dumps({'breakpoint': hits['breakpoint'], 'response': response, 'thread': hits['thread'], 'value': namespace.get('value')}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.breakpoint, 2);
+  assert.equal(payload.response.ok, true);
+  assert.equal(payload.value, 2);
+});
+
 test("does not inject nested function breakpoints at the enclosing function definition", { skip: !PYTHON }, () => {
   const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
   const script = [

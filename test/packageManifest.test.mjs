@@ -38,7 +38,9 @@ test("contributes the additive model data browser command and catalog view", () 
   assert.ok(catalog && catalog.type === "webview", "model catalog is a searchable webview view");
   const views = manifest.contributes.views.djangoShell.map((item) => item.id);
   assert.ok(views.includes("djangoShell.runtimeInspector"), "keeps the existing runtime inspector view");
+  assert.ok(views.includes("djangoShell.debugAnalysis"), "adds the debug analysis Activity Bar panel");
   assert.ok(manifest.activationEvents.includes("onView:djangoShell.modelCatalog"));
+  assert.ok(manifest.activationEvents.includes("onView:djangoShell.debugAnalysis"));
   assert.ok(manifest.activationEvents.includes("onCommand:djangoShell.openModelData"));
 });
 
@@ -56,12 +58,14 @@ test("contributes a command for debugging the active Django shell", () => {
   const commands = manifest.contributes.commands.map((item) => item.command);
   const palette = manifest.contributes.menus.commandPalette.map((item) => item.command);
   const runtimeTitle = manifest.contributes.menus["view/title"].find((item) => item.command === "djangoShell.debugShell");
+  const debugAnalysisTitle = manifest.contributes.menus["view/title"].find((item) => item.command === "djangoShell.debugShell" && item.when === "view == djangoShell.debugAnalysis");
   const editorTitle = manifest.contributes.menus["editor/title"].find((item) => item.command === "djangoShell.debugShell");
 
   assert.ok(commands.includes("djangoShell.debugShell"));
   assert.ok(manifest.activationEvents.includes("onCommand:djangoShell.debugShell"));
   assert.ok(palette.includes("djangoShell.debugShell"));
   assert.equal(runtimeTitle?.when, "view == djangoShell.runtimeInspector");
+  assert.equal(debugAnalysisTitle?.when, "view == djangoShell.debugAnalysis");
   assert.equal(editorTitle?.when, "resourceFilename == 'debug-cell.py'");
 });
 

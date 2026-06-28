@@ -287,6 +287,8 @@ def _run_request(namespace, token, request, initial_names):
         return _progress_snapshot()
     if request.get("kind") == "interrupt":
         return _interrupt_execution(request)
+    if request.get("kind") == "debugBreakpoints":
+        return _debug_update_breakpoints(request)
     if request.get("kind") == "children":
         return _inspect_children(namespace, request.get("path"))
     if request.get("kind") == "models":
@@ -1006,6 +1008,7 @@ def _execute_code(namespace, code, filename=None, line_offset=0, source_text=Non
     stderr = _StreamingCapture("stderr", progress_emit)
     namespace["_djs_debug_should_break"] = _debug_should_break
     namespace["_djs_progress_iter"] = _progress_iter
+    _debug_set_breakpoint_lines(breakpoint_lines)
     _execution_mark_active()
     try:
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -1042,6 +1045,7 @@ def _execution_mark_inactive():
     """Clears the current user execution thread marker."""
     with _PROGRESS_LOCK:
         _STATE.pop("execution_thread_id", None)
+        _STATE.pop("debug_breakpoint_lines", None)
 
 
 def _interrupt_execution(request=None):
@@ -1305,8 +1309,40 @@ def _install_debug_source_cache(filename, source_text, code, line_offset):
     linecache.cache[filename] = (len(text), None, text.splitlines(True), filename)
 
 
-def _debug_should_break():
+def _debug_update_breakpoints(request):
+    """Updates active debug breakpoint lines without waiting for user code to finish."""
+    lines = _debug_breakpoint_lines((request or {}).get("breakpointLines"))
+    with _PROGRESS_LOCK:
+        _STATE["debug_breakpoint_lines"] = lines
+    return {"breakpointLines": sorted(lines), "ok": True}
+
+
+def _debug_set_breakpoint_lines(breakpoint_lines):
+    """Stores active breakpoint lines for injected debug guards."""
+    if breakpoint_lines is None:
+        with _PROGRESS_LOCK:
+            _STATE.pop("debug_breakpoint_lines", None)
+        return
+    with _PROGRESS_LOCK:
+        _STATE["debug_breakpoint_lines"] = _debug_breakpoint_lines(breakpoint_lines)
+
+
+def _debug_line_has_breakpoint(line, end_line=None):
+    """Returns whether one source line or line span currently has an active breakpoint."""
+    try:
+        start = int(line)
+        end = int(end_line if end_line is not None else line)
+    except Exception:
+        return False
+    with _PROGRESS_LOCK:
+        lines = _STATE.get("debug_breakpoint_lines")
+    return isinstance(lines, set) and any(start <= value <= end for value in lines)
+
+
+def _debug_should_break(line=None, end_line=None):
     """Returns whether an injected overlay breakpoint should call the debug hook."""
+    if line is not None and not _debug_line_has_breakpoint(line, end_line):
+        return False
     debugpy = sys.modules.get("debugpy")
     if not debugpy:
         return False
@@ -1342,10 +1378,9 @@ def _debug_wait_for_client(debugpy, timeout=1.5):
 
 def _debug_breakpoint_tree(tree, breakpoint_lines):
     """Injects debugpy breakpoint calls before statements whose source lines are active breakpoints."""
-    lines = _debug_breakpoint_lines(breakpoint_lines)
-    if not lines:
+    if breakpoint_lines is None:
         return tree
-    return _DebugBreakpointTransformer(lines).visit(tree)
+    return _DebugBreakpointTransformer().visit(tree)
 
 
 def _debug_breakpoint_lines(breakpoint_lines):
@@ -1364,10 +1399,6 @@ def _debug_breakpoint_lines(breakpoint_lines):
 class _DebugBreakpointTransformer(ast.NodeTransformer):
     """Adds breakpoint helper calls before statements on active source lines."""
 
-    def __init__(self, lines):
-        """Stores the normalized active source lines."""
-        self.lines = lines
-
     def generic_visit(self, node):
         """Visits children and injects breakpoint calls into statement lists."""
         node = super().generic_visit(node)
@@ -1381,20 +1412,14 @@ class _DebugBreakpointTransformer(ast.NodeTransformer):
         """Returns a statement list with helper calls inserted before matching source lines."""
         injected = []
         for statement in statements:
-            if self._matches_breakpoint(statement):
+            if self._can_break_before(statement):
                 injected.append(_debug_breakpoint_statement(statement))
             injected.append(statement)
         return injected
 
-    def _matches_breakpoint(self, statement):
-        """Returns whether an active breakpoint line falls inside one statement span."""
-        start = int(getattr(statement, "lineno", 0) or 0)
-        end = int(getattr(statement, "end_lineno", start) or start)
-        if start in self.lines:
-            return True
-        if _debug_statement_owns_nested_lines(statement):
-            return False
-        return any(start <= line <= end for line in self.lines)
+    def _can_break_before(self, statement):
+        """Returns whether one statement can safely host a dynamic breakpoint guard."""
+        return int(getattr(statement, "lineno", 0) or 0) > 0 and not isinstance(statement, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
 
 
 def _debug_statement_owns_nested_lines(statement):
@@ -1416,8 +1441,10 @@ def _debug_statement_owns_nested_lines(statement):
 
 def _debug_breakpoint_statement(statement):
     """Builds an overlay-line breakpoint call guarded by the debugpy connection state."""
+    start = int(getattr(statement, "lineno", 0) or 0)
+    end = start if _debug_statement_owns_nested_lines(statement) else int(getattr(statement, "end_lineno", start) or start)
     node = ast.If(
-        test=ast.Call(func=ast.Name(id="_djs_debug_should_break", ctx=ast.Load()), args=[], keywords=[]),
+        test=ast.Call(func=ast.Name(id="_djs_debug_should_break", ctx=ast.Load()), args=[ast.Constant(value=start), ast.Constant(value=end)], keywords=[]),
         body=[ast.Expr(value=_debug_builtin_breakpoint_call())],
         orelse=[],
     )

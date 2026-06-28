@@ -14,13 +14,7 @@ const currentOutput = document.getElementById("currentOutput");
 const currentOutputLabel = document.getElementById("currentOutputLabel");
 const debugButtons = Array.from(document.querySelectorAll("[data-action=debug-shell]"));
 const debugControlButtons = Array.from(document.querySelectorAll("[data-debug-control]"));
-const debugInfo = document.getElementById("debugInfo");
-const debugLocation = document.getElementById("debugLocation");
 const debugMode = document.getElementById("debugMode");
-const debugSourceLine = document.getElementById("debugSourceLine");
-const debugStack = document.getElementById("debugStack");
-const debugStatus = document.getElementById("debugStatus");
-const debugVariables = document.getElementById("debugVariables");
 const newOverlayTabButtons = Array.from(document.querySelectorAll("[data-action=new-overlay-tab]"));
 const outputList = document.getElementById("outputList");
 const editorAnchor = document.getElementById("editorAnchor");
@@ -42,10 +36,8 @@ let snapshotWritten = false;
 let e2eSawShellPrompt = false;
 let debugAttached = false;
 let debugBusy = false;
-let debugDetail = "";
 let debugDisplayMode = "file";
 let debugState = "idle";
-let breakpointCount = 0;
 let overlayTabActive = "overlay-1";
 let overlayTabs = [{ id: "overlay-1", label: "1" }];
 let runtimeReady = false;
@@ -225,12 +217,6 @@ function handleHostMessage(message) {
   if (message.type === "debugStatus") {
     setDebugStatus(String(message.state || "idle"), String(message.detail || ""));
   }
-  if (message.type === "debugInfo") {
-    setDebugInfo(message.info || {});
-  }
-  if (message.type === "breakpoints") {
-    setBreakpointStatus(Number(message.count) || 0);
-  }
   if (message.type === "overlayTabs") {
     setOverlayTabs(message.tabs, message.active);
   }
@@ -355,25 +341,9 @@ function requestDebugControl(action) {
 /** Updates debugger status text and button affordances from host state. */
 function setDebugStatus(state, detail) {
   debugState = state;
-  debugDetail = detail;
   debugBusy = state === "starting";
   debugAttached = state === "attached" || state === "paused" || state === "running";
-  if (debugStatus) {
-    debugStatus.dataset.state = state;
-    debugStatus.textContent = debugStatusText(debugState, debugDetail);
-  }
-  if (state !== "paused") {
-    setDebugInfo({ state });
-  }
   updateDebugControls();
-}
-
-/** Updates the debugger status label with the visible breakpoint count. */
-function setBreakpointStatus(count) {
-  breakpointCount = Math.max(0, Math.floor(count));
-  if (debugStatus) {
-    debugStatus.textContent = debugStatusText(debugState, debugDetail);
-  }
 }
 
 /** Enables or disables debugger actions based on shell and attach state. */
@@ -461,140 +431,6 @@ function switchOverlayTab(tabId) {
   vscode.postMessage({ tabId, type: "switchOverlayTab" });
 }
 
-/** Returns compact debugger state copy for the top bar. */
-function debugStatusText(state, detail) {
-  const suffix = breakpointCount ? ` · ${breakpointCount} breakpoint${breakpointCount === 1 ? "" : "s"}` : "";
-  if (state === "starting") {
-    return `debugger attaching${suffix}`;
-  }
-  if (state === "attached") {
-    return detail ? `debugger ${detail}${suffix}` : `debugger attached${suffix}`;
-  }
-  if (state === "running") {
-    return detail ? `debugger ${detail}${suffix}` : `debugger running${suffix}`;
-  }
-  if (state === "paused") {
-    return detail ? `debugger ${detail}${suffix}` : `debugger paused${suffix}`;
-  }
-  if (state === "error") {
-    return detail ? `debugger ${detail}${suffix}` : `debugger failed${suffix}`;
-  }
-  return `debugger idle${suffix}`;
-}
-
-/** Renders the paused stack frame and variable preview panel. */
-function setDebugInfo(info) {
-  if (!debugInfo || !debugLocation || !debugSourceLine || !debugStack || !debugVariables) {
-    return;
-  }
-  const state = String(info.state || "idle");
-  debugInfo.dataset.state = state;
-  debugStack.textContent = "";
-  debugVariables.textContent = "";
-  if (state === "idle") {
-    debugInfo.hidden = true;
-    return;
-  }
-  debugInfo.hidden = false;
-  if (state !== "paused" && state !== "error") {
-    debugLocation.textContent = `Debugger ${state}`;
-    debugSourceLine.textContent = "No paused Python frame";
-    appendDebugMessage("No frame reported");
-    return;
-  }
-  const frame = info.frame || {};
-  debugLocation.textContent = state === "error" ? "Debug inspection failed" : debugLocationText(frame);
-  debugSourceLine.textContent = String(info.error || frame.sourceLine || "");
-  appendDebugStack(info.frames || []);
-  appendDebugScope("Line variables", info.focusVariables || []);
-  for (const scope of info.scopes || []) {
-    appendDebugScope(scope.total ? `${scope.name} (${scope.total})` : scope.name, scope.variables || []);
-  }
-  if (!debugVariables.children.length) {
-    appendDebugMessage("No variables reported for this frame");
-  }
-}
-
-/** Appends the current DAP stack preview without opening source tabs. */
-function appendDebugStack(frames) {
-  if (!debugStack || !frames.length) {
-    return;
-  }
-  const title = document.createElement("div");
-  title.className = "debugStackTitle";
-  title.textContent = "Stack";
-  debugStack.appendChild(title);
-  for (const frame of frames.slice(0, 8)) {
-    debugStack.appendChild(debugFrameElement(frame));
-  }
-}
-
-/** Creates one compact stack frame preview row. */
-function debugFrameElement(frame) {
-  const row = document.createElement("div");
-  const name = document.createElement("span");
-  const location = document.createElement("span");
-  row.className = "debugFrame";
-  name.className = "debugFrameName";
-  location.className = "debugFrameLocation";
-  name.textContent = String(frame.name || "frame");
-  location.textContent = debugFrameLocation(frame);
-  row.title = `${name.textContent} ${location.textContent}`.trim();
-  row.append(name, location);
-  return row;
-}
-
-/** Appends one titled group of debug variables. */
-function appendDebugScope(title, variables) {
-  if (!variables.length || !debugVariables) {
-    return;
-  }
-  const label = document.createElement("div");
-  label.className = "debugScopeTitle";
-  label.textContent = title;
-  debugVariables.appendChild(label);
-  for (const variable of variables) {
-    debugVariables.appendChild(debugVariableElement(variable));
-  }
-}
-
-/** Creates one compact variable preview row. */
-function debugVariableElement(variable) {
-  const row = document.createElement("div");
-  const name = document.createElement("span");
-  const value = document.createElement("span");
-  row.className = "debugVar";
-  name.className = "debugVarName";
-  value.className = "debugVarValue";
-  name.textContent = String(variable.name || "");
-  value.textContent = String(variable.value || "");
-  row.title = variable.type ? `${name.textContent}: ${value.textContent} (${variable.type})` : `${name.textContent}: ${value.textContent}`;
-  row.append(name, value);
-  return row;
-}
-
-/** Appends a muted debug panel message. */
-function appendDebugMessage(text) {
-  const message = document.createElement("div");
-  message.className = "debugScopeTitle";
-  message.textContent = text;
-  debugVariables.appendChild(message);
-}
-
-/** Formats one paused frame location for the debug panel. */
-function debugLocationText(frame) {
-  const path = String(frame.path || frame.name || "Paused");
-  const file = path.split(/[\\/]/).pop() || path;
-  const suffix = frame.line ? `:${frame.line}${frame.column ? `:${frame.column}` : ""}` : "";
-  return `${file}${suffix}${frame.name ? ` · ${frame.name}` : ""}`;
-}
-
-/** Formats one DAP stack frame location for compact display. */
-function debugFrameLocation(frame) {
-  const path = String(frame.path || "");
-  const file = path.split(/[\\/]/).pop() || path || "unknown";
-  return `${file}${frame.line ? `:${frame.line}` : ""}`;
-}
 
 /** Formats a debugger action name for compact status text. */
 function debugControlLabel(action) {
