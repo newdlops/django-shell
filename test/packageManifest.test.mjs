@@ -82,11 +82,23 @@ test("contributes remote debugpy attach settings", () => {
 test("contributes basic debugger control commands for the custom console", () => {
   const commands = manifest.contributes.commands.map((item) => item.command);
   const controls = ["continue", "pause", "stepOver", "stepInto", "stepOut", "restart", "stop"];
+  const debugAnalysisTitleCommands = manifest.contributes.menus["view/title"].filter((item) => item.when === "view == djangoShell.debugAnalysis").map((item) => item.command);
+  const externalEditorTitleCommands = manifest.contributes.menus["editor/title"].filter((item) => item.when === "djangoShell.externalDebugFrame").map((item) => item.command);
+  const externalKeys = manifest.contributes.keybindings.filter((item) => item.when === "djangoShell.externalDebugFrame").map((item) => `${item.key}:${item.command}`);
 
   for (const control of controls) {
     assert.ok(commands.includes(`djangoShell.debug.${control}`));
     assert.ok(manifest.activationEvents.includes(`onCommand:djangoShell.debug.${control}`));
   }
+  for (const control of ["continue", "pause", "stepOver", "stepInto", "stepOut", "stop"]) {
+    assert.ok(debugAnalysisTitleCommands.includes(`djangoShell.debug.${control}`));
+  }
+  for (const control of ["continue", "stepOver", "stepInto", "stepOut", "stop"]) {
+    assert.ok(externalEditorTitleCommands.includes(`djangoShell.debug.${control}`));
+  }
+  assert.ok(externalKeys.includes("f10:djangoShell.debug.stepOver"));
+  assert.ok(externalKeys.includes("f11:djangoShell.debug.stepInto"));
+  assert.ok(externalKeys.includes("shift+f11:djangoShell.debug.stepOut"));
 });
 
 test("contributes a custom console overlay tab command without standalone file-tab bindings", () => {

@@ -2,7 +2,7 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "0.0.907008",
+  "version": "0.0.907012",
   "publisher": "newdlops",
   "license": "UNLICENSED",
   "icon": "media/icon.png",
@@ -286,6 +286,31 @@
           "command": "djangoShell.debugShell",
           "group": "navigation@1",
           "when": "resourceFilename == 'debug-cell.py'"
+        },
+        {
+          "command": "djangoShell.debug.continue",
+          "group": "navigation@2",
+          "when": "djangoShell.externalDebugFrame"
+        },
+        {
+          "command": "djangoShell.debug.stepOver",
+          "group": "navigation@3",
+          "when": "djangoShell.externalDebugFrame"
+        },
+        {
+          "command": "djangoShell.debug.stepInto",
+          "group": "navigation@4",
+          "when": "djangoShell.externalDebugFrame"
+        },
+        {
+          "command": "djangoShell.debug.stepOut",
+          "group": "navigation@5",
+          "when": "djangoShell.externalDebugFrame"
+        },
+        {
+          "command": "djangoShell.debug.stop",
+          "group": "navigation@6",
+          "when": "djangoShell.externalDebugFrame"
         }
       ],
       "view/title": [
@@ -312,6 +337,36 @@
         {
           "command": "djangoShell.debugShell",
           "group": "navigation@1",
+          "when": "view == djangoShell.debugAnalysis"
+        },
+        {
+          "command": "djangoShell.debug.continue",
+          "group": "navigation@2",
+          "when": "view == djangoShell.debugAnalysis"
+        },
+        {
+          "command": "djangoShell.debug.pause",
+          "group": "navigation@3",
+          "when": "view == djangoShell.debugAnalysis"
+        },
+        {
+          "command": "djangoShell.debug.stepOver",
+          "group": "navigation@4",
+          "when": "view == djangoShell.debugAnalysis"
+        },
+        {
+          "command": "djangoShell.debug.stepInto",
+          "group": "navigation@5",
+          "when": "view == djangoShell.debugAnalysis"
+        },
+        {
+          "command": "djangoShell.debug.stepOut",
+          "group": "navigation@6",
+          "when": "view == djangoShell.debugAnalysis"
+        },
+        {
+          "command": "djangoShell.debug.stop",
+          "group": "navigation@7",
           "when": "view == djangoShell.debugAnalysis"
         },
         {
@@ -342,6 +397,31 @@
       ]
     },
     "keybindings": [
+      {
+        "command": "djangoShell.debug.continue",
+        "key": "f5",
+        "when": "djangoShell.externalDebugFrame"
+      },
+      {
+        "command": "djangoShell.debug.stepOver",
+        "key": "f10",
+        "when": "djangoShell.externalDebugFrame"
+      },
+      {
+        "command": "djangoShell.debug.stepInto",
+        "key": "f11",
+        "when": "djangoShell.externalDebugFrame"
+      },
+      {
+        "command": "djangoShell.debug.stepOut",
+        "key": "shift+f11",
+        "when": "djangoShell.externalDebugFrame"
+      },
+      {
+        "command": "djangoShell.debug.stop",
+        "key": "shift+f5",
+        "when": "djangoShell.externalDebugFrame"
+      },
       {
         "command": "djangoShell.overlayAcceptInput",
         "key": "enter",

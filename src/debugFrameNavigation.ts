@@ -5,6 +5,8 @@ import type { DebugFrameInfo } from "./debugInspector";
 import type { DiagnosticLogger } from "./diagnostics";
 
 const OVERLAY_SOURCE_SUFFIX = "/.django-shell/console-cell.py";
+let externalDebugFrameDecoration: vscode.TextEditorDecorationType | undefined;
+let externalDebugFrameEditor: vscode.TextEditor | undefined;
 
 /** Returns whether a debug frame path points at the generated overlay source. */
 export function isOverlayDebugFramePath(pathOrUri: string | undefined): boolean {
@@ -23,12 +25,29 @@ export async function revealExternalDebugFrame(info: Pick<DebugFrameInfo, "frame
   }
   try {
     const position = new vscode.Position(Math.max(0, info.frame.line - 1), Math.max(0, (info.frame.column ?? 1) - 1));
-    await vscode.window.showTextDocument(vscode.Uri.file(path), { preview: false, selection: new vscode.Selection(position, position), viewColumn: vscode.ViewColumn.Active });
+    const editor = await vscode.window.showTextDocument(vscode.Uri.file(path), { preview: false, selection: new vscode.Selection(position, position), viewColumn: vscode.ViewColumn.Active });
+    decorateExternalDebugFrame(editor, position);
     return true;
   } catch (error) {
     logger?.log("debug.frame.reveal.error", { error: error instanceof Error ? error.message : String(error), path });
     return false;
   }
+}
+
+/** Clears the current external debug-frame line marker. */
+export function clearExternalDebugFrameDecoration(): void {
+  if (externalDebugFrameDecoration && externalDebugFrameEditor) {
+    externalDebugFrameEditor.setDecorations(externalDebugFrameDecoration, []);
+  }
+  externalDebugFrameEditor = undefined;
+}
+
+/** Marks the currently paused external frame in its native editor. */
+function decorateExternalDebugFrame(editor: vscode.TextEditor, position: vscode.Position): void {
+  clearExternalDebugFrameDecoration();
+  externalDebugFrameDecoration ??= vscode.window.createTextEditorDecorationType({ backgroundColor: "rgba(255, 213, 0, 0.18)", before: { color: "rgba(255, 213, 0, 0.95)", contentText: ">> " }, borderColor: "rgba(255, 213, 0, 0.9)", borderStyle: "solid", borderWidth: "0 0 0 3px", isWholeLine: true, overviewRulerColor: "rgba(255, 213, 0, 0.85)", overviewRulerLane: vscode.OverviewRulerLane.Center });
+  externalDebugFrameEditor = editor;
+  editor.setDecorations(externalDebugFrameDecoration, [new vscode.Range(position, position)]);
 }
 
 /** Converts file URIs to filesystem paths while preserving debugpy source names. */

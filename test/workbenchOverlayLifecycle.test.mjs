@@ -261,10 +261,19 @@ test("overlay debug ignores debugpy events from non-overlay paused threads", () 
 
 test("overlay step-in can reveal external source frames", () => {
   assert.ok(customConsoleSource.includes('preferOverlay: this.lastDebugControlAction !== "stepInto"'));
-  assert.ok(customConsoleSource.includes('this.lastDebugControlAction === "stepInto"'));
+  assert.ok(customConsoleSource.includes("clearExternalDebugFrameDecoration"));
+  assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", true'));
+  assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", false'));
+  assert.ok(customConsoleSource.includes('!this.panel?.visible && !(this.debugMode === "overlay"'));
+  assert.ok(customConsoleSource.includes("this.lastDebugFrameOverlay) { void this.showOverlay(); }"));
+  assert.equal(customConsoleSource.includes("switchExternalFrameToNativeDebug"), false);
+  assert.equal(customConsoleSource.includes("debug.native.switch"), false);
   assert.ok(customConsoleSource.includes("revealExternalDebugFrame(info, this.logger)"));
   assert.ok(customConsoleSource.includes("isOverlayDebugFramePath(path)"));
   assert.ok(debugFrameNavigationSource.includes("vscode.window.showTextDocument"));
+  assert.ok(debugFrameNavigationSource.includes("decorateExternalDebugFrame(editor, position)"));
+  assert.ok(debugFrameNavigationSource.includes('contentText: ">> "'));
+  assert.ok(debugFrameNavigationSource.includes("overviewRulerLane"));
   assert.ok(debugFrameNavigationSource.includes("console-cell.py"));
 });
 
@@ -276,8 +285,12 @@ test("overlay debug analysis renders in the Django Shell Activity Bar panel", ()
   assert.ok(debugAnalysisPanelSource.includes("implements vscode.TreeDataProvider<DebugAnalysisNode>"));
   assert.ok(debugAnalysisPanelSource.includes("inspectDebugVariableChildren(reference)"));
   assert.ok(debugAnalysisPanelSource.includes("scope.variables.map(variableNode)"));
+  assert.ok(debugAnalysisPanelSource.includes('label: "Trace"'));
+  assert.ok(debugAnalysisPanelSource.includes("traceTreeItem"));
   assert.ok(debugAnalysisStoreSource.includes("setDebugAnalysisInfo(info: DebugFrameInfo)"));
   assert.ok(debugAnalysisStoreSource.includes("setDebugAnalysisVariableResolver"));
+  assert.ok(debugAnalysisStoreSource.includes("trace: DebugTraceEntry[]"));
+  assert.ok(debugAnalysisStoreSource.includes("debugTraceEntry(info)"));
   assert.ok(debugInspectorSource.includes(`customRequest("variables"`));
   assert.ok(debugInspectorSource.includes(`customRequest("scopes"`));
   assert.ok(customConsoleSource.includes("inspectDebugVariables(session"));
@@ -285,6 +298,14 @@ test("overlay debug analysis renders in the Django Shell Activity Bar panel", ()
   assert.ok(customConsoleSource.includes("setDebugAnalysisVariableResolver"));
   assert.ok(debugInspectorSource.includes("export interface DebugStackFrameInfo"));
   assert.ok(debugInspectorSource.includes("frames: frames.slice(0, 8).map(stackFrameInfo)"));
+});
+
+test("debug variable analysis previews bounded QuerySet result lists", () => {
+  assert.ok(debugInspectorSource.includes("variablesWithQuerySetPreviews"));
+  assert.ok(debugInspectorSource.includes('customRequest("evaluate"'));
+  assert.ok(debugInspectorSource.includes("__import__('builtins').list"));
+  assert.ok(debugInspectorSource.includes("[:10]"));
+  assert.ok(debugInspectorSource.includes("querysetPreview: true"));
 });
 
 test("PTY fallback preserves debug metadata instead of typing overlay debug cells literally", () => {

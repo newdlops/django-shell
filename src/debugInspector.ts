@@ -6,7 +6,9 @@ import type { DebugRequestSession } from "./debugAdapterTypes";
 export type DebugPanelState = "attached" | "error" | "idle" | "paused" | "running";
 
 export interface DebugVariableInfo {
+  evaluateName?: string;
   name: string;
+  querysetPreview?: boolean;
   type?: string;
   value: string;
   variablesReference?: number;
@@ -35,7 +37,8 @@ export interface DebugFrameInfo {
 interface DapStackFrame { column?: number; id: number; line: number; name: string; source?: { name?: string; path?: string } }
 interface DapScope { expensive?: boolean; indexedVariables?: number; name: string; namedVariables?: number; variablesReference: number }
 interface DapThread { id: number; name: string }
-interface DapVariable { indexedVariables?: number; name: string; namedVariables?: number; type?: string; value: string; variablesReference?: number }
+interface DapVariable { evaluateName?: string; indexedVariables?: number; name: string; namedVariables?: number; type?: string; value: string; variablesReference?: number }
+interface DapEvaluateResponse { result?: string; type?: string; variablesReference?: number }
 interface DebugFrameRef { frameId?: number; threadId: number }
 export interface DebugInspectOptions { preferOverlay?: boolean }
 
@@ -148,7 +151,8 @@ async function scopeVariables(session: DebugRequestSession, frameId: number): Pr
   const response = await session.customRequest("scopes", { frameId }) as { scopes?: DapScope[] };
   const scopes: DebugScopeInfo[] = [];
   for (const scope of (response.scopes ?? []).filter((item) => !item.expensive).slice(0, 4)) {
-    scopes.push({ name: scope.name, total: scope.namedVariables ?? scope.indexedVariables, variables: await variablesForReference(session, scope.variablesReference, MAX_SCOPE_VARIABLES) });
+    const variables = await variablesForReference(session, scope.variablesReference, MAX_SCOPE_VARIABLES);
+    scopes.push({ name: scope.name, total: scope.namedVariables ?? scope.indexedVariables, variables: await variablesWithQuerySetPreviews(session, frameId, variables) });
   }
   return scopes;
 }
@@ -164,11 +168,50 @@ async function variablesForReference(session: DebugRequestSession, variablesRefe
 
 /** Normalizes and truncates one DAP variable for webview display. */
 function normalizeVariable(variable: DapVariable): DebugVariableInfo {
-  return { name: variable.name, type: variable.type, value: truncateValue(variable.value), variablesReference: variable.variablesReference };
+  return { evaluateName: variable.evaluateName, name: variable.name, type: variable.type, value: truncateValue(variable.value), variablesReference: variable.variablesReference };
 }
 
 /** Truncates multiline debug adapter values for compact tree rendering. */
 function truncateValue(value: string): string {
   const singleLine = String(value).replace(/\s+/g, " ").trim();
   return singleLine.length > 500 ? `${singleLine.slice(0, 497)}...` : singleLine;
+}
+
+/** Adds bounded QuerySet result previews next to paused-frame variables. */
+async function variablesWithQuerySetPreviews(session: DebugRequestSession, frameId: number, variables: DebugVariableInfo[]): Promise<DebugVariableInfo[]> {
+  const expanded: DebugVariableInfo[] = [];
+  for (const variable of variables) {
+    expanded.push(variable);
+    const expression = querySetPreviewExpression(variable);
+    if (expression) {
+      const preview = await evaluateQuerySetPreview(session, frameId, variable.name, expression);
+      if (preview) {
+        expanded.push(preview);
+      }
+    }
+  }
+  return expanded;
+}
+
+/** Returns a safe expression for a QuerySet variable preview, or undefined for non-QuerySet values. */
+function querySetPreviewExpression(variable: DebugVariableInfo): string | undefined {
+  const looksLikeQuerySet = /\bQuerySet\b/.test(`${variable.type ?? ""} ${variable.value}`);
+  if (!looksLikeQuerySet) {
+    return undefined;
+  }
+  const expression = variable.evaluateName || (/^[A-Za-z_]\w*$/.test(variable.name) ? variable.name : "");
+  return expression ? `__import__('builtins').list((${expression})[:10])` : undefined;
+}
+
+/** Evaluates one bounded QuerySet preview in the paused frame. */
+async function evaluateQuerySetPreview(session: DebugRequestSession, frameId: number, name: string, expression: string): Promise<DebugVariableInfo | undefined> {
+  try {
+    const response = await session.customRequest("evaluate", { context: "watch", expression, frameId }) as DapEvaluateResponse;
+    if (!response.result) {
+      return undefined;
+    }
+    return { name: `${name}[:10]`, querysetPreview: true, type: response.type || "list", value: truncateValue(response.result), variablesReference: response.variablesReference };
+  } catch {
+    return undefined;
+  }
 }

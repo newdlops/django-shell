@@ -2,10 +2,10 @@
 
 import * as vscode from "vscode";
 import type { DebugScopeInfo, DebugStackFrameInfo, DebugVariableInfo } from "./debugInspector";
-import type { DebugAnalysisSource, DebugAnalysisSnapshot } from "./debugAnalysisStore";
+import type { DebugAnalysisSource, DebugAnalysisSnapshot, DebugTraceEntry } from "./debugAnalysisStore";
 import type { DiagnosticLogger } from "./diagnostics";
 
-type DebugAnalysisNode = GroupNode | SourceNode | StackFrameNode | StatusNode | VariableNode;
+type DebugAnalysisNode = GroupNode | SourceNode | StackFrameNode | StatusNode | TraceNode | VariableNode;
 
 interface GroupNode {
   children: DebugAnalysisNode[];
@@ -31,6 +31,11 @@ interface StatusNode {
   kind: "status";
   label: string;
   tooltip?: string;
+}
+
+interface TraceNode {
+  kind: "trace";
+  trace: DebugTraceEntry;
 }
 
 interface VariableNode {
@@ -96,6 +101,9 @@ export class DebugAnalysisPanel implements vscode.TreeDataProvider<DebugAnalysis
     }
     if (node.kind === "frame") {
       return stackFrameTreeItem(node.frame);
+    }
+    if (node.kind === "trace") {
+      return traceTreeItem(node.trace);
     }
     if (node.kind === "variable") {
       return variableTreeItem(node.variable);
@@ -175,6 +183,9 @@ function pausedNodes(snapshot: DebugAnalysisSnapshot): DebugAnalysisNode[] {
   if (frame) {
     nodes.push({ children: [stackFrameNode({ line: frame.line, name: frame.name, path: frame.path }), sourceNode(snapshot.info.error || frame.sourceLine || "")].filter(Boolean) as DebugAnalysisNode[], icon: "debug-stackframe", kind: "group", label: "Paused Frame" });
   }
+  if (snapshot.trace.length) {
+    nodes.push({ children: snapshot.trace.map(traceNode), icon: "history", kind: "group", label: "Trace" });
+  }
   if (snapshot.info.frames?.length) {
     nodes.push({ children: snapshot.info.frames.map(stackFrameNode), collapsed: true, icon: "list-tree", kind: "group", label: "Stack" });
   }
@@ -203,6 +214,20 @@ function scopeNode(scope: DebugScopeInfo): GroupNode {
 /** Wraps a debugger variable as a tree node. */
 function variableNode(variable: DebugVariableInfo): VariableNode {
   return { kind: "variable", variable };
+}
+
+/** Wraps a debugger trace entry as a tree node. */
+function traceNode(trace: DebugTraceEntry): TraceNode {
+  return { kind: "trace", trace };
+}
+
+/** Builds a tree item for one debugger trace entry. */
+function traceTreeItem(trace: DebugTraceEntry): vscode.TreeItem {
+  const item = new vscode.TreeItem(trace.kind === "overlay" ? "Overlay" : "Native", vscode.TreeItemCollapsibleState.None);
+  item.description = `${trace.location} · ${trace.frame}`;
+  item.iconPath = new vscode.ThemeIcon(trace.kind === "overlay" ? "layout-panel" : "file-code");
+  item.tooltip = trace.path ? `${trace.path}:${trace.line}` : trace.location;
+  return item;
 }
 
 /** Builds a tree item for one stack frame. */

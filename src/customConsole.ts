@@ -5,7 +5,7 @@ import type { BackendClient, BackendExecutionResult, BackendProgressSnapshot, Ba
 import { registerCustomConsoleDebugEvents } from "./customConsoleDebugEvents";
 import { webviewHtml } from "./customConsoleHtml";
 import { type DebugBreakpointLocation, syncDebugBreakpoints } from "./debugBreakpoints";
-import { isOverlayDebugFramePath, revealExternalDebugFrame } from "./debugFrameNavigation";
+import { clearExternalDebugFrameDecoration, isOverlayDebugFramePath, revealExternalDebugFrame } from "./debugFrameNavigation";
 import { DirectDebugAdapterSession } from "./directDebugAdapterSession";
 import { type DebugFrameInfo, type DebugVariableInfo, inspectDebugThread, inspectDebugVariables } from "./debugInspector";
 import { DEBUG_CONTROL_ACTIONS, type DebugControlAction, debugControlDetail, debugControlState, isDebugControlAction, runDebugControl } from "./debugControls";
@@ -720,7 +720,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
 
   /** Shows the workbench overlay editor without failing the webview flow. */
   private async showOverlay(): Promise<void> {
-    if (!this.panel?.visible) {
+    if (!this.panel?.visible && !(this.debugMode === "overlay" && (this.debugSession || this.overlayDebugSession))) {
       return;
     }
     try {
@@ -875,17 +875,15 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private postDebugMode(): void { this.post({ mode: this.debugMode, type: "debugMode" }); }
 
   /** Posts debugger attach state to the custom console webview. */
-  private postDebugStatus(state: "attached" | "error" | "idle" | "paused" | "running" | "starting", detail = ""): void {
-    this.debugAnalysis?.setDebugAnalysisStatus(state, detail);
-    this.post({ detail, state, type: "debugStatus" });
-  }
+  private postDebugStatus(state: "attached" | "error" | "idle" | "paused" | "running" | "starting", detail = ""): void { this.debugAnalysis?.setDebugAnalysisStatus(state, detail); this.post({ detail, state, type: "debugStatus" }); }
 
   /** Posts paused debugger frame details and mirrors the current line into the overlay editor. */
   private postDebugInfo(info: DebugFrameInfo): void {
     this.debugAnalysis?.setDebugAnalysisInfo(info);
     void this.overlay?.updateDebugInfo(info);
+    if (info.state !== "paused") { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); }
     if (info.state === "paused") {
-      const path = info.frame?.path?.replace(/\\/g, "/") ?? ""; this.lastDebugFrameOverlay = isOverlayDebugFramePath(path); if (this.debugMode === "overlay" && this.lastDebugControlAction === "stepInto" && !this.lastDebugFrameOverlay) { void revealExternalDebugFrame(info, this.logger).then((revealed) => { if (revealed) { this.overlay?.hide(); } }); }
+      const path = info.frame?.path?.replace(/\\/g, "/") ?? ""; this.lastDebugFrameOverlay = isOverlayDebugFramePath(path); if (this.debugMode === "overlay" && !this.lastDebugFrameOverlay) { void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", true); void revealExternalDebugFrame(info, this.logger).then((revealed) => { if (revealed) { this.overlay?.hide(); } }); } else { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); if (this.debugMode === "overlay" && this.lastDebugFrameOverlay) { void this.showOverlay(); } }
       void closeWorkspaceGeneratedOverlayTabs(this.debugMode !== "overlay").catch(() => undefined);
     }
   }
