@@ -883,7 +883,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     void this.overlay?.updateDebugInfo(info);
     if (info.state !== "paused") { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); }
     if (info.state === "paused") {
-      const path = info.frame?.path?.replace(/\\/g, "/") ?? ""; this.lastDebugFrameOverlay = isOverlayDebugFramePath(path); if (this.debugMode === "overlay" && !this.lastDebugFrameOverlay) { void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", true); void revealExternalDebugFrame(info, this.logger).then((revealed) => { if (revealed) { this.overlay?.hide(); } }); } else { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); if (this.debugMode === "overlay" && this.lastDebugFrameOverlay) { void this.showOverlay(); } }
+      const path = info.frame?.path?.replace(/\\/g, "/") ?? ""; this.lastDebugFrameOverlay = isOverlayDebugFramePath(path); if (this.debugMode === "overlay" && !this.lastDebugFrameOverlay) { void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", true); void revealExternalDebugFrame(info, this.logger).then((revealed) => { if (revealed) { this.overlay?.hide(); } }); } else { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); if (this.debugMode === "overlay" && this.lastDebugFrameOverlay) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); } }
       void closeWorkspaceGeneratedOverlayTabs(this.debugMode !== "overlay").catch(() => undefined);
     }
   }

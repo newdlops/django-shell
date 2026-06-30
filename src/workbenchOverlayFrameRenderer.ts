@@ -48,15 +48,10 @@ export function overlayFrameRendererSource(): string {
       }
       return best;
     }
-    /** Finds the console webview frame: the Django Shell-owned one when detectable, otherwise the largest visible webview so the overlay cell still activates when tab detection fails. */
+    /** Finds the console webview frame without falling through to unrelated webviews. */
     function __dsoFindWebviewFrame(rects) {
       rects = rects || __dsoConsoleGroups();
-      const owned = __dsoConsoleFrame(rects);
-      if (owned) { return owned; }
-      const frames = __dsoWebviewFrames();
-      let best = null, bestArea = 0;
-      for (let i = 0; i < frames.length; i++) { const area = __dsoFrameArea(frames[i]); if (area > bestArea) { best = frames[i]; bestArea = area; } }
-      return bestArea > 4000 ? best : null;
+      return __dsoConsoleFrame(rects);
     }
     /** Finds the workbench DOM host that owns the custom console webview frame. */
     function __dsoFindWebviewHost(frame) {
@@ -69,8 +64,9 @@ export function overlayFrameRendererSource(): string {
       const rects = __dsoConsoleGroups();
       const owned = __dsoConsoleFrame(rects);
       if (owned) { root.__dsoHadConsoleFrame = true; }
-      if (!owned && root.__dsoHadConsoleFrame && !rects.length) { root.__dsoFrame = null; return null; }
-      const frame = owned || (root.__dsoFrame && root.__dsoFrame.isConnected ? root.__dsoFrame : __dsoFindWebviewFrame(rects));
+      if (!rects.length) { root.__dsoFrame = null; return null; }
+      const cached = root.__dsoFrame && root.__dsoFrame.isConnected && __dsoFrameIsConsole(root.__dsoFrame, rects) ? root.__dsoFrame : null;
+      const frame = owned || cached || __dsoFindWebviewFrame(rects);
       const host = __dsoFindWebviewHost(frame);
       if (!frame || !host) { root.__dsoFrame = null; return null; }
       root.__dsoFrame = frame;

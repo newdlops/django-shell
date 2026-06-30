@@ -44,7 +44,10 @@ test("overlay shutdown waits for renderer disposal before closing the CDP socket
 
 test("confirmed console overlays do not fall back to unrelated webview frames", () => {
   assert.ok(frameRendererSource.includes("root.__dsoHadConsoleFrame = true"));
-  assert.ok(frameRendererSource.includes("!owned && root.__dsoHadConsoleFrame && !rects.length"));
+  assert.ok(frameRendererSource.includes("if (!rects.length) { root.__dsoFrame = null; return null; }"));
+  assert.ok(frameRendererSource.includes("__dsoFrameIsConsole(root.__dsoFrame, rects)"));
+  assert.equal(frameRendererSource.includes("otherwise the largest visible webview"), false);
+  assert.equal(frameRendererSource.includes("bestArea > 4000 ? best : null"), false);
 });
 
 test("overlay CDP evaluation stays bound to the owning VS Code window", () => {
@@ -205,11 +208,12 @@ test("debug attach keeps model-browser transport independent from debugpy", () =
   assert.equal(customConsoleSource.includes('this.selectedTransport = "tcp"'), false);
 });
 
-test("debug inspection prefers the generated overlay frame from stopped stacks", () => {
+test("debug inspection preserves the selected or current native frame", () => {
   assert.ok(debugInspectorSource.includes("OVERLAY_SOURCE_SUFFIX"));
   assert.ok(debugInspectorSource.includes("preferredStackFrame"));
-  assert.ok(debugInspectorSource.includes("frames.find(isOverlayStackFrame)"));
-  assert.ok(debugInspectorSource.includes("options.preferOverlay === false"));
+  assert.ok(debugInspectorSource.includes("const selected = frames.find((frame) => frame.id === item.frameId)"));
+  assert.ok(debugInspectorSource.includes("hasConcreteSource(current)"));
+  assert.equal(debugInspectorSource.includes("if (item.frameId && options.preferOverlay !== false)"), false);
   assert.ok(debugInspectorSource.includes("normalizeSourcePath"));
 });
 
@@ -256,7 +260,7 @@ test("overlay debug ignores debugpy events from non-overlay paused threads", () 
   assert.ok(debugEventsSource.includes("debug.active.frame.ignore"));
   assert.ok(debugEventsSource.includes("hooks.setPausedThread(undefined)"));
   assert.ok(debugEventsSource.includes('inspectDebugFrame(session, item, { preferOverlay: hooks.lastControlAction() !== "stepInto" })'));
-  assert.ok(debugInspectorSource.includes("const overlay = frames.find(isOverlayStackFrame)"));
+  assert.ok(debugInspectorSource.includes("return frames.find(isOverlayStackFrame) ?? current"));
 });
 
 test("overlay step-in can reveal external source frames", () => {
@@ -265,7 +269,7 @@ test("overlay step-in can reveal external source frames", () => {
   assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", true'));
   assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", false'));
   assert.ok(customConsoleSource.includes('!this.panel?.visible && !(this.debugMode === "overlay"'));
-  assert.ok(customConsoleSource.includes("this.lastDebugFrameOverlay) { void this.showOverlay(); }"));
+  assert.ok(customConsoleSource.includes("this.lastDebugFrameOverlay) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); }"));
   assert.equal(customConsoleSource.includes("switchExternalFrameToNativeDebug"), false);
   assert.equal(customConsoleSource.includes("debug.native.switch"), false);
   assert.ok(customConsoleSource.includes("revealExternalDebugFrame(info, this.logger)"));

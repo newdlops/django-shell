@@ -82,17 +82,24 @@ async function stackFramesFor(session: DebugRequestSession, threadId: number): P
 
 /** Returns the DAP stack frame matching VS Code's active frame id. */
 function stackFrameFor(frames: DapStackFrame[], item: DebugFrameRef, options: DebugInspectOptions): DapStackFrame | undefined {
-  if (item.frameId && options.preferOverlay !== false) {
-    const overlay = frames.find(isOverlayStackFrame);
-    if (overlay) { return overlay; }
+  if (item.frameId) {
+    const selected = frames.find((frame) => frame.id === item.frameId);
+    if (selected) { return selected; }
   }
-  return item.frameId ? frames.find((frame) => frame.id === item.frameId) ?? preferredStackFrame(frames, options) : preferredStackFrame(frames, options);
+  return preferredStackFrame(frames, options);
 }
 
-/** Returns the best user-code frame from a DAP stack, preferring the overlay backing file. */
+/** Returns the best current execution frame from a DAP stack. */
 function preferredStackFrame(frames: DapStackFrame[], options: DebugInspectOptions): DapStackFrame | undefined {
-  if (options.preferOverlay === false) { return frames[0]; }
-  return frames.find(isOverlayStackFrame) ?? frames[0];
+  const current = frames[0];
+  if (!current || !options.preferOverlay || hasConcreteSource(current)) { return current; }
+  return frames.find(isOverlayStackFrame) ?? current;
+}
+
+/** Returns whether a DAP frame points at a concrete source file or source name. */
+function hasConcreteSource(frame: DapStackFrame): boolean {
+  const path = sourcePathFor(frame);
+  return !!path && !path.startsWith("<");
 }
 
 /** Returns whether a DAP frame points at the generated overlay console file. */
