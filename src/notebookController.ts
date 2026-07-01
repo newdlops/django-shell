@@ -438,7 +438,8 @@ function resultTextOutput(result: BackendExecutionResult): string {
     result.stdout.trimEnd(),
     result.result,
     result.stderr.trimEnd(),
-    result.traceback?.trimEnd()
+    result.traceback?.trimEnd(),
+    result.error?.trimEnd()
   ].filter(Boolean).join("\n");
   return text || "ok";
 }

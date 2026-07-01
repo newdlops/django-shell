@@ -4,6 +4,7 @@ export const DEBUGPY_MARKER_PREFIX = "__DJANGO_SHELL_DEBUGPY__";
 
 export interface DebugpyEndpoint {
   host: string;
+  inProcess?: boolean;
   port: number;
   reused: boolean;
 }
@@ -18,12 +19,16 @@ export interface DebugpyAttachOptions {
   connectHost?: string;
   connectPort?: number;
   listenHost: string;
+  listenHostConfigured?: boolean;
   listenPort: number;
   remoteRoot?: string;
 }
 
 export interface DebugpySettingsReader {
+  /** Reads one debugger setting with a fallback value. */
   get<T>(section: string, defaultValue: T): T;
+  /** Returns VS Code configuration inspection metadata when available. */
+  inspect?<T>(section: string): { defaultValue?: T; globalValue?: T; workspaceFolderValue?: T; workspaceValue?: T } | undefined;
 }
 
 export interface DjangoShellDebugConfiguration {
@@ -48,11 +53,14 @@ export function buildDebugpyBootstrapCode(host: string, port: number, marker = D
   return [
     "import json as _djs_debug_json",
     "import os as _djs_debug_os",
+    "import socket as _djs_debug_socket",
     "import sys as _djs_debug_sys",
     "try:",
     "    _djs_debug_endpoint = globals().get('_django_shell_debugpy_endpoint')",
+    "    _djs_debug_in_process = bool(globals().get('_django_shell_debugpy_in_process'))",
     "    if not _djs_debug_endpoint:",
     `        _djs_debug_paths = ${pythonStringArray(searchPaths)}`,
+    "        _djs_debug_os.environ.setdefault('PYDEVD_DISABLE_FILE_VALIDATION', '1')",
         "        try:",
         "            import debugpy as _djs_debugpy",
         "        except Exception:",
@@ -63,12 +71,27 @@ export function buildDebugpyBootstrapCode(host: string, port: number, marker = D
     `        _djs_debug_host = ${pythonString(host)}`,
     `        _djs_debug_port = ${port}`,
     "        _djs_debug_requested = (_djs_debug_host, _djs_debug_port)",
-    "        _djs_debug_listen_result = _djs_debugpy.listen(_djs_debug_requested)",
+    "        try:",
+    "            _djs_debug_listen_result = _djs_debugpy.listen(_djs_debug_requested)",
+    "        except RuntimeError as _djs_debug_listen_error:",
+    "            if 'timed out waiting for adapter to connect' not in str(_djs_debug_listen_error):",
+    "                raise",
+    "            _djs_debug_in_process = True",
+    "            if not _djs_debug_port:",
+    "                _djs_debug_probe = _djs_debug_socket.socket()",
+    "                try:",
+    "                    _djs_debug_probe.bind((_djs_debug_host, 0))",
+    "                    _djs_debug_port = int(_djs_debug_probe.getsockname()[1])",
+    "                finally:",
+    "                    _djs_debug_probe.close()",
+    "                _djs_debug_requested = (_djs_debug_host, _djs_debug_port)",
+    "            _djs_debug_listen_result = _djs_debugpy.listen(_djs_debug_requested, in_process_debug_adapter=True)",
     "        if isinstance(_djs_debug_listen_result, (list, tuple)) and len(_djs_debug_listen_result) >= 2:",
     "            _djs_debug_endpoint = (_djs_debug_listen_result[0] or _djs_debug_host, int(_djs_debug_listen_result[1]))",
     "        else:",
     "            _djs_debug_endpoint = _djs_debug_requested",
     "        globals()['_django_shell_debugpy_endpoint'] = _djs_debug_endpoint",
+    "        globals()['_django_shell_debugpy_in_process'] = _djs_debug_in_process",
     "        _djs_debug_reused = False",
     "    else:",
     "        import debugpy as _djs_debugpy",
@@ -76,7 +99,7 @@ export function buildDebugpyBootstrapCode(host: string, port: number, marker = D
     "    if hasattr(_djs_debugpy, 'breakpoint'):",
     "        _djs_debug_os.environ['PYTHONBREAKPOINT'] = 'debugpy.breakpoint'",
     "        _djs_debug_sys.breakpointhook = _djs_debugpy.breakpoint",
-    `    print(${pythonString(marker)} + _djs_debug_json.dumps({"ok": True, "host": _djs_debug_endpoint[0], "port": _djs_debug_endpoint[1], "reused": _djs_debug_reused}))`,
+    `    print(${pythonString(marker)} + _djs_debug_json.dumps({"ok": True, "host": _djs_debug_endpoint[0], "inProcess": _djs_debug_in_process, "port": _djs_debug_endpoint[1], "reused": _djs_debug_reused}))`,
     "except Exception as _djs_debug_error:",
     `    print(${pythonString(marker)} + _djs_debug_json.dumps({"ok": False, "error": repr(_djs_debug_error)}))`
   ].join("\n");
@@ -88,6 +111,7 @@ export function readDjangoShellDebugOptions(configuration: DebugpySettingsReader
     connectHost: stringSetting(configuration.get("connectHost", "")),
     connectPort: normalizeDebugpyPort(configuration.get("connectPort", 0)),
     listenHost: stringSetting(configuration.get("listenHost", "127.0.0.1")) || "127.0.0.1",
+    listenHostConfigured: configuredSetting(configuration, "listenHost"),
     listenPort: normalizeDebugpyPort(configuration.get("listenPort", 0)),
     remoteRoot: stringSetting(configuration.get("remoteRoot", ""))
   };
@@ -108,7 +132,11 @@ export function parseDebugpyBootstrapResult(output: string, marker = DEBUGPY_MAR
     if (typeof parsed.host !== "string" || typeof parsed.port !== "number" || parsed.port <= 0) {
       return { error: "debugpy returned an invalid endpoint.", ok: false };
     }
-    return { endpoint: { host: parsed.host, port: parsed.port, reused: Boolean(parsed.reused) }, ok: true };
+    const endpoint: DebugpyEndpoint = { host: parsed.host, port: parsed.port, reused: Boolean(parsed.reused) };
+    if (parsed.inProcess !== undefined) {
+      endpoint.inProcess = Boolean(parsed.inProcess);
+    }
+    return { endpoint, ok: true };
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error), ok: false };
   }
@@ -129,6 +157,14 @@ export function buildDjangoShellDebugConfiguration(endpoint: DebugpyEndpoint, cw
     request: "attach",
     type: "python"
   };
+}
+
+/** Returns the host passed to debugpy.listen(), widening only for explicit remote attach hosts. */
+export function effectiveDebugpyListenHost(options: DebugpyAttachOptions): string {
+  if (!options.listenHostConfigured && options.connectHost && isLoopbackDebugHost(options.listenHost) && !isLocalAttachHost(options.connectHost)) {
+    return "0.0.0.0";
+  }
+  return options.listenHost;
 }
 
 /** Encodes a JavaScript string as a Python string literal. */
@@ -152,8 +188,31 @@ function normalizeDebugpyPort(value: unknown): number {
   return Number.isFinite(port) && port > 0 && port <= 65535 ? port : 0;
 }
 
+/** Returns whether a setting has a user or workspace override. */
+function configuredSetting(configuration: DebugpySettingsReader, section: string): boolean {
+  const inspected = configuration.inspect?.(section);
+  return Boolean(inspected && (inspected.globalValue !== undefined || inspected.workspaceValue !== undefined || inspected.workspaceFolderValue !== undefined));
+}
+
 /** Converts listen-any addresses into a client-connectable loopback host. */
 function connectableDebugHost(host: string): string {
   const value = stringSetting(host) || "127.0.0.1";
   return value === "0.0.0.0" || value === "::" ? "127.0.0.1" : value;
+}
+
+/** Returns whether a host is a local loopback interface. */
+function isLoopbackDebugHost(host: string): boolean {
+  const value = normalizedHost(host);
+  return value === "localhost" || value === "::1" || value === "0:0:0:0:0:0:0:1" || /^127(?:\.\d{1,3}){0,3}$/.test(value);
+}
+
+/** Returns whether a connect host points at this machine rather than a remote server. */
+function isLocalAttachHost(host: string): boolean {
+  const value = normalizedHost(host);
+  return isLoopbackDebugHost(value) || value === "0.0.0.0" || value === "::";
+}
+
+/** Normalizes one host string for local/remote classification. */
+function normalizedHost(host: string): string {
+  return stringSetting(host).toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
 }

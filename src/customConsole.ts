@@ -11,14 +11,15 @@ import { type DebugFrameInfo, type DebugVariableInfo, inspectDebugThread, inspec
 import { DEBUG_CONTROL_ACTIONS, type DebugControlAction, debugControlDetail, debugControlState, isDebugControlAction, runDebugControl } from "./debugControls";
 import type { DebugAnalysisSink } from "./debugAnalysisStore";
 import { DEFAULT_DEBUG_MODE, type DjangoShellDebugMode, debugFileUri, mirrorOverlayBreakpointsToDebugFile, normalizeDebugMode, openDebugFile, readDebugFileText, sourceBreakpointLocations, writeDebugFile } from "./debugFileMode";
-import { DEBUGPY_MARKER_PREFIX, buildDebugpyBootstrapCode, buildDjangoShellDebugConfiguration, type DebugpyBootstrapResult, type DebugpyEndpoint, parseDebugpyBootstrapResult, readDjangoShellDebugOptions } from "./debugShell";
+import { startDebugpyInBackend } from "./debugpyAttach";
+import { buildDjangoShellDebugConfiguration, effectiveDebugpyListenHost, type DebugpyBootstrapResult, type DebugpyEndpoint, readDjangoShellDebugOptions } from "./debugShell";
 import { DiagnosticLogger } from "./diagnostics";
 import { closeWorkspaceGeneratedOverlayTabs, scheduleWorkspaceGeneratedOverlayTabCleanup } from "./generatedOverlayTabs";
 import { NotebookPtySession } from "./notebookPtySession";
 import { overlayEditorUri, resetOverlayBackingFiles } from "./overlayBackingFiles";
 import { runtimePreludeLines } from "./runtimePrelude";
 import type { WorkbenchOverlay, WorkbenchOverlayGeometry } from "./workbenchOverlay";
-const VIEW_TYPE = "djangoShell.customConsole"; const DEBUG_ATTACH_TIMEOUT_MS = 15000;
+const VIEW_TYPE = "djangoShell.customConsole"; const DEBUG_ATTACH_TIMEOUT_MS = 120000;
 /** Stores one webview-level overlay tab with its visible Python source. */
 interface OverlayTabState { id: string; label: string; text: string }
 export interface CustomDjangoConsoleActivationOptions { registerCommands?: boolean; }
@@ -153,9 +154,11 @@ export class CustomDjangoConsole implements vscode.Disposable {
     if (this.debugMode === "file" && await this.prepareFileDebugInput() === 0) { this.postDebugStatus("idle", "set breakpoints"); void vscode.window.showInformationMessage("Set breakpoints in .django-shell/debug-cell.py, then run Django Shell: Debug Current Shell again."); return; }
     const attach = (async () => {
       this.postDebugStatus("starting", "attaching");
-      const cwd = workspaceCwd(), debugOptions = readDjangoShellDebugOptions(vscode.workspace.getConfiguration("djangoShell.debug")); const endpoint = this.debugpyEndpoint ? { endpoint: { ...this.debugpyEndpoint, reused: true }, ok: true } : await this.startDebugpyWithTimeout(backend, debugOptions.listenPort, debugOptions.listenHost);
+      const cwd = workspaceCwd(), debugOptions = readDjangoShellDebugOptions(vscode.workspace.getConfiguration("djangoShell.debug")), listenHost = effectiveDebugpyListenHost(debugOptions); const endpoint = this.debugpyEndpoint ? { endpoint: { ...this.debugpyEndpoint, reused: true }, ok: true } : await this.startDebugpyWithTimeout(backend, debugOptions.listenPort, listenHost);
       if (!endpoint.ok || !endpoint.endpoint) { this.logger?.log("debug.attach.bootstrap.error", { error: endpoint.error ?? "unknown debugpy error", port: 0 }); this.postDebugStatus("error", endpoint.error?.includes("timed out") ? "attach timed out" : "debugpy failed"); void vscode.window.showWarningMessage(`Django Shell debugger could not start: ${endpoint.error ?? "unknown debugpy error"}`); return; }
-      const forward = debugOptions.connectHost || debugOptions.connectPort ? undefined : await this.session?.forwardDebugpy(endpoint.endpoint.port); const attachEndpoint = forward ? { ...endpoint.endpoint, host: forward.host, port: forward.port } : endpoint.endpoint; const configuration = buildDjangoShellDebugConfiguration(attachEndpoint, cwd, debugOptions);
+      const forward = debugOptions.connectHost || debugOptions.connectPort ? undefined : await this.session?.forwardDebugpy(endpoint.endpoint.port);
+      if (!forward && !debugOptions.connectHost && !debugOptions.connectPort && this.session?.isRemoteTerminalBackend()) { const message = remoteDebugPortForwardMessage(endpoint.endpoint.host, endpoint.endpoint.port); this.logger?.log("debug.attach.portForward.missing", { host: endpoint.endpoint.host, port: endpoint.endpoint.port }); this.postDebugStatus("error", "port forward required"); void vscode.window.showWarningMessage(message); return; }
+      const attachEndpoint = forward ? { ...endpoint.endpoint, host: forward.host, port: forward.port } : endpoint.endpoint; this.logger?.log("debug.attach.endpoint", { attachHost: attachEndpoint.host, attachPort: attachEndpoint.port, debugpyHost: endpoint.endpoint.host, debugpyPort: endpoint.endpoint.port, listenHost, listenPort: debugOptions.listenPort }); const configuration = buildDjangoShellDebugConfiguration(attachEndpoint, cwd, debugOptions);
       if (this.debugMode === "overlay") { const direct = new DirectDebugAdapterSession({ onContinued: (body) => { if (this.overlayDebugSession !== direct) { return; } this.logger?.log("debug.direct.continued", { all: body.allThreadsContinued ? 1 : 0, currentThreadId: this.debugThreadId ?? 0, threadId: body.threadId ?? 0 }); this.postDebugStatus("running", "continued"); this.postDebugInfo({ state: "running" }); }, onStopped: (body) => this.handleDirectDebugStopped(direct, body.threadId, body.reason ?? ""), onTerminated: () => { if (this.overlayDebugSession !== direct) { return; } this.overlayDebugSession = undefined; this.debugThreadId = undefined; this.debugpyEndpoint = undefined; this.postDebugStatus("idle", "ended"); this.postDebugInfo({ state: "idle" }); } }, this.logger); await this.showOverlay(); try { await direct.attach(attachEndpoint, () => this.syncActiveDebugBreakpoints("sessionStart", undefined, direct)); } catch (error) { direct.dispose(); this.debugpyEndpoint = undefined; const message = error instanceof Error ? error.message : String(error); this.logger?.log("debug.direct.attach.error", { error: message, host: attachEndpoint.host, port: attachEndpoint.port }); this.postDebugStatus("error", "attach failed"); return; } this.overlayDebugSession = direct; this.debugpyEndpoint = endpoint.endpoint; this.clearInspectionCache(); this.scheduleRuntimeRefresh(); this.postTransport(); this.postDebugStatus("attached", `overlay ${attachEndpoint.host}:${attachEndpoint.port}`); this.refreshBreakpointUi(); await this.runCurrentDebugInput(); return; }
       try { this.runOnNextDebugSessionStart = true;
         this.logger?.log("debug.attach.start", { host: attachEndpoint.host, port: attachEndpoint.port, reused: endpoint.endpoint.reused ? 1 : 0 });
@@ -612,24 +615,13 @@ export class CustomDjangoConsole implements vscode.Disposable {
   }
 
   /** Starts debugpy inside the attached backend and returns its endpoint marker. */
-  private async startDebugpy(backend: BackendClient, port: number, host = "127.0.0.1"): Promise<ReturnType<typeof parseDebugpyBootstrapResult>> {
-    const code = buildDebugpyBootstrapCode(host, port, DEBUGPY_MARKER_PREFIX, this.debugpySearchPaths());
-    const result = await this.executeBackendPython(backend, code);
-    const parsed = parseDebugpyBootstrapResult(executionText(result));
-    if (parsed.ok) { return parsed; }
-    const text = executionText(result);
-    return { error: parsed.error ? `${parsed.error}\n${text}` : text, ok: false };
+  private async startDebugpy(backend: BackendClient, port: number, host = "127.0.0.1"): Promise<DebugpyBootstrapResult> {
+    return startDebugpyInBackend({ backend, host, logger: this.logger, port, stager: this.session });
   }
 
   /** Starts debugpy but releases the debugger UI if the backend request stalls. */
   private startDebugpyWithTimeout(backend: BackendClient, port: number, host = "127.0.0.1"): Promise<DebugpyBootstrapResult> {
     return Promise.race([this.startDebugpy(backend, port, host), new Promise<DebugpyBootstrapResult>((resolve) => setTimeout(() => resolve({ error: `debugpy bootstrap timed out after ${DEBUG_ATTACH_TIMEOUT_MS}ms.`, ok: false }), DEBUG_ATTACH_TIMEOUT_MS))]);
-  }
-
-  /** Returns bundled debugpy import roots from the Python Debugger extension when it is installed. */
-  private debugpySearchPaths(): string[] {
-    const debugpyExtension = vscode.extensions.getExtension("ms-python.debugpy");
-    return debugpyExtension ? [path.join(debugpyExtension.extensionPath, "bundled", "libs")] : [];
   }
 
   /** Returns the filename passed to Python compile() so editor breakpoints bind to the overlay file. */
@@ -972,6 +964,9 @@ function hasUnclosedBracket(source: string): boolean {
 /** Returns the common remote inspection disabled message. */
 function remoteRuntimeMessage(): string { return "Remote runtime inspection is disabled because the backend is only reachable through the interactive terminal."; }
 
+/** Returns the setup guidance shown when a remote debugpy port is not locally reachable. */
+function remoteDebugPortForwardMessage(host: string, port: number): string { return `Django Shell debugger is listening on the remote shell at ${host}:${port}, but no local port-forward is available. Start the shell through a tracked ssh/kubectl exec command, or set djangoShell.debug.connectHost/connectPort to an existing reachable debugpy endpoint.`; }
+
 /** Returns a safe inspection response when remote TCP is unreachable. */
 function remoteRuntimeInspectionDisabled(): BackendRuntimeInspection { return { error: remoteRuntimeMessage(), loadedModuleCount: 0, modules: [], ok: false, variables: [] }; }
 
@@ -979,7 +974,7 @@ function remoteRuntimeInspectionDisabled(): BackendRuntimeInspection { return { 
 function remoteRuntimeChildrenDisabled(): BackendRuntimeChildren { return { children: [], error: remoteRuntimeMessage(), ok: false }; }
 
 /** Formats one backend execution result for display in the custom console. */
-function executionText(result: BackendExecutionResult): string { return [result.stdout, result.stderr, result.result, result.traceback].filter(Boolean).join("\n") || "(no output)"; }
+function executionText(result: BackendExecutionResult): string { return [result.stdout, result.stderr, result.result, result.traceback, result.error].filter(Boolean).join("\n") || "(no output)"; }
 
 /** Returns a compact line count for diagnostics. */
 function lineCount(text: string): number { return text ? text.split(/\r?\n/).length : 0; }

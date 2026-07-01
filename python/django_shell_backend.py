@@ -316,6 +316,9 @@ def _run_request(namespace, token, request, initial_names):
     code = request.get("code")
     if not isinstance(code, str):
         return {"ok": False, "stdout": "", "stderr": "Request code must be a string.", "traceback": ""}
+    if request.get("kind") == "debugpy":
+        with _EXECUTION_LOCK:
+            return _execute_debugpy_bootstrap(namespace, code)
     if request.get("kind") == "complete":
         return _check_complete(code)
     filename = request.get("filename")
@@ -1033,6 +1036,17 @@ def _execute_code(namespace, code, filename=None, line_offset=0, source_text=Non
                 return {"ok": False, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(), "traceback": traceback.format_exc()}
     finally:
         _execution_mark_inactive()
+
+
+def _execute_debugpy_bootstrap(namespace, code):
+    """Executes debugger bootstrap code without redirecting process stderr."""
+    stdout = _StreamingCapture("stdout", False)
+    try:
+        with contextlib.redirect_stdout(stdout):
+            exec(compile(code, "<django-shell-debugpy>", "exec"), namespace)
+        return {"ok": True, "stdout": stdout.getvalue(), "stderr": "", "result": ""}
+    except Exception:
+        return {"ok": False, "stdout": stdout.getvalue(), "stderr": "", "traceback": traceback.format_exc()}
 
 
 def _execution_mark_active():
@@ -2095,7 +2109,7 @@ def _pty_install_capture(namespace):
         shell = None
     if shell is not None:
         return _pty_install_ipython_capture(shell)
-    return _pty_install_plain_capture(sys)
+    return _pty_install_plain_capture(sys, namespace)
 
 
 def _pty_install_ipython_capture(shell):
@@ -2195,7 +2209,7 @@ def _pty_install_ipython_capture(shell):
     return True
 
 
-def _pty_install_plain_capture(sys):
+def _pty_install_plain_capture(sys, namespace):
     """Captures each plain-REPL cell's output by teeing stdout/stderr and emitting a marker on every prompt
     (the REPL calls str(sys.ps1) once per cell boundary). raw_cell stays the user's literal command."""
     if getattr(sys, "_djs_capture", False):
@@ -2237,11 +2251,37 @@ def _pty_install_plain_capture(sys):
             state["result"] = None
             if _RESPONSE_PREFIX in out:
                 return ">>> "  # plumbing cell (_djs_rpc): its marker already went through, don't double-emit
+            raw = _pty_plain_last_history()
             ok = "Traceback (most recent call last)" not in err
-            grid = _pty_tabulate_result(value) if ok else None
+            inspect = None
+            matched_probe, probe_value, probe_error = _pty_inspect_probe_target(raw, namespace)
+            inspection_probe = matched_probe or (ok and (_pty_is_models_probe(raw) or _pty_is_runtime_probe(raw)))
+            if inspection_probe:
+                out = ""
+                err = ""
+            grid = None if inspection_probe or not ok else _pty_tabulate_result(value)
+            raw_metadata = {}
+            if ok and _pty_is_models_probe(raw):
+                _autoimport_registered_models(namespace)
+                raw_metadata["models"] = _browse_models()
+            if ok and _pty_is_runtime_probe(raw):
+                raw_metadata["runtime"] = _pty_runtime_inspection(namespace)
+            if matched_probe:
+                if probe_error:
+                    inspect = {"children": [], "error": probe_error}
+                else:
+                    try:
+                        inspect = {"children": _browse_children_of(probe_value, [])}
+                    except Exception:
+                        inspect = {"children": [], "error": traceback.format_exc()}
             state["counter"] += 1
+            response = {"grid": grid, "inspect": inspect, "ok": ok or matched_probe, "result": None, "stderr": "" if ok else err, "stdout": out, "traceback": err if not ok else ""}
+            metadata = _STATE.pop("pty_raw_metadata", None)
+            if isinstance(metadata, dict):
+                response.update(metadata)
+            response.update(raw_metadata)
             # Write straight to the real stream so the marker is not re-captured by the tee.
-            real_out.write(_pty_cell_marker("_djs_cell-%d" % state["counter"], {"grid": grid, "ok": ok, "result": None, "stderr": "" if ok else err, "stdout": out, "traceback": err if not ok else ""}) + "\n")
+            real_out.write(_pty_cell_marker("_djs_cell-%d" % state["counter"], response) + "\n")
             real_out.flush()
             return ">>> "
 
@@ -2257,6 +2297,16 @@ def _pty_install_plain_capture(sys):
     sys.ps1 = _Ps1()
     sys._djs_capture = True
     return True
+
+
+def _pty_plain_last_history():
+    """Returns the latest plain-REPL history item when readline exposes it."""
+    try:
+        import readline
+
+        return readline.get_history_item(readline.get_current_history_length()) or ""
+    except Exception:
+        return ""
 
 
 def _pty_serve(namespace, token, request_json, request_id, initial_names):

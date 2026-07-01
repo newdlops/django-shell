@@ -9,6 +9,7 @@ const {
   DEBUGPY_MARKER_PREFIX,
   buildDebugpyBootstrapCode,
   buildDjangoShellDebugConfiguration,
+  effectiveDebugpyListenHost,
   parseDebugpyBootstrapResult,
   readDjangoShellDebugOptions
 } = require("../out/debugShell.js");
@@ -18,11 +19,15 @@ test("builds a reusable debugpy bootstrap that emits a marker", () => {
 
   assert.match(code, /import debugpy as _djs_debugpy/);
   assert.match(code, /_djs_debugpy\.listen\(_djs_debug_requested\)/);
+  assert.match(code, /in_process_debug_adapter=True/);
+  assert.match(code, /timed out waiting for adapter to connect/);
+  assert.match(code, /_djs_debug_socket\.socket/);
   assert.match(code, /_djs_debug_endpoint = \(_djs_debug_listen_result\[0\] or _djs_debug_host, int\(_djs_debug_listen_result\[1\]\)\)/);
   assert.match(code, /_django_shell_debugpy_endpoint/);
   assert.match(code, new RegExp(DEBUGPY_MARKER_PREFIX));
   assert.match(code, /\/vscode\/debugpy\/bundled\/libs/);
   assert.match(code, /_djs_debug_sys\.path\.insert/);
+  assert.match(code, /PYDEVD_DISABLE_FILE_VALIDATION/);
   assert.match(code, /PYTHONBREAKPOINT/);
   assert.match(code, /_djs_debug_sys\.breakpointhook = _djs_debugpy\.breakpoint/);
   assert.match(code, /56789/);
@@ -31,8 +36,10 @@ test("builds a reusable debugpy bootstrap that emits a marker", () => {
 test("parses debugpy endpoint markers and failures", () => {
   const ok = parseDebugpyBootstrapResult(`noise\n${DEBUGPY_MARKER_PREFIX}{"ok":true,"host":"127.0.0.1","port":56789,"reused":false}\n`);
   const failed = parseDebugpyBootstrapResult(`${DEBUGPY_MARKER_PREFIX}{"ok":false,"error":"ImportError('debugpy')"}\n`);
+  const inProcess = parseDebugpyBootstrapResult(`${DEBUGPY_MARKER_PREFIX}{"ok":true,"host":"127.0.0.1","inProcess":true,"port":56790,"reused":false}\n`);
 
   assert.deepEqual(ok, { endpoint: { host: "127.0.0.1", port: 56789, reused: false }, ok: true });
+  assert.deepEqual(inProcess, { endpoint: { host: "127.0.0.1", inProcess: true, port: 56790, reused: false }, ok: true });
   assert.equal(failed.ok, false);
   assert.match(failed.error ?? "", /debugpy/);
 });
@@ -64,4 +71,23 @@ test("builds remote-friendly Python attach configuration from debug settings", (
   assert.equal(options.listenPort, 5678);
   assert.deepEqual(configuration.connect, { host: "127.0.0.1", port: 45678 });
   assert.deepEqual(configuration.pathMappings, [{ localRoot: "/workspace/app", remoteRoot: "/app" }]);
+});
+
+test("widens debugpy listen host for an explicit remote attach host", () => {
+  const remoteDefault = readDjangoShellDebugOptions({
+    get(key, fallback) {
+      return { connectHost: "10.0.2.15" }[key] ?? fallback;
+    }
+  });
+  const remoteExplicit = readDjangoShellDebugOptions({
+    get(key, fallback) {
+      return { connectHost: "10.0.2.15", listenHost: "127.0.0.1" }[key] ?? fallback;
+    },
+    inspect(key) {
+      return key === "listenHost" ? { workspaceValue: "127.0.0.1" } : undefined;
+    }
+  });
+
+  assert.equal(effectiveDebugpyListenHost(remoteDefault), "0.0.0.0");
+  assert.equal(effectiveDebugpyListenHost(remoteExplicit), "127.0.0.1");
 });

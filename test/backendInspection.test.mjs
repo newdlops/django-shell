@@ -377,6 +377,62 @@ test("streams stdout and stderr chunks while PTY progress emit is active", { ski
   assert.equal(payload.stderr, "err-live\n");
 });
 
+test("debugpy bootstrap requests do not redirect process stderr", { skip: !PYTHON }, () => {
+  const script = [
+    "import importlib.util, json",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "code='import sys\\nprint(\"debug-marker\")\\nprint(\"debug-stderr\", file=sys.stderr)'",
+    "response=mod._run_request({}, 'tok', {'token':'tok','kind':'debugpy','code':code}, set())",
+    "print(json.dumps(response))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.stdout, "debug-marker\n");
+  assert.equal(payload.stderr, "");
+  assert.match(result.stderr, /debug-stderr/);
+});
+
+test("plain REPL ORM runtime probe includes namespace variables", { skip: !PYTHON }, () => {
+  const script = [
+    "import importlib.util, io, json, sys, readline",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "namespace={'user_value': 42, '_djs_initial_names': set()}",
+    "buf=io.StringIO()",
+    "real_stdout=sys.stdout",
+    "real_stderr=sys.stderr",
+    "real_displayhook=sys.displayhook",
+    "real_ps1=getattr(sys, 'ps1', None)",
+    "try:",
+    "    sys.stdout=buf",
+    "    mod._pty_install_plain_capture(sys, namespace)",
+    "    str(sys.ps1)",
+    "    readline.add_history('len(globals())')",
+    "    sys.displayhook(len(namespace))",
+    "    str(sys.ps1)",
+    "finally:",
+    "    sys.stdout=real_stdout",
+    "    sys.stderr=real_stderr",
+    "    sys.displayhook=real_displayhook",
+    "    if real_ps1 is not None: sys.ps1=real_ps1",
+    "markers=[line for line in buf.getvalue().splitlines() if line.startswith(mod._RESPONSE_PREFIX)]",
+    "response=json.loads(markers[-1][len(mod._RESPONSE_PREFIX):])['response']",
+    "print(json.dumps({'names':[v['name'] for v in response['runtime']['variables']], 'stdout': response['stdout']}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.ok(payload.names.includes("user_value"));
+  assert.equal(payload.stdout, "");
+});
+
 test("uses request filename and line offset as the compiled shell input location", { skip: !PYTHON }, () => {
   const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
   const script = [

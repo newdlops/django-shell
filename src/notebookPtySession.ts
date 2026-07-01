@@ -5,17 +5,20 @@ import * as pty from "node-pty";
 import * as vscode from "vscode";
 import { SerializedAsyncQueue } from "./asyncQueue";
 import { BackendClient, BackendProgressSnapshot, BackendRequestPayload, BackendTransportMode } from "./backendClient";
-import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BACKEND_PROGRESS_PREFIX, BackendBootstrapCommand, BackendPtyResponse, backendBootstrapPayload, buildBackendBootstrapCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendProgressMarkers, parseBackendReadyMarker, parseBackendResponseMarkers } from "./backendBootstrap";
+import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BACKEND_PROGRESS_PREFIX, BACKEND_RESPONSE_PREFIX, BackendBootstrapCommand, BackendPtyResponse, backendBootstrapPayload, buildBackendBootstrapCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendProgressMarkers, parseBackendReadyMarker, parseBackendResponseMarkers } from "./backendBootstrap";
 import { buildPtyBackendRequest, buildPtyExecuteCell, firstPathEntry, isSecretPrompt, safeCommand, trimTerminalText } from "./notebookPtyText";
 import { DiagnosticLogger } from "./diagnostics";
+import { type DebugpyBundlePayload, buildDebugpyBundleInstallCommand, parseDebugpyBundleInstallResult } from "./debugpyBundle";
 import { buildShellEnv } from "./env";
 import { type KubectlExecTarget, type KubectlPortForward, parseKubectlExecTarget, startKubectlPortForward } from "./kubectlPortForward";
 import { ensureNodePtyHelperExecutable } from "./ptyHelper";
 import { getShellLaunch } from "./shellLaunch";
 import { appendShellTranscript } from "./shellTranscript";
+import { type SshExecTarget, type SshPortForward, parseSshExecTarget, startSshPortForward } from "./sshPortForward";
 import { DjangoTerminalMode, InputLineTracker, detectPrimaryPythonPrompt, isDjangoShellCommand, nextModeForOutput, nextModeForSubmittedLine } from "./terminalState";
 
 const KEEPALIVE_IDLE_MS = 45000; const KEEPALIVE_INTERVAL_MS = 30000; const KEEPALIVE_USER_IDLE_MS = 15000;
+const DEBUGPY_STAGE_TIMEOUT_MS = 90000;
 
 export interface NotebookPtyOptions {
   autoActivateWorkspaceVenv: boolean;
@@ -62,13 +65,15 @@ export class NotebookPtySession implements vscode.Disposable {
   private bootstrapRetried = false;
   private bootstrapRetryPending = false;
   private readonly bootstrapWriteTimers = new Set<NodeJS.Timeout>();
+  private readonly debugpyBundlePaths = new Map<string, string>();
   private ptyRequestBuffer = "";
   private ptyProgressBuffer = "";
   private readonly ptyResponseChunks = new Map<string, { chunks: string[]; count: number }>();
   private ptyRequestSeq = 1;
-  private debugpyForward: KubectlPortForward | undefined;
+  private debugpyForward: KubectlPortForward | SshPortForward | undefined;
   private kubectlTarget: KubectlExecTarget | undefined;
   private shellLogTail = "";
+  private sshTarget: SshExecTarget | undefined;
   private spawnedAt = 0;
   private started = false;
   private state = "starting";
@@ -206,15 +211,43 @@ export class NotebookPtySession implements vscode.Disposable {
     return { mode: this.mode, ready: Boolean(this.client), secretPrompt: isSecretPrompt(this.displayText), selectedSettingsModule: this.options.djangoSettingsModule ?? "", sessionId: this.options.sessionId, settingsCandidates: this.options.settingsCandidates ?? [], state: this.state, text: trimTerminalText(this.displayText) };
   }
 
-  /** Starts an automatic kubectl port-forward for remote debugpy when the setup command exposed a kubectl exec target. */
-  async forwardDebugpy(remotePort: number): Promise<KubectlPortForward | undefined> {
-    if (!this.bootstrapRetried || !this.kubectlTarget) { return undefined; }
+  /** Returns whether the backend was attached through the inline fallback used for terminal-only remote shells. */
+  isRemoteTerminalBackend(): boolean {
+    return this.bootstrapRetried;
+  }
+
+  /** Starts an automatic port-forward for remote debugpy when the setup command exposed a kubectl or SSH target. */
+  async forwardDebugpy(remotePort: number): Promise<KubectlPortForward | SshPortForward | undefined> {
+    if (!this.bootstrapRetried) { return undefined; }
     this.clearDebugpyPortForward();
+    if (this.kubectlTarget) { return this.forwardKubectlDebugpy(remotePort); }
+    if (this.sshTarget) { return this.forwardSshDebugpy(remotePort); }
+    this.options.diagnosticLogger?.log("debug.portForward.unavailable", { remotePort, sessionId: this.options.sessionId });
+    return undefined;
+  }
+
+  /** Starts an automatic kubectl port-forward for remote debugpy. */
+  private async forwardKubectlDebugpy(remotePort: number): Promise<KubectlPortForward | undefined> {
+    const target = this.kubectlTarget;
+    if (!target) { return undefined; }
     try {
-      this.debugpyForward = await startKubectlPortForward(this.kubectlTarget, remotePort, this.options.diagnosticLogger);
+      this.debugpyForward = await startKubectlPortForward(target, remotePort, this.options.diagnosticLogger);
       return this.debugpyForward;
     } catch (error) {
       this.options.diagnosticLogger?.log("debug.kubectl.portForward.error", { error: error instanceof Error ? error.message : String(error), remotePort });
+      return undefined;
+    }
+  }
+
+  /** Starts an automatic SSH local port-forward for remote debugpy. */
+  private async forwardSshDebugpy(remotePort: number): Promise<SshPortForward | undefined> {
+    const target = this.sshTarget;
+    if (!target) { return undefined; }
+    try {
+      this.debugpyForward = await startSshPortForward(target, remotePort, this.options.diagnosticLogger);
+      return this.debugpyForward;
+    } catch (error) {
+      this.options.diagnosticLogger?.log("debug.ssh.portForward.error", { error: error instanceof Error ? error.message : String(error), remotePort });
       return undefined;
     }
   }
@@ -223,6 +256,24 @@ export class NotebookPtySession implements vscode.Disposable {
   clearDebugpyPortForward(): void {
     this.debugpyForward?.dispose();
     this.debugpyForward = undefined;
+  }
+
+  /** Stages the bundled debugpy package into the active remote shell and returns its remote import root. */
+  async stageDebugpyBundle(payload: DebugpyBundlePayload): Promise<string | undefined> {
+    const cached = this.debugpyBundlePaths.get(payload.digest);
+    if (cached) {
+      return cached;
+    }
+    const id = `debugpy-${Date.now().toString(36)}-${this.ptyRequestSeq++}`;
+    const install = buildDebugpyBundleInstallCommand(payload, id, BACKEND_RESPONSE_PREFIX);
+    const buffer = await this.writePacedPtyRequest(id, install.command, DEBUGPY_STAGE_TIMEOUT_MS);
+    const result = parseDebugpyBundleInstallResult(buffer);
+    if (!result.ok || !result.path) {
+      throw new Error(result.error ?? "Bundled debugpy install failed.");
+    }
+    this.debugpyBundlePaths.set(payload.digest, result.path);
+    this.options.diagnosticLogger?.log("debugpy.bundle.install", { bytes: install.bytes, chunks: install.chunks, files: payload.fileCount, path: result.path, sessionId: this.options.sessionId });
+    return result.path;
   }
 
   /** Processes PTY output, detects prompts, and attaches the backend once. */
@@ -401,6 +452,48 @@ export class NotebookPtySession implements vscode.Disposable {
     }));
   }
 
+  /** Writes a generated multi-line PTY command in paced chunks and resolves through the normal response marker path. */
+  private writePacedPtyRequest(id: string, command: string, timeoutMs: number): Promise<string> {
+    const queuedAt = Date.now();
+    return this.ptyQueue.run("backend", () => new Promise<string>((resolve, reject) => {
+      const started = Date.now();
+      if (!this.process) {
+        reject(new Error("Django shell PTY is not running."));
+        return;
+      }
+      this.ptyRequestBuffer = "";
+      this.ptyProgressBuffer = "";
+      const timer = setTimeout(() => {
+        this.ptyRequests.delete(id);
+        reject(new Error(`Django shell PTY request timed out after ${timeoutMs}ms. ${id}`));
+      }, timeoutMs);
+      this.ptyRequests.set(id, { reject, resolve, timer });
+      this.options.diagnosticLogger?.log("backend.pty.request", { id, kind: "debugpyBundle", queueMs: started - queuedAt, sessionId: this.options.sessionId });
+      this.writePtyCommandPaced(id, command);
+    }));
+  }
+
+  /** Types one generated PTY command line-by-line so remote terminals do not drop a large queued paste. */
+  private writePtyCommandPaced(id: string, command: string): void {
+    const lines = command.replace(/\r$/, "").split("\r");
+    const sessionGeneration = this.generation;
+    const writeLine = (index: number): void => {
+      if (sessionGeneration !== this.generation || !this.process || !this.ptyRequests.has(id)) {
+        return;
+      }
+      this.process.write(`${lines[index]}\r`);
+      if (index + 1 >= lines.length) {
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.bootstrapWriteTimers.delete(timer);
+        writeLine(index + 1);
+      }, index === 0 ? 100 : 10);
+      this.bootstrapWriteTimers.add(timer);
+    };
+    writeLine(0);
+  }
+
   /** Starts conservative runtime keepalive probes after backend attachment. */
   private startKeepalive(): void {
     if (this.keepaliveTimer) {
@@ -555,9 +648,11 @@ export class NotebookPtySession implements vscode.Disposable {
     this.cellCapture = false;
     this.bootstrapRetried = false;
     this.bootstrapRetryPending = false;
+    this.debugpyBundlePaths.clear();
     this.displayText = "";
     this.inputTracker = new InputLineTracker();
     this.kubectlTarget = undefined;
+    this.sshTarget = undefined;
     this.lastDjangoCommandAt = 0;
     this.lastOutputAt = 0;
     this.lastPrimaryPromptAt = 0;
@@ -581,6 +676,7 @@ export class NotebookPtySession implements vscode.Disposable {
     for (const submitted of this.inputTracker.handleInput(data)) {
       const line = submitted.line.trim();
       this.kubectlTarget = parseKubectlExecTarget(line) ?? this.kubectlTarget;
+      this.sshTarget = parseSshExecTarget(line) ?? this.sshTarget;
       const previousMode = this.mode;
       const nextMode = nextModeForSubmittedLine(this.mode, line);
       const djangoCandidate = isDjangoShellCommand(line);

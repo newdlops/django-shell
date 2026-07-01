@@ -2,7 +2,7 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "0.0.907013",
+  "version": "0.0.907018",
   "publisher": "newdlops",
   "license": "UNLICENSED",
   "icon": "media/icon.png",
@@ -498,7 +498,7 @@
         "djangoShell.debug.listenHost": {
           "type": "string",
           "default": "127.0.0.1",
-          "markdownDescription": "Host passed to `debugpy.listen()` inside the Django shell. Keep `127.0.0.1` for local shells; use `0.0.0.0` only when the remote environment requires a non-loopback listener."
+          "markdownDescription": "Host passed to `debugpy.listen()` inside the Django shell. Keep `127.0.0.1` for local shells. If `connectHost` is a remote host and this setting is not explicitly configured, Django Shell automatically listens on `0.0.0.0` in the remote process."
         },
         "djangoShell.debug.listenPort": {
           "type": "number",
@@ -508,7 +508,7 @@
         "djangoShell.debug.connectHost": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Host VS Code connects to for the debugpy attach session. Empty uses the host reported by debugpy. For SSH/kubectl port-forwarding, set this to `127.0.0.1`."
+          "markdownDescription": "Host VS Code connects to for the debugpy attach session. Empty uses the host reported by debugpy or an automatic local port-forward. Set this to the reachable Django server/container/VM host when debugpy is not reachable through local `127.0.0.1`."
         },
         "djangoShell.debug.connectPort": {
           "type": "number",

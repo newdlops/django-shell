@@ -26,6 +26,7 @@ const ORM_PTY_ROW_CAP = 2000;
 const INSPECT_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface BackendExecutionResult {
+  error?: string;
   ok: boolean;
   result?: string;
   stderr: string;
@@ -239,6 +240,11 @@ export class BackendClient {
   /** Executes Python code in the backend namespace and returns captured output. */
   execute(code: string, filename?: string, lineOffset?: number, sourceText?: string, breakpointLines?: number[]): Promise<BackendExecutionResult> {
     return this.request({ breakpointLines, code, filename, kind: "execute", lineOffset, sourceText }, parseBackendResponse);
+  }
+
+  /** Starts debugpy through a backend path that leaves process stderr untouched. */
+  debugpy(code: string): Promise<BackendExecutionResult> {
+    return this.request({ code, kind: "debugpy" }, parseBackendResponse);
   }
 
   /** Returns the latest running Python progress snapshot when the socket can be polled. */
@@ -563,7 +569,7 @@ function connectHost(host: string): string {
   return host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
 }
 
-const PTY_FALLBACK_KINDS = new Set(["children", "complete", "environment", "execute", "inspect", "prelude", "models", "schema", "filterfields", "rows", "related", "count", "aggregate", "commit", "lookup", "query"]); // helpers: scrubbed _djs_rpc; execute: literal cell.
+const PTY_FALLBACK_KINDS = new Set(["children", "complete", "debugpy", "environment", "execute", "inspect", "prelude", "models", "schema", "filterfields", "rows", "related", "count", "aggregate", "commit", "lookup", "query"]); // helpers: scrubbed _djs_rpc; execute: literal cell.
 const PARALLEL_MODEL_READ_KINDS = new Set(["models", "schema", "filterfields", "rows", "related", "computed", "lookup", "count", "aggregate"]);
 // Kinds ORM/Terminal modes never type over the terminal; schema is synthesized from the first row page, and the filter tree falls back to flat fields (see modelBrowser).
 const ORM_NO_PTY = new Set(["children", "environment", "inspect", "models", "prelude", "schema", "filterfields"]);
@@ -627,7 +633,7 @@ function kindErrorResponse(kind: string, error: string): string {
 function parseBackendResponse(buffer: string): BackendExecutionResult {
   const line = buffer.split(/\r?\n/, 1)[0] ?? "";
   const parsed = JSON.parse(line) as Partial<BackendExecutionResult>;
-  return { ok: Boolean(parsed.ok), result: parsed.result, stderr: parsed.stderr ?? "", stdout: parsed.stdout ?? "", traceback: parsed.traceback };
+  return { error: parsed.error, ok: Boolean(parsed.ok), result: parsed.result, stderr: parsed.stderr ?? "", stdout: parsed.stdout ?? "", traceback: parsed.traceback };
 }
 
 /** Parses the latest backend execution progress snapshot. */

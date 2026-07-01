@@ -201,7 +201,7 @@ test("debug start clicks always reach the extension host for diagnostics", () =>
 test("debug attach keeps model-browser transport independent from debugpy", () => {
   assert.ok(customConsoleSource.includes("readDjangoShellDebugOptions"));
   assert.ok(customConsoleSource.includes("debugOptions.listenPort"));
-  assert.ok(customConsoleSource.includes("debugOptions.listenHost"));
+  assert.ok(customConsoleSource.includes("effectiveDebugpyListenHost"));
   assert.ok(customConsoleSource.includes("forwardDebugpy(endpoint.endpoint.port)"));
   assert.ok(customConsoleSource.includes("clearDebugpyPortForward()"));
   assert.equal(customConsoleSource.includes('backend.setTransportMode("tcp")'), false);
