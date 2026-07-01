@@ -59,7 +59,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 71"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 73"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -76,21 +76,32 @@ test("overlay Monaco layout clamps dimensions instead of trusting transient DOM 
   assert.ok(rendererSource.includes("Math.min(viewportWidth, 8192)"));
   assert.ok(rendererSource.includes("editor.layout(__dsoLayoutSize(root, host))"));
   assert.ok(rendererSource.includes("__dsoLayoutOverlayEditor(root)"));
-  assert.ok(rendererSource.includes("contain:strict"));
+  assert.ok(rendererSource.includes("contain:layout style"));
+  assert.ok(rendererSource.includes(".django-shell-overlay .overflowingContentWidgets{overflow:visible!important;z-index:35}"));
+  assert.equal(rendererSource.includes("contain:strict"), false);
   assert.equal(rendererSource.includes("editor.layout({ width: Math.max(100, rect.width), height: Math.max(80, rect.height) })"), false);
   assert.equal(rendererSource.includes("automaticLayout: true"), false);
 });
 
-test("overlay hover widgets use viewport-fixed coordinates without stale clamp transforms", () => {
+test("overlay hover widgets keep Monaco's editor-local default coordinates", () => {
   const widgetSource = fs.readFileSync(new URL("../src/workbenchOverlayWidgetRenderer.ts", import.meta.url), "utf8");
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(widgetSource.includes('position:fixed;left:0;top:0;width:0!important;height:0!important'));
+  assert.ok(rendererSource.includes("overflow:visible;background:var(--vscode-editor-background)"));
+  assert.ok(rendererSource.includes(".django-shell-overlay-editor{width:100%;height:100%;min-height:80px;box-sizing:border-box;overflow:visible;contain:layout style}"));
+  assert.ok(rendererSource.includes(".django-shell-overlay .monaco-editor{overflow:visible!important}"));
+  assert.ok(widgetSource.includes('position:absolute;left:0;top:0;width:100%!important;height:100%!important'));
   assert.ok(widgetSource.includes('document.getElementById("django-shell-overlay-widget-root")'));
   assert.ok(widgetSource.includes('host.querySelector(".django-shell-overlay-widget-root")'));
-  assert.ok(widgetSource.includes("document.body.appendChild(layerRoot)"));
+  assert.ok(widgetSource.includes("root.appendChild(layerRoot)"));
+  assert.ok(widgetSource.includes("fixedOverflowWidgets: false"));
+  assert.ok(widgetSource.includes('const selectors = ".suggest-widget,.parameter-hints-widget,.context-view"'));
+  assert.ok(widgetSource.includes('node.closest(".monaco-hover,.monaco-editor-hover")'));
   assert.ok(widgetSource.includes("data-dso-applied-transform"));
   assert.ok(widgetSource.includes("hasAppliedTransform ? Number"));
   assert.equal(widgetSource.includes("host.appendChild(layerRoot)"), false);
+  assert.equal(widgetSource.includes("document.body.appendChild(layerRoot)"), false);
+  assert.equal(widgetSource.includes("fixedOverflowWidgets: true"), false);
 });
 
 test("overlay model stays user-only instead of hiding generated prelude DOM", () => {
