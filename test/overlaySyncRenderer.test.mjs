@@ -147,9 +147,12 @@ test("previews the current Enter execution range with editor decorations", () =>
 
   const rangeDecoration = editor.decorations.find((item) => item.options.className === "dso-exec-range");
   assert.deepEqual(root.__dsoExecutionRangePreview, { end: 7, start: 4 });
-  assert.equal(rangeDecoration.options.linesDecorationsClassName, "dso-exec-range-rail");
+  assert.equal(rangeDecoration.options.isWholeLine, true);
+  assert.equal(rangeDecoration.options.linesDecorationsClassName, undefined);
+  assert.equal(editor.decorations.some((item) => item.options.linesDecorationsClassName === "dso-exec-range-rail"), false);
   assert.equal(rangeDecoration.range.startLineNumber, 4);
   assert.equal(rangeDecoration.range.endLineNumber, 7);
+  assert.equal(rangeDecoration.range.startColumn, 1);
   assert.equal(editor.options.lineNumbers(4), ">>>");
   assert.equal(editor.options.lineNumbers(5), "...");
 });

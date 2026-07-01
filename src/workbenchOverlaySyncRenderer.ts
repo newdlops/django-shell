@@ -576,7 +576,7 @@ export function overlaySyncRendererSource(): string {
       const end = Math.max(start, payload.range.end || start);
       const endColumn = model.getLineMaxColumn ? model.getLineMaxColumn(end) : 1;
       const decorations = [{
-        options: { className: "dso-exec-range", isWholeLine: true, linesDecorationsClassName: "dso-exec-range-rail" },
+        options: { className: "dso-exec-range", isWholeLine: true },
         range: { endColumn: endColumn, endLineNumber: end, startColumn: 1, startLineNumber: start }
       }, {
         options: { className: "dso-exec-range-start", isWholeLine: true },

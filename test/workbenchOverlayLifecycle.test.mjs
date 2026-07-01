@@ -59,7 +59,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 68"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 70"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -104,6 +104,15 @@ test("overlay model stays user-only instead of hiding generated prelude DOM", ()
   assert.equal(preludeViewSource.includes("protectedLines.indexOf"), false);
   assert.equal(preludeViewSource.includes("leadingPrefix"), false);
   assert.equal(preludeViewSource.includes("topOf(line)"), false);
+});
+
+test("execution preview decorations stay out of the prompt gutter", () => {
+  const syncSource = fs.readFileSync(new URL("../src/workbenchOverlaySyncRenderer.ts", import.meta.url), "utf8");
+  const executionDecorationBody = syncSource.slice(syncSource.indexOf("function __dsoExecutionRangeDecorations"), syncSource.indexOf("/** Refreshes the visible preview"));
+
+  assert.ok(executionDecorationBody.includes('options: { className: "dso-exec-range", isWholeLine: true }'));
+  assert.ok(executionDecorationBody.includes("startColumn: 1"));
+  assert.equal(executionDecorationBody.includes("linesDecorationsClassName"), false);
 });
 
 test("confirmed console overlays do not fall back to unrelated webview frames", () => {
