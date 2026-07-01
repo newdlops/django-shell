@@ -418,6 +418,7 @@ export function overlayRendererSource(modelUri: string): string {
       root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d(" + left + "px," + top + "px,0)";
       root.style.width = width + "px"; root.style.height = height + "px";
       root.style.right = ""; root.style.bottom = "";
+      try { window.__dsoSyncOverlayWidgetLayer && window.__dsoSyncOverlayWidgetLayer(root); } catch (eWidgetLayerGeometry) {}
       if (sizeChanged) { __dsoLayoutOverlayEditor(root); }
       return true;
     }
