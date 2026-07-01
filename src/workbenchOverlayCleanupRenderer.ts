@@ -62,6 +62,7 @@ export function overlayCleanupRendererSource(): string {
       try { if (root.__dsoPendingRetryTimer) { window.clearTimeout(root.__dsoPendingRetryTimer); root.__dsoPendingRetryTimer = 0; } } catch (eRetryTimer) {}
       try { if (root.__dsoPreludeGuardTimer) { window.clearTimeout(root.__dsoPreludeGuardTimer); root.__dsoPreludeGuardTimer = 0; } } catch (ePreludeTimer) {}
       try { if (root.__dsoSemanticTimer) { window.clearTimeout(root.__dsoSemanticTimer); root.__dsoSemanticTimer = 0; } } catch (eSemanticTimer) {}
+      try { if (root.__dsoCursorRevealTimer) { window.clearTimeout(root.__dsoCursorRevealTimer); root.__dsoCursorRevealTimer = 0; } } catch (eCursorRevealTimer) {}
       try { if (root.__dsoWidgetClampFrame) { window.cancelAnimationFrame(root.__dsoWidgetClampFrame); root.__dsoWidgetClampFrame = 0; } } catch (eWidgetFrame) {}
       try { root.__dsoResizeObserver && root.__dsoResizeObserver.disconnect && root.__dsoResizeObserver.disconnect(); } catch (eResizeObserver) {}
       try { root.__dsoWidgetClampCleanup && root.__dsoWidgetClampCleanup(); } catch (eWidgetCleanup) {}

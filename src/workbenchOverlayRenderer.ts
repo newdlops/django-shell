@@ -344,6 +344,12 @@ export function overlayRendererSource(modelUri: string): string {
       return Number.isFinite(number) ? number : fallback;
     }
 
+    /** Returns the tallest visible editor before Monaco should scroll internally. */
+    function __dsoMaxEditorHeight(viewportHeight) {
+      const height = __dsoFinite(viewportHeight, 520) || 520;
+      return Math.max(120, Math.min(Math.max(160, Math.round(height * 0.7)), 720, height));
+    }
+
     /** Returns a finite Monaco layout size bounded to the visible overlay viewport. */
     function __dsoLayoutSize(root, host) {
       const rect = host && host.getBoundingClientRect ? host.getBoundingClientRect() : {};
@@ -355,7 +361,7 @@ export function overlayRendererSource(modelUri: string): string {
       const viewportWidth = __dsoFinite(window.innerWidth, fallbackWidth) || fallbackWidth;
       const viewportHeight = __dsoFinite(window.innerHeight, fallbackHeight) || fallbackHeight;
       const maxWidth = Math.max(240, Math.min(viewportWidth, 8192));
-      const maxHeight = Math.max(120, Math.min(viewportHeight, 8192));
+      const maxHeight = Math.max(120, Math.min(__dsoMaxEditorHeight(viewportHeight), 8192));
       return { height: Math.round(Math.max(80, Math.min(rawHeight, maxHeight))), width: Math.round(Math.max(100, Math.min(rawWidth, maxWidth))) };
     }
 
@@ -376,8 +382,9 @@ export function overlayRendererSource(modelUri: string): string {
       const hostHeight = Math.max(120, Math.min(__dsoFinite(hostRect.height, viewportHeight), viewportHeight));
       const left = Math.max(0, Math.min(rawLeft, hostWidth - 120));
       const top = Math.max(0, Math.min(rawTop, hostHeight - 120));
+      const availableHeight = Math.max(120, Math.min(hostHeight - top, viewportHeight));
       return {
-        height: Math.max(120, Math.min(rawHeight, hostHeight - top, viewportHeight)),
+        height: Math.max(120, Math.min(rawHeight, availableHeight, __dsoMaxEditorHeight(viewportHeight))),
         left: left,
         top: top,
         width: Math.max(240, Math.min(rawWidth, hostWidth - left, viewportWidth))

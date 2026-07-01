@@ -26,10 +26,34 @@ export function overlaySyncRendererSource(): string {
       try { post(Object.assign({ type: "log", event: event }, fields || {})); } catch (eLog) {}
     }
 
+    /** Reveals the active cursor position only when it has left Monaco's visible viewport. */
+    function __dsoRevealCursorLine(editor) {
+      const position = editor && editor.getPosition && editor.getPosition();
+      if (!position || !Number.isFinite(Number(position.lineNumber))) { return; }
+      try {
+        if (editor.revealPositionInCenterIfOutsideViewport) {
+          editor.revealPositionInCenterIfOutsideViewport(position);
+          return;
+        }
+        if (editor.revealLineInCenterIfOutsideViewport) { editor.revealLineInCenterIfOutsideViewport(position.lineNumber); }
+      } catch (eRevealCursor) {}
+    }
+
+    /** Coalesces cursor reveal requests caused by typing, cursor movement, and decoration refreshes. */
+    function __dsoScheduleCursorReveal(root, editor) {
+      if (!root || !editor) { return; }
+      try { if (root.__dsoCursorRevealTimer) { window.clearTimeout(root.__dsoCursorRevealTimer); } } catch (eClearCursorReveal) {}
+      root.__dsoCursorRevealTimer = window.setTimeout(function () {
+        root.__dsoCursorRevealTimer = 0;
+        __dsoRevealCursorLine(editor);
+      }, 0);
+    }
+
     /** Sends the latest overlay editor text after a short idle window. */
     function __dsoScheduleModelSync(root, editor, readValue, post) {
       window.clearTimeout(root.__dsoSyncTimer);
       if (root.__dsoSuppressModelSync || root.__dsoPreludeRepairing) { return; }
+      __dsoScheduleCursorReveal(root, editor);
       root.__dsoSyncTimer = window.setTimeout(function () {
         if (root.__dsoSuppressModelSync || root.__dsoPreludeRepairing) { return; }
         const code = String(readValue(editor) || "");
@@ -437,6 +461,7 @@ export function overlaySyncRendererSource(): string {
       try {
         editor.executeEdits("django-shell-shift-enter", [{ forceMoveMarkers: true, range: selection, text: "\\n" + indent }]);
         editor.setPosition({ column: indent.length + 1, lineNumber: selection.startLineNumber + 1 });
+        __dsoRevealCursorLine(editor);
         __dsoLog(post, "shiftEnter.newline", { method: "edit", source: source });
       } catch (eEdit) {}
     }
@@ -617,7 +642,7 @@ export function overlaySyncRendererSource(): string {
     function __dsoInstallExecutionRangePreview(root, editor) {
       const model = editor && editor.getModel && editor.getModel();
       if (!root || !editor || !model || !editor.deltaDecorations) { return function () {}; }
-      const update = function () { __dsoUpdateExecutionRangePreview(root, editor); };
+      const update = function () { __dsoUpdateExecutionRangePreview(root, editor); __dsoScheduleCursorReveal(root, editor); };
       const cursorDisposable = editor.onDidChangeCursorPosition ? editor.onDidChangeCursorPosition(update) : null;
       const modelDisposable = model.onDidChangeContent ? model.onDidChangeContent(update) : null;
       update();

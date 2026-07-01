@@ -59,7 +59,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 70"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 71"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -71,6 +71,8 @@ test("overlay Monaco layout clamps dimensions instead of trusting transient DOM 
 
   assert.ok(rendererSource.includes("automaticLayout: false"));
   assert.ok(rendererSource.includes("function __dsoLayoutSize(root, host)"));
+  assert.ok(rendererSource.includes("function __dsoMaxEditorHeight(viewportHeight)"));
+  assert.ok(rendererSource.includes("availableHeight"));
   assert.ok(rendererSource.includes("Math.min(viewportWidth, 8192)"));
   assert.ok(rendererSource.includes("editor.layout(__dsoLayoutSize(root, host))"));
   assert.ok(rendererSource.includes("__dsoLayoutOverlayEditor(root)"));
@@ -113,6 +115,16 @@ test("execution preview decorations stay out of the prompt gutter", () => {
   assert.ok(executionDecorationBody.includes('options: { className: "dso-exec-range", isWholeLine: true }'));
   assert.ok(executionDecorationBody.includes("startColumn: 1"));
   assert.equal(executionDecorationBody.includes("linesDecorationsClassName"), false);
+});
+
+test("overlay input keeps the cursor visible while typing grows the model", () => {
+  const syncSource = fs.readFileSync(new URL("../src/workbenchOverlaySyncRenderer.ts", import.meta.url), "utf8");
+  const cleanupSource = fs.readFileSync(new URL("../src/workbenchOverlayCleanupRenderer.ts", import.meta.url), "utf8");
+
+  assert.ok(syncSource.includes("function __dsoScheduleCursorReveal(root, editor)"));
+  assert.ok(syncSource.includes("revealPositionInCenterIfOutsideViewport(position)"));
+  assert.ok(syncSource.includes("__dsoScheduleCursorReveal(root, editor);"));
+  assert.ok(cleanupSource.includes("__dsoCursorRevealTimer"));
 });
 
 test("confirmed console overlays do not fall back to unrelated webview frames", () => {

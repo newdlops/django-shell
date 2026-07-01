@@ -600,6 +600,24 @@ test("indents explicit Shift Enter continuations", () => {
   assert.ok(edits.some((edit) => edit.text === "\n    "));
 });
 
+test("reveals the cursor after typing or moving inside a growing overlay input", () => {
+  const source = overlaySyncRendererSource();
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };`)(window, document, () => undefined);
+  const model = fakeModel("one\ntwo\nthree\n");
+  const editor = fakeEditor(model, { column: 1, lineNumber: 1 });
+
+  api.installEnterRunner({}, editor, () => undefined);
+  editor.revealedPositions.length = 0;
+  editor.setPosition({ column: 6, lineNumber: 3 });
+  assert.deepEqual(editor.revealedPositions.at(-1), { column: 6, lineNumber: 3 });
+
+  editor.revealedPositions.length = 0;
+  model.setValue("one\ntwo\nthree\nfour\nfive\n");
+  assert.deepEqual(editor.revealedPositions.at(-1), { column: 6, lineNumber: 3 });
+});
+
 function fakeEditor(model, position = { column: 1, lineNumber: 1 }) {
   const editor = {
     addCommand: undefined,
@@ -615,7 +633,10 @@ function fakeEditor(model, position = { column: 1, lineNumber: 1 }) {
     getSelection: () => ({ endColumn: position.column, endLineNumber: position.lineNumber, startColumn: position.column, startLineNumber: position.lineNumber }),
     onDidChangeCursorPosition(callback) { this.cursorListener = callback; return { dispose() {} }; },
     onKeyDown: () => ({ dispose() {} }),
-    revealLineInCenterIfOutsideViewport() {},
+    revealedLines: [],
+    revealedPositions: [],
+    revealLineInCenterIfOutsideViewport(lineNumber) { this.revealedLines.push(lineNumber); },
+    revealPositionInCenterIfOutsideViewport(next) { this.revealedPositions.push(next); },
     setPosition(next) { position = next; if (this.cursorListener) { this.cursorListener(); } },
     updateOptions(options) { this.options = { ...(this.options || {}), ...options }; }
   };
