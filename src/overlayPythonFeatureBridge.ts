@@ -57,7 +57,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const started = Date.now();
     const text = document.getText();
     const offset = this.analysisOffset(document);
-    const protectedLineCount = protectedLineCountForText(text, this.documents.inputStartLine());
+    const protectedLineCount = protectedLineCountForText(text, offset);
     const analysisPosition = this.analysisPosition(position, offset);
     await this.documents.syncAnalysis(text);
     const result = await vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>(
@@ -214,14 +214,13 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
 function analysisOffsetForText(text: string, inputStartLine: number, lineOffset: number): number {
   const markerLine = markerLineForText(text);
   if (markerLine > 0) { return inputStartLine - markerLine - 2; }
-  if (markerLine === 0) { return lineOffset; }
-  return inputStartLine > 1 ? inputStartLine - 1 : 0;
+  return lineOffset;
 }
 
 /** Returns lines protected from completion import edits in the generated prelude. */
 function protectedLineCountForText(text: string, fallback: number): number {
   const markerLine = markerLineForText(text);
-  return markerLine > 0 ? markerLine : Math.max(0, fallback - 1);
+  return markerLine > 0 ? markerLine : Math.max(0, fallback);
 }
 
 /** Returns the zero-based marker line in one editor text snapshot. */

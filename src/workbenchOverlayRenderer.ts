@@ -269,7 +269,7 @@ export function overlayRendererSource(modelUri: string): string {
     /** Returns a workbench-compatible Python language selection. */
     function __dsoPythonLanguage() { return { getLanguageId: function () { return "python"; }, languageId: "python", onDidChange: function () { return { dispose: function () {} }; } }; }
     /** Creates a real workbench CodeEditorWidget using captured VS Code services. */
-    function __dsoCreateWorkbenchEditor(host) {
+    function __dsoCreateWorkbenchEditor(root, host) {
       const factory = __dsoFactory();
       if (!factory) { return null; }
       const uri = __dsoUri();
@@ -284,29 +284,30 @@ export function overlayRendererSource(modelUri: string): string {
       if (!model || !model.uri) { __dsoRememberBadModelSvc(factory.modelSvc); return null; }
       try { if (model && model.setLanguage) { model.setLanguage(__dsoPythonLanguage()); } } catch (eSetLanguage) {}
       try { if (globalThis.monaco && globalThis.monaco.editor && globalThis.monaco.editor.setModelLanguage) { globalThis.monaco.editor.setModelLanguage(model, "python"); } } catch (eSetModelLanguage) {}
-      const options = { acceptSuggestionOnEnter: "on", automaticLayout: true, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
+      const options = { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
       const widgetOptions = { isSimpleWidget: false };
       const editor = factory.inst.createInstance(factory.ctor, host, options, widgetOptions);
       if (editor && editor.setModel) { editor.setModel(model); }
-      const rect = host.getBoundingClientRect();
-      if (editor && editor.layout) { editor.layout({ width: Math.max(100, rect.width), height: Math.max(80, rect.height) }); }
+      if (editor && editor.layout) { editor.layout(__dsoLayoutSize(root, host)); }
       return editor;
     }
     /** Creates a standalone Monaco editor only when the workbench exposes the public API. */
-    function __dsoCreateGlobalMonacoEditor(host) {
+    function __dsoCreateGlobalMonacoEditor(root, host) {
       const monacoApi = (globalThis.monaco && globalThis.monaco.editor) ? globalThis.monaco : ((window.monaco && window.monaco.editor) ? window.monaco : null);
       if (!monacoApi) { return null; }
       const uri = monacoApi.Uri.parse(window.__djangoShellOverlayModelUri);
       let model = monacoApi.editor.getModel(uri); if (model && model.isDisposed && model.isDisposed()) { model = null; } if (model && model.getValue) { try { model.getValue(); } catch (eDisposedValue) { model = null; } } model = model || monacoApi.editor.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python", uri);
-      return monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: true, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, isSimpleWidget: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, model: model, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
+      const editor = monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, isSimpleWidget: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, model: model, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
+      try { editor.layout && editor.layout(__dsoLayoutSize(root, host)); } catch (eGlobalLayout) {}
+      return editor;
     }
     /** Creates or focuses the overlay editor widget. */
     function __dsoEnsureEditor(root) {
       if (root.__djangoShellEditor) { try { const model = root.__djangoShellEditor.getModel && root.__djangoShellEditor.getModel(); if (!model || (model.isDisposed && model.isDisposed())) { root.__djangoShellEditor.dispose && root.__djangoShellEditor.dispose(); root.__djangoShellEditor = null; } else if (model.getValue) { try { model.getValue(); } catch (eDisposedValue) { root.__djangoShellEditor.dispose && root.__djangoShellEditor.dispose(); root.__djangoShellEditor = null; } } } catch (eDisposedModel) { root.__djangoShellEditor = null; } if (root.__djangoShellEditor) { return root.__djangoShellEditor; } }
       const host = root.querySelector(".django-shell-overlay-editor");
       host.textContent = "";
-      if (!root.__djangoShellEditor && !window.__dsoSkipWorkbenchEditor) { try { root.__djangoShellEditor = __dsoCreateWorkbenchEditor(host); } catch (eWorkbench) { const msg = String(eWorkbench && eWorkbench.message || eWorkbench); root.__dsoLastEditorError = msg; if (/UNKNOWN service|Maximum call stack/.test(msg)) { window.__dsoSkipWorkbenchEditor = true; } } }
-      if (!root.__djangoShellEditor) { try { root.__djangoShellEditor = __dsoCreateGlobalMonacoEditor(host); } catch (eGlobal) { root.__dsoLastEditorError = String(eGlobal && eGlobal.message || eGlobal); } }
+      if (!root.__djangoShellEditor && !window.__dsoSkipWorkbenchEditor) { try { root.__djangoShellEditor = __dsoCreateWorkbenchEditor(root, host); } catch (eWorkbench) { const msg = String(eWorkbench && eWorkbench.message || eWorkbench); root.__dsoLastEditorError = msg; if (/UNKNOWN service|Maximum call stack/.test(msg)) { window.__dsoSkipWorkbenchEditor = true; } } }
+      if (!root.__djangoShellEditor) { try { root.__djangoShellEditor = __dsoCreateGlobalMonacoEditor(root, host); } catch (eGlobal) { root.__dsoLastEditorError = String(eGlobal && eGlobal.message || eGlobal); } }
       if (!root.__djangoShellEditor) {
         host.textContent = "Editor widget is waiting for VS Code editor services.";
         root.__dsoPendingRetries = (root.__dsoPendingRetries || 0) + 1;
@@ -322,8 +323,7 @@ export function overlayRendererSource(modelUri: string): string {
         try { window.__dsoApplyOverlayDebugLine && window.__dsoApplyOverlayDebugLine(root, root.__djangoShellEditor); } catch (eDebugLineOptions) { root.__dsoLastDebugLineError = String(eDebugLineOptions && eDebugLineOptions.message || eDebugLineOptions); }
         try { root.__dsoResizeObserver && root.__dsoResizeObserver.disconnect && root.__dsoResizeObserver.disconnect(); } catch (eResizeDisconnect) {}
         root.__dsoResizeObserver = new ResizeObserver(function () {
-          const rect = host.getBoundingClientRect();
-          try { root.__djangoShellEditor.layout && root.__djangoShellEditor.layout({ width: Math.max(100, rect.width), height: Math.max(80, rect.height) }); } catch (eLayout) {}
+          try { __dsoLayoutOverlayEditor(root); } catch (eLayout) {}
         }); root.__dsoResizeObserver.observe(host);
       }
       return root.__djangoShellEditor;
@@ -344,6 +344,21 @@ export function overlayRendererSource(modelUri: string): string {
       return Number.isFinite(number) ? number : fallback;
     }
 
+    /** Returns a finite Monaco layout size bounded to the visible overlay viewport. */
+    function __dsoLayoutSize(root, host) {
+      const rect = host && host.getBoundingClientRect ? host.getBoundingClientRect() : {};
+      const style = root && root.style ? root.style : {};
+      const fallbackWidth = __dsoFinite(parseFloat(style.width || ""), 560);
+      const fallbackHeight = __dsoFinite(parseFloat(style.height || ""), 280);
+      const rawWidth = __dsoFinite(rect.width, fallbackWidth) || fallbackWidth;
+      const rawHeight = __dsoFinite(rect.height, fallbackHeight) || fallbackHeight;
+      const viewportWidth = __dsoFinite(window.innerWidth, fallbackWidth) || fallbackWidth;
+      const viewportHeight = __dsoFinite(window.innerHeight, fallbackHeight) || fallbackHeight;
+      const maxWidth = Math.max(240, Math.min(viewportWidth, 8192));
+      const maxHeight = Math.max(120, Math.min(viewportHeight, 8192));
+      return { height: Math.round(Math.max(80, Math.min(rawHeight, maxHeight))), width: Math.round(Math.max(100, Math.min(rawWidth, maxWidth))) };
+    }
+
     /** Resolves a webview-local cell rectangle into workbench-window coordinates. */
     function __dsoResolvedGeometry(root, geometry) {
       const attach = __dsoAttachRoot(root);
@@ -355,13 +370,17 @@ export function overlayRendererSource(modelUri: string): string {
       const rawTop = frameRect.top - hostRect.top + (hasGeometry ? __dsoFinite(geometry.top, 0) : Math.min(220, frameRect.height * 0.35));
       const rawWidth = hasGeometry ? __dsoFinite(geometry.width, 560) : Math.max(320, frameRect.width - 96);
       const rawHeight = hasGeometry ? __dsoFinite(geometry.height, 280) : 280;
-      const left = Math.max(0, Math.min(rawLeft, hostRect.width - 120));
-      const top = Math.max(0, Math.min(rawTop, hostRect.height - 120));
+      const viewportWidth = Math.max(240, Math.min(__dsoFinite(window.innerWidth, 4096), 8192));
+      const viewportHeight = Math.max(120, Math.min(__dsoFinite(window.innerHeight, 4096), 8192));
+      const hostWidth = Math.max(120, Math.min(__dsoFinite(hostRect.width, viewportWidth), viewportWidth));
+      const hostHeight = Math.max(120, Math.min(__dsoFinite(hostRect.height, viewportHeight), viewportHeight));
+      const left = Math.max(0, Math.min(rawLeft, hostWidth - 120));
+      const top = Math.max(0, Math.min(rawTop, hostHeight - 120));
       return {
-        height: Math.max(120, Math.min(rawHeight, hostRect.height - top)),
+        height: Math.max(120, Math.min(rawHeight, hostHeight - top, viewportHeight)),
         left: left,
         top: top,
-        width: Math.max(240, Math.min(rawWidth, hostRect.width - left))
+        width: Math.max(240, Math.min(rawWidth, hostWidth - left, viewportWidth))
       };
     }
 
@@ -370,11 +389,11 @@ export function overlayRendererSource(modelUri: string): string {
       const host = root.querySelector(".django-shell-overlay-editor");
       const editor = root.__djangoShellEditor;
       if (!host || !editor || !editor.layout) { return; }
-      const rect = host.getBoundingClientRect();
-      const layoutKey = Math.round(rect.width) + ":" + Math.round(rect.height);
+      const layout = __dsoLayoutSize(root, host);
+      const layoutKey = layout.width + ":" + layout.height;
       if (root.__dsoLastEditorLayoutKey === layoutKey) { return; }
       root.__dsoLastEditorLayoutKey = layoutKey;
-      try { editor.layout({ width: Math.max(100, rect.width), height: Math.max(80, rect.height) }); } catch (eLayoutOverlay) {}
+      try { editor.layout(layout); } catch (eLayoutOverlay) {}
       try { window.__dsoScheduleWidgetClamp && window.__dsoScheduleWidgetClamp(root); } catch (eClampLayout) {}
     }
 
@@ -383,13 +402,14 @@ export function overlayRendererSource(modelUri: string): string {
       window.__djangoShellOverlayGeometry = geometry || window.__djangoShellOverlayGeometry || null;
       const rect = __dsoResolvedGeometry(root, window.__djangoShellOverlayGeometry);
       if (!rect) { return false; }
-      const sizeKey = rect.width + ":" + rect.height;
-      const key = rect.left + ":" + rect.top + ":" + sizeKey;
+      const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);
+      const sizeKey = width + ":" + height;
+      const key = left + ":" + top + ":" + sizeKey;
       if (root.__dsoLastRectKey === key) { return true; }
       const sizeChanged = root.__dsoLastSizeKey !== sizeKey;
       root.__dsoLastRectKey = key; root.__dsoLastSizeKey = sizeKey;
-      root.style.left = rect.left + "px"; root.style.top = rect.top + "px";
-      root.style.width = rect.width + "px"; root.style.height = rect.height + "px";
+      root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d(" + left + "px," + top + "px,0)";
+      root.style.width = width + "px"; root.style.height = height + "px";
       root.style.right = ""; root.style.bottom = "";
       if (sizeChanged) { __dsoLayoutOverlayEditor(root); }
       return true;
@@ -398,7 +418,7 @@ export function overlayRendererSource(modelUri: string): string {
     function __dsoEnsureStyle() {
       let style = document.getElementById("django-shell-overlay-style");
       if (!style) { style = document.createElement("style"); style.id = "django-shell-overlay-style"; document.head.appendChild(style); }
-      style.textContent = ".django-shell-overlay{position:absolute;left:0;top:0;width:1px;height:1px;z-index:10;box-sizing:border-box;overflow:hidden;background:var(--vscode-editor-background);color:var(--vscode-foreground);border:0;font-family:var(--vscode-font-family)}.django-shell-overlay-head{display:none}.django-shell-overlay-title{font-size:12px;color:var(--vscode-descriptionForeground)}.django-shell-overlay-spacer{flex:1}.django-shell-overlay button{border:0;border-radius:3px;padding:2px 8px;color:var(--vscode-button-foreground);background:var(--vscode-button-background)}.django-shell-overlay-editor{height:100%;min-height:80px}.django-shell-overlay .margin-view-overlays .line-numbers{min-width:0!important;overflow:visible!important;padding-right:1ch!important}.django-shell-overlay .dso-exec-range{background:var(--vscode-editor-selectionHighlightBackground,rgba(90,150,255,.18));box-shadow:inset 3px 0 0 var(--vscode-focusBorder,rgba(90,150,255,.9))}.django-shell-overlay .dso-exec-range-start{box-shadow:inset 0 1px 0 var(--vscode-focusBorder,rgba(90,150,255,.9))}.django-shell-overlay .dso-exec-range-end{box-shadow:inset 0 -1px 0 var(--vscode-focusBorder,rgba(90,150,255,.9))}.django-shell-overlay .dso-exec-range-rail{background:var(--vscode-focusBorder,rgba(90,150,255,.9));width:3px!important;margin-left:3px}.django-shell-overlay .dso-debug-line{background:color-mix(in srgb,var(--vscode-editor-stackFrameHighlightBackground,#ffff0033) 70%,transparent);box-shadow:inset 3px 0 0 var(--vscode-editorStackFrameHighlight.border,var(--vscode-charts-yellow,#cca700))}.django-shell-overlay .dso-debug-rail{background:var(--vscode-charts-yellow,#cca700);width:3px!important;margin-left:3px}.django-shell-overlay .dso-breakpoint-line{background:color-mix(in srgb,var(--vscode-debugIcon-breakpointForeground,#e51400) 10%,transparent)}.django-shell-overlay .dso-inline-breakpoint{background:color-mix(in srgb,var(--vscode-debugIcon-breakpointForeground,#e51400) 22%,transparent);border-bottom:2px solid var(--vscode-debugIcon-breakpointForeground,#e51400)}.django-shell-overlay .dso-breakpoint-menu{position:absolute;z-index:50;display:flex;flex-direction:column;min-width:190px;padding:4px;border:1px solid var(--vscode-menu-border,var(--vscode-widget-border,#454545));background:var(--vscode-menu-background,var(--vscode-editorWidget-background));box-shadow:0 6px 18px rgba(0,0,0,.32)}.django-shell-overlay .dso-breakpoint-menu button{display:block;width:100%;border:0;border-radius:0;padding:5px 8px;text-align:left;color:var(--vscode-menu-foreground,var(--vscode-foreground));background:transparent}.django-shell-overlay .dso-breakpoint-menu button:hover{background:var(--vscode-menu-selectionBackground,var(--vscode-list-hoverBackground));color:var(--vscode-menu-selectionForeground,var(--vscode-foreground))}.django-shell-overlay-output,.django-shell-overlay-output.error{display:none}.monaco-workbench .tab[aria-label='analysis.py'],.monaco-workbench .tab[aria-label='console-cell.py'],.monaco-workbench .tab[aria-label*='.django-shell'][aria-label*='analysis.py'],.monaco-workbench .tab[title*='/.django-shell/analysis.py'],.monaco-workbench .tab[aria-label*='.django-shell'][aria-label*='console-cell.py'],.monaco-workbench .tab[title*='/.django-shell/console-cell.py']{display:none!important}";
+      style.textContent = ".django-shell-overlay{position:absolute;left:0;top:0;width:1px;height:1px;z-index:10;box-sizing:border-box;overflow:hidden;background:var(--vscode-editor-background);color:var(--vscode-foreground);border:0;font-family:var(--vscode-font-family);will-change:transform}.django-shell-overlay-head{display:none}.django-shell-overlay-title{font-size:12px;color:var(--vscode-descriptionForeground)}.django-shell-overlay-spacer{flex:1}.django-shell-overlay button{border:0;border-radius:3px;padding:2px 8px;color:var(--vscode-button-foreground);background:var(--vscode-button-background)}.django-shell-overlay-editor{width:100%;height:100%;min-height:80px;box-sizing:border-box;overflow:hidden;contain:strict}.django-shell-overlay .margin-view-overlays .line-numbers{min-width:0!important;overflow:visible!important;padding-right:1ch!important}.django-shell-overlay .dso-exec-range{background:var(--vscode-editor-selectionHighlightBackground,rgba(90,150,255,.18));box-shadow:inset 3px 0 0 var(--vscode-focusBorder,rgba(90,150,255,.9))}.django-shell-overlay .dso-exec-range-start{box-shadow:inset 0 1px 0 var(--vscode-focusBorder,rgba(90,150,255,.9))}.django-shell-overlay .dso-exec-range-end{box-shadow:inset 0 -1px 0 var(--vscode-focusBorder,rgba(90,150,255,.9))}.django-shell-overlay .dso-exec-range-rail{background:var(--vscode-focusBorder,rgba(90,150,255,.9));width:3px!important;margin-left:3px}.django-shell-overlay .dso-debug-line{background:color-mix(in srgb,var(--vscode-editor-stackFrameHighlightBackground,#ffff0033) 70%,transparent);box-shadow:inset 3px 0 0 var(--vscode-editorStackFrameHighlight.border,var(--vscode-charts-yellow,#cca700))}.django-shell-overlay .dso-debug-rail{background:var(--vscode-charts-yellow,#cca700);width:3px!important;margin-left:3px}.django-shell-overlay .dso-breakpoint-line{background:color-mix(in srgb,var(--vscode-debugIcon-breakpointForeground,#e51400) 10%,transparent)}.django-shell-overlay .dso-inline-breakpoint{background:color-mix(in srgb,var(--vscode-debugIcon-breakpointForeground,#e51400) 22%,transparent);border-bottom:2px solid var(--vscode-debugIcon-breakpointForeground,#e51400)}.django-shell-overlay .dso-breakpoint-menu{position:absolute;z-index:50;display:flex;flex-direction:column;min-width:190px;padding:4px;border:1px solid var(--vscode-menu-border,var(--vscode-widget-border,#454545));background:var(--vscode-menu-background,var(--vscode-editorWidget-background));box-shadow:0 6px 18px rgba(0,0,0,.32)}.django-shell-overlay .dso-breakpoint-menu button{display:block;width:100%;border:0;border-radius:0;padding:5px 8px;text-align:left;color:var(--vscode-menu-foreground,var(--vscode-foreground));background:transparent}.django-shell-overlay .dso-breakpoint-menu button:hover{background:var(--vscode-menu-selectionBackground,var(--vscode-list-hoverBackground));color:var(--vscode-menu-selectionForeground,var(--vscode-foreground))}.django-shell-overlay-output,.django-shell-overlay-output.error{display:none}.monaco-workbench .tab[aria-label='analysis.py'],.monaco-workbench .tab[aria-label='console-cell.py'],.monaco-workbench .tab[aria-label*='.django-shell'][aria-label*='analysis.py'],.monaco-workbench .tab[title*='/.django-shell/analysis.py'],.monaco-workbench .tab[aria-label*='.django-shell'][aria-label*='console-cell.py'],.monaco-workbench .tab[title*='/.django-shell/console-cell.py']{display:none!important}";
     }
 
     /** Builds overlay DOM without Trusted Types HTML string assignment. */

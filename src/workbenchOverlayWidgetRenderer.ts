@@ -24,7 +24,7 @@ export function overlayWidgetRendererSource(): string {
       let style = document.getElementById("django-shell-overlay-widget-style");
       if (!style) { style = document.createElement("style"); }
       style.id = "django-shell-overlay-widget-style";
-      style.textContent = ".django-shell-overlay-widget-root{position:absolute;left:0;top:0;width:0!important;height:0!important;min-width:0!important;min-height:0!important;overflow:visible;z-index:30;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer{position:fixed;left:0;top:0;width:0!important;height:0!important;min-width:0!important;min-height:0!important;overflow:visible;z-index:31;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-hover *,.django-shell-overlay-widget-layer .monaco-editor-hover,.django-shell-overlay-widget-layer .monaco-editor-hover *,.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .suggest-widget *,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .parameter-hints-widget *,.django-shell-overlay-widget-layer .context-view,.django-shell-overlay-widget-layer .context-view *{pointer-events:auto!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-editor-hover,.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .context-view{box-sizing:border-box!important}";
+      style.textContent = ".django-shell-overlay-widget-root{position:fixed;left:0;top:0;width:0!important;height:0!important;min-width:0!important;min-height:0!important;overflow:visible;z-index:30;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer{position:fixed;left:0;top:0;width:0!important;height:0!important;min-width:0!important;min-height:0!important;overflow:visible;z-index:31;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-hover *,.django-shell-overlay-widget-layer .monaco-editor-hover,.django-shell-overlay-widget-layer .monaco-editor-hover *,.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .suggest-widget *,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .parameter-hints-widget *,.django-shell-overlay-widget-layer .context-view,.django-shell-overlay-widget-layer .context-view *{pointer-events:auto!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-editor-hover,.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .context-view{box-sizing:border-box!important}";
       if (!style.parentElement) { document.head.appendChild(style); }
     }
 
@@ -35,12 +35,25 @@ export function overlayWidgetRendererSource(): string {
       const host = attach && attach.host ? attach.host : root.parentElement;
       if (!host) { return undefined; }
       __dsoEnsureWidgetStyle();
-      let layerRoot = host.querySelector(".django-shell-overlay-widget-root");
+      let layerRoot = document.getElementById("django-shell-overlay-widget-root");
+      const owner = String(root.__dsoOwnerToken || "");
+      if (layerRoot && layerRoot.dataset && layerRoot.dataset.djangoShellOverlayOwner && layerRoot.dataset.djangoShellOverlayOwner !== owner) {
+        try { layerRoot.parentElement && layerRoot.parentElement.removeChild(layerRoot); } catch (eRemoveStaleLayer) {}
+        layerRoot = null;
+      }
+      const hostLayerRoot = host.querySelector(".django-shell-overlay-widget-root");
+      if (hostLayerRoot && hostLayerRoot !== layerRoot) {
+        try { hostLayerRoot.parentElement && hostLayerRoot.parentElement.removeChild(hostLayerRoot); } catch (eRemoveHostLayer) {}
+      }
       let layer = layerRoot && layerRoot.querySelector(".django-shell-overlay-widget-layer");
       if (!layerRoot) {
         layerRoot = document.createElement("div");
+        layerRoot.id = "django-shell-overlay-widget-root";
         layerRoot.className = "monaco-workbench django-shell-overlay-widget-root";
-        host.appendChild(layerRoot);
+      }
+      try { layerRoot.dataset.djangoShellOverlayOwner = owner; } catch (eLayerOwner) {}
+      if (layerRoot.parentElement !== document.body) {
+        document.body.appendChild(layerRoot);
       }
       if (!layer) {
         layer = document.createElement("div");
@@ -74,11 +87,10 @@ export function overlayWidgetRendererSource(): string {
     /** Applies one clamp pass to a visible Monaco popup widget. */
     function __dsoClampWidget(root, node) {
       if (!node || !node.getBoundingClientRect || node.classList.contains("hidden")) { return; }
-      let original = node.getAttribute("data-dso-original-transform");
-      if (original === null) {
-        original = node.style.transform || "";
-        node.setAttribute("data-dso-original-transform", original);
-      }
+      const styleTransform = node.style.transform || "";
+      const appliedTransform = node.getAttribute("data-dso-applied-transform") || "";
+      const hasAppliedTransform = !!appliedTransform && styleTransform === appliedTransform;
+      const original = hasAppliedTransform ? (node.getAttribute("data-dso-original-transform") || "") : styleTransform;
       const boundary = __dsoWidgetBoundary(root);
       const margin = 6;
       const maxWidth = Math.max(160, boundary.right - boundary.left - margin * 2);
@@ -87,8 +99,8 @@ export function overlayWidgetRendererSource(): string {
       if (node.style.maxHeight !== maxHeight + "px") { node.style.maxHeight = maxHeight + "px"; }
       const rect = node.getBoundingClientRect();
       if (!rect.width || !rect.height) { return; }
-      const prevDx = Number(node.getAttribute("data-dso-shift-x") || 0);
-      const prevDy = Number(node.getAttribute("data-dso-shift-y") || 0);
+      const prevDx = hasAppliedTransform ? Number(node.getAttribute("data-dso-shift-x") || 0) : 0;
+      const prevDy = hasAppliedTransform ? Number(node.getAttribute("data-dso-shift-y") || 0) : 0;
       const base = { bottom: rect.bottom - prevDy, left: rect.left - prevDx, right: rect.right - prevDx, top: rect.top - prevDy };
       let dx = 0;
       let dy = 0;
@@ -96,10 +108,15 @@ export function overlayWidgetRendererSource(): string {
       if (base.left + dx < boundary.left + margin) { dx += boundary.left + margin - (base.left + dx); }
       if (base.bottom > boundary.bottom - margin) { dy = boundary.bottom - margin - base.bottom; }
       if (base.top + dy < boundary.top + margin) { dy += boundary.top + margin - (base.top + dy); }
-      const nextTransform = (original ? original + " " : "") + "translate(" + Math.round(dx) + "px," + Math.round(dy) + "px)";
+      const roundedDx = Math.round(dx);
+      const roundedDy = Math.round(dy);
+      const shiftTransform = roundedDx || roundedDy ? "translate(" + roundedDx + "px," + roundedDy + "px)" : "";
+      const nextTransform = shiftTransform ? (original ? original + " " : "") + shiftTransform : original;
       if (node.style.transform !== nextTransform) { node.style.transform = nextTransform; }
-      if (node.getAttribute("data-dso-shift-x") !== String(Math.round(dx))) { node.setAttribute("data-dso-shift-x", String(Math.round(dx))); }
-      if (node.getAttribute("data-dso-shift-y") !== String(Math.round(dy))) { node.setAttribute("data-dso-shift-y", String(Math.round(dy))); }
+      if (node.getAttribute("data-dso-original-transform") !== original) { node.setAttribute("data-dso-original-transform", original); }
+      if (node.getAttribute("data-dso-applied-transform") !== nextTransform) { node.setAttribute("data-dso-applied-transform", nextTransform); }
+      if (node.getAttribute("data-dso-shift-x") !== String(roundedDx)) { node.setAttribute("data-dso-shift-x", String(roundedDx)); }
+      if (node.getAttribute("data-dso-shift-y") !== String(roundedDy)) { node.setAttribute("data-dso-shift-y", String(roundedDy)); }
     }
 
     /** Runs a clamp pass for hover, completion, and parameter widgets. */

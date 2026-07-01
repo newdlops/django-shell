@@ -184,7 +184,7 @@ test("draws breakpoint line markers and posts gutter breakpoint toggles", () => 
   assert.deepEqual(posts.find((payload) => payload.type === "toggleBreakpoint"), { column: 0, inline: false, inputStartLine: 1, line: 3, rawColumn: 0, rawLine: 3, source: "monaco", type: "toggleBreakpoint" });
 });
 
-test("maps relative breakpoint lines onto hidden-prelude model lines", () => {
+test("maps relative breakpoint lines directly onto user-only overlay model lines", () => {
   const source = overlaySyncRendererSource();
   const state = { overlayRoot: undefined };
   const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
@@ -203,11 +203,40 @@ test("maps relative breakpoint lines onto hidden-prelude model lines", () => {
   });
   assert.equal(api.setBreakpoints([1, 2]), "breakpoints:2");
   assert.equal(api.setPrelude("from app.models import one\n"), "ok");
-  assert.deepEqual(root.__dsoBreakpointModelLines, [3, 4]);
-  mouseHandler({ event: { preventDefault() {}, stopPropagation() {} }, target: { position: { lineNumber: 4 }, type: 2 } });
+  assert.deepEqual(root.__dsoBreakpointModelLines, [1, 2]);
+  mouseHandler({ event: { preventDefault() {}, stopPropagation() {} }, target: { position: { lineNumber: 2 }, type: 2 } });
 
-  assert.deepEqual(root.__dsoBreakpointModelLines, [3]);
-  assert.deepEqual(posts.find((payload) => payload.type === "toggleBreakpoint"), { column: 0, inline: false, inputStartLine: 3, line: 2, rawColumn: 0, rawLine: 4, source: "monaco", type: "toggleBreakpoint" });
+  assert.deepEqual(root.__dsoBreakpointModelLines, [1]);
+  assert.deepEqual(posts.find((payload) => payload.type === "toggleBreakpoint"), { column: 0, inline: false, inputStartLine: 1, line: 2, rawColumn: 0, rawLine: 2, source: "monaco", type: "toggleBreakpoint" });
+});
+
+test("strips legacy prelude markers instead of hiding user import lines", () => {
+  const source = overlaySyncRendererSource();
+  const state = { overlayRoot: undefined };
+  const window = { addEventListener() {}, clearTimeout() {}, queueMicrotask(callback) { callback(); }, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { applyPrelude: window.__dsoApplyPreludeHiddenArea };`)(window, document, () => undefined);
+  const prelude = "from app.models import Company\n";
+  const model = fakeModel(`${prelude}# --- django shell input ---\nfrom app.models import Company\nCompany.objects\n`);
+  const rendered = [
+    { style: { top: "0px" }, textContent: "from app.models import Company" },
+    { style: { top: "18px" }, textContent: "Company.objects" }
+  ];
+  const node = { querySelector: () => undefined, querySelectorAll: () => rendered };
+  const editor = fakeEditor(model);
+  editor.getDomNode = () => node;
+  editor.getVisibleRanges = () => [];
+  editor.setHiddenAreas = (areas) => { editor.hiddenAreas = areas; };
+  const root = { __djangoShellEditor: editor, __dsoPreludeText: prelude, style: {} };
+  state.overlayRoot = root;
+  window.__djangoShellOverlayPrelude = prelude;
+
+  api.applyPrelude(root, editor);
+
+  assert.deepEqual(editor.hiddenAreas, []);
+  assert.equal(model.getValue(), "from app.models import Company\nCompany.objects\n");
+  assert.equal(rendered[0].style.display || "", "");
+  assert.equal(rendered[1].style.display || "", "");
 });
 
 test("captures DOM gutter breakpoint clicks before native breakpoint handling", () => {

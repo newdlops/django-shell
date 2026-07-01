@@ -42,6 +42,70 @@ test("overlay shutdown waits for renderer disposal before closing the CDP socket
   assert.ok(socketClose > rendererDispose, "socket should close after renderer cleanup is requested");
 });
 
+test("overlay geometry coalesces scroll updates while keeping a settle pass", () => {
+  const updateGeometryBody = overlaySource.slice(overlaySource.indexOf("updateGeometry(geometry"), overlaySource.indexOf("private queueGeometryFlush"));
+  const queueGeometryBody = overlaySource.slice(overlaySource.indexOf("private queueGeometryFlush"), overlaySource.indexOf("private flushGeometry"));
+
+  assert.ok(overlaySource.includes("const GEOMETRY_FRAME_MS = 16"));
+  assert.ok(overlaySource.includes("const GEOMETRY_SETTLE_MS = 80"));
+  assert.ok(updateGeometryBody.includes("this.queueGeometryFlush(0);"), "scroll geometry should not wait until scrolling stops");
+  assert.ok(updateGeometryBody.includes("this.geometrySettleTimer = setTimeout"));
+  assert.ok(queueGeometryBody.includes("this.geometryFlushInFlight || this.geometryTimer"));
+  assert.ok(overlaySource.includes("this.queueGeometryFlush(GEOMETRY_FRAME_MS)"));
+  assert.equal(updateGeometryBody.includes("this.flushGeometry();"), false);
+  assert.equal(updateGeometryBody.includes("setTimeout(() => this.flushGeometry(), 80)"), false);
+});
+
+test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 68"));
+  assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
+  assert.ok(rendererSource.includes("will-change:transform"));
+  assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
+  assert.equal(rendererSource.includes('root.style.left = rect.left + "px"; root.style.top = rect.top + "px";'), false);
+});
+
+test("overlay Monaco layout clamps dimensions instead of trusting transient DOM size", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+
+  assert.ok(rendererSource.includes("automaticLayout: false"));
+  assert.ok(rendererSource.includes("function __dsoLayoutSize(root, host)"));
+  assert.ok(rendererSource.includes("Math.min(viewportWidth, 8192)"));
+  assert.ok(rendererSource.includes("editor.layout(__dsoLayoutSize(root, host))"));
+  assert.ok(rendererSource.includes("__dsoLayoutOverlayEditor(root)"));
+  assert.ok(rendererSource.includes("contain:strict"));
+  assert.equal(rendererSource.includes("editor.layout({ width: Math.max(100, rect.width), height: Math.max(80, rect.height) })"), false);
+  assert.equal(rendererSource.includes("automaticLayout: true"), false);
+});
+
+test("overlay hover widgets use viewport-fixed coordinates without stale clamp transforms", () => {
+  const widgetSource = fs.readFileSync(new URL("../src/workbenchOverlayWidgetRenderer.ts", import.meta.url), "utf8");
+
+  assert.ok(widgetSource.includes('position:fixed;left:0;top:0;width:0!important;height:0!important'));
+  assert.ok(widgetSource.includes('document.getElementById("django-shell-overlay-widget-root")'));
+  assert.ok(widgetSource.includes('host.querySelector(".django-shell-overlay-widget-root")'));
+  assert.ok(widgetSource.includes("document.body.appendChild(layerRoot)"));
+  assert.ok(widgetSource.includes("data-dso-applied-transform"));
+  assert.ok(widgetSource.includes("hasAppliedTransform ? Number"));
+  assert.equal(widgetSource.includes("host.appendChild(layerRoot)"), false);
+});
+
+test("overlay model stays user-only instead of hiding generated prelude DOM", () => {
+  const preludeViewSource = fs.readFileSync(new URL("../src/workbenchOverlayPreludeViewRenderer.ts", import.meta.url), "utf8");
+  const syncSource = fs.readFileSync(new URL("../src/workbenchOverlaySyncRenderer.ts", import.meta.url), "utf8");
+
+  assert.ok(preludeViewSource.includes("Applies shell prompt metadata without adding hidden prelude lines to the model"));
+  assert.ok(preludeViewSource.includes("editor.setHiddenAreas([], \"django-shell-prelude\")"));
+  assert.ok(syncSource.includes("model.setValue(userText)"));
+  assert.ok(syncSource.includes("prelude.guard.strip"));
+  assert.equal(syncSource.includes("overlayDiagnosticPrefixRendererSource"), false);
+  assert.equal(syncSource.includes("__dsoDiagnosticPrefix"), false);
+  assert.equal(preludeViewSource.includes("protectedLines.indexOf"), false);
+  assert.equal(preludeViewSource.includes("leadingPrefix"), false);
+  assert.equal(preludeViewSource.includes("topOf(line)"), false);
+});
+
 test("confirmed console overlays do not fall back to unrelated webview frames", () => {
   assert.ok(frameRendererSource.includes("root.__dsoHadConsoleFrame = true"));
   assert.ok(frameRendererSource.includes("if (!rects.length) { root.__dsoFrame = null; return null; }"));
@@ -212,7 +276,8 @@ test("debug inspection preserves the selected or current native frame", () => {
   assert.ok(debugInspectorSource.includes("OVERLAY_SOURCE_SUFFIX"));
   assert.ok(debugInspectorSource.includes("preferredStackFrame"));
   assert.ok(debugInspectorSource.includes("const selected = frames.find((frame) => frame.id === item.frameId)"));
-  assert.ok(debugInspectorSource.includes("hasConcreteSource(current)"));
+  assert.ok(debugInspectorSource.includes("if (!current || !options.preferOverlay) { return current; }"));
+  assert.equal(debugInspectorSource.includes("hasConcreteSource(current)"), false);
   assert.equal(debugInspectorSource.includes("if (item.frameId && options.preferOverlay !== false)"), false);
   assert.ok(debugInspectorSource.includes("normalizeSourcePath"));
 });
@@ -224,6 +289,7 @@ test("overlay debug uses a direct DAP session so the shell overlay stays focused
   assert.ok(customConsoleSource.includes("vscode.debug.startDebugging"));
   assert.ok(customConsoleSource.includes("runCurrentInput: () => this.runCurrentDebugInput()"));
   assert.ok(customConsoleSource.includes("await this.showOverlay(); try { await direct.attach"));
+  assert.ok(customConsoleSource.includes('direct), configuration)'));
   assert.ok(customConsoleSource.includes('if (this.debugMode === "overlay") { const direct = new DirectDebugAdapterSession'));
   assert.ok(customConsoleSource.includes('await this.runCurrentDebugInput(); return;'));
   assert.ok(customConsoleSource.includes("this.debugpyEndpoint = undefined"));
@@ -231,6 +297,10 @@ test("overlay debug uses a direct DAP session so the shell overlay stays focused
   assert.ok(debugShellSource.includes("_djs_debug_reused = True"));
   assert.ok(directDebugAdapterSource.includes(`customRequest("disconnect"`));
   assert.ok(directDebugAdapterSource.includes("terminateDebuggee: false"));
+  assert.ok(directDebugAdapterSource.includes("justMyCode: options.justMyCode ?? false"));
+  assert.ok(directDebugAdapterSource.includes("args.cwd = options.cwd"));
+  assert.ok(directDebugAdapterSource.includes("args.pathMappings = options.pathMappings"));
+  assert.ok(directDebugAdapterSource.includes('path: "*/django_shell_backend.py"'));
   assert.ok(customConsoleSource.includes('this.debugMode === "overlay" && this.debugControlOriginOverlay'));
   assert.ok(customConsoleSource.includes('this.debugMode === "overlay" || this.lastDebugFrameOverlay'));
   assert.ok(customConsoleSource.includes('wasVisible || (this.debugMode === "overlay" && (this.debugSession || this.overlayDebugSession))'));
@@ -297,6 +367,16 @@ test("overlay debug analysis renders in the Django Shell Activity Bar panel", ()
   assert.ok(debugAnalysisStoreSource.includes("debugTraceEntry(info)"));
   assert.ok(debugInspectorSource.includes(`customRequest("variables"`));
   assert.ok(debugInspectorSource.includes(`customRequest("scopes"`));
+  assert.ok(debugInspectorSource.includes("debugScopeCandidates"));
+  assert.ok(debugInspectorSource.includes("GLOBAL_SCOPE.test(scope.name)"));
+  assert.ok(debugInspectorSource.includes("LOCAL_SCOPE.test(scope.name)"));
+  assert.ok(debugInspectorSource.includes("variablesWithLocalCandidates"));
+  assert.ok(debugInspectorSource.includes("evaluateLocalCandidate"));
+  assert.ok(debugInspectorSource.includes("collectForTargetNames"));
+  assert.ok(debugInspectorSource.includes("collectAssignmentTargetNames"));
+  assert.ok(debugInspectorSource.includes('DISPLAY_DEBUG_VARIABLE_NAMES = new Map([["__m", "receiver"]])'));
+  assert.ok(debugInspectorSource.includes('VISIBLE_DEBUG_INTERNAL_VARIABLES = new Set(["__m"])'));
+  assert.ok(debugInspectorSource.includes("isHiddenDebugVariable"));
   assert.ok(customConsoleSource.includes("inspectDebugVariables(session"));
   assert.ok(customConsoleSource.includes("setDebugAnalysisInfo(info)"));
   assert.ok(customConsoleSource.includes("setDebugAnalysisVariableResolver"));

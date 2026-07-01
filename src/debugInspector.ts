@@ -44,6 +44,11 @@ export interface DebugInspectOptions { preferOverlay?: boolean }
 
 const OVERLAY_SOURCE_SUFFIX = "/.django-shell/console-cell.py";
 const MAX_SCOPE_VARIABLES = 80;
+const MAX_EVALUATED_LOCAL_CANDIDATES = 24;
+const DISPLAY_DEBUG_VARIABLE_NAMES = new Map([["__m", "receiver"]]);
+const GLOBAL_SCOPE = /^globals?$/i;
+const LOCAL_SCOPE = /^locals?$/i;
+const VISIBLE_DEBUG_INTERNAL_VARIABLES = new Set(["__m"]);
 
 /** Reads the active paused stack frame through DAP requests. */
 export async function inspectDebugFrame(session: DebugRequestSession, item: vscode.DebugStackFrame, options: DebugInspectOptions = {}): Promise<DebugFrameInfo> {
@@ -65,7 +70,7 @@ async function inspectDebugFrameRef(session: DebugRequestSession, item: DebugFra
   const frame = stackFrameFor(frames, item, options);
   const sourceLine = frame ? await sourceLineFor(frame) : "";
   const frameId = frame?.id ?? item.frameId;
-  const scopes = frameId ? await scopeVariables(session, frameId) : [];
+  const scopes = frameId ? await scopeVariables(session, frameId, frame) : [];
   return { frame: frame && { column: frame.column, line: frame.line, name: frame.name, path: sourcePathFor(frame), sourceLine }, frames: frames.slice(0, 8).map(stackFrameInfo), scopes, state: "paused" };
 }
 
@@ -92,14 +97,8 @@ function stackFrameFor(frames: DapStackFrame[], item: DebugFrameRef, options: De
 /** Returns the best current execution frame from a DAP stack. */
 function preferredStackFrame(frames: DapStackFrame[], options: DebugInspectOptions): DapStackFrame | undefined {
   const current = frames[0];
-  if (!current || !options.preferOverlay || hasConcreteSource(current)) { return current; }
+  if (!current || !options.preferOverlay) { return current; }
   return frames.find(isOverlayStackFrame) ?? current;
-}
-
-/** Returns whether a DAP frame points at a concrete source file or source name. */
-function hasConcreteSource(frame: DapStackFrame): boolean {
-  const path = sourcePathFor(frame);
-  return !!path && !path.startsWith("<");
 }
 
 /** Returns whether a DAP frame points at the generated overlay console file. */
@@ -154,14 +153,149 @@ function normalizeSourcePath(value: string): string {
 }
 
 /** Returns compact variables for the current frame scopes. */
-async function scopeVariables(session: DebugRequestSession, frameId: number): Promise<DebugScopeInfo[]> {
+async function scopeVariables(session: DebugRequestSession, frameId: number, frame?: DapStackFrame): Promise<DebugScopeInfo[]> {
   const response = await session.customRequest("scopes", { frameId }) as { scopes?: DapScope[] };
   const scopes: DebugScopeInfo[] = [];
-  for (const scope of (response.scopes ?? []).filter((item) => !item.expensive).slice(0, 4)) {
+  const localCandidates = await localCandidateNamesForFrame(frame);
+  for (const scope of debugScopeCandidates(response.scopes ?? []).slice(0, 4)) {
     const variables = await variablesForReference(session, scope.variablesReference, MAX_SCOPE_VARIABLES);
-    scopes.push({ name: scope.name, total: scope.namedVariables ?? scope.indexedVariables, variables: await variablesWithQuerySetPreviews(session, frameId, variables) });
+    const visibleVariables = LOCAL_SCOPE.test(scope.name) ? await variablesWithLocalCandidates(session, frameId, variables, localCandidates) : variables;
+    scopes.push({ name: scope.name, total: scope.namedVariables ?? scope.indexedVariables, variables: await variablesWithQuerySetPreviews(session, frameId, visibleVariables) });
   }
   return scopes;
+}
+
+/** Returns scopes worth showing, including debugpy Globals where shell variables live. */
+function debugScopeCandidates(scopes: DapScope[]): DapScope[] {
+  const selected: DapScope[] = [];
+  for (const scope of scopes) {
+    if (!scope.expensive || GLOBAL_SCOPE.test(scope.name)) {
+      selected.push(scope);
+    }
+  }
+  if (!selected.length && scopes.length) {
+    selected.push(scopes[0]);
+  }
+  return uniqueScopes(selected);
+}
+
+/** Removes duplicate scope references while preserving debugpy order. */
+function uniqueScopes(scopes: DapScope[]): DapScope[] {
+  const seen = new Set<number>();
+  const selected: DapScope[] = [];
+  for (const scope of scopes) {
+    if (!scope.variablesReference || seen.has(scope.variablesReference)) {
+      continue;
+    }
+    seen.add(scope.variablesReference);
+    selected.push(scope);
+  }
+  return selected;
+}
+
+/** Returns probable local names from user source up to the current paused line. */
+async function localCandidateNamesForFrame(frame: DapStackFrame | undefined): Promise<string[]> {
+  const sourcePath = frame ? sourcePathFor(frame) : "";
+  if (!sourcePath || sourcePath.startsWith("<") || !frame || frame.line <= 0) {
+    return [];
+  }
+  try {
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(sourcePath));
+    const lines: string[] = [];
+    const end = Math.min(document.lineCount, frame.line);
+    for (let index = 0; index < end; index += 1) {
+      lines.push(document.lineAt(index).text);
+    }
+    return collectLocalCandidateNames(lines.join("\n"));
+  } catch {
+    return [];
+  }
+}
+
+/** Collects simple Python binding names that users expect to see while paused. */
+function collectLocalCandidateNames(source: string): string[] {
+  const names = new Set<string>();
+  for (const line of source.split(/\r?\n/)) {
+    collectDefinitionName(line, names);
+    collectForTargetNames(line, names);
+    collectAssignmentTargetNames(line, names);
+    collectAsTargetNames(line, names);
+  }
+  return [...names].slice(0, MAX_EVALUATED_LOCAL_CANDIDATES);
+}
+
+/** Adds function and class definition names to a local candidate set. */
+function collectDefinitionName(line: string, names: Set<string>): void {
+  const match = /^\s*(?:async\s+def|def|class)\s+([A-Za-z_]\w*)\b/.exec(line);
+  if (match) {
+    names.add(match[1]);
+  }
+}
+
+/** Adds for-loop target names to a local candidate set. */
+function collectForTargetNames(line: string, names: Set<string>): void {
+  const match = /^\s*(?:async\s+)?for\s+(.+?)\s+in\b/.exec(line);
+  if (match) {
+    collectTargetNames(match[1], names);
+  }
+}
+
+/** Adds assignment target names to a local candidate set. */
+function collectAssignmentTargetNames(line: string, names: Set<string>): void {
+  const match = /^\s*([^#:=<>!]+?)\s*(?::[^=]+)?=(?!=)/.exec(line);
+  if (match) {
+    collectTargetNames(match[1], names);
+  }
+}
+
+/** Adds exception and context-manager alias names to a local candidate set. */
+function collectAsTargetNames(line: string, names: Set<string>): void {
+  for (const match of line.matchAll(/\bas\s+([A-Za-z_]\w*)\b/g)) {
+    names.add(match[1]);
+  }
+}
+
+/** Adds plain identifier targets, skipping attributes and indexed assignments. */
+function collectTargetNames(target: string, names: Set<string>): void {
+  for (const part of target.split(",")) {
+    const name = part.trim();
+    if (/^[A-Za-z_]\w*$/.test(name)) {
+      names.add(name);
+    }
+  }
+}
+
+/** Appends evaluated shell-global bindings that debugpy omits from Locals in wrapped cells. */
+async function variablesWithLocalCandidates(session: DebugRequestSession, frameId: number, variables: DebugVariableInfo[], candidates: string[]): Promise<DebugVariableInfo[]> {
+  if (!candidates.length) {
+    return variables;
+  }
+  const existing = new Set(variables.flatMap((variable) => [variable.name, variable.evaluateName].filter((name): name is string => Boolean(name))));
+  const extra: DebugVariableInfo[] = [];
+  for (const name of candidates) {
+    if (existing.has(name) || isHiddenDebugVariable(name)) {
+      continue;
+    }
+    const evaluated = await evaluateLocalCandidate(session, frameId, name);
+    if (evaluated) {
+      existing.add(name);
+      extra.push(evaluated);
+    }
+  }
+  return extra.length ? [...variables, ...extra] : variables;
+}
+
+/** Evaluates one plain name in the paused frame without failing the whole inspection. */
+async function evaluateLocalCandidate(session: DebugRequestSession, frameId: number, name: string): Promise<DebugVariableInfo | undefined> {
+  try {
+    const response = await session.customRequest("evaluate", { context: "watch", expression: name, frameId }) as DapEvaluateResponse;
+    if (!response.result) {
+      return undefined;
+    }
+    return normalizeVariable({ evaluateName: name, name, type: response.type, value: response.result, variablesReference: response.variablesReference });
+  } catch {
+    return undefined;
+  }
 }
 
 /** Reads one DAP variablesReference with a bounded count. */
@@ -170,12 +304,20 @@ async function variablesForReference(session: DebugRequestSession, variablesRefe
     return [];
   }
   const response = await session.customRequest("variables", { count, start: 0, variablesReference }) as { variables?: DapVariable[] };
-  return (response.variables ?? []).filter((variable) => !variable.name.startsWith("__")).map(normalizeVariable);
+  return (response.variables ?? []).filter((variable) => !isHiddenDebugVariable(variable.name)).map(normalizeVariable);
+}
+
+/** Returns whether one debug variable is extension/debugpy plumbing rather than user state. */
+function isHiddenDebugVariable(name: string): boolean {
+  if (VISIBLE_DEBUG_INTERNAL_VARIABLES.has(name)) {
+    return false;
+  }
+  return name.startsWith("__") || name.startsWith("_djs_") || name.startsWith("_django_shell_debugpy_");
 }
 
 /** Normalizes and truncates one DAP variable for webview display. */
 function normalizeVariable(variable: DapVariable): DebugVariableInfo {
-  return { evaluateName: variable.evaluateName, name: variable.name, type: variable.type, value: truncateValue(variable.value), variablesReference: variable.variablesReference };
+  return { evaluateName: variable.evaluateName, name: DISPLAY_DEBUG_VARIABLE_NAMES.get(variable.name) ?? variable.name, type: variable.type, value: truncateValue(variable.value), variablesReference: variable.variablesReference };
 }
 
 /** Truncates multiline debug adapter values for compact tree rendering. */

@@ -20,7 +20,9 @@ export interface WorkbenchOverlayGeometry { height: number; left: number; top: n
 interface OverlayBreakpointLocation { column?: number; line: number; }
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
-const RENDERER_PATCH_VERSION = 63;
+const GEOMETRY_FRAME_MS = 16;
+const GEOMETRY_SETTLE_MS = 80;
+const RENDERER_PATCH_VERSION = 68;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -39,6 +41,9 @@ export class WorkbenchOverlay implements vscode.Disposable {
   private workbenchWindowId: number | undefined;
   private ws: WebSocket | undefined;
   private geometry: WorkbenchOverlayGeometry | undefined;
+  private geometryFlushInFlight = false;
+  private geometryFlushPending = false;
+  private geometrySettleTimer: ReturnType<typeof setTimeout> | undefined;
   private geometryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly memoryDocument: OverlayMemoryDocument;
   private readonly featureBridge: OverlayPythonFeatureBridge;
@@ -90,16 +95,36 @@ export class WorkbenchOverlay implements vscode.Disposable {
   updateGeometry(geometry: WorkbenchOverlayGeometry): void {
     this.geometry = geometry;
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) { return; }
-    clearTimeout(this.geometryTimer);
-    this.geometryTimer = setTimeout(() => this.flushGeometry(), 80);
+    this.queueGeometryFlush(0);
+    clearTimeout(this.geometrySettleTimer);
+    this.geometrySettleTimer = setTimeout(() => { this.geometrySettleTimer = undefined; this.queueGeometryFlush(0); }, GEOMETRY_SETTLE_MS);
   }
 
-  /** Applies the latest measured geometry after transient workbench layout churn settles. */
+  /** Queues a geometry update while coalescing rapid scroll measurements. */
+  private queueGeometryFlush(delayMs: number): void {
+    this.geometryFlushPending = true;
+    if (this.geometryFlushInFlight || this.geometryTimer) { return; }
+    if (delayMs <= 0) {
+      this.flushGeometry();
+      return;
+    }
+    this.geometryTimer = setTimeout(() => {
+      this.geometryTimer = undefined;
+      this.flushGeometry();
+    }, delayMs);
+  }
+
+  /** Applies the latest measured geometry to the renderer overlay. */
   private flushGeometry(): void {
     const geometry = this.geometry;
+    this.geometryFlushPending = false;
     if (!geometry || !this.ws || this.ws.readyState !== WebSocket.OPEN) { return; }
+    this.geometryFlushInFlight = true;
     this.logger?.log("overlay.geometry", { height: Math.round(geometry.height), left: Math.round(geometry.left), top: Math.round(geometry.top), width: Math.round(geometry.width) });
-    void this.evalInWorkbench(geometryExpression(geometry)).catch((error: unknown) => { this.logger?.log("overlay.geometry.error", { error: error instanceof Error ? error.message : String(error) }); });
+    void this.evalInWorkbench(geometryExpression(geometry)).catch((error: unknown) => { this.logger?.log("overlay.geometry.error", { error: error instanceof Error ? error.message : String(error) }); }).finally(() => {
+      this.geometryFlushInFlight = false;
+      if (this.geometryFlushPending) { this.queueGeometryFlush(GEOMETRY_FRAME_MS); }
+    });
   }
 
   /** Updates editor-only hidden imports without changing raw analysis text. */
@@ -248,7 +273,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
       disposable.dispose();
     }
     this.closeServer();
-    clearTimeout(this.generatedCleanupTimer); clearTimeout(this.geometryTimer); this.closeSocket("dispose");
+    clearTimeout(this.generatedCleanupTimer); clearTimeout(this.geometrySettleTimer); clearTimeout(this.geometryTimer); this.closeSocket("dispose");
   }
 
   /** Requests renderer-owned overlay cleanup before local bridge resources vanish. */

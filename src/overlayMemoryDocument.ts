@@ -31,7 +31,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
 
   /** Returns the user-visible editor-to-analysis line delta. */
   lineOffset(): number {
-    return 0;
+    return preludeLineCount(this.prelude);
   }
 
   /** Returns the one-based first user-editable source line in console-cell.py. */
@@ -112,7 +112,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   /** Updates editor-only hidden import text while analysis stays on user code. */
   async updatePrelude(prelude: string): Promise<void> {
     const changed = prelude !== this.prelude;
-    this.logger?.log("overlay.memory.prelude", { ...textFields(prelude), changed, offset: prefixLineCount(prelude) });
+    this.logger?.log("overlay.memory.prelude", { ...textFields(prelude), changed, offset: preludeLineCount(prelude) });
     if (prelude === this.prelude) {
       return;
     }
@@ -167,19 +167,14 @@ function textFields(text: string): { chars: number; lines: number } {
   return { chars: text.length, lines: text ? text.split(/\r?\n/).length : 0 };
 }
 
-  /** Returns a full generated Python document from hidden imports and user text. */
-function backingText(prelude: string, userText: string): string {
-  return `${prelude}${INPUT_MARKER}\n${userText}`;
-}
-
 /** Returns analysis source with hidden imports but without the shell input marker. */
 function analysisText(prelude: string, userText: string): string {
   return `${prelude}${userText}`;
 }
 
-/** Returns the first user line for a generated document prefix. */
-function prefixLineCount(prelude: string): number {
-  return backingText(prelude, "").split(/\r?\n/).length - 1;
+/** Returns the number of generated prelude lines before user code in analysis.py. */
+function preludeLineCount(prelude: string): number {
+  return prelude ? prelude.split(/\r?\n/).length - 1 : 0;
 }
 
 /** Returns the user-editable text after the generated marker. */

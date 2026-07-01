@@ -1,5 +1,4 @@
 // Renderer-side editor text synchronization for the Django shell overlay.
-import { overlayDiagnosticPrefixRendererSource } from "./workbenchOverlayDiagnosticPrefixRenderer";
 import { overlayBreakpointRendererSource } from "./workbenchOverlayBreakpointRenderer";
 import { overlayPreludeViewRendererSource } from "./workbenchOverlayPreludeViewRenderer";
 import { overlayPythonRangeRendererSource } from "./workbenchOverlayPythonRangeRenderer";
@@ -83,33 +82,19 @@ export function overlaySyncRendererSource(): string {
 
     /** Returns the protected generated prefix from the canonical prelude text. */
     function __dsoCanonicalPrefix(root) {
-      const marker = __DSO_INPUT_MARKER + "\\n";
-      if (root && !root.__dsoUseVisiblePrelude) { return String(root.__dsoProtectedPrefix || __dsoDiagnosticPrefix(root, "")); }
-      const prelude = root && root.__dsoPreludeText !== undefined ? root.__dsoPreludeText : window.__djangoShellOverlayPrelude;
-      return String(prelude || "") + marker;
+      return "";
     }
 
-    /** Returns user text even when backspace merges it into the marker line. */
+    /** Returns user text, stripping legacy generated prefixes if an older overlay left one behind. */
     function __dsoUserText(text, root) {
       const value = String(text || "");
-      if (root && !root.__dsoUseVisiblePrelude) {
-        const marker = __DSO_INPUT_MARKER, fullMarker = marker + "\\n", index = value.lastIndexOf(marker), prefix = __dsoCanonicalPrefix(root);
-        let userText = index >= 0 ? value.slice(index + marker.length) : "";
-        if (index >= 0) { userText = userText.startsWith("\\r\\n") ? userText.slice(2) : (userText.startsWith("\\n") ? userText.slice(1) : userText); while (userText.startsWith(prefix)) { userText = userText.slice(prefix.length); } return userText; }
-        const prelude = prefix.slice(0, -fullMarker.length);
-        return prelude && value.startsWith(prelude) ? value.slice(prelude.length) : value;
-      }
       const index = value.lastIndexOf(__DSO_INPUT_MARKER);
-      if (index < 0) {
-        const prefix = __dsoCanonicalPrefix(root);
-        const prelude = prefix.slice(0, -(__DSO_INPUT_MARKER.length + 1));
-        return value.startsWith(prelude) ? value.slice(prelude.length) : "";
+      if (index >= 0) {
+        const after = value.slice(index + __DSO_INPUT_MARKER.length);
+        return after.startsWith("\\r\\n") ? after.slice(2) : (after.startsWith("\\n") ? after.slice(1) : after);
       }
-      const after = value.slice(index + __DSO_INPUT_MARKER.length);
-      let userText = after.startsWith("\\r\\n") ? after.slice(2) : (after.startsWith("\\n") ? after.slice(1) : after);
-      const prefix = __dsoCanonicalPrefix(root);
-      while (userText.startsWith(prefix)) { userText = userText.slice(prefix.length); }
-      return userText;
+      const prelude = String(root && root.__dsoPreludeText !== undefined ? root.__dsoPreludeText : window.__djangoShellOverlayPrelude || "");
+      return prelude && value.startsWith(prelude) ? value.slice(prelude.length) : value;
     }
 
     /** Returns only user-visible source from the active overlay editor. */
@@ -137,16 +122,15 @@ export function overlaySyncRendererSource(): string {
       root.__dsoPreludeRepairing = true;
       try {
         root.__dsoPreludeText = root.__dsoPreludeText !== undefined ? root.__dsoPreludeText : String(window.__djangoShellOverlayPrelude || "");
-        const prefix = root.__dsoUseVisiblePrelude ? __dsoCanonicalPrefix(root) : __dsoDiagnosticPrefix(root, userText);
-        root.__dsoProtectedPrefix = prefix;
-        model.setValue(prefix + userText);
+        root.__dsoProtectedPrefix = "";
+        model.setValue(userText);
       } finally {
         root.__dsoPreludeRepairing = false;
         root.__dsoSuppressModelSync = false;
       }
       try { window.__dsoApplyPreludeHiddenArea && window.__dsoApplyPreludeHiddenArea(root, editor); } catch (eApplyVisibleText) {}
       try {
-        const startLine = root.__dsoUserStartLine || __dsoFindInputStartLine(model);
+        const startLine = root.__dsoUserStartLine || 1;
         editor.setPosition && editor.setPosition({ column: 1, lineNumber: startLine });
         editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(startLine);
       } catch (eVisibleCursor) {}
@@ -161,35 +145,27 @@ export function overlaySyncRendererSource(): string {
     function __dsoRepairPrefix(root, editor, post) {
       const model = editor && editor.getModel && editor.getModel();
       if (!root || !model || root.__dsoPreludeRepairing) { return false; }
-      if (!root.__dsoUseVisiblePrelude) { const text = model.getValue(); const userText = __dsoUserText(text, root); const prefix = __dsoDiagnosticPrefix(root, userText); const nextText = prefix + userText; const oldStartLine = root.__dsoUserStartLine || __dsoFindInputStartLine(model); const position = editor && editor.getPosition && editor.getPosition(); const relativeLine = position ? Math.max(0, position.lineNumber - oldStartLine) : 0; const relativeColumn = position ? position.column : 1; const changed = text !== nextText, oldVisibility = root.style.visibility; root.__dsoProtectedPrefix = prefix; if (changed) { root.style.visibility = "hidden"; root.__dsoPreludeRepairing = true; try { model.setValue(nextText); __dsoLog(post, "prelude.guard.diagnostics", { prefixLines: __dsoLineCount(prefix) }); } catch (eVisible) {} root.__dsoPreludeRepairing = false; } root.__dsoProtectedPrefix = prefix; const startLine = __dsoFindInputStartLine(model); __dsoApplyPreludeView(root, editor, model, startLine); if (changed && position) { const targetLine = Math.min(model.getLineCount(), startLine + relativeLine); const targetColumn = Math.min(model.getLineMaxColumn(targetLine), Math.max(1, relativeColumn)); try { editor.setPosition({ column: targetColumn, lineNumber: targetLine }); } catch (eDiagnosticPosition) {} } if (changed) { root.style.visibility = oldVisibility || "visible"; } return changed; }
-      const prefix = __dsoCanonicalPrefix(root);
       const text = model.getValue();
-      if (text.startsWith(prefix)) {
-        const normalizedText = prefix + __dsoUserText(text, root);
-        if (normalizedText !== text) {
-          root.__dsoPreludeRepairing = true;
-          try { model.setValue(normalizedText); __dsoLog(post, "prelude.guard.dedupe", { prefixLines: __dsoLineCount(prefix) }); } catch (eDedupe) {}
-          root.__dsoPreludeRepairing = false;
-        }
-        root.__dsoProtectedPrefix = prefix;
-        __dsoApplyPreludeView(root, editor, model, __dsoFindInputStartLine(model));
-        return false;
-      }
       const userText = __dsoUserText(text, root);
-      const oldStartLine = root.__dsoUserStartLine || __dsoFindInputStartLine(model);
+      const changed = text !== userText;
+      const oldStartLine = root.__dsoUserStartLine || 1;
       const position = editor && editor.getPosition && editor.getPosition();
       const relativeLine = position ? Math.max(0, position.lineNumber - oldStartLine) : 0;
       const relativeColumn = position ? position.column : 1;
-      root.__dsoPreludeRepairing = true;
-      try { model.setValue(prefix + userText); __dsoLog(post, "prelude.guard.restore", { prefixLines: __dsoLineCount(prefix) }); } catch (eRestore) {}
-      root.__dsoPreludeRepairing = false;
-      root.__dsoProtectedPrefix = prefix;
-      const startLine = __dsoFindInputStartLine(model);
+      root.__dsoProtectedPrefix = "";
+      if (changed) {
+        root.__dsoPreludeRepairing = true;
+        try { model.setValue(userText); __dsoLog(post, "prelude.guard.strip", { prefixLines: __dsoLineCount(text) - __dsoLineCount(userText) }); } catch (eStrip) {}
+        root.__dsoPreludeRepairing = false;
+      }
+      const startLine = 1;
       __dsoApplyPreludeView(root, editor, model, startLine);
-      const targetLine = Math.min(model.getLineCount(), startLine + relativeLine);
-      const targetColumn = Math.min(model.getLineMaxColumn(targetLine), Math.max(1, relativeColumn));
-      try { editor.setPosition({ column: targetColumn, lineNumber: targetLine }); } catch (eRestorePosition) {}
-      return true;
+      if (changed && position) {
+        const targetLine = Math.min(model.getLineCount(), startLine + relativeLine);
+        const targetColumn = Math.min(model.getLineMaxColumn(targetLine), Math.max(1, relativeColumn));
+        try { editor.setPosition({ column: targetColumn, lineNumber: targetLine }); } catch (eRestorePosition) {}
+      }
+      return changed;
     }
 
     /** Reapplies hidden prelude state after editor transactions settle. */
@@ -239,13 +215,12 @@ export function overlaySyncRendererSource(): string {
       const model = editor && editor.getModel && editor.getModel();
       if (root) { root.__dsoPreludeText = root.__dsoPreludeText !== undefined ? root.__dsoPreludeText : String(window.__djangoShellOverlayPrelude || ""); }
       __dsoRepairPrefix(root, editor, __dsoPost);
-      const startLine = __dsoFindInputStartLine(model);
+      const startLine = 1;
       __dsoApplyPreludeView(root, editor, model, startLine);
       try { const pos = editor && editor.getPosition && editor.getPosition(); if (editor && editor.setPosition && (!pos || pos.lineNumber < startLine)) { editor.setPosition({ column: 1, lineNumber: startLine }); } } catch (ePos) {}
       __dsoInstallPreludeGuard(root, editor, __dsoPost);
     };
 
-    ${overlayDiagnosticPrefixRendererSource()}
     ${overlayPythonRangeRendererSource()}
 
     /** Returns the selected source or current logical Python block with its source range. */
@@ -831,31 +806,8 @@ export function overlaySyncRendererSource(): string {
         const oldVisibility = root.style.visibility;
         root.style.visibility = "hidden";
         try {
-          if (!root.__dsoUseVisiblePrelude) {
-            root.__dsoPreludeText = String(text || "");
-            window.__dsoApplyPreludeHiddenArea(root, editor);
-            try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (ePreludeBreakpoints) {}
-            try { window.__dsoApplyOverlayDebugLine && window.__dsoApplyOverlayDebugLine(root, editor); } catch (ePreludeDebugLine) {}
-            return "ok";
-          }
-          __dsoRepairPrefix(root, editor, __dsoPost);
-          const current = model.getValue();
-          const userText = __dsoUserText(current, root);
-          const oldStartLine = root.__dsoUserStartLine || __dsoFindInputStartLine(model);
-          const position = editor && editor.getPosition && editor.getPosition();
-          const relativeLine = position ? Math.max(0, position.lineNumber - oldStartLine) : 0;
           root.__dsoPreludeText = String(text || "");
-          root.__dsoProtectedPrefix = __dsoCanonicalPrefix(root);
-          const nextValue = root.__dsoProtectedPrefix + userText;
-          if (current !== nextValue) {
-            root.__dsoPreludeRepairing = true;
-            model.setValue(nextValue);
-            root.__dsoPreludeRepairing = false;
-          }
           window.__dsoApplyPreludeHiddenArea(root, editor);
-          const targetLine = Math.min(model.getLineCount(), (root.__dsoUserStartLine || 1) + relativeLine);
-          const targetColumn = Math.min(model.getLineMaxColumn(targetLine), Math.max(1, position ? position.column : 1));
-          try { editor.setPosition({ column: targetColumn, lineNumber: targetLine }); } catch (ePreludeCursor) {}
           try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eVisiblePreludeBreakpoints) {}
           try { window.__dsoApplyOverlayDebugLine && window.__dsoApplyOverlayDebugLine(root, editor); } catch (eVisiblePreludeDebugLine) {}
         } finally {
