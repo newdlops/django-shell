@@ -25,7 +25,13 @@ export function choosePreferredDebugSourceFrame<T extends DebugSourceFrame>(fram
   const current = frames[0];
   if (!current) { return undefined; }
   if (options.preferOverlay) {
-    if (isOverlayDebugSourceFrame(current) || !isUserDebugSourceFrame(current)) { return frames.find(isOverlayDebugSourceFrame) ?? current; }
+    if (isOverlayDebugSourceFrame(current)) { return current; }
+    if (!isUserDebugSourceFrame(current)) {
+      return frames.find(isOverlayDebugSourceFrame)
+        ?? frames.find((frame) => isWorkspaceDebugSourceFrame(frame, options.workspaceRoots ?? []))
+        ?? frames.find(isUserDebugSourceFrame)
+        ?? current;
+    }
     return current;
   }
   if (options.preferUserSource) {

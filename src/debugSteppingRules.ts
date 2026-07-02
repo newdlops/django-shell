@@ -12,6 +12,8 @@ export function buildDebugpySteppingRules(): DebugpySteppingRule[] {
     { include: false, path: "*/django_shell_backend.py" },
     { include: false, path: "*/socketserver.py" },
     { include: false, path: "*/threading.py" },
+    { include: false, path: "*/lib/python*/*" },
+    { include: false, path: "*\\Lib\\python*\\*" },
     { include: false, path: "*/site-packages/*" },
     { include: false, path: "*\\site-packages\\*" },
     { include: false, path: "*/dist-packages/*" },

@@ -263,6 +263,9 @@ test("overlay renderer exposes a paused debug line marker", () => {
   assert.ok(overlaySource.includes("debugLineExpression"));
   assert.ok(syncSource.includes("__dsoSetOverlayDebugLine"));
   assert.ok(syncSource.includes("dso-debug-line"));
+  assert.ok(syncSource.includes('glyphMarginClassName: "dso-debug-indicator"'));
+  assert.ok(rendererSource.includes(".dso-debug-indicator"));
+  assert.equal(syncSource.includes('linesDecorationsClassName: "dso-debug-rail"'), false);
   assert.equal(rendererSource.includes("overlayDebugRendererSource"), false);
   assert.equal(rendererSource.includes("__dsoBuildOverlayDebugPanel"), false);
   assert.equal(overlaySource.includes('type === "debugVariables"'), false);
@@ -388,6 +391,8 @@ test("overlay debug uses a direct DAP session so the shell overlay stays focused
   assert.ok(debugShellSource.includes("rules: buildDebugpySteppingRules()"));
   assert.ok(debugSteppingRulesSource.includes('path: "*/site-packages/*"'));
   assert.ok(debugSteppingRulesSource.includes('path: "*/dist-packages/*"'));
+  assert.ok(debugSteppingRulesSource.includes('path: "*/lib/python*/*"'));
+  assert.ok(debugSteppingRulesSource.includes('path: "*\\\\Lib\\\\python*\\\\*"'));
   assert.ok(directDebugAdapterSource.includes("args.cwd = options.cwd"));
   assert.ok(directDebugAdapterSource.includes("args.pathMappings = options.pathMappings"));
   assert.ok(debugSteppingRulesSource.includes('path: "*/django_shell_backend.py"'));
@@ -459,7 +464,8 @@ test("overlay step-in can reveal external source frames", () => {
   assert.ok(customConsoleSource.includes("isOverlayDebugFramePath(path)"));
   assert.ok(debugFrameNavigationSource.includes("vscode.window.showTextDocument"));
   assert.ok(debugFrameNavigationSource.includes("decorateExternalDebugFrame(editor, position)"));
-  assert.ok(debugFrameNavigationSource.includes('contentText: ">> "'));
+  assert.equal(debugFrameNavigationSource.includes("contentText"), false);
+  assert.equal(debugFrameNavigationSource.includes("before:"), false);
   assert.ok(debugFrameNavigationSource.includes("overviewRulerLane"));
   assert.ok(debugFrameNavigationSource.includes("console-cell.py"));
 });
@@ -543,8 +549,23 @@ test("generated overlay breakpoints are sent directly to the debug adapter", () 
   assert.ok(debugBreakpointsSource.includes("requestedBreakpoints.length - breakpoints.length"));
   assert.ok(debugBreakpointsSource.includes("sourceModified: true"));
   assert.ok(debugBreakpointsSource.includes("debug.breakpoints.response"));
-  assert.ok(customConsoleSource.includes("debugBreakpoints(lines)"));
+  assert.ok(customConsoleSource.includes("debugBreakpoints(activeLines)"));
   assert.ok(backendClientSource.includes('kind: "debugBreakpoints"'));
+});
+
+test("direct overlay debug syncs workspace Python breakpoints for continue", () => {
+  assert.ok(customConsoleSource.includes("debugBreakpointSyncUris"));
+  assert.ok(customConsoleSource.includes("syncedDebugBreakpointUris"));
+  assert.ok(customConsoleSource.includes("isPythonDebugSourceUri"));
+  assert.ok(customConsoleSource.includes("vscode.debug.breakpoints"));
+  assert.ok(customConsoleSource.includes("sourceBreakpointLocations(uri, lineOffset)"));
+  assert.ok(customConsoleSource.includes('fsPath.endsWith(".py")'));
+});
+
+test("failed debug execution returns focus to the Django Shell output tab", () => {
+  assert.ok(customConsoleSource.includes("if (!result.ok) { clearExternalDebugFrameDecoration();"));
+  assert.ok(customConsoleSource.includes("this.panel?.reveal(vscode.ViewColumn.One)"));
+  assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", false'));
 });
 
 test("debug attach runs the current overlay input after breakpoint sync", () => {

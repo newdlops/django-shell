@@ -73,6 +73,8 @@ test("debug stepping skips third-party packages while keeping project source deb
   assert.ok(paths.includes("*\\site-packages\\*"));
   assert.ok(paths.includes("*/dist-packages/*"));
   assert.ok(paths.includes("*\\dist-packages\\*"));
+  assert.ok(paths.includes("*/lib/python*/*"));
+  assert.ok(paths.includes("*\\Lib\\python*\\*"));
 });
 
 test("builds remote-friendly Python attach configuration from debug settings", () => {

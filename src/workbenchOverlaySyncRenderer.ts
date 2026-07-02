@@ -572,7 +572,7 @@ export function overlaySyncRendererSource(): string {
       const visibleLine = Math.floor(Number(root.__dsoDebugLine || window.__dsoOverlayDebugLine || 0));
       const modelLine = visibleLine > 0 ? (Number(root.__dsoInputStartLine) || 1) + visibleLine - 1 : 0;
       const decorations = modelLine >= 1 && modelLine <= model.getLineCount() ? [{
-        options: { className: "dso-debug-line", isWholeLine: true, linesDecorationsClassName: "dso-debug-rail" },
+        options: { className: "dso-debug-line", glyphMarginClassName: "dso-debug-indicator", isWholeLine: true },
         range: { endColumn: model.getLineMaxColumn ? model.getLineMaxColumn(modelLine) : 1, endLineNumber: modelLine, startColumn: 1, startLineNumber: modelLine }
       }] : [];
       try { root.__dsoDebugLineDecorationIds = editor.deltaDecorations(root.__dsoDebugLineDecorationIds || [], decorations); } catch (eDebugDecorations) { root.__dsoDebugLineDecorationIds = []; }

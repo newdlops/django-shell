@@ -52,6 +52,18 @@ test("keeps current user source while stepping inside a function called from ove
   assert.equal(selected.source.path, "/workspace/app/services.py");
 });
 
+test("recovers overlay source when overlay preference lands on traceback cleanup", () => {
+  const frames = [
+    frame("/Users/lky/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/traceback.py", 184),
+    frame("/workspace/app/services.py", 198),
+    frame("/workspace/.django-shell/console-cell.py", 14)
+  ];
+
+  const selected = choosePreferredDebugSourceFrame(frames, { preferOverlay: true, workspaceRoots: ["/workspace"] });
+
+  assert.equal(selected.source.path, "/workspace/.django-shell/console-cell.py");
+});
+
 test("falls back to non-library source when workspace roots do not match remote paths", () => {
   const frames = [
     frame("/usr/lib/python3.12/threading.py", 100),
