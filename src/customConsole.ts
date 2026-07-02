@@ -118,10 +118,10 @@ export class CustomDjangoConsole implements vscode.Disposable {
     }
     this.lastDebugControlAction = action; this.debugControlOriginOverlay = this.debugMode === "overlay" || this.lastDebugFrameOverlay; this.postDebugStatus(debugControlState(action), debugControlDetail(action));
     try {
-      const result = await runDebugControl(action, activeSession, this.debugThreadId, action === "stop" ? () => this.session?.backend?.interrupt("debugControl.stop") ?? Promise.resolve() : undefined);
+      const result = await runDebugControl(action, activeSession, this.debugThreadId, action === "stop" ? () => this.session?.backend?.interrupt("debugControl.stop") ?? Promise.resolve() : undefined, this.logger);
       if (action === "stop") { this.overlayDebugSession = undefined; this.debugThreadId = undefined; this.debugpyEndpoint = undefined; this.postDebugInfo({ state: "idle" }); }
       if (result.threadId) { this.debugThreadId = result.threadId; }
-      this.logger?.log("debug.control", { action, originOverlay: this.debugControlOriginOverlay, threadId: result.threadId ?? 0 });
+      this.logger?.log("debug.control", { action, originOverlay: this.debugControlOriginOverlay, targetId: result.targetId === undefined ? "none" : result.targetId, threadId: result.threadId ?? 0 });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger?.log("debug.control.error", { action, error: message });
@@ -300,7 +300,6 @@ export class CustomDjangoConsole implements vscode.Disposable {
         }
         await overlay.replaceVisibleText(this.activeOverlayTab().text);
         if (this.overlayPrelude.length) { await overlay.updatePrelude(this.overlayPrelude); }
-        await overlay.updateBreakpoints(this.overlayBreakpointSourceLocations());
         if (panel && panel !== this.panel) {
           await overlay.shutdown();
           throw new Error("Django Shell console closed before overlay finished loading.");
@@ -368,7 +367,6 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private async applyActiveOverlayTab(show: boolean): Promise<void> {
     const overlay = await this.ensureOverlay();
     await overlay.replaceVisibleText(this.activeOverlayTab().text);
-    await overlay.updateBreakpoints(this.overlayBreakpointSourceLocations());
     if (show) {
       await this.showOverlay();
     }
@@ -538,7 +536,6 @@ export class CustomDjangoConsole implements vscode.Disposable {
       await this.controlDebugger(typed.action);
       return;
     }
-    if (typed.type === "overlayToggleBreakpoint") { this.logger?.log("overlay.webview.toggleBreakpoint", { column: Number(typed.column) || 0, inline: Boolean(typed.inline), inputStartLine: Number(typed.inputStartLine) || 0, line: Number(typed.line) || 0, rawColumn: Number(typed.rawColumn) || 0, rawLine: Number(typed.rawLine) || 0, source: String(typed.source || "") }); await (await this.ensureOverlay()).toggleBreakpointFromVisibleLine(typed.line, typed.column, Boolean(typed.inline)); this.refreshBreakpointUi(); return; }
     if (typed.type === "runPython" && typeof typed.code === "string") {
       const lineOffset = typeof typed.lineOffset === "number" && Number.isInteger(typed.lineOffset) ? this.defaultExecutionLineOffset() + Math.max(0, typed.lineOffset) : undefined;
       if (typeof typed.text === "string") { await this.overlay?.syncVisibleText(typed.text); }
@@ -633,13 +630,12 @@ export class CustomDjangoConsole implements vscode.Disposable {
   /** Returns the default line offset for a full visible console-cell.py execution. */
   private defaultExecutionLineOffset(): number { return 0; }
 
-  /** Refreshes breakpoint count in the webview and visible markers in the overlay editor. */
+  /** Refreshes breakpoint count in the webview from native VS Code breakpoints. */
   private refreshBreakpointUi(): void {
     const locations = this.overlayBreakpointSourceLocations();
     const lines = [...new Set(locations.map((breakpoint) => breakpoint.line))].sort((left, right) => left - right);
     this.breakpointCount = locations.length;
     this.post({ count: this.breakpointCount, lines, locations, type: "breakpoints" });
-    void this.overlay?.updateBreakpoints(locations);
   }
 
   /** Returns one-based enabled breakpoint locations for the generated console-cell.py file. */
@@ -875,7 +871,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     void this.overlay?.updateDebugInfo(info);
     if (info.state !== "paused") { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); }
     if (info.state === "paused") {
-      const path = info.frame?.path?.replace(/\\/g, "/") ?? ""; this.lastDebugFrameOverlay = isOverlayDebugFramePath(path); if (this.debugMode === "overlay" && !this.lastDebugFrameOverlay) { void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", true); void revealExternalDebugFrame(info, this.logger).then((revealed) => { if (revealed) { this.overlay?.hide(); } }); } else { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); if (this.debugMode === "overlay" && this.lastDebugFrameOverlay) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); } }
+      const path = info.frame?.path?.replace(/\\/g, "/") ?? ""; this.lastDebugFrameOverlay = isOverlayDebugFramePath(path); if (this.debugMode === "overlay" && !this.lastDebugFrameOverlay) { void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", true); void revealExternalDebugFrame(info, this.logger).then((revealed) => { if (revealed && this.debugMode === "overlay" && !this.lastDebugFrameOverlay) { this.overlay?.park(); } }); } else { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); if (this.debugMode === "overlay" && this.lastDebugFrameOverlay) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); } }
       void closeWorkspaceGeneratedOverlayTabs(this.debugMode !== "overlay").catch(() => undefined);
     }
   }
@@ -884,7 +880,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private async inspectDebugVariableChildren(reference: number): Promise<DebugVariableInfo[]> { const session = this.overlayDebugSession ?? this.debugSession; return session ? inspectDebugVariables(session, Math.max(0, reference)) : []; }
 
   /** Handles stopped events from the direct overlay DAP client without activating VS Code debug editors. */
-  private handleDirectDebugStopped(session: DirectDebugAdapterSession, threadId: number | undefined, reason: string): void { if (session !== this.overlayDebugSession) { return; } this.debugThreadId = threadId; this.logger?.log("debug.direct.stopped", { reason, threadId: threadId ?? 0 }); this.postDebugStatus("paused", reason || "stopped"); void inspectDebugThread(session, threadId, { preferOverlay: this.lastDebugControlAction !== "stepInto" }).then((info) => { this.logger?.log("debug.direct.frame", { frameLine: info.frame?.line ?? 0, frames: info.frames?.length ?? 0, scopes: info.scopes?.length ?? 0 }); this.postDebugInfo(info); }).catch((error: unknown) => this.postDebugInfo({ error: error instanceof Error ? error.message : String(error), state: "error" })); }
+  private handleDirectDebugStopped(session: DirectDebugAdapterSession, threadId: number | undefined, reason: string): void { if (session !== this.overlayDebugSession) { return; } this.debugThreadId = threadId; this.logger?.log("debug.direct.stopped", { reason, threadId: threadId ?? 0 }); this.postDebugStatus("paused", reason || "stopped"); const stepInto = this.lastDebugControlAction === "stepInto"; void inspectDebugThread(session, threadId, { preferOverlay: !stepInto, preferUserSource: stepInto }).then((info) => { this.logger?.log("debug.direct.frame", { frameLine: info.frame?.line ?? 0, framePath: info.frame?.path ?? "", frames: info.frames?.length ?? 0, scopes: info.scopes?.length ?? 0 }); this.postDebugInfo(info); }).catch((error: unknown) => this.postDebugInfo({ error: error instanceof Error ? error.message : String(error), state: "error" })); }
 
   /** Returns the configured default model-browser transport, validated (defaults to ORM). */
   private modelTransportSetting(): BackendTransportMode {

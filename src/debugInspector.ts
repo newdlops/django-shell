@@ -2,6 +2,7 @@
 
 import * as vscode from "vscode";
 import type { DebugRequestSession } from "./debugAdapterTypes";
+import { choosePreferredDebugSourceFrame, isUserDebugSourceFrame, sourcePathForDebugSourceFrame, type DebugSourceFrame } from "./debugSourceFrames";
 
 export type DebugPanelState = "attached" | "error" | "idle" | "paused" | "running";
 
@@ -34,15 +35,14 @@ export interface DebugFrameInfo {
   state: DebugPanelState;
 }
 
-interface DapStackFrame { column?: number; id: number; line: number; name: string; source?: { name?: string; path?: string } }
+interface DapStackFrame extends DebugSourceFrame { column?: number; id: number; line: number; name: string; source?: { name?: string; path?: string } }
 interface DapScope { expensive?: boolean; indexedVariables?: number; name: string; namedVariables?: number; variablesReference: number }
 interface DapThread { id: number; name: string }
 interface DapVariable { evaluateName?: string; indexedVariables?: number; name: string; namedVariables?: number; type?: string; value: string; variablesReference?: number }
 interface DapEvaluateResponse { result?: string; type?: string; variablesReference?: number }
 interface DebugFrameRef { frameId?: number; threadId: number }
-export interface DebugInspectOptions { preferOverlay?: boolean }
+export interface DebugInspectOptions { preferOverlay?: boolean; preferUserSource?: boolean }
 
-const OVERLAY_SOURCE_SUFFIX = "/.django-shell/console-cell.py";
 const MAX_SCOPE_VARIABLES = 80;
 const MAX_EVALUATED_LOCAL_CANDIDATES = 24;
 const DISPLAY_DEBUG_VARIABLE_NAMES = new Map([["__m", "receiver"]]);
@@ -89,22 +89,14 @@ async function stackFramesFor(session: DebugRequestSession, threadId: number): P
 function stackFrameFor(frames: DapStackFrame[], item: DebugFrameRef, options: DebugInspectOptions): DapStackFrame | undefined {
   if (item.frameId) {
     const selected = frames.find((frame) => frame.id === item.frameId);
-    if (selected) { return selected; }
+    if (selected && (!options.preferUserSource || isUserDebugSourceFrame(selected))) { return selected; }
   }
   return preferredStackFrame(frames, options);
 }
 
 /** Returns the best current execution frame from a DAP stack. */
 function preferredStackFrame(frames: DapStackFrame[], options: DebugInspectOptions): DapStackFrame | undefined {
-  const current = frames[0];
-  if (!current || !options.preferOverlay) { return current; }
-  return frames.find(isOverlayStackFrame) ?? current;
-}
-
-/** Returns whether a DAP frame points at the generated overlay console file. */
-function isOverlayStackFrame(frame: DapStackFrame): boolean {
-  const normalized = sourcePathFor(frame).replace(/\\/g, "/");
-  return normalized === "console-cell.py" || normalized.endsWith(OVERLAY_SOURCE_SUFFIX);
+  return choosePreferredDebugSourceFrame(frames, { preferOverlay: options.preferOverlay, preferUserSource: options.preferUserSource, workspaceRoots: workspaceRootPaths() });
 }
 
 /** Returns a serializable stack frame preview for the custom console webview. */
@@ -134,22 +126,12 @@ async function sourceLineFor(frame: DapStackFrame): Promise<string> {
 
 /** Returns a normalized filesystem path or source name for a DAP frame. */
 function sourcePathFor(frame: DapStackFrame): string {
-  return normalizeSourcePath(frame.source?.path ?? frame.source?.name ?? "");
+  return sourcePathForDebugSourceFrame(frame);
 }
 
-/** Converts DAP file URIs to filesystem paths while preserving ordinary source names. */
-function normalizeSourcePath(value: string): string {
-  if (!value) {
-    return "";
-  }
-  if (/^file:\/\//i.test(value)) {
-    try {
-      return vscode.Uri.parse(value).fsPath;
-    } catch {
-      return value;
-    }
-  }
-  return value;
+/** Returns active workspace root paths for user-frame selection. */
+function workspaceRootPaths(): string[] {
+  return vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath).filter(Boolean) ?? [];
 }
 
 /** Returns compact variables for the current frame scopes. */

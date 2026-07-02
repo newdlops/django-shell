@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 
 const require = createRequire(import.meta.url);
+const { buildDebugpySteppingRules } = require("../out/debugSteppingRules.js");
 const {
   DEBUGPY_MARKER_PREFIX,
   buildDebugpyBootstrapCode,
@@ -46,6 +47,7 @@ test("parses debugpy endpoint markers and failures", () => {
 
 test("builds a Python attach configuration for the live shell endpoint", () => {
   const configuration = buildDjangoShellDebugConfiguration({ host: "127.0.0.1", port: 56789, reused: true }, "/workspace/app");
+  const rules = buildDebugpySteppingRules();
 
   assert.deepEqual(configuration, {
     connect: { host: "127.0.0.1", port: 56789 },
@@ -55,8 +57,22 @@ test("builds a Python attach configuration for the live shell endpoint", () => {
     name: "Django Shell",
     pathMappings: [{ localRoot: "/workspace/app", remoteRoot: "/workspace/app" }],
     request: "attach",
+    rules,
     type: "python"
   });
+});
+
+test("debug stepping skips third-party packages while keeping project source debuggable", () => {
+  const rules = buildDebugpySteppingRules();
+  const configuration = buildDjangoShellDebugConfiguration({ host: "127.0.0.1", port: 56789, reused: true }, "/workspace/app");
+  const paths = rules.map((rule) => rule.path);
+
+  assert.equal(configuration.justMyCode, false);
+  assert.deepEqual(configuration.rules, rules);
+  assert.ok(paths.includes("*/site-packages/*"));
+  assert.ok(paths.includes("*\\site-packages\\*"));
+  assert.ok(paths.includes("*/dist-packages/*"));
+  assert.ok(paths.includes("*\\dist-packages\\*"));
 });
 
 test("builds remote-friendly Python attach configuration from debug settings", () => {

@@ -9595,9 +9595,6 @@ function handleHostMessage(message) {
     }
     vscode.postMessage(payload);
   }
-  if (message.type === "overlayToggleBreakpoint") {
-    vscode.postMessage({ column: Number(message.column) || 0, inline: Boolean(message.inline), inputStartLine: Number(message.inputStartLine) || 0, line: Number(message.line) || 0, rawColumn: Number(message.rawColumn) || 0, rawLine: Number(message.rawLine) || 0, source: String(message.source || "webview-fallback"), type: "overlayToggleBreakpoint" });
-  }
   if (message.type === "terminalData" && typeof message.data === "string") {
     snapshotWritten = true;
     terminal.write(message.data);

@@ -3,6 +3,7 @@
 import * as net from "net";
 import type { DebugRequestSession } from "./debugAdapterTypes";
 import type { DebugpyEndpoint } from "./debugShell";
+import { buildDebugpySteppingRules } from "./debugSteppingRules";
 import type { DiagnosticLogger } from "./diagnostics";
 
 interface DapMessage { body?: unknown; command?: string; event?: string; message?: string; request_seq?: number; success?: boolean; type: "event" | "request" | "response"; }
@@ -231,15 +232,10 @@ function isInitializeTimeout(error: unknown): boolean {
 
 /** Builds debugpy attach arguments for overlay-owned sessions. */
 function attachArguments(options: DirectDebugAdapterAttachOptions): Record<string, unknown> {
-  const args: Record<string, unknown> = { django: options.django ?? true, justMyCode: options.justMyCode ?? false, name: options.name ?? "Django Shell Overlay", request: "attach", rules: debugpySteppingRules(), steppingResumesAllThreads: false, subProcess: false, type: "python" };
+  const args: Record<string, unknown> = { django: options.django ?? true, justMyCode: options.justMyCode ?? false, name: options.name ?? "Django Shell Overlay", request: "attach", rules: buildDebugpySteppingRules(), steppingResumesAllThreads: false, subProcess: false, type: "python" };
   if (options.cwd) { args.cwd = options.cwd; }
   if (options.pathMappings?.length) { args.pathMappings = options.pathMappings; }
   return args;
-}
-
-/** Returns debugpy stepping filters that keep overlay stepping out of backend plumbing. */
-function debugpySteppingRules(): Array<{ include: boolean; path: string }> {
-  return [{ include: false, path: "<django-shell-backend>" }, { include: false, path: "*/django_shell_backend.py" }, { include: false, path: "*/socketserver.py" }, { include: false, path: "*/threading.py" }];
 }
 
 /** Waits briefly before retrying a stale debugpy adapter connection. */

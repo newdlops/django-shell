@@ -204,7 +204,8 @@ async function refreshPausedFrame(item: vscode.DebugThread | vscode.DebugStackFr
   if (!("frameId" in item)) { return; }
   hooks.postStatus("paused", "breakpoint");
   try {
-    const info = await inspectDebugFrame(session, item, { preferOverlay: hooks.lastControlAction() !== "stepInto" });
+    const stepInto = hooks.lastControlAction() === "stepInto";
+    const info = await inspectDebugFrame(session, item, { preferOverlay: !stepInto, preferUserSource: stepInto });
     if (isCurrent() && hooks.getSession()?.id === session.id) { hooks.logger?.log("debug.frame", frameFields(info)); hooks.postInfo(info); }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -217,7 +218,8 @@ async function refreshPausedFrame(item: vscode.DebugThread | vscode.DebugStackFr
 async function refreshStoppedThread(session: vscode.DebugSession, body: { reason?: string; threadId?: number } | undefined, hooks: DebugEventHooks, isCurrent: () => boolean): Promise<void> {
   hooks.postStatus("paused", String(body?.reason || "stopped"));
   try {
-    const info = await inspectDebugThread(session, body?.threadId, { preferOverlay: hooks.lastControlAction() !== "stepInto" });
+    const stepInto = hooks.lastControlAction() === "stepInto";
+    const info = await inspectDebugThread(session, body?.threadId, { preferOverlay: !stepInto, preferUserSource: stepInto });
     if (isCurrent() && hooks.getSession()?.id === session.id) { hooks.logger?.log("debug.frame", frameFields(info)); hooks.postInfo(info); }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

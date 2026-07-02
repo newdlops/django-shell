@@ -1,5 +1,7 @@
 // Debugpy bootstrap helpers for attaching VS Code to the live Django shell.
 
+import { buildDebugpySteppingRules, type DebugpySteppingRule } from "./debugSteppingRules";
+
 export const DEBUGPY_MARKER_PREFIX = "__DJANGO_SHELL_DEBUGPY__";
 
 export interface DebugpyEndpoint {
@@ -45,6 +47,7 @@ export interface DjangoShellDebugConfiguration {
     remoteRoot: string;
   }>;
   request: "attach";
+  rules: DebugpySteppingRule[];
   type: "python";
 }
 
@@ -155,6 +158,7 @@ export function buildDjangoShellDebugConfiguration(endpoint: DebugpyEndpoint, cw
     name: "Django Shell",
     pathMappings: [{ localRoot: cwd, remoteRoot }],
     request: "attach",
+    rules: buildDebugpySteppingRules(),
     type: "python"
   };
 }

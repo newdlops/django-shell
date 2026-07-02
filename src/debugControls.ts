@@ -2,6 +2,8 @@
 
 import * as vscode from "vscode";
 import type { DisposableDebugRequestSession } from "./debugAdapterTypes";
+import { buildStepInArguments } from "./debugStepTargets";
+import type { DiagnosticLogger } from "./diagnostics";
 
 export const DEBUG_CONTROL_ACTIONS = ["continue", "pause", "stepOver", "stepInto", "stepOut", "restart", "stop"] as const;
 
@@ -10,6 +12,7 @@ export type DebugControlAction = typeof DEBUG_CONTROL_ACTIONS[number];
 export type DebugControlUiState = "attached" | "idle" | "paused" | "running";
 
 export interface DebugControlResult {
+  targetId?: number;
   threadId?: number;
 }
 
@@ -54,7 +57,7 @@ export function debugControlDetail(action: DebugControlAction): string {
 }
 
 /** Executes one debugger action against the Django shell debug adapter session. */
-export async function runDebugControl(action: DebugControlAction, session?: DisposableDebugRequestSession | vscode.DebugSession, preferredThreadId?: number, interruptExecution?: () => Promise<unknown>): Promise<DebugControlResult> {
+export async function runDebugControl(action: DebugControlAction, session?: DisposableDebugRequestSession | vscode.DebugSession, preferredThreadId?: number, interruptExecution?: () => Promise<unknown>, logger?: DiagnosticLogger): Promise<DebugControlResult> {
   if (action === "stop" && session) {
     await interruptExecution?.();
     if ("disconnect" in session && typeof session.disconnect === "function") { await session.disconnect(); } else { await vscode.debug.stopDebugging(session as vscode.DebugSession); }
@@ -65,8 +68,9 @@ export async function runDebugControl(action: DebugControlAction, session?: Disp
     if (!threadId) {
       throw new Error("Debugger is attached but no debug thread is available yet. Run a Python cell or use Pause first.");
     }
-    await session.customRequest(dapRequest(action), { threadId });
-    return { threadId };
+    const args = action === "stepInto" ? await buildStepInArguments(session, threadId, logger) : { threadId };
+    await session.customRequest(dapRequest(action), args);
+    return { targetId: "targetId" in args ? args.targetId : undefined, threadId };
   }
   await vscode.commands.executeCommand(debugControlCommand(action));
   return {};

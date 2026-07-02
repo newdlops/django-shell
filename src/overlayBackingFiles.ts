@@ -17,6 +17,11 @@ export function overlayEditorUri(): vscode.Uri {
   return overlayBackingUris().editor;
 }
 
+/** Returns the workspace-local Python file used for hidden overlay language analysis. */
+export function overlayAnalysisUri(): vscode.Uri {
+  return overlayBackingUris().analysis;
+}
+
 /** Replaces stale generated overlay files with empty editor and analysis text. */
 export async function resetOverlayBackingFiles(): Promise<void> {
   const uris = overlayBackingUris();
