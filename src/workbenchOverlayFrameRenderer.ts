@@ -53,11 +53,9 @@ export function overlayFrameRendererSource(): string {
       rects = rects || __dsoConsoleGroups();
       return __dsoConsoleFrame(rects);
     }
-    /** Finds the workbench DOM host that owns the custom console webview frame. */
-    function __dsoFindWebviewHost(frame) {
-      if (!frame) { return null; }
-      const closest = frame.closest(".webview");
-      return closest && closest !== frame ? closest : frame.parentElement;
+    /** Returns the top-level portal host outside webview iframe clipping. */
+    function __dsoOverlayPortalHost() {
+      return document.body || document.documentElement;
     }
     /** Binds the overlay to the console webview without letting a closed console fall through to an unrelated webview. */
     function __dsoAttachRoot(root) {
@@ -67,10 +65,10 @@ export function overlayFrameRendererSource(): string {
       if (!rects.length) { root.__dsoFrame = null; return null; }
       const cached = root.__dsoFrame && root.__dsoFrame.isConnected && __dsoFrameIsConsole(root.__dsoFrame, rects) ? root.__dsoFrame : null;
       const frame = owned || cached || __dsoFindWebviewFrame(rects);
-      const host = __dsoFindWebviewHost(frame);
+      const host = __dsoOverlayPortalHost();
       if (!frame || !host) { root.__dsoFrame = null; return null; }
       root.__dsoFrame = frame;
-      if (window.getComputedStyle(host).position === "static") { host.style.position = "relative"; }
+      if (host !== document.body && host !== document.documentElement && window.getComputedStyle(host).position === "static") { host.style.position = "relative"; }
       if (root.parentElement !== host) { host.appendChild(root); }
       return { frame: frame, host: host };
     }

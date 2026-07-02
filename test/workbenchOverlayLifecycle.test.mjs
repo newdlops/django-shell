@@ -59,7 +59,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 74"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 81"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -73,30 +73,54 @@ test("overlay Monaco layout clamps dimensions instead of trusting transient DOM 
   assert.ok(rendererSource.includes("function __dsoLayoutSize(root, host)"));
   assert.ok(rendererSource.includes("function __dsoMaxEditorHeight(viewportHeight)"));
   assert.ok(rendererSource.includes("availableHeight"));
+  assert.ok(rendererSource.includes("boundaryLeft"));
+  assert.ok(rendererSource.includes("boundaryRight"));
+  assert.ok(rendererSource.includes("Math.min(rawWidth, boundaryRight - left, viewportWidth)"));
+  assert.equal(rendererSource.includes("hostWidth - left"), false);
   assert.ok(rendererSource.includes("Math.min(viewportWidth, 8192)"));
   assert.ok(rendererSource.includes("editor.layout(__dsoLayoutSize(root, host))"));
   assert.ok(rendererSource.includes("__dsoLayoutOverlayEditor(root)"));
   assert.ok(rendererSource.includes("contain:layout style"));
   assert.ok(rendererSource.includes(".django-shell-overlay .overflowingContentWidgets{overflow:visible!important;z-index:35}"));
+  assert.ok(rendererSource.includes(".django-shell-overlay .margin-view-overlays .line-numbers{color:var(--vscode-editorLineNumber-foreground"));
   assert.equal(rendererSource.includes("contain:strict"), false);
   assert.equal(rendererSource.includes("editor.layout({ width: Math.max(100, rect.width), height: Math.max(80, rect.height) })"), false);
   assert.equal(rendererSource.includes("automaticLayout: true"), false);
 });
 
-test("overlay hover widgets use a workbench-level layer with overlay-relative coordinates", () => {
+test("overlay hover widgets use a viewport-level layer with overlay-relative coordinates", () => {
   const widgetSource = fs.readFileSync(new URL("../src/workbenchOverlayWidgetRenderer.ts", import.meta.url), "utf8");
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
   assert.ok(rendererSource.includes("overflow:visible;background:var(--vscode-editor-background)"));
+  assert.ok(rendererSource.includes("z-index:2147483646"));
+  assert.ok(rendererSource.includes("__dsoSyncWidgetTheme(root, true)"));
   assert.ok(rendererSource.includes(".django-shell-overlay-editor{width:100%;height:100%;min-height:80px;box-sizing:border-box;overflow:visible;contain:layout style}"));
   assert.ok(rendererSource.includes(".django-shell-overlay .monaco-editor{overflow:visible!important}"));
   assert.ok(rendererSource.includes("window.__dsoSyncOverlayWidgetLayer && window.__dsoSyncOverlayWidgetLayer(root)"));
   assert.ok(widgetSource.includes('position:fixed;left:0;top:0;width:0;height:0'));
+  assert.ok(widgetSource.includes("z-index:2147483647!important"));
+  assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .overflowingContentWidgets{overflow:visible!important;z-index:2147483647!important}"));
+  assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-editor-hover{background:var(--vscode-editorHoverWidget-background"));
+  assert.ok(widgetSource.includes("opacity:1!important;overflow:visible!important;z-index:2147483647!important"));
+  assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .monaco-hover .monaco-sash,.django-shell-overlay-widget-layer .monaco-editor-hover .monaco-sash"));
+  assert.ok(widgetSource.includes("function __dsoThemeSource()"));
+  assert.ok(widgetSource.includes("function __dsoSyncThemeClasses(node, includeWorkbenchClass)"));
+  assert.ok(widgetSource.includes('add("monaco-workbench")'));
+  assert.ok(widgetSource.includes('name === "vs" || name.indexOf("vs-") === 0 || name.indexOf("hc-") === 0'));
   assert.ok(widgetSource.includes("window.__dsoSyncOverlayWidgetLayer = function (root)"));
   assert.ok(widgetSource.includes("root.getBoundingClientRect()"));
+  assert.ok(widgetSource.includes("viewportWidth = Math.max(1, Math.round(window.innerWidth"));
+  assert.ok(widgetSource.includes('layerRoot.style.left = "0px"; layerRoot.style.top = "0px"'));
+  assert.ok(widgetSource.includes('layer.style.left = left + "px"; layer.style.top = top + "px"'));
+  assert.ok(widgetSource.includes("function __dsoWidgetPortalHost()"));
+  assert.ok(widgetSource.includes("return document.body"));
+  assert.ok(widgetSource.includes("const portalHost = __dsoWidgetPortalHost()"));
   assert.ok(widgetSource.includes('document.getElementById("django-shell-overlay-widget-root")'));
   assert.ok(widgetSource.includes('host.querySelector(".django-shell-overlay-widget-root")'));
-  assert.ok(widgetSource.includes("document.body.appendChild(layerRoot)"));
+  assert.ok(widgetSource.includes('layerRoot.className = "monaco-workbench django-shell-overlay-widget-root"'));
+  assert.ok(widgetSource.includes("__dsoSyncWidgetTheme(layerRoot, true)"));
+  assert.ok(widgetSource.includes("portalHost.appendChild(layerRoot)"));
   assert.ok(widgetSource.includes("fixedOverflowWidgets: false"));
   assert.ok(widgetSource.includes("return { bottom: window.innerHeight, left: 0, right: window.innerWidth, top: 0 }"));
   assert.ok(widgetSource.includes('const selectors = ".suggest-widget,.parameter-hints-widget,.context-view"'));
@@ -105,6 +129,8 @@ test("overlay hover widgets use a workbench-level layer with overlay-relative co
   assert.ok(widgetSource.includes("hasAppliedTransform ? Number"));
   assert.equal(widgetSource.includes("host.appendChild(layerRoot)"), false);
   assert.equal(widgetSource.includes("root.appendChild(layerRoot)"), false);
+  assert.equal(widgetSource.includes('classList.remove("monaco-workbench")'), false);
+  assert.equal(widgetSource.includes("document.body.appendChild(layerRoot)"), false);
   assert.equal(widgetSource.includes("fixedOverflowWidgets: true"), false);
 });
 
@@ -146,6 +172,11 @@ test("confirmed console overlays do not fall back to unrelated webview frames", 
   assert.ok(frameRendererSource.includes("root.__dsoHadConsoleFrame = true"));
   assert.ok(frameRendererSource.includes("if (!rects.length) { root.__dsoFrame = null; return null; }"));
   assert.ok(frameRendererSource.includes("__dsoFrameIsConsole(root.__dsoFrame, rects)"));
+  assert.ok(frameRendererSource.includes("function __dsoOverlayPortalHost()"));
+  assert.ok(frameRendererSource.includes("return document.body || document.documentElement"));
+  assert.ok(frameRendererSource.includes("const host = __dsoOverlayPortalHost()"));
+  assert.ok(frameRendererSource.includes("host !== document.body && host !== document.documentElement"));
+  assert.equal(frameRendererSource.includes("function __dsoFindWebviewHost"), false);
   assert.equal(frameRendererSource.includes("otherwise the largest visible webview"), false);
   assert.equal(frameRendererSource.includes("bestArea > 4000 ? best : null"), false);
 });
@@ -225,7 +256,7 @@ test("overlay prompt gutter stays compact after breakpoint controls install", ()
   assert.ok(breakpointSource.includes("lineDecorationsWidth: 0"));
   assert.ok(rendererSource.includes("lineNumbersMinChars: 1"));
   assert.ok(breakpointSource.includes("lineNumbersMinChars: 1"));
-  assert.ok(rendererSource.includes(".margin-view-overlays .line-numbers{min-width:0!important;overflow:visible!important;padding-right:1ch!important}"));
+  assert.ok(rendererSource.includes(".margin-view-overlays .line-numbers{color:var(--vscode-editorLineNumber-foreground"));
   assert.ok(rendererSource.includes('let style = document.getElementById("django-shell-overlay-style")'));
   assert.equal(rendererSource.includes('if (document.getElementById("django-shell-overlay-style")) { return; }'), false);
   assert.equal(rendererSource.includes("lineDecorationsWidth: 14"), false);
