@@ -20,9 +20,8 @@ export interface WorkbenchOverlayGeometry { height: number; left: number; top: n
 interface OverlayBreakpointLocation { column?: number; line: number; }
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
-const GEOMETRY_FRAME_MS = 16;
 const GEOMETRY_SETTLE_MS = 80;
-const RENDERER_PATCH_VERSION = 82;
+const RENDERER_PATCH_VERSION = 83;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -123,7 +122,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
     this.logger?.log("overlay.geometry", { height: Math.round(geometry.height), left: Math.round(geometry.left), top: Math.round(geometry.top), width: Math.round(geometry.width) });
     void this.evalInWorkbench(geometryExpression(geometry)).catch((error: unknown) => { this.logger?.log("overlay.geometry.error", { error: error instanceof Error ? error.message : String(error) }); }).finally(() => {
       this.geometryFlushInFlight = false;
-      if (this.geometryFlushPending) { this.queueGeometryFlush(GEOMETRY_FRAME_MS); }
+      if (this.geometryFlushPending) { this.queueGeometryFlush(0); }
     });
   }
 

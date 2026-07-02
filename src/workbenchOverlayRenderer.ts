@@ -439,6 +439,28 @@ export function overlayRendererSource(modelUri: string): string {
       if (sizeChanged) { __dsoLayoutOverlayEditor(root); }
       return true;
     }
+    /** Schedules one renderer-local geometry refresh for parent workbench scroll and resize. */
+    function __dsoScheduleGeometrySync(root) {
+      if (!root || root.__dsoGeometrySyncFrame) { return; }
+      root.__dsoGeometrySyncFrame = window.requestAnimationFrame(function () {
+        root.__dsoGeometrySyncFrame = 0;
+        if (!root.isConnected || root.style.display === "none") { return; }
+        try { __dsoApplyGeometry(root, window.__djangoShellOverlayGeometry); } catch (eGeometrySync) {}
+      });
+    }
+    /** Installs renderer-local scroll listeners so iframe movement is not delayed by host geometry messages. */
+    function __dsoInstallGeometrySync(root) {
+      if (!root || root.__dsoGeometrySyncInstalled) { return; }
+      const schedule = function () { __dsoScheduleGeometrySync(root); };
+      window.addEventListener("resize", schedule, true);
+      document.addEventListener("scroll", schedule, true);
+      root.__dsoGeometrySyncInstalled = true;
+      root.__dsoGeometrySyncCleanup = function () {
+        window.removeEventListener("resize", schedule, true);
+        document.removeEventListener("scroll", schedule, true);
+        root.__dsoGeometrySyncInstalled = false;
+      };
+    }
     /** Installs the overlay CSS once per workbench window. */
     function __dsoEnsureStyle() {
       let style = document.getElementById("django-shell-overlay-style");
@@ -493,6 +515,7 @@ export function overlayRendererSource(modelUri: string): string {
       root.__dsoOwnerToken = window.__djangoShellOverlayOwnerToken;
       try { root.dataset.djangoShellOverlayOwner = String(window.__djangoShellOverlayOwnerToken || ""); } catch (eOwnerDataset) {}
       try { __dsoSyncWidgetTheme && __dsoSyncWidgetTheme(root, true); } catch (eRootTheme) {}
+      __dsoInstallGeometrySync(root);
       root.__dsoUseVisiblePrelude = !!window.__djangoShellOverlayUseVisiblePrelude;
       root.style.display = "block";
       if (!root.__dsoGeometryTimer) { root.__dsoGeometryTimer = window.setInterval(function () { if (root.style.display !== "none" && !__dsoApplyGeometry(root, window.__djangoShellOverlayGeometry) && root.__dsoHadConsoleFrame && window.__dsoDisposeOverlay) { window.__dsoDisposeOverlay(root); } }, 250); }
