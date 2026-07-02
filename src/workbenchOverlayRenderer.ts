@@ -268,8 +268,16 @@ export function overlayRendererSource(modelUri: string): string {
     }
     /** Returns a workbench-compatible Python language selection. */
     function __dsoPythonLanguage() { return { getLanguageId: function () { return "python"; }, languageId: "python", onDidChange: function () { return { dispose: function () {} }; } }; }
+    /** Returns a body-level overflow widget portal before Monaco editor construction. */
+    function __dsoOverflowWidgetsNode(root) {
+      return window.__dsoPrepareOverlayWidgetNode ? window.__dsoPrepareOverlayWidgetNode(root) : undefined;
+    }
+    /** Returns whether the editor must be rebuilt so constructor-only widget portal options apply. */
+    function __dsoNeedsWidgetPortalRebuild(root) {
+      return !!(root && root.__djangoShellEditor && root.__dsoWidgetPortalVersion !== "body-constructor-v1");
+    }
     /** Creates a real workbench CodeEditorWidget using captured VS Code services. */
-    function __dsoCreateWorkbenchEditor(root, host) {
+    function __dsoCreateWorkbenchEditor(root, host, overflowWidgetsNode) {
       const factory = __dsoFactory();
       if (!factory) { return null; }
       const uri = __dsoUri();
@@ -284,7 +292,7 @@ export function overlayRendererSource(modelUri: string): string {
       if (!model || !model.uri) { __dsoRememberBadModelSvc(factory.modelSvc); return null; }
       try { if (model && model.setLanguage) { model.setLanguage(__dsoPythonLanguage()); } } catch (eSetLanguage) {}
       try { if (globalThis.monaco && globalThis.monaco.editor && globalThis.monaco.editor.setModelLanguage) { globalThis.monaco.editor.setModelLanguage(model, "python"); } } catch (eSetModelLanguage) {}
-      const options = { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
+      const options = { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
       const widgetOptions = { isSimpleWidget: false };
       const editor = factory.inst.createInstance(factory.ctor, host, options, widgetOptions);
       if (editor && editor.setModel) { editor.setModel(model); }
@@ -292,22 +300,24 @@ export function overlayRendererSource(modelUri: string): string {
       return editor;
     }
     /** Creates a standalone Monaco editor only when the workbench exposes the public API. */
-    function __dsoCreateGlobalMonacoEditor(root, host) {
+    function __dsoCreateGlobalMonacoEditor(root, host, overflowWidgetsNode) {
       const monacoApi = (globalThis.monaco && globalThis.monaco.editor) ? globalThis.monaco : ((window.monaco && window.monaco.editor) ? window.monaco : null);
       if (!monacoApi) { return null; }
       const uri = monacoApi.Uri.parse(window.__djangoShellOverlayModelUri);
       let model = monacoApi.editor.getModel(uri); if (model && model.isDisposed && model.isDisposed()) { model = null; } if (model && model.getValue) { try { model.getValue(); } catch (eDisposedValue) { model = null; } } model = model || monacoApi.editor.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python", uri);
-      const editor = monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, isSimpleWidget: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, model: model, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
+      const editor = monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: false, hover: { enabled: true }, isSimpleWidget: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, model: model, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
       try { editor.layout && editor.layout(__dsoLayoutSize(root, host)); } catch (eGlobalLayout) {}
       return editor;
     }
     /** Creates or focuses the overlay editor widget. */
     function __dsoEnsureEditor(root) {
+      if (__dsoNeedsWidgetPortalRebuild(root)) { try { root.__djangoShellEditor.dispose && root.__djangoShellEditor.dispose(); } catch (eWidgetPortalRebuild) {} root.__djangoShellEditor = null; root.__dsoWidgetPortalVersion = ""; }
       if (root.__djangoShellEditor) { try { const model = root.__djangoShellEditor.getModel && root.__djangoShellEditor.getModel(); if (!model || (model.isDisposed && model.isDisposed())) { root.__djangoShellEditor.dispose && root.__djangoShellEditor.dispose(); root.__djangoShellEditor = null; } else if (model.getValue) { try { model.getValue(); } catch (eDisposedValue) { root.__djangoShellEditor.dispose && root.__djangoShellEditor.dispose(); root.__djangoShellEditor = null; } } } catch (eDisposedModel) { root.__djangoShellEditor = null; } if (root.__djangoShellEditor) { return root.__djangoShellEditor; } }
       const host = root.querySelector(".django-shell-overlay-editor");
       host.textContent = "";
-      if (!root.__djangoShellEditor && !window.__dsoSkipWorkbenchEditor) { try { root.__djangoShellEditor = __dsoCreateWorkbenchEditor(root, host); } catch (eWorkbench) { const msg = String(eWorkbench && eWorkbench.message || eWorkbench); root.__dsoLastEditorError = msg; if (/UNKNOWN service|Maximum call stack/.test(msg)) { window.__dsoSkipWorkbenchEditor = true; } } }
-      if (!root.__djangoShellEditor) { try { root.__djangoShellEditor = __dsoCreateGlobalMonacoEditor(root, host); } catch (eGlobal) { root.__dsoLastEditorError = String(eGlobal && eGlobal.message || eGlobal); } }
+      const overflowWidgetsNode = __dsoOverflowWidgetsNode(root);
+      if (!root.__djangoShellEditor && !window.__dsoSkipWorkbenchEditor) { try { root.__djangoShellEditor = __dsoCreateWorkbenchEditor(root, host, overflowWidgetsNode); } catch (eWorkbench) { const msg = String(eWorkbench && eWorkbench.message || eWorkbench); root.__dsoLastEditorError = msg; if (/UNKNOWN service|Maximum call stack/.test(msg)) { window.__dsoSkipWorkbenchEditor = true; } } }
+      if (!root.__djangoShellEditor) { try { root.__djangoShellEditor = __dsoCreateGlobalMonacoEditor(root, host, overflowWidgetsNode); } catch (eGlobal) { root.__dsoLastEditorError = String(eGlobal && eGlobal.message || eGlobal); } }
       if (!root.__djangoShellEditor) {
         host.textContent = "Editor widget is waiting for VS Code editor services.";
         root.__dsoPendingRetries = (root.__dsoPendingRetries || 0) + 1;
@@ -316,6 +326,7 @@ export function overlayRendererSource(modelUri: string): string {
           root.__dsoPendingRetryTimer = window.setTimeout(function () { if (root.isConnected && root.style.display !== "none") { window.__djangoShellOverlayShow(window.__djangoShellOverlayGeometry); } }, 500);
         }
       } else {
+        root.__dsoWidgetPortalVersion = "body-constructor-v1";
         root.style.visibility = "visible";
         root.__dsoPendingRetries = 0; try { window.__dsoApplyPreludeHiddenArea && window.__dsoApplyPreludeHiddenArea(root, root.__djangoShellEditor); } catch (ePreludeHidden) {}
         try { window.__dsoConfigureOverlayWidgets && window.__dsoConfigureOverlayWidgets(root, root.__djangoShellEditor); } catch (eWidgetOptions) { root.__dsoLastWidgetError = String(eWidgetOptions && eWidgetOptions.message || eWidgetOptions); }

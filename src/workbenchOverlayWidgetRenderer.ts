@@ -54,7 +54,7 @@ export function overlayWidgetRendererSource(): string {
       let style = document.getElementById("django-shell-overlay-widget-style");
       if (!style) { style = document.createElement("style"); }
       style.id = "django-shell-overlay-widget-style";
-      style.textContent = ".django-shell-overlay-widget-root{position:fixed;left:0;top:0;width:0;height:0;min-width:0!important;min-height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer{position:absolute;left:0;top:0;width:100%;height:100%;min-width:0!important;min-height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer .overflowingContentWidgets{overflow:visible!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-hover *,.django-shell-overlay-widget-layer .monaco-editor-hover,.django-shell-overlay-widget-layer .monaco-editor-hover *,.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .suggest-widget *,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .parameter-hints-widget *,.django-shell-overlay-widget-layer .context-view,.django-shell-overlay-widget-layer .context-view *{pointer-events:auto!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-editor-hover{background:var(--vscode-editorHoverWidget-background,var(--vscode-editorWidget-background,var(--vscode-editor-background)))!important;border-color:var(--vscode-editorHoverWidget-border,var(--vscode-widget-border,transparent))!important;box-sizing:border-box!important;color:var(--vscode-editorHoverWidget-foreground,var(--vscode-foreground))!important;opacity:1!important;overflow:visible!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .monaco-hover .monaco-sash,.django-shell-overlay-widget-layer .monaco-editor-hover .monaco-sash{overflow:visible!important;pointer-events:auto!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .context-view{box-sizing:border-box!important;z-index:2147483647!important}";
+      style.textContent = ".django-shell-overlay-widget-root{position:fixed;left:0;top:0;width:0;height:0;min-width:0!important;min-height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer{position:absolute;left:0;top:0;width:100vw;height:100vh;min-width:100vw!important;min-height:100vh!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer .overflowingContentWidgets{overflow:visible!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-hover *,.django-shell-overlay-widget-layer .monaco-editor-hover,.django-shell-overlay-widget-layer .monaco-editor-hover *,.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .suggest-widget *,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .parameter-hints-widget *,.django-shell-overlay-widget-layer .context-view,.django-shell-overlay-widget-layer .context-view *{pointer-events:auto!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-editor-hover{background:var(--vscode-editorHoverWidget-background,var(--vscode-editorWidget-background,var(--vscode-editor-background)))!important;border-color:var(--vscode-editorHoverWidget-border,var(--vscode-widget-border,transparent))!important;box-sizing:border-box!important;color:var(--vscode-editorHoverWidget-foreground,var(--vscode-foreground))!important;opacity:1!important;overflow:visible!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .monaco-hover .monaco-sash,.django-shell-overlay-widget-layer .monaco-editor-hover .monaco-sash{overflow:visible!important;pointer-events:auto!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .context-view{box-sizing:border-box!important;z-index:2147483647!important}";
       if (!style.parentElement) { document.head.appendChild(style); }
     }
 
@@ -63,7 +63,7 @@ export function overlayWidgetRendererSource(): string {
       return document.body;
     }
 
-    /** Keeps the viewport-level popup layer aligned to the overlay editor rectangle. */
+    /** Keeps the body-level popup layer aligned to Monaco's editor-relative overflow-widget coordinates. */
     window.__dsoSyncOverlayWidgetLayer = function (root) {
       const layerRoot = root && root.__dsoWidgetRoot;
       const layer = root && root.__dsoWidgetLayer;
@@ -72,14 +72,13 @@ export function overlayWidgetRendererSource(): string {
       const viewportWidth = Math.max(1, Math.round(window.innerWidth || document.documentElement.clientWidth || rect.right || 1));
       const viewportHeight = Math.max(1, Math.round(window.innerHeight || document.documentElement.clientHeight || rect.bottom || 1));
       const left = Math.round(rect.left), top = Math.round(rect.top);
-      const layerWidth = Math.max(1, viewportWidth - left), layerHeight = Math.max(1, viewportHeight - top);
-      const key = left + ":" + top + ":" + layerWidth + ":" + layerHeight + ":" + viewportWidth + ":" + viewportHeight;
+      const key = left + ":" + top + ":" + viewportWidth + ":" + viewportHeight;
       if (root.__dsoWidgetLayerRectKey === key) { return; }
       root.__dsoWidgetLayerRectKey = key;
       layerRoot.style.left = "0px"; layerRoot.style.top = "0px";
       layerRoot.style.width = viewportWidth + "px"; layerRoot.style.height = viewportHeight + "px";
       layer.style.left = left + "px"; layer.style.top = top + "px";
-      layer.style.width = layerWidth + "px"; layer.style.height = layerHeight + "px";
+      layer.style.width = viewportWidth + "px"; layer.style.height = viewportHeight + "px";
     };
 
     /** Returns the viewport-level node used by Monaco for hover and completion widgets. */
@@ -123,12 +122,17 @@ export function overlayWidgetRendererSource(): string {
       return layer;
     }
 
+    /** Prepares the constructor-time Monaco overflow widget portal outside the webview host. */
+    window.__dsoPrepareOverlayWidgetNode = function (root) {
+      return __dsoOverlayWidgetNode(root);
+    };
+
     /** Attaches Monaco overflow widgets after the editor has been created. */
     window.__dsoConfigureOverlayWidgets = function (root, editor) {
       if (!root || !editor || !editor.updateOptions) { return; }
       const node = __dsoOverlayWidgetNode(root);
       if (!node) { return; }
-      editor.updateOptions({ fixedOverflowWidgets: false, overflowWidgetsDomNode: node });
+      editor.updateOptions({ fixedOverflowWidgets: false });
     };
 
     /** Returns the visible workbench viewport rectangle. */

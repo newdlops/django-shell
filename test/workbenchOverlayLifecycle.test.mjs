@@ -59,7 +59,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 81"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 82"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -88,17 +88,23 @@ test("overlay Monaco layout clamps dimensions instead of trusting transient DOM 
   assert.equal(rendererSource.includes("automaticLayout: true"), false);
 });
 
-test("overlay hover widgets use a viewport-level layer with overlay-relative coordinates", () => {
+test("overlay hover widgets use a constructor-time body portal outside the webview host", () => {
   const widgetSource = fs.readFileSync(new URL("../src/workbenchOverlayWidgetRenderer.ts", import.meta.url), "utf8");
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
   assert.ok(rendererSource.includes("overflow:visible;background:var(--vscode-editor-background)"));
   assert.ok(rendererSource.includes("z-index:2147483646"));
   assert.ok(rendererSource.includes("__dsoSyncWidgetTheme(root, true)"));
+  assert.ok(rendererSource.includes("function __dsoOverflowWidgetsNode(root)"));
+  assert.ok(rendererSource.includes("function __dsoNeedsWidgetPortalRebuild(root)"));
+  assert.ok(rendererSource.includes("overflowWidgetsDomNode: overflowWidgetsNode"));
+  assert.ok(rendererSource.includes("root.__dsoWidgetPortalVersion = \"body-constructor-v1\""));
+  assert.ok(rendererSource.includes("fixedOverflowWidgets: false"));
   assert.ok(rendererSource.includes(".django-shell-overlay-editor{width:100%;height:100%;min-height:80px;box-sizing:border-box;overflow:visible;contain:layout style}"));
   assert.ok(rendererSource.includes(".django-shell-overlay .monaco-editor{overflow:visible!important}"));
   assert.ok(rendererSource.includes("window.__dsoSyncOverlayWidgetLayer && window.__dsoSyncOverlayWidgetLayer(root)"));
   assert.ok(widgetSource.includes('position:fixed;left:0;top:0;width:0;height:0'));
+  assert.ok(widgetSource.includes('width:100vw;height:100vh'));
   assert.ok(widgetSource.includes("z-index:2147483647!important"));
   assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .overflowingContentWidgets{overflow:visible!important;z-index:2147483647!important}"));
   assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-editor-hover{background:var(--vscode-editorHoverWidget-background"));
@@ -116,12 +122,13 @@ test("overlay hover widgets use a viewport-level layer with overlay-relative coo
   assert.ok(widgetSource.includes("function __dsoWidgetPortalHost()"));
   assert.ok(widgetSource.includes("return document.body"));
   assert.ok(widgetSource.includes("const portalHost = __dsoWidgetPortalHost()"));
+  assert.ok(widgetSource.includes("window.__dsoPrepareOverlayWidgetNode = function (root)"));
   assert.ok(widgetSource.includes('document.getElementById("django-shell-overlay-widget-root")'));
   assert.ok(widgetSource.includes('host.querySelector(".django-shell-overlay-widget-root")'));
   assert.ok(widgetSource.includes('layerRoot.className = "monaco-workbench django-shell-overlay-widget-root"'));
   assert.ok(widgetSource.includes("__dsoSyncWidgetTheme(layerRoot, true)"));
   assert.ok(widgetSource.includes("portalHost.appendChild(layerRoot)"));
-  assert.ok(widgetSource.includes("fixedOverflowWidgets: false"));
+  assert.ok(widgetSource.includes("editor.updateOptions({ fixedOverflowWidgets: false })"));
   assert.ok(widgetSource.includes("return { bottom: window.innerHeight, left: 0, right: window.innerWidth, top: 0 }"));
   assert.ok(widgetSource.includes('const selectors = ".suggest-widget,.parameter-hints-widget,.context-view"'));
   assert.ok(widgetSource.includes('node.closest(".monaco-hover,.monaco-editor-hover")'));
@@ -131,6 +138,7 @@ test("overlay hover widgets use a viewport-level layer with overlay-relative coo
   assert.equal(widgetSource.includes("root.appendChild(layerRoot)"), false);
   assert.equal(widgetSource.includes('classList.remove("monaco-workbench")'), false);
   assert.equal(widgetSource.includes("document.body.appendChild(layerRoot)"), false);
+  assert.equal(widgetSource.includes("overflowWidgetsDomNode: node"), false);
   assert.equal(widgetSource.includes("fixedOverflowWidgets: true"), false);
 });
 
@@ -172,9 +180,12 @@ test("confirmed console overlays do not fall back to unrelated webview frames", 
   assert.ok(frameRendererSource.includes("root.__dsoHadConsoleFrame = true"));
   assert.ok(frameRendererSource.includes("if (!rects.length) { root.__dsoFrame = null; return null; }"));
   assert.ok(frameRendererSource.includes("__dsoFrameIsConsole(root.__dsoFrame, rects)"));
-  assert.ok(frameRendererSource.includes("function __dsoOverlayPortalHost()"));
-  assert.ok(frameRendererSource.includes("return document.body || document.documentElement"));
-  assert.ok(frameRendererSource.includes("const host = __dsoOverlayPortalHost()"));
+  assert.ok(frameRendererSource.includes("function __dsoConsoleGroupEntries()"));
+  assert.ok(frameRendererSource.includes("function __dsoConsoleGroupForFrame(frame, entries)"));
+  assert.ok(frameRendererSource.includes("function __dsoWebviewLayerHost(frame)"));
+  assert.ok(frameRendererSource.includes("function __dsoOverlayPortalHost(frame, entries)"));
+  assert.ok(frameRendererSource.includes("return __dsoWebviewLayerHost(frame) || __dsoConsoleGroupForFrame(frame, entries) || document.body || document.documentElement"));
+  assert.ok(frameRendererSource.includes("const host = __dsoOverlayPortalHost(frame, entries)"));
   assert.ok(frameRendererSource.includes("host !== document.body && host !== document.documentElement"));
   assert.equal(frameRendererSource.includes("function __dsoFindWebviewHost"), false);
   assert.equal(frameRendererSource.includes("otherwise the largest visible webview"), false);
