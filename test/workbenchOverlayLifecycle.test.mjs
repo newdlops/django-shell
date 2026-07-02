@@ -562,8 +562,12 @@ test("direct overlay debug syncs workspace Python breakpoints for continue", () 
   assert.ok(customConsoleSource.includes('fsPath.endsWith(".py")'));
 });
 
-test("failed debug execution returns focus to the Django Shell output tab", () => {
-  assert.ok(customConsoleSource.includes("if (!result.ok) { clearExternalDebugFrameDecoration();"));
+test("failed debug execution exits debugging and returns focus to output", () => {
+  assert.ok(customConsoleSource.includes("stopDebugAfterFailedExecution"));
+  assert.ok(customConsoleSource.includes("await direct.disconnect()"));
+  assert.ok(customConsoleSource.includes("await vscode.debug.stopDebugging(session)"));
+  assert.ok(customConsoleSource.includes('this.postDebugStatus("idle", "ended")'));
+  assert.ok(customConsoleSource.includes("clearExternalDebugFrameDecoration();"));
   assert.ok(customConsoleSource.includes("this.panel?.reveal(vscode.ViewColumn.One)"));
   assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", false'));
 });

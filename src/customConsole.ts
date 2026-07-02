@@ -584,7 +584,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     const text = executionText(result);
     this.lastPythonResult = { code, execution, ok: result.ok, text };
     this.post({ code, execution, ok: result.ok, text, type: "pythonResult" });
-    if (!result.ok) { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); this.panel?.reveal(vscode.ViewColumn.One); }
+    if (!result.ok) { await this.stopDebugAfterFailedExecution(); }
     void this.overlay?.postOutput(text, result.ok);
     this.postTransport();
     this.scheduleRuntimeRefresh();
@@ -654,6 +654,9 @@ export class CustomDjangoConsole implements vscode.Disposable {
 
   /** Returns whether one URI is a Python source debugpy can bind. */
   private isPythonDebugSourceUri(uri: vscode.Uri): boolean { const fsPath = uri.fsPath.replace(/\\/g, "/").toLowerCase(); return uri.scheme === "file" && (fsPath.endsWith(".py") || fsPath.includes("/.django-shell/")); }
+
+  /** Stops debugger attachment after Python has already failed and returns focus to output. */
+  private async stopDebugAfterFailedExecution(): Promise<void> { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); this.panel?.reveal(vscode.ViewColumn.One); const direct = this.overlayDebugSession; if (direct) { this.overlayDebugSession = undefined; this.debugThreadId = undefined; this.debugpyEndpoint = undefined; this.syncedDebugBreakpointUris.clear(); await direct.disconnect(); this.postDebugStatus("idle", "ended"); this.postDebugInfo({ state: "idle" }); return; } const session = this.debugSession; if (session) { this.debugpyEndpoint = undefined; await vscode.debug.stopDebugging(session); if (this.debugSession === session) { this.debugSession = undefined; this.debugThreadId = undefined; this.syncedDebugBreakpointUris.clear(); this.postDebugStatus("idle", "ended"); this.postDebugInfo({ state: "idle" }); } } }
 
   /** Stops the active Django Shell debugger session when one is attached. */
   private async stopDebugShell(): Promise<void> {
