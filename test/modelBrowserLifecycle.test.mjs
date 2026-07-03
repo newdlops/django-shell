@@ -32,6 +32,47 @@ test("model browser leaves loading state when the shell is busy or paused in deb
   assert.ok(modelCatalogSource.includes("model.catalog.timeout"));
 });
 
+test("model catalog refresh survives busy shells and debug pauses", () => {
+  const backendClientSource = fs.readFileSync(new URL("../src/backendClient.ts", import.meta.url), "utf8");
+  const modelCatalogClientSource = fs.readFileSync(new URL("../media/modelCatalogSource.js", import.meta.url), "utf8");
+  // A timed-out catalog read applies its late result instead of discarding the already-queued work.
+  assert.ok(modelCatalogSource.includes("result = await pendingList"));
+  // The webview keeps the last loaded catalog browsable through transient busy/timeout refreshes.
+  assert.ok(modelCatalogClientSource.includes("state.ok = state.groups.length > 0"));
+  // Transient socket failures cool down and re-probe instead of disabling parallel reads for the session.
+  assert.ok(backendClientSource.includes("TCP_RETRY_COOLDOWN_MS"));
+  assert.ok(backendClientSource.includes("this.tcpFailedAt = Date.now()"));
+  assert.ok(backendClientSource.includes("this.tcpFailedAt = 0"));
+  assert.ok(backendClientSource.includes("remoteSocketUnavailable"));
+  // Busy-time parallel reads reject after a bounded wait instead of hanging on a paused backend.
+  assert.ok(backendClientSource.includes("PARALLEL_READ_RESPONSE_TIMEOUT_MS"));
+  // Backend socket threads keep serving reads while debugpy is paused; cell executes restore tracing for breakpoints.
+  assert.ok(pythonBackendSource.includes("def _debugger_exempt_thread"));
+  assert.ok(pythonBackendSource.includes("def _restore_debugger_tracing"));
+  assert.ok(pythonBackendSource.includes("_restore_debugger_tracing()"));
+  assert.ok(pythonBackendSource.includes("daemon_threads = True"));
+  assert.ok(pythonBackendSource.includes("pydev_do_not_trace"));
+});
+
+test("remote SSH/kubectl shells tunnel the backend socket for parallel model reads", () => {
+  const backendClientSource = fs.readFileSync(new URL("../src/backendClient.ts", import.meta.url), "utf8");
+  // The remote-ready path starts a backend tunnel beside the PTY instead of leaving the socket off for the session.
+  assert.ok(notebookPtySessionSource.includes("void this.forwardBackendSocket(ready.port, this.client)"));
+  assert.ok(notebookPtySessionSource.includes("startKubectlPortForward(kubectl, remotePort"));
+  assert.ok(notebookPtySessionSource.includes("startSshPortForward(ssh as SshExecTarget, remotePort"));
+  assert.ok(notebookPtySessionSource.includes("backend.portForward.ready"));
+  assert.ok(notebookPtySessionSource.includes("backend.portForward.error"));
+  // The tunnel is torn down whenever the backend detaches or the session resets.
+  assert.ok(notebookPtySessionSource.includes("clearBackendPortForward"));
+  assert.ok(backendClientSource.includes("useForwardedEndpoint"));
+  assert.ok(backendClientSource.includes("this.forwardedEndpoint?.host"));
+  assert.ok(backendClientSource.includes("this.forwardedEndpoint?.port"));
+  // Debug cell runs stay pinned to the interactive PTY main thread; only reads ride the socket/tunnel.
+  assert.ok(backendClientSource.includes("if (this.fallback && hasDebugExecutionPayload(payload))"));
+  // Deliberate PTY fallbacks must not extend the socket retry cooldown.
+  assert.ok(backendClientSource.includes("if (error !== undefined) {"));
+});
+
 test("read-only model browser backend requests can run beside long cell execution", () => {
   const backendClientSource = fs.readFileSync(new URL("../src/backendClient.ts", import.meta.url), "utf8");
   const extensionSource = fs.readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");

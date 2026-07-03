@@ -39,6 +39,34 @@ class _Server(socketserver.ThreadingTCPServer):
     """TCP server that stores the Django shell namespace and auth token."""
 
     allow_reuse_address = True
+    daemon_threads = True
+
+    def process_request(self, request, client_address):
+        """Serves each request on a debugger-exempt thread so model-browser reads keep answering while debugpy is paused at a breakpoint."""
+        thread = threading.Thread(target=self.process_request_thread, args=(request, client_address), daemon=True)
+        _debugger_exempt_thread(thread).start()
+
+
+def _debugger_exempt_thread(thread):
+    """Marks a backend service thread so debugpy suspend-all skips it (pydevd leaves pydev_do_not_trace threads running)."""
+    thread.pydev_do_not_trace = True
+    thread.is_pydev_daemon_thread = True
+    return thread
+
+
+def _restore_debugger_tracing():
+    """Re-enables debugger tracing on a socket handler thread before it runs user cell code, so cell breakpoints still bind."""
+    thread = threading.current_thread()
+    if not getattr(thread, "pydev_do_not_trace", False):
+        return
+    thread.pydev_do_not_trace = False
+    thread.is_pydev_daemon_thread = False
+    try:
+        import debugpy
+
+        debugpy.trace_this_thread(True)
+    except Exception:
+        pass
 
 
 class _Handler(socketserver.StreamRequestHandler):
@@ -87,7 +115,7 @@ def start(namespace, token):
             server.initial_names = set(namespace)
             server.namespace = namespace
             _STATE["server"] = server
-            threading.Thread(target=server.serve_forever, daemon=True).start()
+            _debugger_exempt_thread(threading.Thread(target=server.serve_forever, daemon=True)).start()
         server.token = token
         host, port = server.server_address
         try:
@@ -325,6 +353,7 @@ def _run_request(namespace, token, request, initial_names):
     line_offset = request.get("lineOffset")
     source_text = request.get("sourceText")
     breakpoint_lines = request.get("breakpointLines")
+    _restore_debugger_tracing()
     with _EXECUTION_LOCK:
         return _execute_code(
             namespace,
@@ -741,8 +770,30 @@ def _model_instance_attribute_mapping(value, evaluate_values=False):
         return None
     if not evaluate_values:
         data = getattr(value, "__dict__", {})
-        return {name: data[name] if name in data else _InspectionDeferred(_model_instance_attribute_label(value, name)) for name in names}
+        return {name: _model_instance_child_value(value, name, data) for name in names}
     return {name: _read_attr_value(value, name) for name in names}
+
+
+def _model_instance_child_value(value, name, data):
+    """Returns a visible Django model child value while deferring relation descriptors."""
+    if name in data:
+        return data[name]
+    if _pty_is_computed_field(type(value), name):
+        return _read_attr_value(value, name)
+    return _InspectionDeferred(_model_instance_attribute_label(value, name))
+
+
+def _debug_model_value_map(value, limit=80):
+    """Returns Django model fields, annotations, and computed values for debug adapter watch display."""
+    if getattr(value, "_meta", None) is None or isinstance(value, type):
+        return {}
+    data = getattr(value, "__dict__", {})
+    result = {}
+    for name in (_model_instance_attribute_names(value) or [])[:max(0, int(limit))]:
+        child = _model_instance_child_value(value, name, data)
+        if not isinstance(child, _InspectionDeferred):
+            result[name] = child
+    return result
 
 
 def _model_instance_attribute_label(value, name):
@@ -781,6 +832,8 @@ def _model_instance_attribute_names(value):
             add(getattr(field, "name", None))
         except Exception:
             continue
+    for name in getattr(value, "__dict__", {}):
+        add(name)
     for name in dir(type(value)):
         if _pty_is_computed_field(type(value), name):
             add(name)

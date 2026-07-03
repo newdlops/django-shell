@@ -129,6 +129,12 @@ test("shows datetime values and Django reverse relations in object inspection", 
     "        return [Field('id'), Field('created_at'), Field('orders', accessor='orders', auto_created=True, concrete=False), Field('hidden', accessor='hidden+', auto_created=True, concrete=False)]",
     "class Company:",
     "    _meta = Meta()",
+    "    @property",
+    "    def label(self):",
+    "        return 'Company ' + str(self.id)",
+    "    @property",
+    "    def broken_label(self):",
+    "        raise RuntimeError('label failed')",
     "class Manager:",
     "    def __init__(self, items):",
     "        self.items = items",
@@ -140,8 +146,10 @@ test("shows datetime values and Django reverse relations in object inspection", 
     "company = Company()",
     "company.id = 1",
     "company.created_at = datetime.datetime(2026, 6, 7, 12, 30)",
+    "company.annotated_total = 7",
     "manager = Manager([Order('primary')])",
     "children = mod._inspect_value_children(company, [{'op':'name','name':'company'}])",
+    "debug_values = {k: mod._preview_value(v) for k, v in mod._debug_model_value_map(company).items()}",
     "date_children = mod._inspect_value_children(company.created_at, [{'op':'name','name':'company'},{'op':'attr','name':'created_at'}])",
     "manager_children = mod._browse_children_of(manager, [{'op':'name','name':'manager'}])",
     "resolved = mod._resolve_path({'manager': manager}, manager_children[0]['path'])",
@@ -154,6 +162,7 @@ test("shows datetime values and Django reverse relations in object inspection", 
     "broken_children = mod._browse_children_of(broken_value, [])",
     "print(json.dumps({",
     "  'children': {v['name']: v['preview'] for v in children},",
+    "  'debugValues': debug_values,",
     "  'dateChildren': {v['name']: v['preview'] for v in date_children},",
     "  'managerPathOp': manager_children[0]['path'][-1]['op'],",
     "  'resolvedName': resolved.name,",
@@ -169,8 +178,14 @@ test("shows datetime values and Django reverse relations in object inspection", 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.children.created_at, "2026-06-07 12:30:00");
+  assert.equal(payload.children.annotated_total, "7");
+  assert.equal(payload.children.label, "'Company 1'");
+  assert.match(payload.children.broken_label, /label failed/);
   assert.equal(payload.children.orders, "<attribute>");
   assert.equal(Object.hasOwn(payload.children, "hidden"), false);
+  assert.equal(payload.debugValues.annotated_total, "7");
+  assert.equal(payload.debugValues.label, "'Company 1'");
+  assert.equal(Object.hasOwn(payload.debugValues, "orders"), false);
   assert.equal(payload.dateChildren.value, "2026-06-07 12:30:00");
   assert.equal(payload.managerPathOp, "all_index");
   assert.equal(payload.resolvedName, "primary");
@@ -578,6 +593,36 @@ test("debug execution does not make invalid module-level return valid", { skip: 
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.ok, false);
   assert.match(payload.traceback, /outside function/);
+});
+
+test("marks backend socket threads debugger-exempt and restores tracing for cell executes", { skip: !PYTHON }, () => {
+  const script = [
+    "import importlib.util, json, threading",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "marked=mod._debugger_exempt_thread(threading.Thread(target=lambda: None))",
+    "current=threading.current_thread()",
+    "current.pydev_do_not_trace=True",
+    "current.is_pydev_daemon_thread=True",
+    "mod._restore_debugger_tracing()",
+    "print(json.dumps({",
+    "  'daemonThreads': bool(mod._Server.daemon_threads),",
+    "  'markedDoNotTrace': bool(marked.pydev_do_not_trace),",
+    "  'markedDaemonFlag': bool(marked.is_pydev_daemon_thread),",
+    "  'restoredDoNotTrace': bool(current.pydev_do_not_trace),",
+    "  'restoredDaemonFlag': bool(current.is_pydev_daemon_thread)",
+    "}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.daemonThreads, true);
+  assert.equal(payload.markedDoNotTrace, true);
+  assert.equal(payload.markedDaemonFlag, true);
+  assert.equal(payload.restoredDoNotTrace, false);
+  assert.equal(payload.restoredDaemonFlag, false);
 });
 
 function pythonExecutable() {

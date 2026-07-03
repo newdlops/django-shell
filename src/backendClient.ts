@@ -14,6 +14,8 @@ import {
 import { aggregatesNeedPython, buildAggregateOrm, buildCommitOrm, buildComputedOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, buildRowsOrm } from "./modelOrm";
 
 const TCP_CONNECT_TIMEOUT_MS = 1500;
+const TCP_RETRY_COOLDOWN_MS = 15000;
+const PARALLEL_READ_RESPONSE_TIMEOUT_MS = 6000;
 // Max length of a reconstructed ORM cell we'll TYPE into the shell. A literal cell is written as one line, and a tty
 // input queue (MAX_INPUT, ~1KB on macOS) silently drops bytes past it → the cell arrives truncated, IPython sits at a
 // continuation prompt, and the serialized PTY queue hangs. Reads whose cell exceeds this fall back to the socket/`_djs_rpc`
@@ -184,8 +186,10 @@ export type BackendTransportMode = "auto" | "orm" | "pty" | "tcp";
 /** Sends execution requests to the backend running inside the Django shell process. */
 export class BackendClient {
   private activeTransport: BackendTransport = "none";
+  private forwardedEndpoint: { host: string; port: number } | undefined;
   private parallelModelReads = false;
-  private tcpUnavailable = false;
+  private remoteSocketUnavailable = false;
+  private tcpFailedAt = 0;
   private mode: BackendTransportMode = "orm";
 
   /** Stores the socket endpoint and shared authentication token. */
@@ -208,7 +212,9 @@ export class BackendClient {
   /** Sets the transport preference; re-enables TCP probing unless terminal is forced. */
   setTransportMode(mode: BackendTransportMode): void {
     this.mode = mode;
-    this.tcpUnavailable = this.mode === "pty" && this.tcpUnavailable;
+    if (this.mode !== "pty") {
+      this.tcpFailedAt = 0;
+    }
   }
 
   /** Runs model-browser reads through the socket while a Python cell owns the terminal stream. */
@@ -224,7 +230,19 @@ export class BackendClient {
 
   /** Marks the loopback socket unreachable so requests skip it and use the PTY — e.g. a remote SSH/kubectl shell whose 127.0.0.1 is the pod's, not ours. */
   markSocketUnavailable(): void {
-    this.tcpUnavailable = true;
+    this.remoteSocketUnavailable = true;
+  }
+
+  /** Routes socket requests through a locally forwarded tunnel endpoint, restoring parallel reads for remote SSH/kubectl shells. */
+  useForwardedEndpoint(host: string, port: number): void {
+    this.forwardedEndpoint = { host, port };
+    this.remoteSocketUnavailable = false;
+    this.tcpFailedAt = 0;
+  }
+
+  /** Returns whether socket requests should be skipped: remote shells permanently, transient failures only during a short cooldown so one busy/paused moment cannot disable parallel reads for the rest of the session. */
+  private get socketUnavailable(): boolean {
+    return this.remoteSocketUnavailable || (this.tcpFailedAt !== 0 && Date.now() - this.tcpFailedAt < TCP_RETRY_COOLDOWN_MS);
   }
 
   /** Returns whether reads reconstruct as readable ORM cells (ORM + Terminal modes) instead of `_djs_rpc` plumbing. */
@@ -234,7 +252,7 @@ export class BackendClient {
   supportsRuntimeInspection(): boolean {
     // Runtime inspection uses pure Python probe cells; the capture hook attaches metadata without logging helper calls.
     if (this.reconstructsViaOrmCell) { return Boolean(this.fallback); }
-    return !this.tcpUnavailable || Boolean(this.fallback);
+    return !this.socketUnavailable || Boolean(this.fallback);
   }
 
   /** Executes Python code in the backend namespace and returns captured output. */
@@ -292,7 +310,7 @@ export class BackendClient {
 
   /** Returns whether progress polling can run without queuing behind the interactive PTY cell. */
   canPollProgress(): boolean {
-    return this.mode !== "pty" && !this.tcpUnavailable;
+    return this.mode !== "pty" && !this.socketUnavailable;
   }
 
   /** Checks whether Python source is complete without executing it. */
@@ -429,14 +447,20 @@ export class BackendClient {
     log = true
   ): Promise<T> {
     const started = Date.now();
-    // Skip the socket whenever it is known unreachable (remote shell, or a prior failure) and a terminal fallback exists — covers auto AND forced Socket, so a doomed loopback connect is never retried.
-    if (this.mode === "pty" || (this.tcpUnavailable && this.fallback)) {
+    // Debug cell runs stay on the interactive main thread (stable pydevd thread id, traced since attach): route them
+    // through the PTY even when the socket/tunnel is healthy — the socket keeps serving parallel reads beside them.
+    if (this.fallback && hasDebugExecutionPayload(payload)) {
       return this.requestFallback(payload, parse, started, undefined, log, false);
     }
-    return this.socketRequest(payload).then(
+    // Skip the socket whenever it is known unreachable (remote shell, or a recent failure cooldown) and a terminal fallback exists — covers auto AND forced Socket, so a doomed loopback connect is never retried.
+    if (this.mode === "pty" || (this.socketUnavailable && this.fallback)) {
+      return this.requestFallback(payload, parse, started, undefined, log, false);
+    }
+    return this.socketRequest(payload, this.parallelReadResponseTimeout(payload)).then(
       (buffer) => {
         const parsed = parse(buffer);
         this.activeTransport = "tcp";
+        this.tcpFailedAt = 0;
         if (log) { this.logRequest(payload.kind, started, parsed, buffer.length, undefined, "tcp"); }
         return parsed;
       },
@@ -448,19 +472,25 @@ export class BackendClient {
           if (log) { this.logRequest(payload.kind, started, undefined, 0, message, "tcp"); }
           return parse(kindErrorResponse(payload.kind, `Socket transport failed: ${message}`));
         }
-        // Socket unreachable (e.g. a remote shell whose 127.0.0.1 isn't ours): fall back to the terminal so the request still completes. requestFallback sets tcpUnavailable so we stop retrying.
+        // Socket unreachable (e.g. a remote shell whose 127.0.0.1 isn't ours): fall back to the terminal so the request still completes. requestFallback starts the retry cooldown.
         return this.requestFallback(payload, parse, started, error, log);
       }
     );
   }
 
+  /** Returns a bounded response wait for busy-time parallel reads, so a paused/suspended backend rejects instead of hanging the read forever. */
+  private parallelReadResponseTimeout(payload: BackendRequestPayload): number | undefined {
+    return this.parallelModelReads && PARALLEL_MODEL_READ_KINDS.has(payload.kind) ? PARALLEL_READ_RESPONSE_TIMEOUT_MS : undefined;
+  }
+
   /** Sends one request through the direct TCP socket transport. */
-  private socketRequest(payload: BackendRequestPayload): Promise<string> {
+  private socketRequest(payload: BackendRequestPayload, responseTimeoutMs?: number): Promise<string> {
     return new Promise((resolve, reject) => {
-      const host = connectHost(this.endpoint.host);
-      const socket = net.createConnection({ host, port: this.endpoint.port });
+      const host = this.forwardedEndpoint?.host ?? connectHost(this.endpoint.host);
+      const socket = net.createConnection({ host, port: this.forwardedEndpoint?.port ?? this.endpoint.port });
       let buffer = "";
       let settled = false;
+      let responseTimer: ReturnType<typeof setTimeout> | undefined;
       const connectTimer = setTimeout(() => {
         fail(new Error(`Timed out connecting to Django shell backend after ${TCP_CONNECT_TIMEOUT_MS}ms.`));
       }, TCP_CONNECT_TIMEOUT_MS);
@@ -468,6 +498,11 @@ export class BackendClient {
       socket.setEncoding("utf8");
       socket.on("connect", () => {
         clearTimeout(connectTimer);
+        if (responseTimeoutMs) {
+          responseTimer = setTimeout(() => {
+            fail(new Error(`Django shell backend did not answer within ${responseTimeoutMs}ms while Python is busy.`));
+          }, responseTimeoutMs);
+        }
         socket.write(`${JSON.stringify({ ...payload, token: this.endpoint.token })}\n`);
       });
       socket.on("data", (chunk) => {
@@ -492,6 +527,7 @@ export class BackendClient {
         }
         settled = true;
         clearTimeout(connectTimer);
+        clearTimeout(responseTimer);
         socket.destroy();
         reject(error);
       }
@@ -503,6 +539,7 @@ export class BackendClient {
         }
         settled = true;
         clearTimeout(connectTimer);
+        clearTimeout(responseTimer);
         socket.end();
         resolve(value);
       }
@@ -524,7 +561,11 @@ export class BackendClient {
     if (!this.fallback) {
       return parse(kindErrorResponse(payload.kind, error instanceof Error ? error.message : "Terminal transport is unavailable."));
     }
-    this.tcpUnavailable = true;
+    if (error !== undefined) {
+      // Start the retry cooldown only for real socket failures; deliberate fallbacks (forced PTY, cooldown skips,
+      // debug runs pinned to the main thread) must not keep pushing the next socket probe further out.
+      this.tcpFailedAt = Date.now();
+    }
     if (this.parallelModelReads && PARALLEL_MODEL_READ_KINDS.has(payload.kind)) {
       const buffer = kindErrorResponse(payload.kind, PARALLEL_MODEL_READ_UNAVAILABLE);
       const parsed = parse(buffer);

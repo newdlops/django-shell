@@ -77,10 +77,16 @@ export function isUserDebugSourceFrame(frame: DebugSourceFrame): boolean {
   return isConcreteDebugSourceFrame(frame, path) && isUserDebugSourcePath(path);
 }
 
-/** Returns whether a path points at user source outside generated overlays and libraries. */
+/** Returns whether a path points at user source outside generated overlays, libraries, and the shell entry script. */
 export function isUserDebugSourcePath(pathOrUri: string | undefined): boolean {
   const path = normalizeDebugSourcePath(pathOrUri);
-  return !!path && !path.startsWith("<") && !isOverlayDebugSourcePath(path) && !isLibraryDebugSourcePath(path);
+  return !!path && !path.startsWith("<") && !isOverlayDebugSourcePath(path) && !isLibraryDebugSourcePath(path) && !isShellEntryDebugSourcePath(path);
+}
+
+/** Returns whether a path is the Django management entry script that hosts the interactive shell's ancestor frames. */
+function isShellEntryDebugSourcePath(path: string): boolean {
+  const normalized = comparablePath(path);
+  return normalized === "manage.py" || normalized.endsWith("/manage.py");
 }
 
 /** Returns whether a frame belongs to one of the active workspace roots. */

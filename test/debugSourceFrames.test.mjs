@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 
 const require = createRequire(import.meta.url);
-const { choosePreferredDebugSourceFrame, isOverlayDebugSourcePath } = require("../out/debugSourceFrames.js");
+const { choosePreferredDebugSourceFrame, isOverlayDebugSourcePath, isUserDebugSourcePath } = require("../out/debugSourceFrames.js");
 
 test("prefers workspace source frames over site-packages during step-in", () => {
   const frames = [
@@ -79,6 +79,19 @@ test("detects generated overlay frame paths and file URIs", () => {
   assert.equal(isOverlayDebugSourcePath("/workspace/.django-shell/console-cell.py"), true);
   assert.equal(isOverlayDebugSourcePath("file:///workspace/.django-shell/console-cell.py"), true);
   assert.equal(isOverlayDebugSourcePath("/workspace/app/services.py"), false);
+});
+
+test("treats the manage.py shell entry script as plumbing rather than user source", () => {
+  assert.equal(isUserDebugSourcePath("/workspace/manage.py"), false);
+  assert.equal(isUserDebugSourcePath("C:\\work\\proj\\manage.py"), false);
+  assert.equal(isUserDebugSourcePath("/workspace/app/manage_utils.py"), true);
+
+  const frames = [
+    frame("/workspace/manage.py", 22),
+    frame("/workspace/app/services.py", 9)
+  ];
+  const selected = choosePreferredDebugSourceFrame(frames, { preferUserSource: true, workspaceRoots: ["/workspace"] });
+  assert.equal(selected.source.path, "/workspace/app/services.py");
 });
 
 function frame(path, line) {

@@ -48,6 +48,7 @@ export interface DjangoShellDebugConfiguration {
   }>;
   request: "attach";
   rules: DebugpySteppingRule[];
+  showReturnValue: boolean;
   type: "python";
 }
 
@@ -159,6 +160,7 @@ export function buildDjangoShellDebugConfiguration(endpoint: DebugpyEndpoint, cw
     pathMappings: [{ localRoot: cwd, remoteRoot }],
     request: "attach",
     rules: buildDebugpySteppingRules(),
+    showReturnValue: true,
     type: "python"
   };
 }

@@ -11,9 +11,14 @@ var debounce;
 window.addEventListener("message", (event) => {
   const message = event.data;
   if (message && message.type === "models") {
-    state.ok = Boolean(message.ok);
-    state.error = message.error || "";
-    state.groups = groupByApp(Array.isArray(message.models) ? message.models : []);
+    if (message.ok) {
+      state.ok = true;
+      state.error = "";
+      state.groups = groupByApp(Array.isArray(message.models) ? message.models : []);
+    } else {
+      state.error = message.error || "";
+      state.ok = state.groups.length > 0;
+    }
     render();
   }
 });
@@ -82,7 +87,8 @@ function render() {
   }
   els.list.innerHTML = "";
   els.list.appendChild(fragment);
-  els.footer.textContent = footerText(total, capped, query);
+  els.footer.textContent = state.error || footerText(total, capped, query);
+  els.footer.title = state.error;
 }
 function footerText(total, capped, query) {
   if (!total) {

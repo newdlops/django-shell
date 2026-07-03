@@ -48,6 +48,7 @@ const MAX_EVALUATED_LOCAL_CANDIDATES = 24;
 const DISPLAY_DEBUG_VARIABLE_NAMES = new Map([["__m", "receiver"]]);
 const GLOBAL_SCOPE = /^globals?$/i;
 const LOCAL_SCOPE = /^locals?$/i;
+const RETURN_VALUE_NAME = /^\(return\)\s+(.+)$/;
 const VISIBLE_DEBUG_INTERNAL_VARIABLES = new Set(["__m"]);
 
 /** Reads the active paused stack frame through DAP requests. */
@@ -299,7 +300,36 @@ function isHiddenDebugVariable(name: string): boolean {
 
 /** Normalizes and truncates one DAP variable for webview display. */
 function normalizeVariable(variable: DapVariable): DebugVariableInfo {
-  return { evaluateName: variable.evaluateName, name: DISPLAY_DEBUG_VARIABLE_NAMES.get(variable.name) ?? variable.name, type: variable.type, value: truncateValue(variable.value), variablesReference: variable.variablesReference };
+  return { evaluateName: variable.evaluateName || returnValueEvaluateExpression(variable.name), name: displayVariableName(variable), type: variable.type, value: displayVariableValue(variable.value, variable.variablesReference), variablesReference: variable.variablesReference };
+}
+
+/** Renames pydevd "(return) Class.method" step results into chain-friendly receiver/result labels. */
+function displayVariableName(variable: DapVariable): string {
+  const mapped = DISPLAY_DEBUG_VARIABLE_NAMES.get(variable.name);
+  if (mapped) {
+    return mapped;
+  }
+  const returnValue = RETURN_VALUE_NAME.exec(variable.name);
+  if (!returnValue) {
+    return variable.name;
+  }
+  const method = returnValue[1].split(".").pop() || returnValue[1];
+  const looksLikeQuerySet = /QuerySet\b/.test(`${variable.type ?? ""} ${variable.value}`);
+  return looksLikeQuerySet ? `${method}() receiver` : `${method}() result`;
+}
+
+/** Returns the paused-frame expression for one pydevd step return value when debugpy omits its evaluateName. */
+function returnValueEvaluateExpression(name: string): string | undefined {
+  // pydevd stores step return values in the paused frame's locals under this dict.
+  const returnValue = RETURN_VALUE_NAME.exec(name);
+  return returnValue ? `__pydevd_ret_val_dict[${JSON.stringify(returnValue[1])}]` : undefined;
+}
+
+/** Formats one debug variable value with its DAP reference when it can be expanded. */
+function displayVariableValue(value: string, variablesReference?: number): string {
+  const ref = Number(variablesReference) || 0;
+  const text = truncateValue(value);
+  return ref ? `${text}<${ref}>` : text;
 }
 
 /** Truncates multiline debug adapter values for compact tree rendering. */
@@ -313,6 +343,13 @@ async function variablesWithQuerySetPreviews(session: DebugRequestSession, frame
   const expanded: DebugVariableInfo[] = [];
   for (const variable of variables) {
     expanded.push(variable);
+    const modelExpression = djangoModelPreviewExpression(variable);
+    if (modelExpression) {
+      const preview = await evaluateDjangoModelPreview(session, frameId, variable.name, modelExpression);
+      if (preview) {
+        expanded.push(preview);
+      }
+    }
     const expression = querySetPreviewExpression(variable);
     if (expression) {
       const preview = await evaluateQuerySetPreview(session, frameId, variable.name, expression);
@@ -324,13 +361,44 @@ async function variablesWithQuerySetPreviews(session: DebugRequestSession, frame
   return expanded;
 }
 
+/** Returns a frame expression that reads one panel variable; step-result expressions arrive pre-synthesized as evaluateName. */
+function debugVariableExpression(variable: DebugVariableInfo): string {
+  if (variable.evaluateName) {
+    return variable.evaluateName;
+  }
+  return /^[A-Za-z_]\w*$/.test(variable.name) ? variable.name : "";
+}
+
+/** Returns a safe expression for a Django model value map, or undefined for non-evaluable variables. */
+function djangoModelPreviewExpression(variable: DebugVariableInfo): string | undefined {
+  const expression = debugVariableExpression(variable);
+  if (!expression || !variable.variablesReference || /QuerySet\b|\b(list|dict|tuple|set|str|int|float|bool|NoneType|function|module|type)\b/i.test(`${variable.type ?? ""} ${variable.value}`)) {
+    return undefined;
+  }
+  return `_djs_backend_module._debug_model_value_map(${expression})`;
+}
+
+/** Evaluates one Django model value map in the paused frame. */
+async function evaluateDjangoModelPreview(session: DebugRequestSession, frameId: number, name: string, expression: string): Promise<DebugVariableInfo | undefined> {
+  try {
+    const response = await session.customRequest("evaluate", { context: "watch", expression, frameId }) as DapEvaluateResponse;
+    if (!response.result || response.result === "{}") {
+      return undefined;
+    }
+    return { name: `${name} model values`, type: response.type || "dict", value: displayVariableValue(response.result, response.variablesReference), variablesReference: response.variablesReference };
+  } catch {
+    return undefined;
+  }
+}
+
 /** Returns a safe expression for a QuerySet variable preview, or undefined for non-QuerySet values. */
 function querySetPreviewExpression(variable: DebugVariableInfo): string | undefined {
-  const looksLikeQuerySet = /\bQuerySet\b/.test(`${variable.type ?? ""} ${variable.value}`);
+  // Suffix match: custom queryset classes (Manager.from_queryset) repr as e.g. <OrderQuerySet [...]> with no word boundary.
+  const looksLikeQuerySet = /QuerySet\b/.test(`${variable.type ?? ""} ${variable.value}`);
   if (!looksLikeQuerySet) {
     return undefined;
   }
-  const expression = variable.evaluateName || (/^[A-Za-z_]\w*$/.test(variable.name) ? variable.name : "");
+  const expression = debugVariableExpression(variable);
   return expression ? `__import__('builtins').list((${expression})[:10])` : undefined;
 }
 
@@ -341,7 +409,7 @@ async function evaluateQuerySetPreview(session: DebugRequestSession, frameId: nu
     if (!response.result) {
       return undefined;
     }
-    return { name: `${name}[:10]`, querysetPreview: true, type: response.type || "list", value: truncateValue(response.result), variablesReference: response.variablesReference };
+    return { name: `${name}[:10]`, querysetPreview: true, type: response.type || "list", value: displayVariableValue(response.result, response.variablesReference), variablesReference: response.variablesReference };
   } catch {
     return undefined;
   }

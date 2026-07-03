@@ -81,11 +81,13 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
     const started = Date.now();
     let list: BackendModelList;
     try {
-      const result = await Promise.race([this.source.listModels(), new Promise<typeof CATALOG_REQUEST_TIMEOUT>((resolve) => setTimeout(() => resolve(CATALOG_REQUEST_TIMEOUT), CATALOG_REQUEST_TIMEOUT_MS))]);
+      const pendingList = this.source.listModels();
+      let result = await Promise.race([pendingList, new Promise<typeof CATALOG_REQUEST_TIMEOUT>((resolve) => setTimeout(() => resolve(CATALOG_REQUEST_TIMEOUT), CATALOG_REQUEST_TIMEOUT_MS))]);
       if (result === CATALOG_REQUEST_TIMEOUT) {
         this.logger?.log("model.catalog.timeout", { attempt, ms: CATALOG_REQUEST_TIMEOUT_MS });
         void this.view.webview.postMessage({ error: CATALOG_BUSY_MESSAGE, models: [], ok: false, type: "models" });
-        return;
+        // The slow read already queued backend work (possibly a typed PTY cell) — apply its result when it lands instead of discarding it.
+        result = await pendingList;
       }
       list = result;
     } catch (error) {

@@ -58,6 +58,7 @@ test("builds a Python attach configuration for the live shell endpoint", () => {
     pathMappings: [{ localRoot: "/workspace/app", remoteRoot: "/workspace/app" }],
     request: "attach",
     rules,
+    showReturnValue: true,
     type: "python"
   });
 });
@@ -69,12 +70,13 @@ test("debug stepping skips third-party packages while keeping project source deb
 
   assert.equal(configuration.justMyCode, false);
   assert.deepEqual(configuration.rules, rules);
-  assert.ok(paths.includes("*/site-packages/*"));
-  assert.ok(paths.includes("*\\site-packages\\*"));
-  assert.ok(paths.includes("*/dist-packages/*"));
-  assert.ok(paths.includes("*\\dist-packages\\*"));
-  assert.ok(paths.includes("*/lib/python*/*"));
-  assert.ok(paths.includes("*\\Lib\\python*\\*"));
+  // pydevd globs: single `*` never crosses path separators — every rule must use `**` to match real absolute paths.
+  assert.ok(paths.includes("**/manage.py"));
+  assert.ok(paths.includes("**/django_shell_backend.py"));
+  assert.ok(paths.includes("**/site-packages/**"));
+  assert.ok(paths.includes("**/dist-packages/**"));
+  assert.ok(paths.includes("**/lib/python*/**"));
+  assert.ok(paths.every((path) => path.startsWith("<") || path.startsWith("**")));
 });
 
 test("builds remote-friendly Python attach configuration from debug settings", () => {

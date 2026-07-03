@@ -388,14 +388,16 @@ test("overlay debug uses a direct DAP session so the shell overlay stays focused
   assert.ok(directDebugAdapterSource.includes("terminateDebuggee: false"));
   assert.ok(directDebugAdapterSource.includes("justMyCode: options.justMyCode ?? false"));
   assert.ok(directDebugAdapterSource.includes("buildDebugpySteppingRules()"));
+  assert.ok(directDebugAdapterSource.includes("showReturnValue: true"));
   assert.ok(debugShellSource.includes("rules: buildDebugpySteppingRules()"));
-  assert.ok(debugSteppingRulesSource.includes('path: "*/site-packages/*"'));
-  assert.ok(debugSteppingRulesSource.includes('path: "*/dist-packages/*"'));
-  assert.ok(debugSteppingRulesSource.includes('path: "*/lib/python*/*"'));
-  assert.ok(debugSteppingRulesSource.includes('path: "*\\\\Lib\\\\python*\\\\*"'));
+  assert.ok(debugShellSource.includes("showReturnValue: true"));
+  assert.ok(debugSteppingRulesSource.includes('path: "**/site-packages/**"'));
+  assert.ok(debugSteppingRulesSource.includes('path: "**/dist-packages/**"'));
+  assert.ok(debugSteppingRulesSource.includes('path: "**/lib/python*/**"'));
+  assert.ok(debugSteppingRulesSource.includes('path: "**/manage.py"'));
   assert.ok(directDebugAdapterSource.includes("args.cwd = options.cwd"));
   assert.ok(directDebugAdapterSource.includes("args.pathMappings = options.pathMappings"));
-  assert.ok(debugSteppingRulesSource.includes('path: "*/django_shell_backend.py"'));
+  assert.ok(debugSteppingRulesSource.includes('path: "**/django_shell_backend.py"'));
   assert.ok(customConsoleSource.includes('this.debugMode === "overlay" && this.debugControlOriginOverlay'));
   assert.ok(customConsoleSource.includes('this.debugMode === "overlay" || this.lastDebugFrameOverlay'));
   assert.ok(customConsoleSource.includes('wasVisible || (this.debugMode === "overlay" && (this.debugSession || this.overlayDebugSession))'));
@@ -496,6 +498,8 @@ test("overlay debug analysis renders in the Django Shell Activity Bar panel", ()
   assert.ok(debugInspectorSource.includes('DISPLAY_DEBUG_VARIABLE_NAMES = new Map([["__m", "receiver"]])'));
   assert.ok(debugInspectorSource.includes('VISIBLE_DEBUG_INTERNAL_VARIABLES = new Set(["__m"])'));
   assert.ok(debugInspectorSource.includes("isHiddenDebugVariable"));
+  assert.ok(debugInspectorSource.includes("displayVariableValue(variable.value, variable.variablesReference)"));
+  assert.ok(debugInspectorSource.includes("`${text}<${ref}>`"));
   assert.ok(customConsoleSource.includes("inspectDebugVariables(session"));
   assert.ok(customConsoleSource.includes("setDebugAnalysisInfo(info)"));
   assert.ok(customConsoleSource.includes("setDebugAnalysisVariableResolver"));
@@ -507,8 +511,20 @@ test("debug variable analysis previews bounded QuerySet result lists", () => {
   assert.ok(debugInspectorSource.includes("variablesWithQuerySetPreviews"));
   assert.ok(debugInspectorSource.includes('customRequest("evaluate"'));
   assert.ok(debugInspectorSource.includes("__import__('builtins').list"));
+  assert.ok(debugInspectorSource.includes("_djs_backend_module._debug_model_value_map"));
+  assert.ok(debugInspectorSource.includes("evaluateDjangoModelPreview"));
+  assert.ok(debugInspectorSource.includes("model values"));
   assert.ok(debugInspectorSource.includes("[:10]"));
   assert.ok(debugInspectorSource.includes("querysetPreview: true"));
+  // Chain intermediates surfaced as pydevd "(return) name" step results get list previews next to the variable itself.
+  assert.ok(debugInspectorSource.includes("debugVariableExpression"));
+  assert.ok(debugInspectorSource.includes("returnValueEvaluateExpression"));
+  assert.ok(debugInspectorSource.includes("__pydevd_ret_val_dict["));
+  assert.ok(debugInspectorSource.includes("/^\\(return\\)\\s+(.+)$/"));
+  // Step results render as chain-friendly labels instead of raw pydevd "(return) ..." names.
+  assert.ok(debugInspectorSource.includes("displayVariableName"));
+  assert.ok(debugInspectorSource.includes("`${method}() receiver`"));
+  assert.ok(debugInspectorSource.includes("`${method}() result`"));
 });
 
 test("PTY fallback preserves debug metadata instead of typing overlay debug cells literally", () => {
@@ -566,7 +582,10 @@ test("failed debug execution exits debugging and returns focus to output", () =>
   assert.ok(customConsoleSource.includes("stopDebugAfterFailedExecution"));
   assert.ok(customConsoleSource.includes("await direct.disconnect()"));
   assert.ok(customConsoleSource.includes("await vscode.debug.stopDebugging(session)"));
-  assert.ok(customConsoleSource.includes('this.postDebugStatus("idle", "ended")'));
+  assert.ok(customConsoleSource.includes("this.lastDebugControlAction = undefined"));
+  assert.ok(customConsoleSource.includes("this.debugControlOriginOverlay = false"));
+  assert.ok(customConsoleSource.includes("this.lastDebugFrameOverlay = false"));
+  assert.ok(customConsoleSource.includes('this.postDebugStatus("idle")'));
   assert.ok(customConsoleSource.includes("clearExternalDebugFrameDecoration();"));
   assert.ok(customConsoleSource.includes("this.panel?.reveal(vscode.ViewColumn.One)"));
   assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", false'));

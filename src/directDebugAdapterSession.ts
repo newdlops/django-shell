@@ -232,7 +232,7 @@ function isInitializeTimeout(error: unknown): boolean {
 
 /** Builds debugpy attach arguments for overlay-owned sessions. */
 function attachArguments(options: DirectDebugAdapterAttachOptions): Record<string, unknown> {
-  const args: Record<string, unknown> = { django: options.django ?? true, justMyCode: options.justMyCode ?? false, name: options.name ?? "Django Shell Overlay", request: "attach", rules: buildDebugpySteppingRules(), steppingResumesAllThreads: false, subProcess: false, type: "python" };
+  const args: Record<string, unknown> = { django: options.django ?? true, justMyCode: options.justMyCode ?? false, name: options.name ?? "Django Shell Overlay", request: "attach", rules: buildDebugpySteppingRules(), showReturnValue: true, steppingResumesAllThreads: false, subProcess: false, type: "python" };
   if (options.cwd) { args.cwd = options.cwd; }
   if (options.pathMappings?.length) { args.pathMappings = options.pathMappings; }
   return args;

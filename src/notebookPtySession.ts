@@ -70,6 +70,7 @@ export class NotebookPtySession implements vscode.Disposable {
   private ptyProgressBuffer = "";
   private readonly ptyResponseChunks = new Map<string, { chunks: string[]; count: number }>();
   private ptyRequestSeq = 1;
+  private backendForward: KubectlPortForward | SshPortForward | undefined;
   private debugpyForward: KubectlPortForward | SshPortForward | undefined;
   private kubectlTarget: KubectlExecTarget | undefined;
   private shellLogTail = "";
@@ -198,6 +199,7 @@ export class NotebookPtySession implements vscode.Disposable {
     this.generation += 1;
     this.stopKeepalive();
     this.clearDebugpyPortForward();
+    this.clearBackendPortForward();
     this.clearBootstrapWriteTimers();
     this.process?.kill();
     this.rejectPtyRequests("Django shell PTY session disposed.");
@@ -224,6 +226,35 @@ export class NotebookPtySession implements vscode.Disposable {
     if (this.sshTarget) { return this.forwardSshDebugpy(remotePort); }
     this.options.diagnosticLogger?.log("debug.portForward.unavailable", { remotePort, sessionId: this.options.sessionId });
     return undefined;
+  }
+
+  /** Tunnels the remote backend socket to a local port so model reads run in parallel with a busy remote PTY. */
+  private async forwardBackendSocket(remotePort: number, client: BackendClient): Promise<void> {
+    const kubectl = this.kubectlTarget;
+    const ssh = this.sshTarget;
+    if ((!kubectl && !ssh) || !remotePort) {
+      this.options.diagnosticLogger?.log("backend.portForward.unavailable", { remotePort, sessionId: this.options.sessionId });
+      return;
+    }
+    try {
+      const forward = kubectl ? await startKubectlPortForward(kubectl, remotePort, this.options.diagnosticLogger) : await startSshPortForward(ssh as SshExecTarget, remotePort, this.options.diagnosticLogger);
+      if (this.client !== client) {
+        forward.dispose();
+        return;
+      }
+      this.clearBackendPortForward();
+      this.backendForward = forward;
+      client.useForwardedEndpoint(forward.host, forward.port);
+      this.options.diagnosticLogger?.log("backend.portForward.ready", { localPort: forward.port, remotePort, sessionId: this.options.sessionId });
+    } catch (error) {
+      this.options.diagnosticLogger?.log("backend.portForward.error", { error: error instanceof Error ? error.message : String(error), remotePort, sessionId: this.options.sessionId });
+    }
+  }
+
+  /** Stops the backend socket tunnel owned by this PTY session. */
+  private clearBackendPortForward(): void {
+    this.backendForward?.dispose();
+    this.backendForward = undefined;
   }
 
   /** Starts an automatic kubectl port-forward for remote debugpy. */
@@ -386,8 +417,12 @@ export class NotebookPtySession implements vscode.Disposable {
       this.client = new BackendClient(ready, this.options.diagnosticLogger, (payload) => this.requestViaPty(payload));
       const preferred = vscode.workspace.getConfiguration("djangoShell").get<string>("modelBrowser.transport", "pty");
       if (["orm", "auto", "tcp", "pty"].includes(preferred)) { this.client.setTransportMode(preferred as BackendTransportMode); }
-      // Inline bootstrap was used → remote shell (SSH/kubectl): the backend's 127.0.0.1 socket isn't reachable from here, so skip it and use the PTY.
-      if (this.bootstrapRetried) { this.client.markSocketUnavailable(); }
+      // Inline bootstrap was used → remote shell (SSH/kubectl): the backend's 127.0.0.1 socket isn't reachable directly, so
+      // skip it, then try a tunnel to the backend port so parallel model reads work beside a busy remote PTY.
+      if (this.bootstrapRetried) {
+        this.client.markSocketUnavailable();
+        void this.forwardBackendSocket(ready.port, this.client);
+      }
       this.state = "ready";
       this.startKeepalive();
       this.options.diagnosticLogger?.log("backend.ready", { autoImported: ready.autoImported, host: ready.host, port: ready.port, remote: this.bootstrapRetried, sessionId: this.options.sessionId });
@@ -643,6 +678,7 @@ export class NotebookPtySession implements vscode.Disposable {
     this.stopKeepalive();
     this.clearBootstrapWriteTimers();
     this.clearDebugpyPortForward();
+    this.clearBackendPortForward();
     this.client = undefined;
     this.ipython = false;
     this.cellCapture = false;
@@ -713,7 +749,7 @@ export class NotebookPtySession implements vscode.Disposable {
 
   /** Drops the attached backend when the user leaves the Python shell. */
   private detachBackendForShellExit(): void {
-    this.stopKeepalive(); this.client = undefined; this.ipython = false; this.cellCapture = false; this.suppressBackendOutput = false; this.token = ""; this.state = "starting"; this.rejectPtyRequests("Django shell backend detached."); this.fireChange();
+    this.stopKeepalive(); this.clearBackendPortForward(); this.client = undefined; this.ipython = false; this.cellCapture = false; this.suppressBackendOutput = false; this.token = ""; this.state = "starting"; this.rejectPtyRequests("Django shell backend detached."); this.fireChange();
   }
 }
 
