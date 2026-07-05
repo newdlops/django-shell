@@ -19,7 +19,7 @@ export interface WorkbenchOverlayGeometry { height: number; left: number; top: n
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
 const GEOMETRY_SETTLE_MS = 80;
-const RENDERER_PATCH_VERSION = 86;
+const RENDERER_PATCH_VERSION = 88;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -143,9 +143,25 @@ export class WorkbenchOverlay implements vscode.Disposable {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected) {
       return;
     }
-    const visibleLine = info.frame && this.isOverlayFrame(info.frame.path) ? info.frame.line : 0;
+    // Keep the last paused line highlighted through the transient "running" state between steps: clearing it there and
+    // re-adding it on the next stop makes the current-line marker blink on every step. It moves on the next "paused" and
+    // clears only when the run ends (idle/error).
+    if (info.state === "running") {
+      return;
+    }
+    const visibleLine = info.state === "paused" && info.frame && this.isOverlayFrame(info.frame.path) ? info.frame.line : 0;
     await this.evalInWorkbench(debugLineExpression(visibleLine >= 1 ? visibleLine : 0)).catch((error: unknown) => {
       this.logger?.log("overlay.debug.info.error", { error: error instanceof Error ? error.message : String(error) });
+    });
+  }
+
+  /** Mirrors the one-based lines that have breakpoints into overlay glyph-margin dots so users can see where breakpoints are set. */
+  async updateBreakpoints(lines: number[]): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected) {
+      return;
+    }
+    await this.evalInWorkbench(breakpointsExpression(lines)).catch((error: unknown) => {
+      this.logger?.log("overlay.breakpoints.error", { error: error instanceof Error ? error.message : String(error) });
     });
   }
 
@@ -756,6 +772,8 @@ function outputExpression(text: string, ok: boolean): string { return `window.__
 
 /** Returns the expression that refreshes the paused debugger line marker. */
 function debugLineExpression(visibleLine: number): string { return `window.__dsoSetOverlayDebugLine ? window.__dsoSetOverlayDebugLine(${JSON.stringify(visibleLine)}) : 'overlay-debug-line-missing'`; }
+/** Builds the renderer call that renders overlay breakpoint glyphs for the given one-based lines. */
+function breakpointsExpression(lines: number[]): string { return `window.__dsoSetOverlayBreakpoints ? window.__dsoSetOverlayBreakpoints(${JSON.stringify(lines)}) : 'overlay-breakpoints-missing'`; }
 
 /** Parses one hover markdown file link into a target file and one-based position (fragment forms: L10, L10,5, 10,5). */
 function parseHoverLinkTarget(href: string): { column: number; line: number; uri: vscode.Uri } | undefined {

@@ -41,11 +41,10 @@ interface DapThread { id: number; name: string }
 interface DapVariable { evaluateName?: string; indexedVariables?: number; name: string; namedVariables?: number; type?: string; value: string; variablesReference?: number }
 interface DapEvaluateResponse { result?: string; type?: string; variablesReference?: number }
 interface DebugFrameRef { frameId?: number; threadId: number }
-export interface DebugInspectOptions { preferOverlay?: boolean; preferUserSource?: boolean }
+export interface DebugInspectOptions { enrich?: boolean; preferOverlay?: boolean; preferUserSource?: boolean }
 
 const MAX_SCOPE_VARIABLES = 80;
-const MAX_EVALUATED_LOCAL_CANDIDATES = 24;
-const MAX_QUERYSET_PREVIEW_CACHE = 256;
+const MAX_EVALUATED_LOCAL_CANDIDATES = 10;
 const DISPLAY_DEBUG_VARIABLE_NAMES = new Map([["__m", "receiver"]]);
 const GLOBAL_SCOPE = /^globals?$/i;
 const LOCAL_SCOPE = /^locals?$/i;
@@ -55,14 +54,14 @@ const VISIBLE_DEBUG_INTERNAL_VARIABLES = new Set(["__m"]);
 type DebugVariableLevel = "children" | "scope";
 
 interface DebugInspectionMemo {
-  querysetPreviews: Map<string, { type?: string; value: string } | undefined>;
   scopes: Map<number, Promise<DebugScopeInfo[]>>;
   stacks: Map<number, Promise<DapStackFrame[]>>;
 }
 
-// Session-scoped inspection caches. stacks/scopes share one DAP read per pause across the stopped-event chain, the
-// active-stack-item chain, and diagnostics logging; querysetPreviews persists across steps keyed by the variable repr so
-// unchanged QuerySets skip their per-step database re-query. The WeakMap releases everything with the session object.
+// Session-scoped inspection cache. stacks/scopes share one DAP read per pause across the stopped-event chain, the
+// active-stack-item chain, and diagnostics logging. The WeakMap releases everything with the session object. Preview
+// caches were removed: enrichment now runs only on the settled (debounced) pass, so previews are re-evaluated live there
+// (keeping a current-pause variablesReference so they stay expandable) instead of cached without one.
 const INSPECTION_MEMO = new WeakMap<DebugRequestSession, DebugInspectionMemo>();
 
 /** Drops the per-pause stack/scope memos so the next stopped or continued event re-reads live debugger state. */
@@ -81,7 +80,7 @@ export function invalidateDebugInspection(session: DebugRequestSession | undefin
 function inspectionMemoFor(session: DebugRequestSession): DebugInspectionMemo {
   let memo = INSPECTION_MEMO.get(session);
   if (!memo) {
-    memo = { querysetPreviews: new Map(), scopes: new Map(), stacks: new Map() };
+    memo = { scopes: new Map(), stacks: new Map() };
     INSPECTION_MEMO.set(session, memo);
   }
   return memo;
@@ -107,7 +106,8 @@ async function inspectDebugFrameRef(session: DebugRequestSession, item: DebugFra
   const frame = stackFrameFor(frames, item, options);
   const sourceLine = frame ? await sourceLineFor(frame) : "";
   const frameId = frame?.id ?? item.frameId;
-  const scopes = frameId ? await scopeVariables(session, frameId, frame) : [];
+  const basic = frameId ? await scopeVariables(session, frameId) : [];
+  const scopes = frameId && frame && options.enrich !== false ? await enrichScopeVariables(session, frameId, frame, basic) : basic;
   return { frame: frame && { column: frame.column, line: frame.line, name: frame.name, path: sourcePathFor(frame), sourceLine }, frames: frames.slice(0, 8).map(stackFrameInfo), scopes, state: "paused" };
 }
 
@@ -183,28 +183,36 @@ function workspaceRootPaths(): string[] {
   return vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath).filter(Boolean) ?? [];
 }
 
-/** Returns compact variables for the current frame scopes, shared per pause so parallel inspection chains reuse one read. */
-function scopeVariables(session: DebugRequestSession, frameId: number, frame?: DapStackFrame): Promise<DebugScopeInfo[]> {
+/** Returns the plain (un-enriched) frame scope variables, shared per pause so parallel inspection chains reuse one scopes+variables read. Enrichment (candidates/previews) is layered on separately so the fast stepping pass can skip it. */
+function scopeVariables(session: DebugRequestSession, frameId: number): Promise<DebugScopeInfo[]> {
   const memo = inspectionMemoFor(session);
   const cached = memo.scopes.get(frameId);
   if (cached) {
     return cached;
   }
-  const request = readScopeVariables(session, frameId, frame);
+  const request = readScopeVariables(session, frameId);
   memo.scopes.set(frameId, request);
   request.catch(() => memo.scopes.delete(frameId));
   return request;
 }
 
-/** Reads frame scopes concurrently; only Locals get candidate/preview enrichment — the Django shell's Globals hold every accumulated ORM object, and per-variable evaluates plus QuerySet re-queries there made each ORM-mode step crawl. */
-async function readScopeVariables(session: DebugRequestSession, frameId: number, frame?: DapStackFrame): Promise<DebugScopeInfo[]> {
+/** Reads each frame scope's plain variables concurrently (no candidate/preview evaluates). */
+async function readScopeVariables(session: DebugRequestSession, frameId: number): Promise<DebugScopeInfo[]> {
   const response = await session.customRequest("scopes", { frameId }) as { scopes?: DapScope[] };
+  const scopes = debugScopeCandidates(response.scopes ?? []).slice(0, 4);
+  return Promise.all(scopes.map(async (scope) => ({ name: scope.name, total: scope.namedVariables ?? scope.indexedVariables, variables: await variablesForReference(session, scope.variablesReference, MAX_SCOPE_VARIABLES) })));
+}
+
+/** Layers Locals enrichment onto plain scopes: shell-global cell bindings debugpy files under Globals, plus live (expandable) QuerySet/model previews. Only runs on the settled (non-stepping) inspection pass — see the two-phase stop handlers — so previews carry a current-pause variablesReference and step latency stays off the enrichment path. */
+async function enrichScopeVariables(session: DebugRequestSession, frameId: number, frame: DapStackFrame, basicScopes: DebugScopeInfo[]): Promise<DebugScopeInfo[]> {
+  const globalsVariables = basicScopes.find((scope) => GLOBAL_SCOPE.test(scope.name))?.variables ?? [];
   const localCandidates = await localCandidateNamesForFrame(frame);
-  return Promise.all(debugScopeCandidates(response.scopes ?? []).slice(0, 4).map(async (scope) => {
-    const variables = await variablesForReference(session, scope.variablesReference, MAX_SCOPE_VARIABLES);
-    const local = LOCAL_SCOPE.test(scope.name);
-    const visibleVariables = local ? await variablesWithLocalCandidates(session, frameId, variables, localCandidates) : variables;
-    return { name: scope.name, total: scope.namedVariables ?? scope.indexedVariables, variables: local ? await variablesWithQuerySetPreviews(session, frameId, visibleVariables) : visibleVariables };
+  return Promise.all(basicScopes.map(async (scope) => {
+    if (!LOCAL_SCOPE.test(scope.name)) {
+      return scope;
+    }
+    const withCandidates = await variablesWithLocalCandidates(session, frameId, scope.variables, localCandidates, globalsVariables);
+    return { ...scope, variables: await variablesWithQuerySetPreviews(session, frameId, withCandidates) };
   }));
 }
 
@@ -308,15 +316,18 @@ function collectTargetNames(target: string, names: Set<string>): void {
   }
 }
 
-/** Appends evaluated shell-global bindings that debugpy omits from Locals in wrapped cells, evaluating candidates concurrently so remote round trips overlap. */
-async function variablesWithLocalCandidates(session: DebugRequestSession, frameId: number, variables: DebugVariableInfo[], candidates: string[]): Promise<DebugVariableInfo[]> {
+/** Appends shell-global bindings that debugpy omits from Locals in wrapped cells, reusing the already-fetched Globals variables so no extra round trip is needed; only bindings absent from Globals (rare, e.g. truncated) fall back to a bounded set of concurrent evaluates. */
+async function variablesWithLocalCandidates(session: DebugRequestSession, frameId: number, variables: DebugVariableInfo[], candidates: string[], globalsVariables: DebugVariableInfo[]): Promise<DebugVariableInfo[]> {
   if (!candidates.length) {
     return variables;
   }
   const existing = new Set(variables.flatMap((variable) => [variable.name, variable.evaluateName].filter((name): name is string => Boolean(name))));
+  const globalsByName = new Map(globalsVariables.map((variable) => [variable.name, variable]));
   const missing = candidates.filter((name) => !existing.has(name) && !isHiddenDebugVariable(name));
-  const evaluated = await Promise.all(missing.map((name) => evaluateLocalCandidate(session, frameId, name)));
-  const extra = evaluated.filter((variable): variable is DebugVariableInfo => Boolean(variable));
+  const fromGlobals = missing.map((name) => globalsByName.get(name)).filter((variable): variable is DebugVariableInfo => Boolean(variable));
+  const toEvaluate = missing.filter((name) => !globalsByName.has(name)).slice(0, MAX_EVALUATED_LOCAL_CANDIDATES);
+  const evaluated = (await Promise.all(toEvaluate.map((name) => evaluateLocalCandidate(session, frameId, name)))).filter((variable): variable is DebugVariableInfo => Boolean(variable));
+  const extra = [...fromGlobals, ...evaluated];
   return extra.length ? [...variables, ...extra] : variables;
 }
 
@@ -393,7 +404,7 @@ function truncateValue(value: string): string {
   return singleLine.length > 500 ? `${singleLine.slice(0, 497)}...` : singleLine;
 }
 
-/** Adds bounded QuerySet and model previews next to paused-frame variables, evaluating variables concurrently. */
+/** Adds QuerySet and model previews next to paused-frame variables, evaluated live and concurrently so the preview rows carry a current-pause variablesReference and stay expandable (the user can drill into the actual result rows/fields). Runs only on the settled enrichment pass, so this is not on the per-step path. */
 async function variablesWithQuerySetPreviews(session: DebugRequestSession, frameId: number, variables: DebugVariableInfo[]): Promise<DebugVariableInfo[]> {
   const rows = await Promise.all(variables.map(async (variable) => {
     const entry: DebugVariableInfo[] = [variable];
@@ -406,7 +417,7 @@ async function variablesWithQuerySetPreviews(session: DebugRequestSession, frame
     }
     const expression = querySetPreviewExpression(variable);
     if (expression) {
-      const preview = await cachedQuerySetPreview(session, frameId, variable, expression);
+      const preview = await evaluateQuerySetPreview(session, frameId, variable.name, expression);
       if (preview) {
         entry.push(preview);
       }
@@ -414,27 +425,6 @@ async function variablesWithQuerySetPreviews(session: DebugRequestSession, frame
     return entry;
   }));
   return rows.flat();
-}
-
-/** Returns a QuerySet preview from the per-session cache while the variable repr is unchanged, else evaluates it live. A QuerySet slice runs a fresh database query, so reuse turns one query per QuerySet per step into one per QuerySet; cached previews carry repr text only (no variablesReference). */
-async function cachedQuerySetPreview(session: DebugRequestSession, frameId: number, variable: DebugVariableInfo, expression: string): Promise<DebugVariableInfo | undefined> {
-  const memo = inspectionMemoFor(session);
-  const key = `${expression}|${stripReferenceSuffix(variable.value)}`;
-  if (memo.querysetPreviews.has(key)) {
-    const cached = memo.querysetPreviews.get(key);
-    return cached && { name: `${variable.name}[:10]`, querysetPreview: true, type: cached.type, value: cached.value };
-  }
-  const preview = await evaluateQuerySetPreview(session, frameId, variable.name, expression);
-  if (memo.querysetPreviews.size >= MAX_QUERYSET_PREVIEW_CACHE) {
-    memo.querysetPreviews.clear();
-  }
-  memo.querysetPreviews.set(key, preview && { type: preview.type, value: stripReferenceSuffix(preview.value) });
-  return preview;
-}
-
-/** Removes the trailing `<ref>` decoration so cache keys and cached texts survive per-pause reference churn. */
-function stripReferenceSuffix(value: string): string {
-  return value.replace(/<\d+>$/, "");
 }
 
 /** Returns a frame expression that reads one panel variable; step-result expressions arrive pre-synthesized as evaluateName. */

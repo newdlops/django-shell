@@ -193,39 +193,33 @@ test("previews the current Enter execution range with editor decorations", () =>
   assert.equal(editor.options.lineNumbers(5), "...");
 });
 
-test("keeps native Monaco breakpoint handling instead of custom overlay breakpoint APIs", () => {
+test("reveals breakpoint lines as glyph-margin dots while leaving breakpoint SETTING native", () => {
   const source = overlaySyncRendererSource();
   const state = { overlayRoot: undefined };
   const events = [];
   const window = { addEventListener(type, _callback, capture) { events.push({ capture: !!capture, target: "window", type }); }, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
   const document = { activeElement: undefined, addEventListener(type, _callback, capture) { events.push({ capture: !!capture, target: "document", type }); }, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : undefined, querySelectorAll: () => [], removeEventListener() {} };
-  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installBreakpointToggle: window.__dsoInstallBreakpointToggle, installEnterRunner: window.__dsoInstallEnterRunner, setBreakpoints: window.__dsoSetOverlayBreakpoints };`)(window, document, () => undefined);
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installBreakpointToggle: window.__dsoInstallBreakpointToggle, setBreakpoints: window.__dsoSetOverlayBreakpoints };`)(window, document, () => undefined);
   let mouseHandler;
   const node = { addEventListener(type, _callback, capture) { events.push({ capture: !!capture, target: "node", type }); }, classList: { contains: () => false }, contains: () => true, querySelectorAll: () => [], removeEventListener() {} };
   const editor = fakeEditor(fakeModel("one\ntwo\nthree\nfour\n"));
   editor.onMouseDown = (callback) => { mouseHandler = callback; return { dispose() {} }; };
   editor.getDomNode = () => node;
-  const posts = [];
-  const root = { __djangoShellEditor: editor };
+  const root = { __djangoShellEditor: editor, __dsoInputStartLine: 1 };
   state.overlayRoot = root;
 
-  api.installEnterRunner(root, editor, (payload) => {
-    posts.push(payload);
-    return { json: async () => ({ executed: true }) };
-  });
+  api.setBreakpoints([2, 4]);
 
-  assert.equal(api.setBreakpoints, undefined);
+  // Reveal: a glyph-margin dot is drawn per breakpoint line.
+  assert.equal(typeof api.setBreakpoints, "function");
+  const glyphs = editor.decorations.filter((item) => item.options.glyphMarginClassName === "dso-breakpoint");
+  assert.equal(glyphs.length, 2);
+  assert.deepEqual(glyphs.map((item) => item.range.startLineNumber).sort((a, b) => a - b), [2, 4]);
+  // Setting stays native: no custom toggle API, no mouse/context handlers, no line-className breakpoint decorations.
   assert.equal(api.installBreakpointToggle, undefined);
   assert.equal(mouseHandler, undefined);
   assert.equal(events.some((event) => event.type === "mousedown" || event.type === "contextmenu"), false);
-  assert.equal(posts.some((payload) => payload.type === "toggleBreakpoint"), false);
   assert.equal(editor.decorations.some((item) => item.options.className === "dso-breakpoint-line"), false);
-  assert.equal(editor.decorations.filter((item) => item.options.glyphMarginClassName).length, 0);
-  assert.equal(editor.decorations.filter((item) => item.options.linesDecorationsClassName).length, 0);
-  assert.equal(editor.options.glyphMargin, true);
-  assert.equal(editor.options.lineDecorationsWidth, 0);
-  assert.equal(editor.options.lineNumbersMinChars, 1);
-  assert.equal(root.__dsoBreakpointModelLines, undefined);
 });
 
 test("strips legacy prelude markers instead of hiding user import lines", () => {

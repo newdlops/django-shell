@@ -14,6 +14,10 @@ export function buildDebugpySteppingRules(): DebugpySteppingRule[] {
     { include: false, path: "**/django_shell_backend.py" },
     // The interactive shell's ancestor frames live in manage.py: stepping past a cell must run on instead of trapping there.
     { include: false, path: "**/manage.py" },
+    // With justMyCode:false, stepping (or step-in) over a `from x import y` that first-imports a module would otherwise
+    // trap in Python's import machinery. Frozen stdlib modules report `<frozen ...>` filenames; importlib lives on disk.
+    { include: false, path: "<frozen *>" },
+    { include: false, path: "**/importlib/**" },
     { include: false, path: "**/socketserver.py" },
     { include: false, path: "**/threading.py" },
     { include: false, path: "**/lib/python*/**" },

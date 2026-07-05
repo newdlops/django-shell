@@ -7,6 +7,9 @@ import type { DiagnosticLogger } from "./diagnostics";
 
 export type DebugStatusState = "attached" | "error" | "idle" | "paused" | "running" | "starting";
 
+// Delay before the settled (enriched) inspection pass; rapid steps within this window reschedule it, skipping enrichment.
+const DEBUG_ENRICH_DELAY_MS = 150;
+
 interface DebugEventHooks {
   consumeRunOnSessionStart(): boolean;
   getSession(): vscode.DebugSession | undefined;
@@ -33,13 +36,21 @@ interface DebugThreadEventBody {
 export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[], hooks: DebugEventHooks): void {
   let generation = 0;
   let pausedThreadId: number | undefined;
+  let enrichTimer: ReturnType<typeof setTimeout> | undefined;
   const clearInfo = (state: DebugPanelState) => hooks.postInfo({ state });
+  // Two-phase inspection: post the frame + plain variables immediately (fast stepping), then run the expensive
+  // candidate/preview enrichment only once the user settles, so rapid stepping never waits on it.
+  const scheduleEnrich = (current: number, run: () => Promise<void>) => {
+    if (enrichTimer) { clearTimeout(enrichTimer); }
+    enrichTimer = setTimeout(() => { if (current === generation) { void run(); } }, DEBUG_ENRICH_DELAY_MS);
+  };
   const inspectStack = (item: vscode.DebugThread | vscode.DebugStackFrame | undefined) => {
     if (shouldIgnoreActiveStackItem(item, pausedThreadId, hooks)) { hooks.logger?.log("debug.active.frame.ignore", { pausedThreadId: pausedThreadId ?? 0, threadId: item && "threadId" in item ? item.threadId : 0 }); return; }
     generation += 1;
     const current = generation;
     if (item && "frameId" in item) { hooks.logger?.log("debug.active.frame", { frameId: item.frameId, threadId: item.threadId }); }
-    void refreshPausedFrame(item, hooks, () => current === generation);
+    void refreshPausedFrame(item, hooks, () => current === generation, false);
+    scheduleEnrich(current, () => refreshPausedFrame(item, hooks, () => current === generation, true));
   };
   const inspectStopped = (session: vscode.DebugSession, body: DebugThreadEventBody | undefined) => {
     if (session.id !== hooks.getSession()?.id) { return; }
@@ -51,7 +62,8 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
     invalidateDebugInspection(session);
     hooks.logger?.log("debug.dap.stopped", { reason: body?.reason ?? "", threadId: body?.threadId ?? 0 });
     void logDebugStack(session, body?.threadId, hooks);
-    void refreshStoppedThread(session, body, hooks, () => current === generation);
+    void refreshStoppedThread(session, body, hooks, () => current === generation, false);
+    scheduleEnrich(current, () => refreshStoppedThread(session, body, hooks, () => current === generation, true));
   };
   const handleContinued = (body: DebugThreadEventBody | undefined) => {
     if (shouldIgnoreContinuedThread(body, pausedThreadId, hooks)) { hooks.logger?.log("debug.dap.continued.ignore", { pausedThreadId: pausedThreadId ?? 0, threadId: body?.threadId ?? 0 }); return; }
@@ -191,8 +203,8 @@ async function firstDebugThreadId(session: vscode.DebugSession): Promise<number 
   return response.threads?.[0]?.id;
 }
 
-/** Refreshes paused frame location if VS Code focuses a stack frame. */
-async function refreshPausedFrame(item: vscode.DebugThread | vscode.DebugStackFrame | undefined, hooks: DebugEventHooks, isCurrent: () => boolean): Promise<void> {
+/** Refreshes paused frame location if VS Code focuses a stack frame; enrich=false is the fast stepping pass (plain variables), enrich=true the settled pass (candidates + previews). */
+async function refreshPausedFrame(item: vscode.DebugThread | vscode.DebugStackFrame | undefined, hooks: DebugEventHooks, isCurrent: () => boolean, enrich: boolean): Promise<void> {
   const session = hooks.getSession();
   if (!session || !item || item.session.id !== session.id) {
     hooks.postInfo({ state: session ? "attached" : "idle" });
@@ -202,7 +214,7 @@ async function refreshPausedFrame(item: vscode.DebugThread | vscode.DebugStackFr
   hooks.postStatus("paused", "breakpoint");
   try {
     const stepInto = hooks.lastControlAction() === "stepInto";
-    const info = await inspectDebugFrame(session, item, { preferOverlay: !stepInto, preferUserSource: stepInto });
+    const info = await inspectDebugFrame(session, item, { enrich, preferOverlay: !stepInto, preferUserSource: stepInto });
     if (isCurrent() && hooks.getSession()?.id === session.id) { hooks.logger?.log("debug.frame", frameFields(info)); hooks.postInfo(info); }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -211,12 +223,12 @@ async function refreshPausedFrame(item: vscode.DebugThread | vscode.DebugStackFr
   }
 }
 
-/** Refreshes paused frame info directly from a DAP stopped event. */
-async function refreshStoppedThread(session: vscode.DebugSession, body: { reason?: string; threadId?: number } | undefined, hooks: DebugEventHooks, isCurrent: () => boolean): Promise<void> {
+/** Refreshes paused frame info directly from a DAP stopped event; enrich=false is the fast stepping pass, enrich=true the settled pass. */
+async function refreshStoppedThread(session: vscode.DebugSession, body: { reason?: string; threadId?: number } | undefined, hooks: DebugEventHooks, isCurrent: () => boolean, enrich: boolean): Promise<void> {
   hooks.postStatus("paused", String(body?.reason || "stopped"));
   try {
     const stepInto = hooks.lastControlAction() === "stepInto";
-    const info = await inspectDebugThread(session, body?.threadId, { preferOverlay: !stepInto, preferUserSource: stepInto });
+    const info = await inspectDebugThread(session, body?.threadId, { enrich, preferOverlay: !stepInto, preferUserSource: stepInto });
     if (isCurrent() && hooks.getSession()?.id === session.id) { hooks.logger?.log("debug.frame", frameFields(info)); hooks.postInfo(info); }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

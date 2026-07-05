@@ -76,6 +76,9 @@ test("debug stepping skips third-party packages while keeping project source deb
   assert.ok(paths.includes("**/site-packages/**"));
   assert.ok(paths.includes("**/dist-packages/**"));
   assert.ok(paths.includes("**/lib/python*/**"));
+  // Frozen stdlib + importlib are skipped so step/step-in over a `from x import y` never traps in import machinery.
+  assert.ok(paths.includes("<frozen *>"));
+  assert.ok(paths.includes("**/importlib/**"));
   assert.ok(paths.every((path) => path.startsWith("<") || path.startsWith("**")));
 });
 

@@ -70,7 +70,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 86"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 88"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -271,7 +271,7 @@ test("overlay renderer exposes a paused debug line marker", () => {
   assert.equal(overlaySource.includes('type === "debugVariables"'), false);
 });
 
-test("overlay prompt gutter keeps the native breakpoint glyph margin", () => {
+test("overlay prompt gutter keeps the glyph margin and reveals breakpoints there", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
   const syncSource = fs.readFileSync(new URL("../src/workbenchOverlaySyncRenderer.ts", import.meta.url), "utf8");
 
@@ -283,8 +283,9 @@ test("overlay prompt gutter keeps the native breakpoint glyph margin", () => {
   assert.ok(rendererSource.includes('let style = document.getElementById("django-shell-overlay-style")'));
   assert.equal(rendererSource.includes('if (document.getElementById("django-shell-overlay-style")) { return; }'), false);
   assert.equal(rendererSource.includes("lineDecorationsWidth: 14"), false);
-  assert.equal(rendererSource.includes("dso-breakpoint"), false);
-  assert.equal(syncSource.includes("dso-breakpoint"), false);
+  // Breakpoint reveal glyph is drawn in the same glyph margin.
+  assert.ok(rendererSource.includes("dso-breakpoint"));
+  assert.ok(syncSource.includes("dso-breakpoint"));
 });
 
 test("overlay renderer caches expensive widget layout work", () => {
@@ -447,7 +448,7 @@ test("overlay debug ignores debugpy events from non-overlay paused threads", () 
 });
 
 test("overlay step-in can reveal external source frames", () => {
-  assert.ok(customConsoleSource.includes('const stepInto = this.lastDebugControlAction === "stepInto"'));
+  assert.ok(customConsoleSource.includes('stepInto = this.lastDebugControlAction === "stepInto"'));
   assert.ok(customConsoleSource.includes("preferUserSource: stepInto"));
   assert.ok(customConsoleSource.includes("clearExternalDebugFrameDecoration"));
   assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", true'));
@@ -634,6 +635,47 @@ test("stepInto target resolution is time-boxed and bounds language-server calls"
   assert.ok(stepTargetsSource.includes("pythonIdentifierSpans(line).slice(0, 8)"), "capped identifier probes");
   assert.ok(stepTargetsSource.includes("const staticCallNames = fallbackDirectCallNames(line, source.visibleText, [])"), "static call names are tried before language-server lookups");
   assert.ok(stepTargetsSource.includes("new vscode.Position(lineIndex, span.start)"), "one definition probe per identifier");
+});
+
+test("two-phase inspection: fast frame first, enriched (live/expandable previews) only on settle", () => {
+  // Enrichment (candidates + previews) is split from the basic scope read and gated behind the enrich option.
+  assert.ok(debugInspectorSource.includes("enrich?: boolean"), "inspect options carry an enrich flag");
+  assert.ok(debugInspectorSource.includes("options.enrich !== false ? await enrichScopeVariables"), "basic scopes returned unless enrich requested");
+  assert.ok(debugInspectorSource.includes("async function enrichScopeVariables"));
+  assert.ok(debugInspectorSource.includes("globalsVariables"), "Globals variables are reused for local candidates (no per-name evaluate)");
+  assert.ok(debugInspectorSource.includes("MAX_EVALUATED_LOCAL_CANDIDATES = 10"), "bounded fallback evaluates");
+  // Previews evaluated live so the row keeps a current-pause variablesReference and stays expandable (user can drill into rows/fields).
+  assert.ok(debugInspectorSource.includes("await evaluateQuerySetPreview(session, frameId, variable.name, expression)"));
+  assert.ok(debugInspectorSource.includes("await evaluateDjangoModelPreview(session, frameId, variable.name, modelExpression)"));
+  assert.ok(!debugInspectorSource.includes("cachedQuerySetPreview") && !debugInspectorSource.includes("cachedModelPreview"), "per-step preview caches removed in favour of settled live evaluation");
+  // Stepping posts a fast (enrich:false) frame then a debounced enrich:true pass in both overlay and file paths.
+  assert.ok(customConsoleSource.includes("enrich: false }).then(post)"), "overlay stop posts the fast frame first");
+  assert.ok(customConsoleSource.includes("DEBUG_ENRICH_DELAY_MS"));
+  assert.ok(debugEventsSource.includes("scheduleEnrich(current, () =>"), "file-mode stop/active-stack defer enrichment");
+});
+
+test("breakpoint lines are revealed as glyph-margin dots in the overlay", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+  const syncSource = fs.readFileSync(new URL("../src/workbenchOverlaySyncRenderer.ts", import.meta.url), "utf8");
+  // Extension mirrors breakpoint lines into the overlay whenever the breakpoint UI refreshes.
+  assert.ok(customConsoleSource.includes("void this.overlay?.updateBreakpoints(lines);"));
+  assert.ok(overlaySource.includes("async updateBreakpoints(lines: number[])"));
+  assert.ok(overlaySource.includes("window.__dsoSetOverlayBreakpoints"));
+  // Renderer draws a glyph per breakpoint line and re-applies after text/prelude changes.
+  assert.ok(syncSource.includes("window.__dsoApplyOverlayBreakpoints = function"));
+  assert.ok(syncSource.includes('glyphMarginClassName: "dso-breakpoint"'));
+  assert.ok(syncSource.includes("window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor)"));
+  assert.ok(rendererSource.includes(".dso-breakpoint::before{background:var(--vscode-debugIcon-breakpointForeground"));
+});
+
+test("stepping keeps the current-line marker stable (no per-step blink) and centers the arrow", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+  // Flicker: the transient running state must not clear the overlay debug line.
+  assert.ok(overlaySource.includes('if (info.state === "running") {'), "updateDebugInfo keeps the paused line during the running state");
+  assert.ok(overlaySource.includes('info.state === "paused" && info.frame && this.isOverlayFrame'));
+  // Arrow centering: flex-center the triangle within Monaco's per-line glyph div instead of height:100% + top:50%.
+  assert.ok(rendererSource.includes(".dso-debug-indicator{align-items:center;background:transparent;display:flex;justify-content:center;"), "arrow is flex-centered");
+  assert.ok(!rendererSource.includes(".dso-debug-indicator{background:transparent;height:100%!important"), "no height:100% override that breaks centering");
 });
 
 test("backend only traces the request thread for debug runs so warm connections stay fast", () => {

@@ -159,6 +159,7 @@ export function overlaySyncRendererSource(): string {
       } catch (eVisibleCursor) {}
       delete window.__dsoPendingOverlayVisibleText;
       root.__dsoHasAppliedInitialText = true;
+      try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eVisibleTextBreakpoints) {}
       root.style.visibility = oldVisibility || "visible";
       return "ok";
     };
@@ -592,6 +593,35 @@ export function overlaySyncRendererSource(): string {
       return editor ? window.__dsoApplyOverlayDebugLine(root, editor) : "debug-line:" + root.__dsoDebugLine;
     };
 
+    /** Draws a glyph-margin dot on every user-input line that has a breakpoint, so breakpoints are visible in the overlay (the real editor's native glyphs sit behind it). */
+    window.__dsoApplyOverlayBreakpoints = function (root, editor) {
+      const model = editor && editor.getModel && editor.getModel();
+      if (!root || !editor || !model || !editor.deltaDecorations) { return "missing-editor"; }
+      const startLine = Number(root.__dsoInputStartLine) || 1;
+      const lines = root.__dsoBreakpointLines || window.__dsoOverlayBreakpointLines || [];
+      const seen = {};
+      const decorations = [];
+      for (let i = 0; i < lines.length; i += 1) {
+        const modelLine = startLine + Math.floor(Number(lines[i]) || 0) - 1;
+        if (modelLine >= 1 && modelLine <= model.getLineCount() && !seen[modelLine]) {
+          seen[modelLine] = true;
+          decorations.push({ options: { glyphMarginClassName: "dso-breakpoint", isWholeLine: false }, range: { endColumn: 1, endLineNumber: modelLine, startColumn: 1, startLineNumber: modelLine } });
+        }
+      }
+      try { root.__dsoBreakpointDecorationIds = editor.deltaDecorations(root.__dsoBreakpointDecorationIds || [], decorations); } catch (eBreakpointDecorations) { root.__dsoBreakpointDecorationIds = []; }
+      return "breakpoints:" + decorations.length;
+    };
+
+    /** Stores the breakpoint lines (one-based user-input lines) and renders their glyphs on the live editor. */
+    window.__dsoSetOverlayBreakpoints = function (lines) {
+      const root = document.getElementById("django-shell-overlay");
+      window.__dsoOverlayBreakpointLines = Array.isArray(lines) ? lines : [];
+      if (!root) { return "breakpoints:queued"; }
+      root.__dsoBreakpointLines = window.__dsoOverlayBreakpointLines;
+      const editor = root.__djangoShellEditor;
+      return editor ? window.__dsoApplyOverlayBreakpoints(root, editor) : "breakpoints:" + root.__dsoBreakpointLines.length;
+    };
+
     /** Returns Monaco decorations for the currently executable Python input range. */
     function __dsoExecutionRangeDecorations(model, payload) {
       if (!model || !payload || !payload.range || !String(payload.code || "").trim()) { return []; }
@@ -832,6 +862,7 @@ export function overlaySyncRendererSource(): string {
           root.__dsoPreludeText = String(text || "");
           window.__dsoApplyPreludeHiddenArea(root, editor);
           try { window.__dsoApplyOverlayDebugLine && window.__dsoApplyOverlayDebugLine(root, editor); } catch (eVisiblePreludeDebugLine) {}
+          try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eVisiblePreludeBreakpoints) {}
         } finally {
           root.style.visibility = oldVisibility || "visible";
         }
