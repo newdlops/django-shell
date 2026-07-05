@@ -5,7 +5,7 @@ import * as pty from "node-pty";
 import * as vscode from "vscode";
 import { SerializedAsyncQueue } from "./asyncQueue";
 import { BackendClient, BackendProgressSnapshot, BackendRequestPayload, BackendTransportMode } from "./backendClient";
-import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BACKEND_PROGRESS_PREFIX, BACKEND_RESPONSE_PREFIX, BackendBootstrapCommand, BackendPtyResponse, backendBootstrapPayload, buildBackendBootstrapCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendProgressMarkers, parseBackendReadyMarker, parseBackendResponseMarkers } from "./backendBootstrap";
+import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BACKEND_PROGRESS_PREFIX, BACKEND_RESPONSE_PREFIX, BackendBootstrapCommand, BackendPtyResponse, backendBootstrapPayload, backendFeaturePayload, buildBackendBootstrapCommand, buildFeatureLoadCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendProgressMarkers, parseBackendReadyMarker, parseBackendResponseMarkers } from "./backendBootstrap";
 import { buildPtyBackendRequest, buildPtyExecuteCell, firstPathEntry, isSecretPrompt, safeCommand, trimTerminalText } from "./notebookPtyText";
 import { DiagnosticLogger } from "./diagnostics";
 import { type DebugpyBundlePayload, buildDebugpyBundleInstallCommand, parseDebugpyBundleInstallResult } from "./debugpyBundle";
@@ -440,6 +440,38 @@ export class NotebookPtySession implements vscode.Disposable {
     writeLine(0);
   }
 
+  /** Loads the deferred model-browser feature after the core backend is ready: over the socket when a tunnel is up (the remote win), else a best-effort idle-gated typed delivery so pure-PTY remotes still get the browser. */
+  private async loadModelBrowserFeature(client: BackendClient): Promise<void> {
+    if (this.client !== client) { return; }
+    const payload = backendFeaturePayload(this.options.backendRuntimePath);
+    if (!payload) { return; }
+    try {
+      const result = await client.loadFeature(payload);
+      if (result?.ok) { this.options.diagnosticLogger?.log("backend.feature.loaded", { reused: result.reused ? 1 : 0, sessionId: this.options.sessionId, transport: "socket" }); return; }
+      throw new Error(result?.error || "loadfeature returned not-ok");
+    } catch (error) {
+      const command = buildFeatureLoadCommand(this.options.backendRuntimePath);
+      const idle = detectPrimaryPythonPrompt(this.outputTail);
+      this.options.diagnosticLogger?.log("backend.feature.socket.failed", { error: error instanceof Error ? error.message : String(error), idle, sessionId: this.options.sessionId, typedFallback: Boolean(command) && idle });
+      if (command && idle && this.client === client) { this.writeFeatureLoadPaced(command); }
+    }
+  }
+
+  /** Types the deferred feature source in paced lines while suppressing echo; only used as the socket-unavailable fallback, and only when the shell was idle (checked by the caller) so it does not interleave with a running cell. */
+  private writeFeatureLoadPaced(command: string): void {
+    const lines = command.replace(/\r$/, "").split("\r");
+    const sessionGeneration = this.generation;
+    this.suppressBackendOutput = true;
+    const writeLine = (index: number): void => {
+      if (sessionGeneration !== this.generation || !this.process) { return; }
+      this.process.write(`${lines[index]}\r`);
+      if (index + 1 >= lines.length) { const done = setTimeout(() => { this.bootstrapWriteTimers.delete(done); this.suppressBackendOutput = false; }, 80); this.bootstrapWriteTimers.add(done); return; }
+      const timer = setTimeout(() => { this.bootstrapWriteTimers.delete(timer); writeLine(index + 1); }, index === 0 ? 60 : 20);
+      this.bootstrapWriteTimers.add(timer);
+    };
+    writeLine(0);
+  }
+
   /** Cancels delayed inline bootstrap writes for a restarted or disposed PTY. */
   private clearBootstrapWriteTimers(): void {
     for (const timer of this.bootstrapWriteTimers) {
@@ -465,7 +497,8 @@ export class NotebookPtySession implements vscode.Disposable {
       // skip it, then try a tunnel to the backend port so parallel model reads work beside a busy remote PTY.
       if (this.bootstrapRetried) {
         this.client.markSocketUnavailable();
-        void this.forwardBackendSocket(ready.port, this.client);
+        const client = this.client;
+        void this.forwardBackendSocket(ready.port, client).then(() => this.loadModelBrowserFeature(client));
       }
       this.state = "ready";
       this.startKeepalive();

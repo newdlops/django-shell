@@ -210,16 +210,16 @@ test("reveals breakpoint lines as glyph-margin dots while leaving breakpoint SET
 
   api.setBreakpoints([2, 4]);
 
-  // Reveal: a glyph-margin dot is drawn per breakpoint line.
+  // Reveal: each breakpoint line is marked whole-line (no extra glyph-margin dot).
   assert.equal(typeof api.setBreakpoints, "function");
-  const glyphs = editor.decorations.filter((item) => item.options.glyphMarginClassName === "dso-breakpoint");
-  assert.equal(glyphs.length, 2);
-  assert.deepEqual(glyphs.map((item) => item.range.startLineNumber).sort((a, b) => a - b), [2, 4]);
-  // Setting stays native: no custom toggle API, no mouse/context handlers, no line-className breakpoint decorations.
+  const lineMarks = editor.decorations.filter((item) => item.options.className === "dso-breakpoint-line" && item.options.isWholeLine);
+  assert.equal(lineMarks.length, 2);
+  assert.deepEqual(lineMarks.map((item) => item.range.startLineNumber).sort((a, b) => a - b), [2, 4]);
+  assert.equal(editor.decorations.some((item) => item.options.glyphMarginClassName === "dso-breakpoint"), false);
+  // Setting stays native: no custom toggle API, no mouse/context handlers.
   assert.equal(api.installBreakpointToggle, undefined);
   assert.equal(mouseHandler, undefined);
   assert.equal(events.some((event) => event.type === "mousedown" || event.type === "contextmenu"), false);
-  assert.equal(editor.decorations.some((item) => item.options.className === "dso-breakpoint-line"), false);
 });
 
 test("strips legacy prelude markers instead of hiding user import lines", () => {

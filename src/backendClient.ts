@@ -81,6 +81,12 @@ export interface BackendStageDebugpyResult {
   reused?: boolean;
 }
 
+export interface BackendLoadFeatureResult {
+  error?: string;
+  ok: boolean;
+  reused?: boolean;
+}
+
 export interface BackendRuntimeInspection {
   error?: string;
   loadedModuleCount?: number;
@@ -288,6 +294,25 @@ export class BackendClient {
     const payload: BackendRequestPayload = { data, digest, kind: "stagedebugpy" };
     return this.socketRequest(payload).then((buffer) => {
       const parsed = parseStageDebugpyResponse(buffer);
+      this.activeTransport = "tcp";
+      this.logRequest(payload.kind, started, parsed, buffer.length, undefined, "tcp");
+      return parsed;
+    }, (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logRequest(payload.kind, started, undefined, 0, message, "tcp");
+      throw error instanceof Error ? error : new Error(message);
+    });
+  }
+
+  /** Loads the deferred model-browser feature over the socket in one request; rejects when the socket is unreachable so the caller can fall back to typed PTY delivery. */
+  loadFeature(data: string): Promise<BackendLoadFeatureResult> {
+    if (this.socketUnavailable) {
+      return Promise.reject(new Error("Backend socket is unavailable for the model browser feature load."));
+    }
+    const started = Date.now();
+    const payload: BackendRequestPayload = { data, kind: "loadfeature" };
+    return this.socketRequest(payload).then((buffer) => {
+      const parsed = parseLoadFeatureResponse(buffer);
       this.activeTransport = "tcp";
       this.logRequest(payload.kind, started, parsed, buffer.length, undefined, "tcp");
       return parsed;
@@ -735,6 +760,12 @@ function parseProgressResponse(buffer: string): BackendProgressSnapshot {
 function parseStageDebugpyResponse(buffer: string): BackendStageDebugpyResult {
   const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendStageDebugpyResult>;
   return { error: parsed.error, ok: Boolean(parsed.ok), path: typeof parsed.path === "string" && parsed.path ? parsed.path : null, reused: Boolean(parsed.reused) };
+}
+
+/** Parses the JSON result of a "loadfeature" request. */
+function parseLoadFeatureResponse(buffer: string): BackendLoadFeatureResult {
+  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendLoadFeatureResult>;
+  return { error: parsed.error, ok: Boolean(parsed.ok), reused: Boolean(parsed.reused) };
 }
 
 /** Parses a backend completeness check response. */

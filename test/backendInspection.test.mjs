@@ -358,6 +358,35 @@ test("interrupt request stops the active Python execution thread", { skip: !PYTH
   assert.equal(payload.threadId, null);
 });
 
+test("core backend defers the model browser until loadfeature installs it", { skip: !PYTHON }, () => {
+  const script = [
+    "import json, zlib, base64",
+    `src=open(${JSON.stringify(path.resolve("python/django_shell_backend.py"))},encoding='utf-8').read()`,
+    "idx=src.index('# --- Model data browser')",
+    "core=src[:idx]; feature=src[idx:]",
+    "g={}",
+    "exec(compile(core,'<core>','exec'), g)",
+    "before=('_browse_models' in g)",
+    "loader=('_load_feature' in g and '_BROWSE_REQUEST_KINDS' in g)",
+    "guard=g['_run_request'](None,'t',{'token':'t','kind':'models'},None)",
+    "data=base64.b64encode(zlib.compress(feature.encode('utf-8'))).decode('ascii')",
+    "res=g['_load_feature']({'data':data})",
+    "after=('_browse_models' in g)",
+    "reload=g['_load_feature']({'data':data})",
+    "print(json.dumps({'before':before,'loader':loader,'guardLoading':(not guard.get('ok')) and ('loading' in (guard.get('error') or '')),'loadOk':res.get('ok'),'reused':res.get('reused'),'after':after,'reloadReused':reload.get('reused')}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.before, false, "the core half does not define the model browser");
+  assert.equal(payload.loader, true);
+  assert.equal(payload.guardLoading, true, "browser requests before load return a still-loading message");
+  assert.equal(payload.loadOk, true);
+  assert.equal(payload.reused, false);
+  assert.equal(payload.after, true, "loadfeature installs the browser into the same module globals");
+  assert.equal(payload.reloadReused, true, "a second load is an idempotent no-op");
+});
+
 test("streams stdout and stderr chunks while PTY progress emit is active", { skip: !PYTHON }, () => {
   const script = [
     "import importlib.util, io, json, sys",

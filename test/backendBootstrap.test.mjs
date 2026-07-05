@@ -14,14 +14,44 @@ const {
   BACKEND_PROGRESS_PREFIX,
   BACKEND_READY_PREFIX,
   BACKEND_RESPONSE_PREFIX,
+  backendBootstrapPayload,
+  backendFeaturePayload,
   buildBackendBootstrap,
   buildBackendBootstrapCommand,
+  buildFeatureLoadCommand,
   buildInlineBackendBootstrapCommand,
   parseBackendFailedMarker,
   parseBackendProgressMarkers,
   parseBackendReadyMarker,
   parseBackendResponseMarkers
 } = require("../out/backendBootstrap.js");
+
+test("remote inline bootstrap types only the core half; the model browser ships separately", () => {
+  const realPath = path.resolve("python/django_shell_backend.py");
+  const marker = "# --- Model data browser";
+  const whole = zlib.inflateSync(Buffer.from(backendBootstrapPayload(realPath), "base64")).toString("utf8");
+  const feature = zlib.inflateSync(Buffer.from(backendFeaturePayload(realPath), "base64")).toString("utf8");
+  const core = whole.slice(0, whole.indexOf(marker));
+
+  // Whole (local env/disk delivery) has everything; the feature half carries the browser defs but not start().
+  assert.ok(whole.includes(marker) && whole.includes("def _browse_models") && whole.includes("def start(namespace"));
+  assert.ok(feature.startsWith(marker) && feature.includes("def _browse_models"));
+  assert.ok(!feature.includes("def start(namespace"), "start() stays in the core half");
+  // Core keeps the loader + dispatch guard but not the browser definitions.
+  assert.ok(core.includes("def start(namespace") && core.includes("def _load_feature") && core.includes("_BROWSE_REQUEST_KINDS"));
+  assert.ok(!core.includes("def _browse_models"), "browser definitions are deferred out of the typed core");
+
+  // The inline command's embedded payload reconstructs to exactly the core half (no browser defs typed on remote).
+  const command = buildInlineBackendBootstrapCommand(realPath, "tok").command;
+  const chunks = [...command.matchAll(/\.append\("([^"]*)"\)/g)].map((match) => match[1]);
+  const inlineSource = zlib.inflateSync(Buffer.from(chunks.join(""), "base64")).toString("utf8");
+  assert.equal(inlineSource, core);
+  assert.ok(Buffer.from(backendFeaturePayload(realPath), "base64").length < Buffer.from(backendBootstrapPayload(realPath), "base64").length);
+
+  // Typed fallback exec's the feature into the live backend module and scrubs its history line.
+  const fallback = buildFeatureLoadCommand(realPath);
+  assert.ok(fallback.includes("_djs_backend_module.__dict__") && fallback.includes("_pty_history_scrub"));
+});
 
 test("builds a path bootstrap command when backend source is unavailable", () => {
   const command = buildBackendBootstrap("/tmp/backend.py", "abc123");

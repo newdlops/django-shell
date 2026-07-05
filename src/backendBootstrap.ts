@@ -56,13 +56,46 @@ export const BACKEND_PAYLOAD_ENV = "DJANGO_SHELL_BACKEND_B64";
 /** Env var ("1"/"0") telling the backend whether to bind workspace models into the live shell namespace at startup. */
 export const BACKEND_AUTOIMPORT_ENV = "DJANGO_SHELL_AUTOIMPORT_MODELS";
 
-/** Returns the deflate+base64 backend source to set as the spawn env payload, or undefined when unreadable. */
-export function backendBootstrapPayload(runtimePath: string): string | undefined {
+// Section marker splitting the backend into a small always-needed CORE and the larger model-browser FEATURE. On remote
+// shells the core is typed inline and the feature is delivered out-of-band (socket, else typed) so the fragile typed
+// bootstrap carries ~half the bytes. Local (env/disk) delivery still ships the whole source, so nothing splits there.
+export const BACKEND_FEATURE_MARKER = "# --- Model data browser";
+
+/** Reads the backend source file, returning undefined when unreadable. */
+function readBackendSource(runtimePath: string): string | undefined {
   try {
-    return deflateSync(Buffer.from(fs.readFileSync(runtimePath, "utf8"), "utf8")).toString("base64");
+    return fs.readFileSync(runtimePath, "utf8");
   } catch {
     return undefined;
   }
+}
+
+/** Returns the core backend source (everything before the deferred model-browser feature section). */
+function backendCoreSource(source: string): string {
+  const index = source.indexOf(BACKEND_FEATURE_MARKER);
+  return index >= 0 ? source.slice(0, index) : source;
+}
+
+/** Returns the deferred model-browser feature source (from its section marker to EOF), or "" when the marker is absent. */
+function backendFeatureSource(source: string): string {
+  const index = source.indexOf(BACKEND_FEATURE_MARKER);
+  return index >= 0 ? source.slice(index) : "";
+}
+
+/** Returns the deflate+base64 whole backend source for the spawn env payload (local delivery ships everything), or undefined when unreadable. */
+export function backendBootstrapPayload(runtimePath: string): string | undefined {
+  const source = readBackendSource(runtimePath);
+  return source ? deflateSync(Buffer.from(source, "utf8")).toString("base64") : undefined;
+}
+
+/** Returns the deflate+base64 of the deferred model-browser feature source for a socket "loadfeature" request, or undefined when absent/unreadable. */
+export function backendFeaturePayload(runtimePath: string): string | undefined {
+  const source = readBackendSource(runtimePath);
+  if (!source) {
+    return undefined;
+  }
+  const feature = backendFeatureSource(source);
+  return feature ? deflateSync(Buffer.from(feature, "utf8")).toString("base64") : undefined;
 }
 
 /** Builds the one-line Python command injected into the interactive Django shell. */
@@ -86,10 +119,12 @@ export function buildBackendBootstrapCommand(runtimePath: string, token: string)
 
 /** Builds a file-independent bootstrap that embeds the compressed backend source in the typed command, as a fallback for remote shells (SSH, kubectl/docker exec) where the spawn env payload is not forwarded and the local runtime path is absent on the remote. Returns undefined when the local source cannot be read. */
 export function buildInlineBackendBootstrapCommand(runtimePath: string, token: string): BackendBootstrapCommand | undefined {
-  const payload = backendBootstrapPayload(runtimePath);
-  if (!payload) {
+  const source = readBackendSource(runtimePath);
+  if (!source) {
     return undefined;
   }
+  // Type only the CORE half inline; the model-browser feature follows over the socket (or typed fallback) after ready.
+  const payload = deflateSync(Buffer.from(backendCoreSource(source), "utf8")).toString("base64");
   const partsKey = `_djs_inline_parts_${token}`;
   const partsLiteral = pythonString(partsKey);
   const python = [
@@ -102,6 +137,24 @@ export function buildInlineBackendBootstrapCommand(runtimePath: string, token: s
   const chunkLines = payloadChunks(payload).map((chunk) => `globals().setdefault(${partsLiteral},[]).append(${pythonString(chunk)})`);
   const command = `${initLine}\r${chunkLines.join("\r")}\rexec(${pythonString(python)})\r`;
   return { bytes: command.length, command, mode: "inline" };
+}
+
+/** Builds the typed PTY fallback that appends the deferred feature source in short lines and exec's it into the live backend module — used only when the socket "loadfeature" is unavailable (a pure-PTY remote with no tunnel). Returns undefined when there is no feature section. */
+export function buildFeatureLoadCommand(runtimePath: string): string | undefined {
+  const payload = backendFeaturePayload(runtimePath);
+  if (!payload) {
+    return undefined;
+  }
+  const partsLiteral = pythonString("_djs_feature_parts");
+  const python = [
+    "import base64 as _djs_fb,zlib as _djs_fz",
+    `_djs_fsrc=_djs_fz.decompress(_djs_fb.b64decode("".join(globals().pop(${partsLiteral},[])))).decode("utf-8")`,
+    `exec(compile(_djs_fsrc,"<django-shell-backend>","exec"),_djs_backend_module.__dict__)`,
+    "_djs_backend_module._pty_history_scrub(None)"
+  ].join("; ");
+  const initLine = `globals()[${partsLiteral}]=[]`;
+  const chunkLines = payloadChunks(payload).map((chunk) => `globals().setdefault(${partsLiteral},[]).append(${pythonString(chunk)})`);
+  return `${initLine}\r${chunkLines.join("\r")}\rexec(${pythonString(python)})\r`;
 }
 
 /** Splits the inline backend payload into short terminal input lines so remote IPython/kubectl PTYs do not choke on one huge line. */

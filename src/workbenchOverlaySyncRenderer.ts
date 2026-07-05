@@ -593,7 +593,7 @@ export function overlaySyncRendererSource(): string {
       return editor ? window.__dsoApplyOverlayDebugLine(root, editor) : "debug-line:" + root.__dsoDebugLine;
     };
 
-    /** Draws a glyph-margin dot on every user-input line that has a breakpoint, so breakpoints are visible in the overlay (the real editor's native glyphs sit behind it). */
+    /** Reveals every user-input line that has a breakpoint with a whole-line marker (a colored left edge), so the breakpoint LINE is visible in the overlay without adding a second gutter dot. */
     window.__dsoApplyOverlayBreakpoints = function (root, editor) {
       const model = editor && editor.getModel && editor.getModel();
       if (!root || !editor || !model || !editor.deltaDecorations) { return "missing-editor"; }
@@ -605,7 +605,7 @@ export function overlaySyncRendererSource(): string {
         const modelLine = startLine + Math.floor(Number(lines[i]) || 0) - 1;
         if (modelLine >= 1 && modelLine <= model.getLineCount() && !seen[modelLine]) {
           seen[modelLine] = true;
-          decorations.push({ options: { glyphMarginClassName: "dso-breakpoint", isWholeLine: false }, range: { endColumn: 1, endLineNumber: modelLine, startColumn: 1, startLineNumber: modelLine } });
+          decorations.push({ options: { className: "dso-breakpoint-line", isWholeLine: true }, range: { endColumn: 1, endLineNumber: modelLine, startColumn: 1, startLineNumber: modelLine } });
         }
       }
       try { root.__dsoBreakpointDecorationIds = editor.deltaDecorations(root.__dsoBreakpointDecorationIds || [], decorations); } catch (eBreakpointDecorations) { root.__dsoBreakpointDecorationIds = []; }

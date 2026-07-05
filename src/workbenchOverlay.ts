@@ -19,7 +19,7 @@ export interface WorkbenchOverlayGeometry { height: number; left: number; top: n
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
 const GEOMETRY_SETTLE_MS = 80;
-const RENDERER_PATCH_VERSION = 88;
+const RENDERER_PATCH_VERSION = 89;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];

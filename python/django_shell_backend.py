@@ -301,6 +301,11 @@ def _connect_host(bound_host):
     return "127.0.0.1" if bound_host in ("0.0.0.0", "::") else bound_host
 
 
+# Model-browser request kinds handled by the deferred feature module (loaded via "loadfeature"); guarded so a browser
+# request that races ahead of the feature load returns a clean "still loading" message instead of a NameError.
+_BROWSE_REQUEST_KINDS = frozenset({"models", "schema", "filterfields", "rows", "related", "count", "aggregate", "commit", "lookup", "computed", "query"})
+
+
 def _run_request(namespace, token, request, initial_names):
     """Validates a request and executes its code under the shared execution lock."""
     if request.get("token") != token:
@@ -319,8 +324,12 @@ def _run_request(namespace, token, request, initial_names):
         return _debug_update_breakpoints(request)
     if request.get("kind") == "stagedebugpy":
         return _stage_debugpy_bundle(request)
+    if request.get("kind") == "loadfeature":
+        return _load_feature(request)
     if request.get("kind") == "children":
         return _inspect_children(namespace, request.get("path"))
+    if request.get("kind") in _BROWSE_REQUEST_KINDS and "_browse_models" not in globals():
+        return {"ok": False, "error": "The model browser is still loading; try again in a moment."}
     if request.get("kind") == "models":
         return _browse_models()
     if request.get("kind") == "schema":
@@ -1060,7 +1069,9 @@ def _execute_code(namespace, code, filename=None, line_offset=0, source_text=Non
     compile_filename = filename or "<django-shell-input>"
     _install_debug_source_cache(compile_filename, source_text, code, line_offset)
     _debug_current_thread(breakpoint_lines is not None)
-    progress_emit = bool(_STATE.get("progress_emit"))
+    # A debug run steps line-by-line, and each pause's inspection reprs (e.g. Django QuerySet repr, which iterates) would
+    # otherwise flood the progress stream through the QuerySet-progress hook. Suppress progress while breakpoints are active.
+    progress_emit = bool(_STATE.get("progress_emit")) and breakpoint_lines is None
     _progress_begin(code, emit=progress_emit)
     stdout = _StreamingCapture("stdout", progress_emit)
     stderr = _StreamingCapture("stderr", progress_emit)
@@ -1102,6 +1113,28 @@ def _execute_debugpy_bootstrap(namespace, code):
         return {"ok": True, "stdout": stdout.getvalue(), "stderr": "", "result": ""}
     except Exception:
         return {"ok": False, "stdout": stdout.getvalue(), "stderr": "", "traceback": traceback.format_exc()}
+
+
+def _load_feature(request):
+    """Loads a deferred backend feature (the model browser) into this module's globals from a deflate+base64 source blob.
+
+    Keeps the initial remote bootstrap small: the core backend is typed in first, then the browser half is delivered
+    over the socket (or typed as a fallback) and exec'd into the same module dict so all cross-references resolve.
+    Idempotent — a second call after the browser is present is a no-op."""
+    if "_browse_models" in globals():
+        return {"ok": True, "reused": True}
+    import base64
+    import zlib
+
+    data = request.get("data")
+    if not isinstance(data, str) or not data:
+        return {"ok": False, "error": "loadfeature requires a deflate+base64 source payload."}
+    try:
+        source = zlib.decompress(base64.b64decode(data)).decode("utf-8")
+        exec(compile(source, "<django-shell-backend>", "exec"), globals())
+        return {"ok": True, "reused": False}
+    except Exception:
+        return {"ok": False, "error": "loadfeature failed to install the model browser.", "traceback": traceback.format_exc()}
 
 
 def _stage_debugpy_bundle(request):

@@ -882,6 +882,9 @@ export class CustomDjangoConsole implements vscode.Disposable {
   /** Handles stopped events from the direct overlay DAP client without activating VS Code debug editors. */
   private handleDirectDebugStopped(session: DirectDebugAdapterSession, threadId: number | undefined, reason: string): void {
     if (session !== this.overlayDebugSession) { return; }
+    // A warm run that already finished can still receive one trailing step/stopped event; resume it instead of flipping
+    // the panel back to "paused" (which would strand the thread and re-show a stale frame after the cell completed).
+    if (!this.debugRunActive) { this.logger?.log("debug.direct.stopped.stale", { reason, threadId: threadId ?? 0 }); void runDebugControl("continue", session, threadId, undefined, this.logger).catch(() => undefined); return; }
     this.debugThreadId = threadId; invalidateDebugInspection(session); if (this.debugEnrichTimer) { clearTimeout(this.debugEnrichTimer); }
     const gen = ++this.debugStopGeneration, stepInto = this.lastDebugControlAction === "stepInto", options = { preferOverlay: !stepInto, preferUserSource: stepInto };
     this.logger?.log("debug.direct.stopped", { reason, threadId: threadId ?? 0 }); this.postDebugStatus("paused", reason || "stopped");

@@ -70,7 +70,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 88"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 89"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -654,18 +654,19 @@ test("two-phase inspection: fast frame first, enriched (live/expandable previews
   assert.ok(debugEventsSource.includes("scheduleEnrich(current, () =>"), "file-mode stop/active-stack defer enrichment");
 });
 
-test("breakpoint lines are revealed as glyph-margin dots in the overlay", () => {
+test("breakpoint lines are revealed with a whole-line marker (not a second gutter dot)", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
   const syncSource = fs.readFileSync(new URL("../src/workbenchOverlaySyncRenderer.ts", import.meta.url), "utf8");
   // Extension mirrors breakpoint lines into the overlay whenever the breakpoint UI refreshes.
   assert.ok(customConsoleSource.includes("void this.overlay?.updateBreakpoints(lines);"));
   assert.ok(overlaySource.includes("async updateBreakpoints(lines: number[])"));
   assert.ok(overlaySource.includes("window.__dsoSetOverlayBreakpoints"));
-  // Renderer draws a glyph per breakpoint line and re-applies after text/prelude changes.
+  // Renderer marks the whole breakpoint LINE (className, isWholeLine) rather than adding a glyph-margin dot.
   assert.ok(syncSource.includes("window.__dsoApplyOverlayBreakpoints = function"));
-  assert.ok(syncSource.includes('glyphMarginClassName: "dso-breakpoint"'));
+  assert.ok(syncSource.includes('className: "dso-breakpoint-line", isWholeLine: true'));
+  assert.ok(!syncSource.includes('glyphMarginClassName: "dso-breakpoint"'), "no extra breakpoint gutter dot");
   assert.ok(syncSource.includes("window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor)"));
-  assert.ok(rendererSource.includes(".dso-breakpoint::before{background:var(--vscode-debugIcon-breakpointForeground"));
+  assert.ok(rendererSource.includes(".dso-breakpoint-line{box-shadow:inset 3px 0 0 var(--vscode-debugIcon-breakpointForeground"));
 });
 
 test("stepping keeps the current-line marker stable (no per-step blink) and centers the arrow", () => {
@@ -683,6 +684,13 @@ test("backend only traces the request thread for debug runs so warm connections 
   assert.ok(backendSource.includes("_debug_current_thread(breakpoint_lines is not None)"), "tracing is gated on a debug run");
   assert.ok(backendSource.includes("def _debug_current_thread(active):"));
   assert.ok(backendSource.includes("debugpy.trace_this_thread(False)"), "normal runs disable leftover tracing");
+  // Progress emission is suppressed during a debug run so pause-time inspection reprs (QuerySet repr) don't flood.
+  assert.ok(backendSource.includes("bool(_STATE.get(\"progress_emit\")) and breakpoint_lines is None"));
+});
+
+test("a warm run ignores and resumes a trailing stopped event after it has ended", () => {
+  assert.ok(customConsoleSource.includes("if (!this.debugRunActive) { this.logger?.log(\"debug.direct.stopped.stale\""));
+  assert.ok(customConsoleSource.includes('runDebugControl("continue", session, threadId'));
 });
 
 test("debug attach runs the current overlay input after breakpoint sync", () => {
