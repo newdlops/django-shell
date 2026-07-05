@@ -36,7 +36,7 @@ let snapshotWritten = false;
 let e2eSawShellPrompt = false;
 let debugAttached = false;
 let debugBusy = false;
-let debugDisplayMode = "file";
+let debugDisplayMode = "overlay";
 let debugState = "idle";
 let overlayTabActive = "overlay-1";
 let overlayTabs = [{ id: "overlay-1", label: "1" }];
@@ -316,7 +316,7 @@ function requestDebugShell() {
 
 /** Updates the selected debugger display mode and optionally notifies the extension host. */
 function setDebugMode(mode, notify) {
-  debugDisplayMode = mode === "overlay" ? "overlay" : "file";
+  debugDisplayMode = mode === "file" ? "file" : "overlay";
   if (debugMode) {
     debugMode.value = debugDisplayMode;
   }

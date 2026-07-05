@@ -9456,7 +9456,7 @@ var snapshotWritten = false;
 var e2eSawShellPrompt = false;
 var debugAttached = false;
 var debugBusy = false;
-var debugDisplayMode = "file";
+var debugDisplayMode = "overlay";
 var debugState = "idle";
 var overlayTabActive = "overlay-1";
 var overlayTabs = [{ id: "overlay-1", label: "1" }];
@@ -9700,7 +9700,7 @@ function requestDebugShell() {
   vscode.postMessage({ debugAttached, debugBusy, debugMode: debugDisplayMode, debugState, runtimeReady, type: "debugShell" });
 }
 function setDebugMode(mode, notify) {
-  debugDisplayMode = mode === "overlay" ? "overlay" : "file";
+  debugDisplayMode = mode === "file" ? "file" : "overlay";
   if (debugMode) {
     debugMode.value = debugDisplayMode;
   }

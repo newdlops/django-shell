@@ -7,11 +7,11 @@ import { overlayEditorUri } from "./overlayBackingFiles";
 
 export type DjangoShellDebugMode = "file" | "overlay";
 
-export const DEFAULT_DEBUG_MODE: DjangoShellDebugMode = "file";
+export const DEFAULT_DEBUG_MODE: DjangoShellDebugMode = "overlay";
 
-/** Returns a supported debug display mode, defaulting to the stable file-backed path. */
+/** Returns a supported debug display mode, defaulting to the overlay path. */
 export function normalizeDebugMode(value: unknown): DjangoShellDebugMode {
-  return value === "overlay" ? "overlay" : DEFAULT_DEBUG_MODE;
+  return value === "file" ? "file" : DEFAULT_DEBUG_MODE;
 }
 
 /** Returns the workspace-local file used for the easy file-backed debug mode. */
