@@ -45,11 +45,47 @@ export interface DebugInspectOptions { preferOverlay?: boolean; preferUserSource
 
 const MAX_SCOPE_VARIABLES = 80;
 const MAX_EVALUATED_LOCAL_CANDIDATES = 24;
+const MAX_QUERYSET_PREVIEW_CACHE = 256;
 const DISPLAY_DEBUG_VARIABLE_NAMES = new Map([["__m", "receiver"]]);
 const GLOBAL_SCOPE = /^globals?$/i;
 const LOCAL_SCOPE = /^locals?$/i;
 const RETURN_VALUE_NAME = /^\(return\)\s+(.+)$/;
 const VISIBLE_DEBUG_INTERNAL_VARIABLES = new Set(["__m"]);
+
+type DebugVariableLevel = "children" | "scope";
+
+interface DebugInspectionMemo {
+  querysetPreviews: Map<string, { type?: string; value: string } | undefined>;
+  scopes: Map<number, Promise<DebugScopeInfo[]>>;
+  stacks: Map<number, Promise<DapStackFrame[]>>;
+}
+
+// Session-scoped inspection caches. stacks/scopes share one DAP read per pause across the stopped-event chain, the
+// active-stack-item chain, and diagnostics logging; querysetPreviews persists across steps keyed by the variable repr so
+// unchanged QuerySets skip their per-step database re-query. The WeakMap releases everything with the session object.
+const INSPECTION_MEMO = new WeakMap<DebugRequestSession, DebugInspectionMemo>();
+
+/** Drops the per-pause stack/scope memos so the next stopped or continued event re-reads live debugger state. */
+export function invalidateDebugInspection(session: DebugRequestSession | undefined): void {
+  if (!session) {
+    return;
+  }
+  const memo = INSPECTION_MEMO.get(session);
+  if (memo) {
+    memo.scopes.clear();
+    memo.stacks.clear();
+  }
+}
+
+/** Returns the per-session inspection memo, creating it on first use. */
+function inspectionMemoFor(session: DebugRequestSession): DebugInspectionMemo {
+  let memo = INSPECTION_MEMO.get(session);
+  if (!memo) {
+    memo = { querysetPreviews: new Map(), scopes: new Map(), stacks: new Map() };
+    INSPECTION_MEMO.set(session, memo);
+  }
+  return memo;
+}
 
 /** Reads the active paused stack frame through DAP requests. */
 export async function inspectDebugFrame(session: DebugRequestSession, item: vscode.DebugStackFrame, options: DebugInspectOptions = {}): Promise<DebugFrameInfo> {
@@ -77,13 +113,25 @@ async function inspectDebugFrameRef(session: DebugRequestSession, item: DebugFra
 
 /** Reads child variables for one expandable DAP variablesReference. */
 export async function inspectDebugVariables(session: DebugRequestSession, variablesReference: number): Promise<DebugVariableInfo[]> {
-  return variablesForReference(session, variablesReference, 120);
+  return variablesForReference(session, variablesReference, 120, "children");
 }
 
-/** Returns the current DAP stack frames for a stopped thread. */
-async function stackFramesFor(session: DebugRequestSession, threadId: number): Promise<DapStackFrame[]> {
-  const response = await session.customRequest("stackTrace", { levels: 30, startFrame: 0, threadId }) as { stackFrames?: DapStackFrame[] };
-  return response.stackFrames ?? [];
+/** Returns compact stack rows for diagnostics, reusing the same-pause stack memo instead of a second stackTrace request. */
+export async function debugStackSummary(session: DebugRequestSession, threadId: number): Promise<Array<{ id: number; line: number; name: string; path: string }>> {
+  return (await stackFramesFor(session, threadId)).map((frame) => ({ id: frame.id, line: frame.line, name: frame.name, path: sourcePathFor(frame) }));
+}
+
+/** Returns the current DAP stack frames for a stopped thread, shared per pause across concurrent inspections. */
+function stackFramesFor(session: DebugRequestSession, threadId: number): Promise<DapStackFrame[]> {
+  const memo = inspectionMemoFor(session);
+  const cached = memo.stacks.get(threadId);
+  if (cached) {
+    return cached;
+  }
+  const request = Promise.resolve(session.customRequest("stackTrace", { levels: 30, startFrame: 0, threadId })).then((response) => (response as { stackFrames?: DapStackFrame[] }).stackFrames ?? []);
+  memo.stacks.set(threadId, request);
+  request.catch(() => memo.stacks.delete(threadId));
+  return request;
 }
 
 /** Returns the DAP stack frame matching VS Code's active frame id. */
@@ -135,17 +183,29 @@ function workspaceRootPaths(): string[] {
   return vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath).filter(Boolean) ?? [];
 }
 
-/** Returns compact variables for the current frame scopes. */
-async function scopeVariables(session: DebugRequestSession, frameId: number, frame?: DapStackFrame): Promise<DebugScopeInfo[]> {
-  const response = await session.customRequest("scopes", { frameId }) as { scopes?: DapScope[] };
-  const scopes: DebugScopeInfo[] = [];
-  const localCandidates = await localCandidateNamesForFrame(frame);
-  for (const scope of debugScopeCandidates(response.scopes ?? []).slice(0, 4)) {
-    const variables = await variablesForReference(session, scope.variablesReference, MAX_SCOPE_VARIABLES);
-    const visibleVariables = LOCAL_SCOPE.test(scope.name) ? await variablesWithLocalCandidates(session, frameId, variables, localCandidates) : variables;
-    scopes.push({ name: scope.name, total: scope.namedVariables ?? scope.indexedVariables, variables: await variablesWithQuerySetPreviews(session, frameId, visibleVariables) });
+/** Returns compact variables for the current frame scopes, shared per pause so parallel inspection chains reuse one read. */
+function scopeVariables(session: DebugRequestSession, frameId: number, frame?: DapStackFrame): Promise<DebugScopeInfo[]> {
+  const memo = inspectionMemoFor(session);
+  const cached = memo.scopes.get(frameId);
+  if (cached) {
+    return cached;
   }
-  return scopes;
+  const request = readScopeVariables(session, frameId, frame);
+  memo.scopes.set(frameId, request);
+  request.catch(() => memo.scopes.delete(frameId));
+  return request;
+}
+
+/** Reads frame scopes concurrently; only Locals get candidate/preview enrichment — the Django shell's Globals hold every accumulated ORM object, and per-variable evaluates plus QuerySet re-queries there made each ORM-mode step crawl. */
+async function readScopeVariables(session: DebugRequestSession, frameId: number, frame?: DapStackFrame): Promise<DebugScopeInfo[]> {
+  const response = await session.customRequest("scopes", { frameId }) as { scopes?: DapScope[] };
+  const localCandidates = await localCandidateNamesForFrame(frame);
+  return Promise.all(debugScopeCandidates(response.scopes ?? []).slice(0, 4).map(async (scope) => {
+    const variables = await variablesForReference(session, scope.variablesReference, MAX_SCOPE_VARIABLES);
+    const local = LOCAL_SCOPE.test(scope.name);
+    const visibleVariables = local ? await variablesWithLocalCandidates(session, frameId, variables, localCandidates) : variables;
+    return { name: scope.name, total: scope.namedVariables ?? scope.indexedVariables, variables: local ? await variablesWithQuerySetPreviews(session, frameId, visibleVariables) : visibleVariables };
+  }));
 }
 
 /** Returns scopes worth showing, including debugpy Globals where shell variables live. */
@@ -248,23 +308,15 @@ function collectTargetNames(target: string, names: Set<string>): void {
   }
 }
 
-/** Appends evaluated shell-global bindings that debugpy omits from Locals in wrapped cells. */
+/** Appends evaluated shell-global bindings that debugpy omits from Locals in wrapped cells, evaluating candidates concurrently so remote round trips overlap. */
 async function variablesWithLocalCandidates(session: DebugRequestSession, frameId: number, variables: DebugVariableInfo[], candidates: string[]): Promise<DebugVariableInfo[]> {
   if (!candidates.length) {
     return variables;
   }
   const existing = new Set(variables.flatMap((variable) => [variable.name, variable.evaluateName].filter((name): name is string => Boolean(name))));
-  const extra: DebugVariableInfo[] = [];
-  for (const name of candidates) {
-    if (existing.has(name) || isHiddenDebugVariable(name)) {
-      continue;
-    }
-    const evaluated = await evaluateLocalCandidate(session, frameId, name);
-    if (evaluated) {
-      existing.add(name);
-      extra.push(evaluated);
-    }
-  }
+  const missing = candidates.filter((name) => !existing.has(name) && !isHiddenDebugVariable(name));
+  const evaluated = await Promise.all(missing.map((name) => evaluateLocalCandidate(session, frameId, name)));
+  const extra = evaluated.filter((variable): variable is DebugVariableInfo => Boolean(variable));
   return extra.length ? [...variables, ...extra] : variables;
 }
 
@@ -282,20 +334,23 @@ async function evaluateLocalCandidate(session: DebugRequestSession, frameId: num
 }
 
 /** Reads one DAP variablesReference with a bounded count. */
-async function variablesForReference(session: DebugRequestSession, variablesReference: number, count: number): Promise<DebugVariableInfo[]> {
+async function variablesForReference(session: DebugRequestSession, variablesReference: number, count: number, level: DebugVariableLevel = "scope"): Promise<DebugVariableInfo[]> {
   if (!variablesReference) {
     return [];
   }
   const response = await session.customRequest("variables", { count, start: 0, variablesReference }) as { variables?: DapVariable[] };
-  return (response.variables ?? []).filter((variable) => !isHiddenDebugVariable(variable.name)).map(normalizeVariable);
+  return (response.variables ?? []).filter((variable) => !isHiddenDebugVariable(variable.name, level)).map(normalizeVariable);
 }
 
-/** Returns whether one debug variable is extension/debugpy plumbing rather than user state. */
-function isHiddenDebugVariable(name: string): boolean {
+/** Returns whether one debug variable is extension/debugpy plumbing rather than user state. Dunder members stay visible under an explicitly expanded node ("children"), otherwise debugpy groups like "special variables" expand to nothing. */
+function isHiddenDebugVariable(name: string, level: DebugVariableLevel = "scope"): boolean {
   if (VISIBLE_DEBUG_INTERNAL_VARIABLES.has(name)) {
     return false;
   }
-  return name.startsWith("__") || name.startsWith("_djs_") || name.startsWith("_django_shell_debugpy_");
+  if (name.startsWith("_djs_") || name.startsWith("_django_shell_debugpy_")) {
+    return true;
+  }
+  return level === "scope" && name.startsWith("__");
 }
 
 /** Normalizes and truncates one DAP variable for webview display. */
@@ -338,27 +393,48 @@ function truncateValue(value: string): string {
   return singleLine.length > 500 ? `${singleLine.slice(0, 497)}...` : singleLine;
 }
 
-/** Adds bounded QuerySet result previews next to paused-frame variables. */
+/** Adds bounded QuerySet and model previews next to paused-frame variables, evaluating variables concurrently. */
 async function variablesWithQuerySetPreviews(session: DebugRequestSession, frameId: number, variables: DebugVariableInfo[]): Promise<DebugVariableInfo[]> {
-  const expanded: DebugVariableInfo[] = [];
-  for (const variable of variables) {
-    expanded.push(variable);
+  const rows = await Promise.all(variables.map(async (variable) => {
+    const entry: DebugVariableInfo[] = [variable];
     const modelExpression = djangoModelPreviewExpression(variable);
     if (modelExpression) {
       const preview = await evaluateDjangoModelPreview(session, frameId, variable.name, modelExpression);
       if (preview) {
-        expanded.push(preview);
+        entry.push(preview);
       }
     }
     const expression = querySetPreviewExpression(variable);
     if (expression) {
-      const preview = await evaluateQuerySetPreview(session, frameId, variable.name, expression);
+      const preview = await cachedQuerySetPreview(session, frameId, variable, expression);
       if (preview) {
-        expanded.push(preview);
+        entry.push(preview);
       }
     }
+    return entry;
+  }));
+  return rows.flat();
+}
+
+/** Returns a QuerySet preview from the per-session cache while the variable repr is unchanged, else evaluates it live. A QuerySet slice runs a fresh database query, so reuse turns one query per QuerySet per step into one per QuerySet; cached previews carry repr text only (no variablesReference). */
+async function cachedQuerySetPreview(session: DebugRequestSession, frameId: number, variable: DebugVariableInfo, expression: string): Promise<DebugVariableInfo | undefined> {
+  const memo = inspectionMemoFor(session);
+  const key = `${expression}|${stripReferenceSuffix(variable.value)}`;
+  if (memo.querysetPreviews.has(key)) {
+    const cached = memo.querysetPreviews.get(key);
+    return cached && { name: `${variable.name}[:10]`, querysetPreview: true, type: cached.type, value: cached.value };
   }
-  return expanded;
+  const preview = await evaluateQuerySetPreview(session, frameId, variable.name, expression);
+  if (memo.querysetPreviews.size >= MAX_QUERYSET_PREVIEW_CACHE) {
+    memo.querysetPreviews.clear();
+  }
+  memo.querysetPreviews.set(key, preview && { type: preview.type, value: stripReferenceSuffix(preview.value) });
+  return preview;
+}
+
+/** Removes the trailing `<ref>` decoration so cache keys and cached texts survive per-pause reference churn. */
+function stripReferenceSuffix(value: string): string {
+  return value.replace(/<\d+>$/, "");
 }
 
 /** Returns a frame expression that reads one panel variable; step-result expressions arrive pre-synthesized as evaluateName. */

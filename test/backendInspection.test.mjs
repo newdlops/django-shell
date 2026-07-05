@@ -625,6 +625,45 @@ test("marks backend socket threads debugger-exempt and restores tracing for cell
   assert.equal(payload.restoredDaemonFlag, false);
 });
 
+test("stages the debugpy bundle by digest with probe, install, reuse, and traversal guard", { skip: !PYTHON }, () => {
+  const script = [
+    "import base64, hashlib, importlib.util, json, os, shutil, tempfile, zlib",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "digest=hashlib.sha256(b'bundle-test').hexdigest()",
+    "root=os.path.join(tempfile.gettempdir(), 'django-shell-debugpy-' + digest[:16])",
+    "shutil.rmtree(root, ignore_errors=True)",
+    "probe=mod._run_request({}, 'tok', {'token':'tok','kind':'stagedebugpy','digest':digest}, set())",
+    "bad=mod._run_request({}, 'tok', {'token':'tok','kind':'stagedebugpy','digest':'NOPE'}, set())",
+    "files=[['debugpy/__init__.py', base64.b64encode(b'# stub').decode()]]",
+    "data=base64.b64encode(zlib.compress(json.dumps(files).encode())).decode()",
+    "install=mod._run_request({}, 'tok', {'token':'tok','kind':'stagedebugpy','digest':digest,'data':data}, set())",
+    "reuse=mod._run_request({}, 'tok', {'token':'tok','kind':'stagedebugpy','digest':digest}, set())",
+    "digest2=hashlib.sha256(b'bundle-evil').hexdigest()",
+    "shutil.rmtree(os.path.join(tempfile.gettempdir(), 'django-shell-debugpy-' + digest2[:16]), ignore_errors=True)",
+    "evil=base64.b64encode(zlib.compress(json.dumps([['../evil.py', base64.b64encode(b'boom').decode()]]).encode())).decode()",
+    "traversal=mod._run_request({}, 'tok', {'token':'tok','kind':'stagedebugpy','digest':digest2,'data':evil}, set())",
+    "shutil.rmtree(root, ignore_errors=True)",
+    "print(json.dumps({'probe':probe,'badOk':bad['ok'],'install':install,'reuse':reuse,'traversalOk':traversal['ok'],'traversalError':traversal.get('error','')}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.deepEqual(payload.probe, { ok: true, path: null, reused: false });
+  assert.equal(payload.badOk, false);
+  assert.equal(payload.install.ok, true);
+  assert.equal(payload.install.files, 1);
+  assert.equal(payload.install.reused, false);
+  assert.ok(payload.install.path.includes("django-shell-debugpy-"));
+  assert.equal(payload.reuse.ok, true);
+  assert.equal(payload.reuse.reused, true);
+  assert.equal(payload.reuse.path, payload.install.path);
+  assert.equal(payload.traversalOk, false);
+  assert.match(payload.traversalError, /Unsafe debugpy bundle path/);
+});
+
 function pythonExecutable() {
   const candidates = [process.env.DJANGO_SHELL_E2E_PYTHON, process.env.DJLS_E2E_BASE_PYTHON, "/Users/lky/.asdf/installs/python/3.11.15/bin/python3.11", "/usr/bin/python3", "python3"].filter(Boolean);
   return candidates.find((candidate) => childProcess.spawnSync(candidate, ["--version"], { encoding: "utf8" }).status === 0);

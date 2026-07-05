@@ -26,8 +26,11 @@ type DebugpyBundleFile = [string, string];
 
 const DEBUGPY_BUNDLE_CHUNK_SIZE = 900;
 const TEXT_EXTENSIONS = new Set([".json", ".md", ".py", ".pyi", ".txt", ".typed"]);
-const TEXT_FILENAMES = new Set(["INSTALLER", "METADATA", "README", "RECORD", "WHEEL", "top_level.txt"]);
-const SKIPPED_DIRECTORIES = new Set(["__pycache__"]);
+// Runtime-dead weight for a debugpy.listen() attach: pydevd_attach_to_process (attach-by-pid injection, ~26% of the
+// bundle), _pydev_runfiles (pytest runner integration), and the never-imported top-level `packaging` copy. Licenses are
+// kept for attribution; wheel-inventory files (RECORD/METADATA/...) are dropped with the old TEXT_FILENAMES list.
+const SKIPPED_DIRECTORIES = new Set(["__pycache__", "_pydev_runfiles", "pydevd_attach_to_process"]);
+const SKIPPED_DIRECTORY_PREFIXES = ["packaging"];
 
 /** Builds a compressed text-file debugpy bundle from the first usable bundled libs path. */
 export function createDebugpyBundlePayload(searchPaths: string[]): DebugpyBundlePayload | undefined {
@@ -88,7 +91,7 @@ function readDebugpyBundleFiles(root: string): DebugpyBundleFile[] {
 function visitDebugpyBundleDirectory(root: string, directory: string, files: DebugpyBundleFile[]): void {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
     if (entry.isDirectory()) {
-      if (!SKIPPED_DIRECTORIES.has(entry.name)) {
+      if (!isSkippedDebugpyBundleDirectory(entry.name)) {
         visitDebugpyBundleDirectory(root, path.join(directory, entry.name), files);
       }
       continue;
@@ -102,9 +105,14 @@ function visitDebugpyBundleDirectory(root: string, directory: string, files: Deb
   }
 }
 
+/** Returns whether one directory holds no code the staged debugpy needs at runtime. */
+function isSkippedDebugpyBundleDirectory(name: string): boolean {
+  return SKIPPED_DIRECTORIES.has(name) || SKIPPED_DIRECTORY_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
 /** Returns whether one bundled file is portable enough to copy into a remote Python environment. */
 function shouldBundleDebugpyFile(filename: string): boolean {
-  return TEXT_EXTENSIONS.has(path.extname(filename)) || TEXT_FILENAMES.has(filename) || filename.startsWith("LICENSE");
+  return TEXT_EXTENSIONS.has(path.extname(filename)) || filename.startsWith("LICENSE");
 }
 
 /** Builds the remote Python installer body used after payload chunks have been staged. */

@@ -45,7 +45,15 @@ export function clearExternalDebugFrameDecoration(): void {
 /** Marks the currently paused external frame in its native editor. */
 function decorateExternalDebugFrame(editor: vscode.TextEditor, position: vscode.Position): void {
   clearExternalDebugFrameDecoration();
-  externalDebugFrameDecoration ??= vscode.window.createTextEditorDecorationType({ borderColor: "rgba(255, 213, 0, 0.9)", borderStyle: "solid", borderWidth: "0 0 0 3px", isWholeLine: true, overviewRulerColor: "rgba(255, 213, 0, 0.85)", overviewRulerLane: vscode.OverviewRulerLane.Center });
+  externalDebugFrameDecoration ??= vscode.window.createTextEditorDecorationType({
+    backgroundColor: new vscode.ThemeColor("editor.stackFrameHighlightBackground"),
+    borderColor: new vscode.ThemeColor("debugIcon.breakpointCurrentStackframeForeground"),
+    borderStyle: "solid",
+    borderWidth: "0 0 0 4px",
+    isWholeLine: true,
+    overviewRulerColor: new vscode.ThemeColor("debugIcon.breakpointCurrentStackframeForeground"),
+    overviewRulerLane: vscode.OverviewRulerLane.Center
+  });
   externalDebugFrameEditor = editor;
   editor.setDecorations(externalDebugFrameDecoration, [new vscode.Range(position, position)]);
 }

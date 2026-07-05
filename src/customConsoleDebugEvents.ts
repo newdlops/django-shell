@@ -2,7 +2,7 @@
 
 import * as vscode from "vscode";
 import type { DebugControlAction } from "./debugControls";
-import { type DebugFrameInfo, type DebugPanelState, inspectDebugFrame, inspectDebugThread } from "./debugInspector";
+import { type DebugFrameInfo, type DebugPanelState, debugStackSummary, inspectDebugFrame, inspectDebugThread, invalidateDebugInspection } from "./debugInspector";
 import type { DiagnosticLogger } from "./diagnostics";
 
 export type DebugStatusState = "attached" | "error" | "idle" | "paused" | "running" | "starting";
@@ -48,6 +48,7 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
     const current = generation;
     pausedThreadId = body?.threadId;
     hooks.setPausedThread(pausedThreadId);
+    invalidateDebugInspection(session);
     hooks.logger?.log("debug.dap.stopped", { reason: body?.reason ?? "", threadId: body?.threadId ?? 0 });
     void logDebugStack(session, body?.threadId, hooks);
     void refreshStoppedThread(session, body, hooks, () => current === generation);
@@ -57,6 +58,7 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
     pausedThreadId = undefined;
     hooks.setPausedThread(undefined);
     generation += 1;
+    invalidateDebugInspection(hooks.getSession());
     hooks.logger?.log("debug.dap.continued", { threadId: body?.threadId ?? 0 });
     hooks.postStatus("running", "continued");
     clearInfo("running");
@@ -171,13 +173,13 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Logs the raw DAP stack so missing overlay frames are diagnosable from Output. */
+/** Logs the paused DAP stack so missing overlay frames are diagnosable from Output; shares the inspection chain's stackTrace read. */
 async function logDebugStack(session: vscode.DebugSession, threadId: number | undefined, hooks: DebugEventHooks): Promise<void> {
   try {
     const resolvedThreadId = threadId ?? await firstDebugThreadId(session);
     if (!resolvedThreadId) { return; }
-    const response = await session.customRequest("stackTrace", { levels: 30, startFrame: 0, threadId: resolvedThreadId }) as { stackFrames?: Array<{ id: number; line: number; name: string; source?: { name?: string; path?: string } }> };
-    hooks.logger?.log("debug.stack", { frames: JSON.stringify((response.stackFrames ?? []).map(debugStackFrameFields)), threadId: resolvedThreadId });
+    const frames = await debugStackSummary(session, resolvedThreadId);
+    hooks.logger?.log("debug.stack", { frames: JSON.stringify(frames), threadId: resolvedThreadId });
   } catch (error) {
     hooks.logger?.log("debug.stack.error", { error: error instanceof Error ? error.message : String(error), threadId: threadId ?? 0 });
   }
@@ -187,11 +189,6 @@ async function logDebugStack(session: vscode.DebugSession, threadId: number | un
 async function firstDebugThreadId(session: vscode.DebugSession): Promise<number | undefined> {
   const response = await session.customRequest("threads", {}) as { threads?: Array<{ id: number }> };
   return response.threads?.[0]?.id;
-}
-
-/** Formats one DAP stack frame for compact diagnostics. */
-function debugStackFrameFields(frame: { id: number; line: number; name: string; source?: { name?: string; path?: string } }): { id: number; line: number; name: string; path: string } {
-  return { id: frame.id, line: frame.line, name: frame.name, path: frame.source?.path ?? frame.source?.name ?? "" };
 }
 
 /** Refreshes paused frame location if VS Code focuses a stack frame. */

@@ -289,12 +289,57 @@ export class NotebookPtySession implements vscode.Disposable {
     this.debugpyForward = undefined;
   }
 
-  /** Stages the bundled debugpy package into the active remote shell and returns its remote import root. */
+  /** Stages the bundled debugpy package into the active remote shell and returns its remote import root. Cheapest transport first: a probe reuses an install left by an earlier session, then the socket tunnel carries the whole bundle in one request; typing thousands of paced terminal lines is only the last resort. */
   async stageDebugpyBundle(payload: DebugpyBundlePayload): Promise<string | undefined> {
     const cached = this.debugpyBundlePaths.get(payload.digest);
     if (cached) {
       return cached;
     }
+    const staged = await this.probeStagedDebugpyBundle(payload) ?? await this.uploadDebugpyBundleViaSocket(payload) ?? await this.typeDebugpyBundleViaPty(payload);
+    this.debugpyBundlePaths.set(payload.digest, staged);
+    return staged;
+  }
+
+  /** Returns the remote path of an already-staged bundle when the digest-keyed directory survives from a prior session. */
+  private async probeStagedDebugpyBundle(payload: DebugpyBundlePayload): Promise<string | undefined> {
+    const client = this.client;
+    if (!client) {
+      return undefined;
+    }
+    try {
+      const probe = await client.stageDebugpyProbe(payload.digest);
+      if (probe.ok && probe.path) {
+        this.options.diagnosticLogger?.log("debugpy.bundle.reused", { path: probe.path, sessionId: this.options.sessionId });
+        return probe.path;
+      }
+    } catch (error) {
+      this.options.diagnosticLogger?.log("debugpy.bundle.probe.error", { error: error instanceof Error ? error.message : String(error), sessionId: this.options.sessionId });
+    }
+    return undefined;
+  }
+
+  /** Ships the compressed bundle through the backend socket tunnel in one request, when that transport is reachable. */
+  private async uploadDebugpyBundleViaSocket(payload: DebugpyBundlePayload): Promise<string | undefined> {
+    const client = this.client;
+    if (!client) {
+      return undefined;
+    }
+    const started = Date.now();
+    try {
+      const uploaded = await client.stageDebugpyUpload(payload.digest, payload.data);
+      if (uploaded.ok && uploaded.path) {
+        this.options.diagnosticLogger?.log("debugpy.bundle.install", { bytes: payload.data.length, files: payload.fileCount, ms: Date.now() - started, path: uploaded.path, sessionId: this.options.sessionId, transport: "tcp" });
+        return uploaded.path;
+      }
+      this.options.diagnosticLogger?.log("debugpy.bundle.socket.error", { error: uploaded.error ?? "Socket staging returned no path.", sessionId: this.options.sessionId });
+    } catch (error) {
+      this.options.diagnosticLogger?.log("debugpy.bundle.socket.error", { error: error instanceof Error ? error.message : String(error), sessionId: this.options.sessionId });
+    }
+    return undefined;
+  }
+
+  /** Types the chunked bundle installer into the interactive PTY — the slow last-resort transport. */
+  private async typeDebugpyBundleViaPty(payload: DebugpyBundlePayload): Promise<string> {
     const id = `debugpy-${Date.now().toString(36)}-${this.ptyRequestSeq++}`;
     const install = buildDebugpyBundleInstallCommand(payload, id, BACKEND_RESPONSE_PREFIX);
     const buffer = await this.writePacedPtyRequest(id, install.command, DEBUGPY_STAGE_TIMEOUT_MS);
@@ -302,8 +347,7 @@ export class NotebookPtySession implements vscode.Disposable {
     if (!result.ok || !result.path) {
       throw new Error(result.error ?? "Bundled debugpy install failed.");
     }
-    this.debugpyBundlePaths.set(payload.digest, result.path);
-    this.options.diagnosticLogger?.log("debugpy.bundle.install", { bytes: install.bytes, chunks: install.chunks, files: payload.fileCount, path: result.path, sessionId: this.options.sessionId });
+    this.options.diagnosticLogger?.log("debugpy.bundle.install", { bytes: install.bytes, chunks: install.chunks, files: payload.fileCount, path: result.path, sessionId: this.options.sessionId, transport: "pty" });
     return result.path;
   }
 
@@ -445,8 +489,9 @@ export class NotebookPtySession implements vscode.Disposable {
     if (this.token && !this.bootstrapRetried && (parseBackendNeedsInline(this.outputTail) || /Traceback \(most recent call last\)/.test(this.outputTail))) {
       this.bootstrapRetryPending = true;
     }
-    // Send the large inline payload only once the shell is back at a ready prompt — typing ~24KB while the failure
-    // traceback is still printing corrupts it (the PTY mangles input written before the prompt returns).
+    // Send the large inline payload only once the shell is back at a ready prompt — typing the compressed backend source
+    // (tens of KB across many paced lines) while the failure traceback is still printing corrupts it (the PTY mangles input
+    // written before the prompt returns). Fewer, near-max-width lines keep this window short — see backendBootstrap chunking.
     if (this.bootstrapRetryPending && !this.bootstrapRetried && detectPrimaryPythonPrompt(this.outputTail)) {
       const inline = buildInlineBackendBootstrapCommand(this.options.backendRuntimePath, this.token);
       this.bootstrapRetried = true;

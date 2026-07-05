@@ -74,6 +74,13 @@ export interface BackendCompletenessResult {
   traceback?: string;
 }
 
+export interface BackendStageDebugpyResult {
+  error?: string;
+  ok: boolean;
+  path?: string | null;
+  reused?: boolean;
+}
+
 export interface BackendRuntimeInspection {
   error?: string;
   loadedModuleCount?: number;
@@ -157,6 +164,8 @@ export interface BackendRequestPayload {
   changes?: ModelCommitChange[];
   code?: string;
   cursor?: unknown;
+  data?: string;
+  digest?: string;
   exclude?: string[];
   filename?: string;
   filters?: BackendModelFilter[];
@@ -263,6 +272,30 @@ export class BackendClient {
   /** Starts debugpy through a backend path that leaves process stderr untouched. */
   debugpy(code: string): Promise<BackendExecutionResult> {
     return this.request({ code, kind: "debugpy" }, parseBackendResponse);
+  }
+
+  /** Probes for an already-staged debugpy bundle by digest; the tiny request may cross the socket or the one-line PTY RPC. */
+  stageDebugpyProbe(digest: string): Promise<BackendStageDebugpyResult> {
+    return this.request({ digest, kind: "stagedebugpy" }, parseStageDebugpyResponse);
+  }
+
+  /** Uploads the compressed debugpy bundle in one socket request; rejects when the socket is unreachable so the caller can fall back to typed PTY staging. */
+  stageDebugpyUpload(digest: string, data: string): Promise<BackendStageDebugpyResult> {
+    if (this.socketUnavailable) {
+      return Promise.reject(new Error("Backend socket is unavailable for the debugpy bundle upload."));
+    }
+    const started = Date.now();
+    const payload: BackendRequestPayload = { data, digest, kind: "stagedebugpy" };
+    return this.socketRequest(payload).then((buffer) => {
+      const parsed = parseStageDebugpyResponse(buffer);
+      this.activeTransport = "tcp";
+      this.logRequest(payload.kind, started, parsed, buffer.length, undefined, "tcp");
+      return parsed;
+    }, (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logRequest(payload.kind, started, undefined, 0, message, "tcp");
+      throw error instanceof Error ? error : new Error(message);
+    });
   }
 
   /** Returns the latest running Python progress snapshot when the socket can be polled. */
@@ -610,7 +643,7 @@ function connectHost(host: string): string {
   return host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
 }
 
-const PTY_FALLBACK_KINDS = new Set(["children", "complete", "debugpy", "environment", "execute", "inspect", "prelude", "models", "schema", "filterfields", "rows", "related", "count", "aggregate", "commit", "lookup", "query"]); // helpers: scrubbed _djs_rpc; execute: literal cell.
+const PTY_FALLBACK_KINDS = new Set(["children", "complete", "debugpy", "environment", "execute", "inspect", "prelude", "models", "schema", "filterfields", "rows", "related", "count", "aggregate", "commit", "lookup", "query", "stagedebugpy"]); // helpers: scrubbed _djs_rpc; execute: literal cell; stagedebugpy: probe-sized only (uploads are socket-only).
 const PARALLEL_MODEL_READ_KINDS = new Set(["models", "schema", "filterfields", "rows", "related", "computed", "lookup", "count", "aggregate"]);
 // Kinds ORM/Terminal modes never type over the terminal; schema is synthesized from the first row page, and the filter tree falls back to flat fields (see modelBrowser).
 const ORM_NO_PTY = new Set(["children", "environment", "inspect", "models", "prelude", "schema", "filterfields"]);
@@ -696,6 +729,12 @@ function parseProgressResponse(buffer: string): BackendProgressSnapshot {
     stream: typeof parsed.stream === "string" ? parsed.stream : undefined,
     total: typeof parsed.total === "number" || parsed.total === null ? parsed.total : undefined
   };
+}
+
+/** Parses a staged-debugpy probe or upload response. */
+function parseStageDebugpyResponse(buffer: string): BackendStageDebugpyResult {
+  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendStageDebugpyResult>;
+  return { error: parsed.error, ok: Boolean(parsed.ok), path: typeof parsed.path === "string" && parsed.path ? parsed.path : null, reused: Boolean(parsed.reused) };
 }
 
 /** Parses a backend completeness check response. */

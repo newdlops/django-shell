@@ -11,6 +11,7 @@ interface GroupNode {
   children: DebugAnalysisNode[];
   collapsed?: boolean;
   icon: string;
+  id?: string;
   kind: "group";
   label: string;
 }
@@ -39,6 +40,7 @@ interface TraceNode {
 }
 
 interface VariableNode {
+  id: string;
   kind: "variable";
   variable: DebugVariableInfo;
 }
@@ -49,6 +51,7 @@ const VIEW_ID = "djangoShell.debugAnalysis";
 export class DebugAnalysisPanel implements vscode.TreeDataProvider<DebugAnalysisNode>, vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<DebugAnalysisNode | undefined>();
   private readonly disposables: vscode.Disposable[] = [];
+  private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private visible = false;
 
   readonly onDidChangeTreeData = this.changeEmitter.event;
@@ -79,6 +82,10 @@ export class DebugAnalysisPanel implements vscode.TreeDataProvider<DebugAnalysis
 
   /** Releases tree view listeners and refresh resources. */
   dispose(): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
@@ -90,6 +97,7 @@ export class DebugAnalysisPanel implements vscode.TreeDataProvider<DebugAnalysis
     if (node.kind === "group") {
       const item = new vscode.TreeItem(node.label, node.collapsed ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded);
       item.iconPath = new vscode.ThemeIcon(node.icon);
+      item.id = node.id;
       return item;
     }
     if (node.kind === "source") {
@@ -106,7 +114,7 @@ export class DebugAnalysisPanel implements vscode.TreeDataProvider<DebugAnalysis
       return traceTreeItem(node.trace);
     }
     if (node.kind === "variable") {
-      return variableTreeItem(node.variable);
+      return variableTreeItem(node);
     }
     const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
     item.description = node.description;
@@ -121,7 +129,7 @@ export class DebugAnalysisPanel implements vscode.TreeDataProvider<DebugAnalysis
       return node.children;
     }
     if (node?.kind === "variable") {
-      return this.variableChildren(node.variable);
+      return this.variableChildren(node);
     }
     if (node) {
       return [];
@@ -129,21 +137,26 @@ export class DebugAnalysisPanel implements vscode.TreeDataProvider<DebugAnalysis
     return rootNodes(this.source.debugAnalysisSnapshot());
   }
 
-  /** Invalidates the tree when debugger analysis changes. */
+  /** Invalidates the tree on analysis changes, coalescing the per-stop event burst (status, info, resolver) into one refresh so in-flight child expansions are not repeatedly detached from replaced node objects. */
   private handleDebugAnalysisChange(): void {
-    if (this.visible) {
-      this.changeEmitter.fire(undefined);
+    if (!this.visible || this.refreshTimer) {
+      return;
     }
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = undefined;
+      this.changeEmitter.fire(undefined);
+    }, 50);
   }
 
   /** Loads child variables for one expandable DAP variable reference. */
-  private async variableChildren(variable: DebugVariableInfo): Promise<DebugAnalysisNode[]> {
-    const reference = Number(variable.variablesReference) || 0;
+  private async variableChildren(node: VariableNode): Promise<DebugAnalysisNode[]> {
+    const reference = Number(node.variable.variablesReference) || 0;
     if (!reference) {
       return [];
     }
     try {
-      return (await this.source.inspectDebugVariableChildren(reference)).map(variableNode);
+      const children = await this.source.inspectDebugVariableChildren(reference);
+      return children.length ? variableNodes(node.id, children) : [{ icon: "info", kind: "status", label: "(no visible members)" }];
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger?.log("debug.analysis.variables.error", { error: message, reference });
@@ -176,21 +189,21 @@ function rootNodes(snapshot: DebugAnalysisSnapshot): DebugAnalysisNode[] {
   return [{ icon: "debug-alt", kind: "status", label: "Start Django Shell debugging to inspect paused frames." }];
 }
 
-/** Builds tree sections for a paused debug frame. */
+/** Builds tree sections for a paused debug frame. Group and variable nodes carry stable path-based ids so VS Code keeps their expansion across the frequent whole-tree refreshes a stop produces (fresh node objects otherwise reset it). */
 function pausedNodes(snapshot: DebugAnalysisSnapshot): DebugAnalysisNode[] {
   const frame = snapshot.info.frame;
   const nodes: DebugAnalysisNode[] = [];
   if (frame) {
-    nodes.push({ children: [stackFrameNode({ line: frame.line, name: frame.name, path: frame.path }), sourceNode(snapshot.info.error || frame.sourceLine || "")].filter(Boolean) as DebugAnalysisNode[], icon: "debug-stackframe", kind: "group", label: "Paused Frame" });
+    nodes.push({ children: [stackFrameNode({ line: frame.line, name: frame.name, path: frame.path }), sourceNode(snapshot.info.error || frame.sourceLine || "")].filter(Boolean) as DebugAnalysisNode[], icon: "debug-stackframe", id: "group:paused-frame", kind: "group", label: "Paused Frame" });
   }
   if (snapshot.trace.length) {
-    nodes.push({ children: snapshot.trace.map(traceNode), icon: "history", kind: "group", label: "Trace" });
+    nodes.push({ children: snapshot.trace.map(traceNode), icon: "history", id: "group:trace", kind: "group", label: "Trace" });
   }
   if (snapshot.info.frames?.length) {
-    nodes.push({ children: snapshot.info.frames.map(stackFrameNode), collapsed: true, icon: "list-tree", kind: "group", label: "Stack" });
+    nodes.push({ children: snapshot.info.frames.map(stackFrameNode), collapsed: true, icon: "list-tree", id: "group:stack", kind: "group", label: "Stack" });
   }
   if (snapshot.info.scopes?.length) {
-    nodes.push({ children: snapshot.info.scopes.map(scopeNode), icon: "variable-group", kind: "group", label: "Variables" });
+    nodes.push({ children: snapshot.info.scopes.map(scopeNode), icon: "variable-group", id: "group:variables", kind: "group", label: "Variables" });
   }
   return nodes.length ? nodes : [{ icon: "debug-pause", kind: "status", label: snapshot.detail || "Debugger paused" }];
 }
@@ -205,15 +218,22 @@ function sourceNode(text: string): SourceNode | undefined {
   return text ? { kind: "source", text } : undefined;
 }
 
-/** Converts a debug scope into a tree group. */
-function scopeNode(scope: DebugScopeInfo): GroupNode {
+/** Converts a debug scope into a tree group keyed by its position and name (counts stay out of the id so expansion survives them). */
+function scopeNode(scope: DebugScopeInfo, index: number): GroupNode {
   const suffix = typeof scope.total === "number" ? ` (${scope.total})` : "";
-  return { children: scope.variables.map(variableNode), icon: "variable-group", kind: "group", label: `${scope.name}${suffix}` };
+  const id = `scope:${index}:${scope.name}`;
+  return { children: variableNodes(id, scope.variables), icon: "variable-group", id, kind: "group", label: `${scope.name}${suffix}` };
 }
 
-/** Wraps a debugger variable as a tree node. */
-function variableNode(variable: DebugVariableInfo): VariableNode {
-  return { kind: "variable", variable };
+/** Wraps debugger variables as tree nodes with parent-scoped ids, suffixing duplicate names to keep ids tree-unique. */
+function variableNodes(parentId: string, variables: DebugVariableInfo[]): VariableNode[] {
+  const used = new Map<string, number>();
+  return variables.map((variable) => {
+    const base = `${parentId}/v:${variable.name}`;
+    const count = used.get(base) ?? 0;
+    used.set(base, count + 1);
+    return { id: count ? `${base}#${count}` : base, kind: "variable", variable };
+  });
 }
 
 /** Wraps a debugger trace entry as a tree node. */
@@ -240,11 +260,13 @@ function stackFrameTreeItem(frame: DebugStackFrameInfo): vscode.TreeItem {
 }
 
 /** Builds a tree item for one debugger variable. */
-function variableTreeItem(variable: DebugVariableInfo): vscode.TreeItem {
+function variableTreeItem(node: VariableNode): vscode.TreeItem {
+  const variable = node.variable;
   const reference = Number(variable.variablesReference) || 0;
   const item = new vscode.TreeItem(variable.name || "(unnamed)", reference ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
   item.description = variable.value;
   item.iconPath = new vscode.ThemeIcon(reference ? "symbol-field" : "symbol-variable");
+  item.id = node.id;
   item.tooltip = variable.type ? `${variable.name}: ${variable.value} (${variable.type})` : `${variable.name}: ${variable.value}`;
   return item;
 }

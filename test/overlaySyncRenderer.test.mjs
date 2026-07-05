@@ -8,6 +8,42 @@ const require = createRequire(import.meta.url);
 const { overlayRendererSource } = require("../out/workbenchOverlayRenderer.js");
 const { overlaySyncRendererSource } = require("../out/workbenchOverlaySyncRenderer.js");
 const { overlayPythonRangeRendererSource } = require("../out/workbenchOverlayPythonRangeRenderer.js");
+const { overlayWidgetRendererSource } = require("../out/workbenchOverlayWidgetRenderer.js");
+
+test("routes popup file links through the bridge and leaves command links to the workbench", () => {
+  const source = overlayWidgetRendererSource();
+  const window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame: () => 0 };
+  const document = { addEventListener() {}, body: {}, getElementById: () => undefined, head: { appendChild() {} }, createElement: () => ({ style: {} }), querySelector: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const posts = [];
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installRouter: __dsoInstallWidgetLinkRouter };`)(window, document, (payload) => posts.push(payload));
+  let clickHandler;
+  let captured = false;
+  const layerRoot = { addEventListener(type, callback, capture) { if (type === "click") { clickHandler = callback; captured = capture; } } };
+  api.installRouter({ __dsoWidgetRoot: layerRoot });
+  assert.equal(typeof clickHandler, "function");
+  assert.equal(captured, true);
+  assert.equal(layerRoot.__dsoLinkRouterInstalled, true);
+
+  const fileAnchor = { getAttribute: (name) => name === "data-href" ? "file:///work/app/models.py#L10,5" : "" };
+  const fileEvent = { prevented: false, stopped: false, target: { closest: () => fileAnchor }, preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; } };
+  clickHandler(fileEvent);
+  assert.deepEqual(posts, [{ type: "openLink", href: "file:///work/app/models.py#L10,5" }]);
+  assert.equal(fileEvent.prevented, true);
+  assert.equal(fileEvent.stopped, true);
+
+  const commandAnchor = { getAttribute: (name) => name === "data-href" ? "command:editor.action.showHover" : "" };
+  const commandEvent = { prevented: false, stopped: false, target: { closest: () => commandAnchor }, preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; } };
+  clickHandler(commandEvent);
+  assert.equal(posts.length, 1);
+  assert.equal(commandEvent.prevented, false);
+  assert.equal(commandEvent.stopped, false);
+
+  // A second install on the same layer must not stack duplicate listeners.
+  let reinstalls = 0;
+  layerRoot.addEventListener = () => { reinstalls += 1; };
+  api.installRouter({ __dsoWidgetRoot: layerRoot });
+  assert.equal(reinstalls, 0);
+});
 
 test("emits parseable workbench overlay renderer source", () => {
   assert.equal(typeof Function(overlayRendererSource("file:///tmp/console-cell.py")), "function");

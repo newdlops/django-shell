@@ -70,7 +70,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 84"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 86"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -337,7 +337,7 @@ test("debug start clicks always reach the extension host for diagnostics", () =>
   assert.ok(customConsoleClientSource.includes("button.disabled = false"));
   assert.ok(customConsoleSource.includes("debug.webview.request"));
   assert.ok(customConsoleSource.includes("debug.shell.request"));
-  assert.ok(customConsoleSource.includes("debug.shell.alreadyAttached"));
+  assert.ok(customConsoleSource.includes("debug.shell.reuse"));
   assert.ok(customConsoleSource.includes("debug.shell.noBackend"));
   assert.ok(customConsoleSource.includes("debugAttachPromise"));
   assert.ok(customConsoleSource.includes("debug.shell.inFlight"));
@@ -479,7 +479,10 @@ test("overlay debug analysis renders in the Django Shell Activity Bar panel", ()
   assert.ok(debugAnalysisPanelSource.includes('const VIEW_ID = "djangoShell.debugAnalysis"'));
   assert.ok(debugAnalysisPanelSource.includes("implements vscode.TreeDataProvider<DebugAnalysisNode>"));
   assert.ok(debugAnalysisPanelSource.includes("inspectDebugVariableChildren(reference)"));
-  assert.ok(debugAnalysisPanelSource.includes("scope.variables.map(variableNode)"));
+  assert.ok(debugAnalysisPanelSource.includes("variableNodes(id, scope.variables)"));
+  assert.ok(debugAnalysisPanelSource.includes("variableNodes(node.id, children)"), "expanded children keep parent-scoped stable ids");
+  assert.ok(debugAnalysisPanelSource.includes("item.id = node.id"), "tree items carry stable ids so expansion survives refreshes");
+  assert.ok(debugAnalysisPanelSource.includes("this.refreshTimer = setTimeout("), "per-stop refresh bursts are coalesced");
   assert.ok(debugAnalysisPanelSource.includes('label: "Trace"'));
   assert.ok(debugAnalysisPanelSource.includes("traceTreeItem"));
   assert.ok(debugAnalysisStoreSource.includes("setDebugAnalysisInfo(info: DebugFrameInfo)"));
@@ -498,6 +501,8 @@ test("overlay debug analysis renders in the Django Shell Activity Bar panel", ()
   assert.ok(debugInspectorSource.includes('DISPLAY_DEBUG_VARIABLE_NAMES = new Map([["__m", "receiver"]])'));
   assert.ok(debugInspectorSource.includes('VISIBLE_DEBUG_INTERNAL_VARIABLES = new Set(["__m"])'));
   assert.ok(debugInspectorSource.includes("isHiddenDebugVariable"));
+  assert.ok(debugInspectorSource.includes('variablesForReference(session, variablesReference, 120, "children")'), "expanded nodes keep dunder members visible");
+  assert.ok(debugInspectorSource.includes('level === "scope" && name.startsWith("__")'), "dunder filtering only applies at scope level");
   assert.ok(debugInspectorSource.includes("displayVariableValue(variable.value, variable.variablesReference)"));
   assert.ok(debugInspectorSource.includes("`${text}<${ref}>`"));
   assert.ok(customConsoleSource.includes("inspectDebugVariables(session"));
@@ -505,6 +510,21 @@ test("overlay debug analysis renders in the Django Shell Activity Bar panel", ()
   assert.ok(customConsoleSource.includes("setDebugAnalysisVariableResolver"));
   assert.ok(debugInspectorSource.includes("export interface DebugStackFrameInfo"));
   assert.ok(debugInspectorSource.includes("frames: frames.slice(0, 8).map(stackFrameInfo)"));
+});
+
+test("overlay hover file links open beside the console or reveal inside the overlay", () => {
+  const widgetRendererSource = fs.readFileSync(new URL("../src/workbenchOverlayWidgetRenderer.ts", import.meta.url), "utf8");
+  // Renderer: capture-phase routing for file links inside portal popups (hover/suggest docs).
+  assert.ok(widgetRendererSource.includes("__dsoInstallWidgetLinkRouter"));
+  assert.ok(widgetRendererSource.includes('__dsoPost({ type: "openLink", href: href })'));
+  // Extension: generated-file targets reveal inside the overlay editor instead of opening hidden tabs.
+  assert.ok(overlaySource.includes('payload?.type === "openLink"'));
+  assert.ok(overlaySource.includes("openHoverLink"));
+  assert.ok(overlaySource.includes("parseHoverLinkTarget"));
+  assert.ok(overlaySource.includes("target.line - this.memoryDocument.lineOffset()"));
+  assert.ok(overlaySource.includes("revealOverlayLine"));
+  // Real files open in a side group so the console webview and overlay stay intact.
+  assert.ok(overlaySource.includes("viewColumn: vscode.ViewColumn.Beside"));
 });
 
 test("debug variable analysis previews bounded QuerySet result lists", () => {
@@ -534,8 +554,7 @@ test("PTY fallback preserves debug metadata instead of typing overlay debug cell
   assert.ok(notebookPtySessionSource.includes("function wantsPtyDebugWrapper"));
 });
 
-test("debug stop interrupts the active backend execution instead of only detaching", () => {
-  assert.ok(customConsoleSource.includes("backend?.interrupt(\"debugControl.stop\")"));
+test("full debug teardown (restart/close) interrupts the backend and disconnects", () => {
   assert.ok(customConsoleSource.includes("backend?.interrupt(\"debugWebview.stop\")"));
   assert.ok(customConsoleSource.includes("interruptExecution: (reason) => this.session?.backend?.interrupt(reason)"));
   assert.ok(debugControlsSource.includes("await interruptExecution?.();"));
@@ -578,17 +597,50 @@ test("direct overlay debug syncs workspace Python breakpoints for continue", () 
   assert.ok(customConsoleSource.includes('fsPath.endsWith(".py")'));
 });
 
-test("failed debug execution exits debugging and returns focus to output", () => {
-  assert.ok(customConsoleSource.includes("stopDebugAfterFailedExecution"));
-  assert.ok(customConsoleSource.includes("await direct.disconnect()"));
-  assert.ok(customConsoleSource.includes("await vscode.debug.stopDebugging(session)"));
-  assert.ok(customConsoleSource.includes("this.lastDebugControlAction = undefined"));
-  assert.ok(customConsoleSource.includes("this.debugControlOriginOverlay = false"));
-  assert.ok(customConsoleSource.includes("this.lastDebugFrameOverlay = false"));
-  assert.ok(customConsoleSource.includes('this.postDebugStatus("idle")'));
+test("a finished debug run ends warm and keeps the debugpy connection for reuse", () => {
+  assert.ok(customConsoleSource.includes("if (this.debugRunActive) { await this.endDebugRun("));
+  assert.ok(customConsoleSource.includes('this.lastDebugControlAction ? "completed" : "no breakpoint hit"'));
+  assert.ok(customConsoleSource.includes("private async endDebugRun("));
+  assert.ok(customConsoleSource.includes("this.debugRunActive = false; this.debugThreadId = undefined;"));
+  assert.ok(customConsoleSource.includes("debugBreakpoints([])"), "endDebugRun clears breakpoint state so warm runs never pause");
+  assert.ok(customConsoleSource.includes("debug.run.end"));
+  // endDebugRun must NOT disconnect / stop the session (that is teardownDebug only)
+  const endDebugRunBody = customConsoleSource.slice(customConsoleSource.indexOf("private async endDebugRun("), customConsoleSource.indexOf("private async stopDebugRun("));
+  assert.ok(!endDebugRunBody.includes("disconnect(") && !endDebugRunBody.includes("stopDebugging("), "endDebugRun keeps the socket warm");
+  assert.ok(customConsoleSource.includes('this.postDebugStatus("idle", detail)'));
   assert.ok(customConsoleSource.includes("clearExternalDebugFrameDecoration();"));
-  assert.ok(customConsoleSource.includes("this.panel?.reveal(vscode.ViewColumn.One)"));
-  assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", false'));
+});
+
+test("debug reuses a warm connection instead of reconnecting; full teardown only on restart/close", () => {
+  assert.ok(customConsoleSource.includes("return this.reuseWarmDebugRun(this.overlayDebugSession)"));
+  assert.ok(customConsoleSource.includes("return this.reuseWarmDebugRun(this.debugSession)"));
+  assert.ok(customConsoleSource.includes("private async reuseWarmDebugRun("));
+  assert.ok(customConsoleSource.includes("this.debugRunActive = true;"));
+  assert.ok(customConsoleSource.includes("private async teardownDebug("));
+  assert.ok(customConsoleSource.includes("await this.teardownDebug();"), "restart tears the connection down fully");
+  assert.ok(customConsoleSource.includes("await session.disconnect();"));
+});
+
+test("stop keeps the debug connection warm and resumes a paused cell", () => {
+  assert.ok(customConsoleSource.includes('if (action === "stop") { await this.stopDebugRun(activeSession); return; }'));
+  assert.ok(customConsoleSource.includes("private async stopDebugRun("));
+  assert.ok(customConsoleSource.includes('runDebugControl("continue", session, this.debugThreadId'));
+});
+
+test("stepInto target resolution is time-boxed and bounds language-server calls", () => {
+  const stepTargetsSource = fs.readFileSync(new URL("../src/debugStepTargets.ts", import.meta.url), "utf8");
+  assert.ok(stepTargetsSource.includes("STEP_IN_TARGET_TIMEOUT_MS = 120"));
+  assert.ok(stepTargetsSource.includes("Promise.race([preferredUserStepInTargetId"), "the target lookup races a timeout");
+  assert.ok(stepTargetsSource.includes("pythonIdentifierSpans(line).slice(0, 8)"), "capped identifier probes");
+  assert.ok(stepTargetsSource.includes("const staticCallNames = fallbackDirectCallNames(line, source.visibleText, [])"), "static call names are tried before language-server lookups");
+  assert.ok(stepTargetsSource.includes("new vscode.Position(lineIndex, span.start)"), "one definition probe per identifier");
+});
+
+test("backend only traces the request thread for debug runs so warm connections stay fast", () => {
+  const backendSource = fs.readFileSync(new URL("../python/django_shell_backend.py", import.meta.url), "utf8");
+  assert.ok(backendSource.includes("_debug_current_thread(breakpoint_lines is not None)"), "tracing is gated on a debug run");
+  assert.ok(backendSource.includes("def _debug_current_thread(active):"));
+  assert.ok(backendSource.includes("debugpy.trace_this_thread(False)"), "normal runs disable leftover tracing");
 });
 
 test("debug attach runs the current overlay input after breakpoint sync", () => {

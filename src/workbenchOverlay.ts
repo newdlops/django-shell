@@ -19,7 +19,7 @@ export interface WorkbenchOverlayGeometry { height: number; left: number; top: n
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
 const GEOMETRY_SETTLE_MS = 80;
-const RENDERER_PATCH_VERSION = 84;
+const RENDERER_PATCH_VERSION = 86;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -343,6 +343,34 @@ export class WorkbenchOverlay implements vscode.Disposable {
   private scheduleGeneratedCleanup(): void { clearTimeout(this.generatedCleanupTimer); this.generatedCleanupTimer = setTimeout(() => { void closeGeneratedOverlayTabs([this.memoryDocument.analysisUri, this.memoryDocument.editorUri]).catch(() => undefined); }, 450); }
   /** Converts a one-based user-input line into the backing console-cell.py line offset. */
   private relativeLineOffset(relativeLine: unknown): number | undefined { return typeof relativeLine === "number" && Number.isFinite(relativeLine) ? Math.max(0, Math.floor(relativeLine) - 1) : undefined; }
+
+  /** Opens one hover markdown link: generated-file targets reveal inside the overlay, real files open beside the console. */
+  private async openHoverLink(href: string): Promise<void> {
+    const target = parseHoverLinkTarget(href);
+    if (!target) {
+      return;
+    }
+    if (samePath(target.uri.fsPath, this.memoryDocument.analysisUri.fsPath)) {
+      await this.revealOverlayLine(target.line - this.memoryDocument.lineOffset(), target.column);
+      return;
+    }
+    if (samePath(target.uri.fsPath, this.memoryDocument.editorUri.fsPath)) {
+      await this.revealOverlayLine(target.line, target.column);
+      return;
+    }
+    const document = await vscode.workspace.openTextDocument(target.uri);
+    const position = new vscode.Position(Math.max(0, target.line - 1), Math.max(0, target.column - 1));
+    await vscode.window.showTextDocument(document, { preview: true, selection: new vscode.Range(position, position), viewColumn: vscode.ViewColumn.Beside });
+  }
+
+  /** Moves the overlay cursor to one visible line so generated-file link targets resolve in place. */
+  private async revealOverlayLine(line: number, column: number): Promise<void> {
+    const safeLine = Math.max(1, Math.floor(line) || 1);
+    const safeColumn = Math.max(1, Math.floor(column) || 1);
+    await this.ensureInjected();
+    const report = await this.evalInWorkbench(`(function(){const root=document.getElementById("django-shell-overlay");const editor=root&&root.__djangoShellEditor;if(!editor||!editor.setPosition){return "no-overlay";}const position={lineNumber:${safeLine},column:${safeColumn}};try{editor.setPosition(position);editor.revealPositionInCenterIfOutsideViewport&&editor.revealPositionInCenterIfOutsideViewport(position);editor.focus&&editor.focus();}catch(eReveal){return "reveal-error:"+String(eReveal&&eReveal.message||eReveal);}return "ok";})()`);
+    this.logger?.log("overlay.openLink.reveal", { column: safeColumn, line: safeLine, report });
+  }
   /** Returns whether a paused frame belongs to this overlay's generated source file. */
   private isOverlayFrame(pathOrUri: string | undefined): boolean { const normalized = normalizeFramePath(pathOrUri); return !!normalized && normalized === this.memoryDocument.editorUri.fsPath; }
   /** Starts the local HTTP bridge used by the renderer run button. */
@@ -396,6 +424,12 @@ export class WorkbenchOverlay implements vscode.Disposable {
       if (payload?.type === "change" && typeof payload.code === "string") {
         this.logger?.log("overlay.bridge.change", textFields(payload.code));
         await this.memoryDocument.syncVolatile(payload.code);
+      }
+      if (payload?.type === "openLink" && typeof payload.href === "string") {
+        this.logger?.log("overlay.bridge.openLink", { href: payload.href.slice(0, 300) });
+        void this.openHoverLink(payload.href).catch((error: unknown) => this.logger?.log("overlay.openLink.error", { error: error instanceof Error ? error.message : String(error) }));
+        res.writeHead(204, CORS_HEADERS).end();
+        return;
       }
       if (payload?.type === "run" && typeof payload.code === "string") {
         this.logger?.log("overlay.bridge.run", { ...textFields(payload.code), fullText: typeof payload.text === "string" ? textFields(payload.text).lines : 0 });
@@ -722,6 +756,25 @@ function outputExpression(text: string, ok: boolean): string { return `window.__
 
 /** Returns the expression that refreshes the paused debugger line marker. */
 function debugLineExpression(visibleLine: number): string { return `window.__dsoSetOverlayDebugLine ? window.__dsoSetOverlayDebugLine(${JSON.stringify(visibleLine)}) : 'overlay-debug-line-missing'`; }
+
+/** Parses one hover markdown file link into a target file and one-based position (fragment forms: L10, L10,5, 10,5). */
+function parseHoverLinkTarget(href: string): { column: number; line: number; uri: vscode.Uri } | undefined {
+  try {
+    const uri = vscode.Uri.parse(href, true);
+    if (uri.scheme !== "file") {
+      return undefined;
+    }
+    const match = /^L?(\d+)(?:[,:](\d+))?/i.exec(decodeURIComponent(uri.fragment || ""));
+    return { column: match?.[2] ? Number(match[2]) : 1, line: match?.[1] ? Number(match[1]) : 1, uri: uri.with({ fragment: "" }) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Returns whether two filesystem paths are equal after platform-neutral normalization. */
+function samePath(left: string, right: string): boolean {
+  return left.replace(/\\/g, "/").toLowerCase() === right.replace(/\\/g, "/").toLowerCase();
+}
 
 /** Returns the expression that reads only user-visible overlay text. */
 function visibleTextReadExpression(): string { return `(function(){return window.__dsoGetOverlayVisibleText ? JSON.stringify({ok:true,text:window.__dsoGetOverlayVisibleText()}) : JSON.stringify({ok:false});})()`; }

@@ -35,11 +35,15 @@ export interface StepInArguments {
   threadId: number;
 }
 
-/** Builds a DAP stepIn request, targeting a user-source function when debugpy exposes one. */
+// Resolving a user-source step-in target runs language-server definition lookups; time-box it so a slow (or remote) Python
+// language server never stalls the step — plain stepIn plus the debugpy stepping rules already skip library frames.
+const STEP_IN_TARGET_TIMEOUT_MS = 120;
+
+/** Builds a DAP stepIn request, targeting a user-source function when debugpy exposes one within a short time budget. */
 export async function buildStepInArguments(session: DisposableDebugRequestSession | vscode.DebugSession, threadId: number, logger?: DiagnosticLogger): Promise<StepInArguments> {
   const frame = await currentStackFrame(session, threadId);
   if (!frame) { return { threadId }; }
-  const targetId = await preferredUserStepInTargetId(session, frame, logger);
+  const targetId = await Promise.race([preferredUserStepInTargetId(session, frame, logger), new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), STEP_IN_TARGET_TIMEOUT_MS))]);
   return targetId !== undefined ? { targetId, threadId } : { threadId };
 }
 
@@ -84,6 +88,8 @@ async function userDefinitionTargetNamesForFrame(frame: DapStackFrame): Promise<
     const lineIndex = Math.max(0, frame.line - 1);
     if (lineIndex >= source.visibleLineCount || source.providerLine >= document.lineCount) { return emptyStepTargetSource(source.analysis); }
     const line = source.visibleLine;
+    const staticCallNames = fallbackDirectCallNames(line, source.visibleText, []);
+    if (staticCallNames.length) { return { analysis: source.analysis, callNames: staticCallNames, definitionNames: [], line, names: staticCallNames }; }
     const definitionNames = await userDefinitionNamesForLine(document, source.providerLine, line);
     const callNames = fallbackDirectCallNames(line, source.visibleText, definitionNames);
     return { analysis: source.analysis, callNames, definitionNames, line, names: uniqueNames([...definitionNames, ...callNames]) };
@@ -109,7 +115,7 @@ async function providerSourceForFrame(sourcePath: string, visibleLine: number): 
 /** Finds source-line identifiers whose definitions point at user source files. */
 async function userDefinitionNamesForLine(document: vscode.TextDocument, lineIndex: number, line: string): Promise<string[]> {
   const names = new Set<string>();
-  for (const span of pythonIdentifierSpans(line).slice(0, 40)) {
+  for (const span of pythonIdentifierSpans(line).slice(0, 8)) {
     if (await spanHasUserDefinition(document, lineIndex, span)) { names.add(span.name); }
   }
   return [...names];
@@ -124,14 +130,10 @@ function fallbackDirectCallNames(line: string, visibleText: string, definitionNa
     .filter((name) => knownNames.has(name));
 }
 
-/** Returns whether any position inside an identifier resolves to a user source file. */
+/** Returns whether an identifier resolves to a user source file (one definition probe at the identifier start to bound language-server cost). */
 async function spanHasUserDefinition(document: vscode.TextDocument, lineIndex: number, span: DebugSourceNameSpan): Promise<boolean> {
-  const columns = uniqueNumbers([span.start, Math.min(span.end - 1, span.start + 1), Math.floor((span.start + span.end - 1) / 2)]);
-  for (const column of columns) {
-    const definitions = await definitionLocations(document, new vscode.Position(lineIndex, column));
-    if (definitions.some((definition) => isUserDebugSourcePath(definition.uri.fsPath))) { return true; }
-  }
-  return false;
+  const definitions = await definitionLocations(document, new vscode.Position(lineIndex, span.start));
+  return definitions.some((definition) => isUserDebugSourcePath(definition.uri.fsPath));
 }
 
 /** Reads VS Code definition locations at one source position. */
@@ -164,11 +166,6 @@ function emptyStepTargetSource(analysis: boolean): StepTargetSource {
 /** Returns names without duplicates while preserving order. */
 function uniqueNames(names: string[]): string[] {
   return [...new Set(names)];
-}
-
-/** Returns numbers without duplicates while preserving order. */
-function uniqueNumbers(values: number[]): number[] {
-  return [...new Set(values)];
 }
 
 /** Returns whether two filesystem paths are equal after platform-neutral normalization. */

@@ -317,6 +317,8 @@ def _run_request(namespace, token, request, initial_names):
         return _interrupt_execution(request)
     if request.get("kind") == "debugBreakpoints":
         return _debug_update_breakpoints(request)
+    if request.get("kind") == "stagedebugpy":
+        return _stage_debugpy_bundle(request)
     if request.get("kind") == "children":
         return _inspect_children(namespace, request.get("path"))
     if request.get("kind") == "models":
@@ -1057,7 +1059,7 @@ def _execute_code(namespace, code, filename=None, line_offset=0, source_text=Non
     result = None
     compile_filename = filename or "<django-shell-input>"
     _install_debug_source_cache(compile_filename, source_text, code, line_offset)
-    _debug_current_thread()
+    _debug_current_thread(breakpoint_lines is not None)
     progress_emit = bool(_STATE.get("progress_emit"))
     _progress_begin(code, emit=progress_emit)
     stdout = _StreamingCapture("stdout", progress_emit)
@@ -1100,6 +1102,40 @@ def _execute_debugpy_bootstrap(namespace, code):
         return {"ok": True, "stdout": stdout.getvalue(), "stderr": "", "result": ""}
     except Exception:
         return {"ok": False, "stdout": stdout.getvalue(), "stderr": "", "traceback": traceback.format_exc()}
+
+
+def _stage_debugpy_bundle(request):
+    """Probes for, or installs, the extension's bundled debugpy copy under a digest-keyed temp directory.
+
+    Without ``data`` this is a cheap probe so reconnects reuse an earlier install instead of re-shipping megabytes;
+    with ``data`` (deflate+base64 of a ``[[relative_path, base64_content], ...]`` JSON list) it writes the files.
+    The socket transport carries the payload in one request, replacing thousands of typed terminal lines."""
+    import base64
+    import tempfile
+    import zlib
+
+    digest = request.get("digest")
+    if not isinstance(digest, str) or len(digest) < 16 or not all(c in "0123456789abcdef" for c in digest):
+        return {"ok": False, "error": "stagedebugpy requires a lowercase hex digest."}
+    root = os.path.normpath(os.path.join(tempfile.gettempdir(), "django-shell-debugpy-" + digest[:16]))
+    if os.path.exists(os.path.join(root, "debugpy", "__init__.py")):
+        return {"ok": True, "path": root, "reused": True}
+    data = request.get("data")
+    if not isinstance(data, str) or not data:
+        return {"ok": True, "path": None, "reused": False}
+    try:
+        files = json.loads(zlib.decompress(base64.b64decode(data)).decode("utf-8"))
+        for entry in files:
+            relative, content = entry
+            target = os.path.normpath(os.path.join(root, *str(relative).split("/")))
+            if target != root and not target.startswith(root + os.sep):
+                return {"ok": False, "error": "Unsafe debugpy bundle path: " + str(relative)}
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as handle:
+                handle.write(base64.b64decode(content))
+        return {"ok": True, "files": len(files), "path": root, "reused": False}
+    except Exception:
+        return {"ok": False, "error": traceback.format_exc()}
 
 
 def _execution_mark_active():
@@ -1540,15 +1576,18 @@ def _debug_copy_location(node, source):
     return node
 
 
-def _debug_current_thread():
-    """Registers the backend request thread with debugpy when a debugger is attached."""
+def _debug_current_thread(active):
+    """Enables debugger tracing on the request thread only for debug runs so a warm debugpy connection does not trace normal cells; disables it otherwise."""
     debugpy = sys.modules.get("debugpy")
     if not debugpy:
         return
     try:
-        connected = getattr(debugpy, "is_client_connected", lambda: True)()
-        if connected and hasattr(debugpy, "debug_this_thread"):
-            debugpy.debug_this_thread()
+        if active:
+            connected = getattr(debugpy, "is_client_connected", lambda: True)()
+            if connected and hasattr(debugpy, "debug_this_thread"):
+                debugpy.debug_this_thread()
+        elif hasattr(debugpy, "trace_this_thread"):
+            debugpy.trace_this_thread(False)
     except Exception:
         pass
 

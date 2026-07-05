@@ -118,8 +118,27 @@ export function overlayWidgetRendererSource(): string {
       root.__dsoWidgetLayer = layer;
       __dsoSyncWidgetTheme(layerRoot, true);
       __dsoInstallWidgetClamp(root);
+      __dsoInstallWidgetLinkRouter(root);
       window.__dsoSyncOverlayWidgetLayer(root);
       return layer;
+    }
+
+    /** Routes file links inside portal popups through the extension host, so hover navigation never replaces the console tab with a hidden generated editor. */
+    function __dsoInstallWidgetLinkRouter(root) {
+      const layerRoot = root && root.__dsoWidgetRoot;
+      if (!layerRoot || layerRoot.__dsoLinkRouterInstalled) { return; }
+      layerRoot.__dsoLinkRouterInstalled = true;
+      layerRoot.addEventListener("click", function (event) {
+        try {
+          const anchor = event.target && event.target.closest ? event.target.closest("a[data-href], a[href]") : null;
+          if (!anchor) { return; }
+          const href = String(anchor.getAttribute("data-href") || anchor.getAttribute("href") || "");
+          if (href.indexOf("file:") !== 0) { return; }
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          __dsoPost({ type: "openLink", href: href });
+        } catch (eWidgetLink) {}
+      }, true);
     }
 
     /** Prepares the constructor-time Monaco overflow widget portal outside the webview host. */

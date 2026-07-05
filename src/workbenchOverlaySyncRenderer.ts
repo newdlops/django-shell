@@ -569,6 +569,8 @@ export function overlaySyncRendererSource(): string {
     window.__dsoApplyOverlayDebugLine = function (root, editor) {
       const model = editor && editor.getModel && editor.getModel();
       if (!root || !editor || !model || !editor.deltaDecorations) { return "missing-editor"; }
+      // Refresh the Enter-preview band first so it hides while paused and the stopped line stays the only highlighted row.
+      try { __dsoUpdateExecutionRangePreview(root, editor); } catch (eExecRangeRefresh) {}
       const visibleLine = Math.floor(Number(root.__dsoDebugLine || window.__dsoOverlayDebugLine || 0));
       const modelLine = visibleLine > 0 ? (Number(root.__dsoInputStartLine) || 1) + visibleLine - 1 : 0;
       const decorations = modelLine >= 1 && modelLine <= model.getLineCount() ? [{
@@ -617,7 +619,9 @@ export function overlaySyncRendererSource(): string {
       const model = editor && editor.getModel && editor.getModel();
       if (!root || !editor || !model || !editor.deltaDecorations) { return; }
       const payload = __dsoPreviewPayload(root, editor);
-      const decorations = __dsoExecutionRangeDecorations(model, payload);
+      // Hide the Enter-preview band while the debugger is paused so the stopped line stays the only highlighted row.
+      const pausedLine = Math.floor(Number(root.__dsoDebugLine || window.__dsoOverlayDebugLine || 0));
+      const decorations = pausedLine > 0 ? [] : __dsoExecutionRangeDecorations(model, payload);
       const preview = payload && payload.range ? { end: payload.range.end, start: payload.range.start } : null;
       const previewKey = preview ? preview.start + ":" + preview.end : "";
       try {

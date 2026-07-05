@@ -14,15 +14,24 @@ const {
   parseDebugpyBundleInstallResult
 } = require("../out/debugpyBundle.js");
 
-test("packages portable debugpy files without native extension binaries", () => {
+test("packages portable debugpy files without native binaries or runtime-dead directories", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "django-shell-debugpy-libs-"));
   fs.mkdirSync(path.join(root, "debugpy", "server"), { recursive: true });
-  fs.mkdirSync(path.join(root, "debugpy", "_vendored"), { recursive: true });
+  fs.mkdirSync(path.join(root, "debugpy", "_vendored", "pydevd", "pydevd_attach_to_process"), { recursive: true });
+  fs.mkdirSync(path.join(root, "debugpy", "_vendored", "pydevd", "_pydev_runfiles"), { recursive: true });
   fs.mkdirSync(path.join(root, "packaging"), { recursive: true });
+  fs.mkdirSync(path.join(root, "packaging-24.2.dist-info"), { recursive: true });
+  fs.mkdirSync(path.join(root, "debugpy-1.8.20.dist-info", "licenses"), { recursive: true });
   fs.writeFileSync(path.join(root, "debugpy", "__init__.py"), "__version__ = 'x'\n");
   fs.writeFileSync(path.join(root, "debugpy", "server", "api.py"), "def listen(): pass\n");
   fs.writeFileSync(path.join(root, "debugpy", "_vendored", "native.so"), "binary");
+  fs.writeFileSync(path.join(root, "debugpy", "_vendored", "pydevd", "pydevd.py"), "x = 1\n");
+  fs.writeFileSync(path.join(root, "debugpy", "_vendored", "pydevd", "pydevd_attach_to_process", "add_code_to_python_process.py"), "pid = 1\n");
+  fs.writeFileSync(path.join(root, "debugpy", "_vendored", "pydevd", "_pydev_runfiles", "pydev_runfiles.py"), "tests = 1\n");
   fs.writeFileSync(path.join(root, "packaging", "__init__.py"), "");
+  fs.writeFileSync(path.join(root, "packaging-24.2.dist-info", "METADATA"), "Name: packaging\n");
+  fs.writeFileSync(path.join(root, "debugpy-1.8.20.dist-info", "RECORD"), "inventory\n");
+  fs.writeFileSync(path.join(root, "debugpy-1.8.20.dist-info", "licenses", "LICENSE"), "MIT\n");
   fs.writeFileSync(path.join(root, "debugpy", "py.typed"), "");
 
   const payload = createDebugpyBundlePayload([path.join(root, "missing"), root]);
@@ -30,13 +39,18 @@ test("packages portable debugpy files without native extension binaries", () => 
   const files = JSON.parse(zlib.inflateSync(Buffer.from(payload.data, "base64")).toString("utf8"));
   const names = files.map((file) => file[0]);
 
-  assert.equal(payload.fileCount, 4);
+  assert.equal(payload.fileCount, 5);
   assert.ok(payload.digest.length >= 16);
   assert.ok(names.includes("debugpy/__init__.py"));
   assert.ok(names.includes("debugpy/server/api.py"));
   assert.ok(names.includes("debugpy/py.typed"));
-  assert.ok(names.includes("packaging/__init__.py"));
+  assert.ok(names.includes("debugpy/_vendored/pydevd/pydevd.py"));
+  assert.ok(names.includes("debugpy-1.8.20.dist-info/licenses/LICENSE"), "license files stay for attribution");
   assert.ok(!names.includes("debugpy/_vendored/native.so"));
+  assert.ok(!names.some((name) => name.startsWith("packaging")), "never-imported packaging copies are dropped");
+  assert.ok(!names.some((name) => name.includes("pydevd_attach_to_process/")), "attach-by-pid payload is dead weight for listen()");
+  assert.ok(!names.some((name) => name.includes("_pydev_runfiles/")), "pytest runner integration is dead weight");
+  assert.ok(!names.includes("debugpy-1.8.20.dist-info/RECORD"), "wheel inventory files are dropped");
 });
 
 test("builds a chunked remote debugpy installer command", () => {
