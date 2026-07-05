@@ -688,9 +688,11 @@ test("backend only traces the request thread for debug runs so warm connections 
   assert.ok(backendSource.includes("bool(_STATE.get(\"progress_emit\")) and breakpoint_lines is None"));
 });
 
-test("a warm run ignores and resumes a trailing stopped event after it has ended", () => {
+test("a warm run ignores and resumes a trailing stopped event after it has ended without re-activating debug", () => {
   assert.ok(customConsoleSource.includes("if (!this.debugRunActive) { this.logger?.log(\"debug.direct.stopped.stale\""));
   assert.ok(customConsoleSource.includes('runDebugControl("continue", session, threadId'));
+  // The resume's continued event must NOT re-post "running" (which would re-enable the debug controls after the run ended).
+  assert.ok(customConsoleSource.includes('debugRun: this.debugRunActive ? 1 : 0, threadId: body.threadId ?? 0 }); if (!this.debugRunActive) { return; } this.postDebugStatus("running", "continued")'));
 });
 
 test("debug attach runs the current overlay input after breakpoint sync", () => {
