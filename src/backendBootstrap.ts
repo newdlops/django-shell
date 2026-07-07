@@ -139,22 +139,19 @@ export function buildInlineBackendBootstrapCommand(runtimePath: string, token: s
   return { bytes: command.length, command, mode: "inline" };
 }
 
-/** Builds the typed PTY fallback that appends the deferred feature source in short lines and exec's it into the live backend module — used only when the socket "loadfeature" is unavailable (a pure-PTY remote with no tunnel). Returns undefined when there is no feature section. */
-export function buildFeatureLoadCommand(runtimePath: string): string | undefined {
+/** Shell-namespace key staging the typed feature chunks that a `loadfeature` PTY request consumes via `partsKey`. */
+export const BACKEND_FEATURE_PARTS_KEY = "_djs_feature_parts";
+
+/** Builds the typed PTY fallback that stages the deferred feature source in short append lines and finishes with the given `_djs_rpc` loadfeature line — used only when the socket "loadfeature" is unavailable (a pure-PTY remote with no tunnel). The rpc tail is capture-skipped by the backend hook, so its id-correlated response marker prints straight to the terminal. Returns undefined when there is no feature section. */
+export function buildFeatureLoadPtyCommand(runtimePath: string, rpcTailLine: string): string | undefined {
   const payload = backendFeaturePayload(runtimePath);
   if (!payload) {
     return undefined;
   }
-  const partsLiteral = pythonString("_djs_feature_parts");
-  const python = [
-    "import base64 as _djs_fb,zlib as _djs_fz",
-    `_djs_fsrc=_djs_fz.decompress(_djs_fb.b64decode("".join(globals().pop(${partsLiteral},[])))).decode("utf-8")`,
-    `exec(compile(_djs_fsrc,"<django-shell-backend>","exec"),_djs_backend_module.__dict__)`,
-    "_djs_backend_module._pty_history_scrub(None)"
-  ].join("; ");
+  const partsLiteral = pythonString(BACKEND_FEATURE_PARTS_KEY);
   const initLine = `globals()[${partsLiteral}]=[]`;
   const chunkLines = payloadChunks(payload).map((chunk) => `globals().setdefault(${partsLiteral},[]).append(${pythonString(chunk)})`);
-  return `${initLine}\r${chunkLines.join("\r")}\rexec(${pythonString(python)})\r`;
+  return `${initLine}\r${chunkLines.join("\r")}\r${rpcTailLine.replace(/\r$/, "")}\r`;
 }
 
 /** Splits the inline backend payload into short terminal input lines so remote IPython/kubectl PTYs do not choke on one huge line. */

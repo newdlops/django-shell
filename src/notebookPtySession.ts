@@ -4,8 +4,8 @@ import { randomBytes } from "crypto";
 import * as pty from "node-pty";
 import * as vscode from "vscode";
 import { SerializedAsyncQueue } from "./asyncQueue";
-import { BackendClient, BackendProgressSnapshot, BackendRequestPayload, BackendTransportMode } from "./backendClient";
-import { BACKEND_AUTOIMPORT_ENV, BACKEND_PAYLOAD_ENV, BACKEND_PROGRESS_PREFIX, BACKEND_RESPONSE_PREFIX, BackendBootstrapCommand, BackendPtyResponse, backendBootstrapPayload, backendFeaturePayload, buildBackendBootstrapCommand, buildFeatureLoadCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendProgressMarkers, parseBackendReadyMarker, parseBackendResponseMarkers } from "./backendBootstrap";
+import { BackendClient, BackendProgressSnapshot, BackendRequestPayload, BackendTransportMode, parseLoadFeatureResponse } from "./backendClient";
+import { BACKEND_AUTOIMPORT_ENV, BACKEND_FEATURE_PARTS_KEY, BACKEND_PAYLOAD_ENV, BACKEND_PROGRESS_PREFIX, BACKEND_RESPONSE_PREFIX, BackendBootstrapCommand, BackendPtyResponse, backendBootstrapPayload, backendFeaturePayload, buildBackendBootstrapCommand, buildFeatureLoadPtyCommand, buildInlineBackendBootstrapCommand, parseBackendFailedMarker, parseBackendNeedsInline, parseBackendProgressMarkers, parseBackendReadyMarker, parseBackendResponseMarkers } from "./backendBootstrap";
 import { buildPtyBackendRequest, buildPtyExecuteCell, firstPathEntry, isSecretPrompt, safeCommand, trimTerminalText } from "./notebookPtyText";
 import { DiagnosticLogger } from "./diagnostics";
 import { type DebugpyBundlePayload, buildDebugpyBundleInstallCommand, parseDebugpyBundleInstallResult } from "./debugpyBundle";
@@ -19,6 +19,7 @@ import { DjangoTerminalMode, InputLineTracker, detectPrimaryPythonPrompt, isDjan
 
 const KEEPALIVE_IDLE_MS = 45000; const KEEPALIVE_INTERVAL_MS = 30000; const KEEPALIVE_USER_IDLE_MS = 15000;
 const DEBUGPY_STAGE_TIMEOUT_MS = 90000;
+const FEATURE_LOAD_TIMEOUT_MS = 60000;
 
 export interface NotebookPtyOptions {
   autoActivateWorkspaceVenv: boolean;
@@ -342,7 +343,7 @@ export class NotebookPtySession implements vscode.Disposable {
   private async typeDebugpyBundleViaPty(payload: DebugpyBundlePayload): Promise<string> {
     const id = `debugpy-${Date.now().toString(36)}-${this.ptyRequestSeq++}`;
     const install = buildDebugpyBundleInstallCommand(payload, id, BACKEND_RESPONSE_PREFIX);
-    const buffer = await this.writePacedPtyRequest(id, install.command, DEBUGPY_STAGE_TIMEOUT_MS);
+    const buffer = await this.writePacedPtyRequest(id, install.command, DEBUGPY_STAGE_TIMEOUT_MS, "debugpyBundle");
     const result = parseDebugpyBundleInstallResult(buffer);
     if (!result.ok || !result.path) {
       throw new Error(result.error ?? "Bundled debugpy install failed.");
@@ -440,9 +441,9 @@ export class NotebookPtySession implements vscode.Disposable {
     writeLine(0);
   }
 
-  /** Loads the deferred model-browser feature after the core backend is ready: over the socket when a tunnel is up (the remote win), else a best-effort idle-gated typed delivery so pure-PTY remotes still get the browser. */
-  private async loadModelBrowserFeature(client: BackendClient): Promise<void> {
-    if (this.client !== client) { return; }
+  /** Delivers the deferred model-browser feature on the FIRST browse request (lazy): over the socket when a tunnel is up (the remote win), else typed as a paced PTY request serialized behind the shared queue so it cannot interleave with cells. Throws when delivery fails so the client retries on a later browse. */
+  private async deliverModelBrowserFeature(client: BackendClient): Promise<void> {
+    if (this.client !== client) { throw new Error("Django shell session restarted before the model browser feature loaded."); }
     const payload = backendFeaturePayload(this.options.backendRuntimePath);
     if (!payload) { return; }
     try {
@@ -450,26 +451,15 @@ export class NotebookPtySession implements vscode.Disposable {
       if (result?.ok) { this.options.diagnosticLogger?.log("backend.feature.loaded", { reused: result.reused ? 1 : 0, sessionId: this.options.sessionId, transport: "socket" }); return; }
       throw new Error(result?.error || "loadfeature returned not-ok");
     } catch (error) {
-      const command = buildFeatureLoadCommand(this.options.backendRuntimePath);
-      const idle = detectPrimaryPythonPrompt(this.outputTail);
-      this.options.diagnosticLogger?.log("backend.feature.socket.failed", { error: error instanceof Error ? error.message : String(error), idle, sessionId: this.options.sessionId, typedFallback: Boolean(command) && idle });
-      if (command && idle && this.client === client) { this.writeFeatureLoadPaced(command); }
+      this.options.diagnosticLogger?.log("backend.feature.socket.failed", { error: error instanceof Error ? error.message : String(error), sessionId: this.options.sessionId });
     }
-  }
-
-  /** Types the deferred feature source in paced lines while suppressing echo; only used as the socket-unavailable fallback, and only when the shell was idle (checked by the caller) so it does not interleave with a running cell. */
-  private writeFeatureLoadPaced(command: string): void {
-    const lines = command.replace(/\r$/, "").split("\r");
-    const sessionGeneration = this.generation;
-    this.suppressBackendOutput = true;
-    const writeLine = (index: number): void => {
-      if (sessionGeneration !== this.generation || !this.process) { return; }
-      this.process.write(`${lines[index]}\r`);
-      if (index + 1 >= lines.length) { const done = setTimeout(() => { this.bootstrapWriteTimers.delete(done); this.suppressBackendOutput = false; }, 80); this.bootstrapWriteTimers.add(done); return; }
-      const timer = setTimeout(() => { this.bootstrapWriteTimers.delete(timer); writeLine(index + 1); }, index === 0 ? 60 : 20);
-      this.bootstrapWriteTimers.add(timer);
-    };
-    writeLine(0);
+    const id = `feature-${Date.now().toString(36)}-${this.ptyRequestSeq++}`;
+    const command = buildFeatureLoadPtyCommand(this.options.backendRuntimePath, buildPtyBackendRequest(id, { kind: "loadfeature", partsKey: BACKEND_FEATURE_PARTS_KEY }, this.token));
+    if (!command) { throw new Error("The deferred model browser source is unavailable for typed delivery."); }
+    const buffer = await this.writePacedPtyRequest(id, command, FEATURE_LOAD_TIMEOUT_MS, "featureLoad");
+    const result = parseLoadFeatureResponse(buffer);
+    if (!result.ok) { throw new Error(result.error || "Typed loadfeature returned not-ok."); }
+    this.options.diagnosticLogger?.log("backend.feature.loaded", { reused: result.reused ? 1 : 0, sessionId: this.options.sessionId, transport: "pty" });
   }
 
   /** Cancels delayed inline bootstrap writes for a restarted or disposed PTY. */
@@ -494,11 +484,13 @@ export class NotebookPtySession implements vscode.Disposable {
       const preferred = vscode.workspace.getConfiguration("djangoShell").get<string>("modelBrowser.transport", "pty");
       if (["orm", "auto", "tcp", "pty"].includes(preferred)) { this.client.setTransportMode(preferred as BackendTransportMode); }
       // Inline bootstrap was used → remote shell (SSH/kubectl): the backend's 127.0.0.1 socket isn't reachable directly, so
-      // skip it, then try a tunnel to the backend port so parallel model reads work beside a busy remote PTY.
+      // skip it, then try a tunnel to the backend port so parallel model reads work beside a busy remote PTY. The deferred
+      // model-browser half is NOT pushed here — the client loads it lazily on the first browse request.
       if (this.bootstrapRetried) {
         this.client.markSocketUnavailable();
         const client = this.client;
-        void this.forwardBackendSocket(ready.port, client).then(() => this.loadModelBrowserFeature(client));
+        const forward = this.forwardBackendSocket(ready.port, client);
+        client.setModelBrowserFeatureLoader(() => forward.then(() => this.deliverModelBrowserFeature(client)));
       }
       this.state = "ready";
       this.startKeepalive();
@@ -566,7 +558,7 @@ export class NotebookPtySession implements vscode.Disposable {
   }
 
   /** Writes a generated multi-line PTY command in paced chunks and resolves through the normal response marker path. */
-  private writePacedPtyRequest(id: string, command: string, timeoutMs: number): Promise<string> {
+  private writePacedPtyRequest(id: string, command: string, timeoutMs: number, kind: string): Promise<string> {
     const queuedAt = Date.now();
     return this.ptyQueue.run("backend", () => new Promise<string>((resolve, reject) => {
       const started = Date.now();
@@ -581,7 +573,7 @@ export class NotebookPtySession implements vscode.Disposable {
         reject(new Error(`Django shell PTY request timed out after ${timeoutMs}ms. ${id}`));
       }, timeoutMs);
       this.ptyRequests.set(id, { reject, resolve, timer });
-      this.options.diagnosticLogger?.log("backend.pty.request", { id, kind: "debugpyBundle", queueMs: started - queuedAt, sessionId: this.options.sessionId });
+      this.options.diagnosticLogger?.log("backend.pty.request", { id, kind, queueMs: started - queuedAt, sessionId: this.options.sessionId });
       this.writePtyCommandPaced(id, command);
     }));
   }

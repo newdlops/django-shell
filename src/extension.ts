@@ -7,7 +7,7 @@ import { DebugAnalysisPanel } from "./debugAnalysisPanel";
 import { DebugAnalysisStore } from "./debugAnalysisStore";
 import { DEBUG_CONTROL_ACTIONS } from "./debugControls";
 import { DiagnosticLogger } from "./diagnostics";
-import type { BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelComputed, BackendModelCount, BackendModelList, BackendModelLookup, BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
+import { type BackendCommitResult, type BackendFilterFieldTree, type BackendModelAggregate, type BackendModelComputed, type BackendModelCount, type BackendModelList, type BackendModelLookup, type BackendModelQuery, type BackendModelRelatedRows, type BackendModelRows, type BackendModelSchema, MODEL_IDLE_MESSAGE, type ModelAggregateQuery, type ModelCommitQuery, type ModelComputedQuery, type ModelCountQuery, type ModelLookupQuery, type ModelQueryRequest, type ModelRelatedQuery, type ModelRowsQuery } from "./modelBackend";
 import { ModelBrowser } from "./modelBrowser";
 import { ModelQueryConsole } from "./modelQueryConsole";
 import { ModelCatalog } from "./modelCatalog";
@@ -15,8 +15,6 @@ import { NOTEBOOK_TYPE } from "./notebookConstants";
 import { DjangoConsoleSerializer } from "./notebookSerializer";
 import { RuntimeInspector } from "./runtimeInspector";
 import type { DjangoNotebookConsole } from "./notebookConsole";
-
-const MODEL_IDLE_MESSAGE = "Open the Django Shell console first.";
 
 type OutputChannelFactory = () => vscode.OutputChannel;
 

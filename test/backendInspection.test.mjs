@@ -387,6 +387,73 @@ test("core backend defers the model browser until loadfeature installs it", { sk
   assert.equal(payload.reloadReused, true, "a second load is an idempotent no-op");
 });
 
+test("PTY models probe degrades to a still-loading catalog while the feature half is absent", { skip: !PYTHON }, () => {
+  // Regression: the capture hook attached the catalog via an unguarded _browse_models() call, so a models
+  // probe on a core-only remote raised NameError out of post_run_cell — no marker, catalog timeout, and an
+  // "Error in callback" dump in the user's terminal.
+  const script = [
+    "import json, io, sys",
+    `src=open(${JSON.stringify(path.resolve("python/django_shell_backend.py"))},encoding='utf-8').read()`,
+    "g={}",
+    "exec(compile(src[:src.index('# --- Model data browser')],'<core>','exec'), g)",
+    "class Events:",
+    "    def __init__(self): self.cb={}",
+    "    def register(self, name, fn): self.cb[name]=fn",
+    "class Shell: pass",
+    "class Info:",
+    "    def __init__(self, raw): self.raw_cell=raw",
+    "class Result:",
+    "    def __init__(self, value): self.result=value; self.error_in_exec=None; self.error_before_exec=None",
+    "shell=Shell(); shell.user_ns={}; shell.events=Events()",
+    "g['_pty_install_ipython_capture'](shell)",
+    "pre=shell.events.cb['pre_run_cell']; post=shell.events.cb['post_run_cell']",
+    "real=sys.stdout; buf=io.StringIO(); sys.stdout=buf; escaped=None",
+    "try:",
+    "    pre(Info('len(apps.get_models())'))",
+    "    post(Result(3))",
+    "except Exception as exc:",
+    "    escaped=repr(exc)",
+    "finally:",
+    "    sys.stdout=real",
+    "markers=[line for line in buf.getvalue().splitlines() if line.startswith(g['_RESPONSE_PREFIX'])]",
+    "resp=json.loads(markers[0][len(g['_RESPONSE_PREFIX']):])['response'] if markers else None",
+    "models=(resp or {}).get('models') or {}",
+    "print(json.dumps({'escaped':escaped,'markers':len(markers),'markerOk':bool(resp and resp.get('ok')),'modelsOk':models.get('ok'),'loading':'loading' in (models.get('error') or '')}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.escaped, null, "the missing browser half must not escape post_run_cell");
+  assert.equal(payload.markers, 1, "the probe still emits its response marker");
+  assert.equal(payload.markerOk, true);
+  assert.equal(payload.modelsOk, false);
+  assert.equal(payload.loading, true, "the attached catalog carries the still-loading error");
+});
+
+test("loadfeature consumes staged shell-namespace chunks via partsKey (typed PTY delivery)", { skip: !PYTHON }, () => {
+  const script = [
+    "import json, zlib, base64",
+    `src=open(${JSON.stringify(path.resolve("python/django_shell_backend.py"))},encoding='utf-8').read()`,
+    "idx=src.index('# --- Model data browser')",
+    "core=src[:idx]; feature=src[idx:]",
+    "g={}",
+    "exec(compile(core,'<core>','exec'), g)",
+    "data=base64.b64encode(zlib.compress(feature.encode('utf-8'))).decode('ascii')",
+    "ns={'_djs_feature_parts':[data[:1000],data[1000:]]}",
+    "missing=g['_run_request'](ns,'t',{'token':'t','kind':'loadfeature','partsKey':'_djs_absent'},None)",
+    "res=g['_run_request'](ns,'t',{'token':'t','kind':'loadfeature','partsKey':'_djs_feature_parts'},None)",
+    "print(json.dumps({'missingOk':missing.get('ok'),'ok':res.get('ok'),'reused':res.get('reused'),'after':('_browse_models' in g),'popped':('_djs_feature_parts' not in ns)}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.missingOk, false, "an absent parts key still reports a clean payload error");
+  assert.equal(payload.ok, true);
+  assert.equal(payload.reused, false);
+  assert.equal(payload.after, true, "the staged chunks install the browser half");
+  assert.equal(payload.popped, true, "consumed chunks are removed from the shell namespace");
+});
+
 test("streams stdout and stderr chunks while PTY progress emit is active", { skip: !PYTHON }, () => {
   const script = [
     "import importlib.util, io, json, sys",

@@ -2,7 +2,7 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
-import type { BackendModelList } from "./modelBackend";
+import { type BackendModelList, MODEL_IDLE_MESSAGE } from "./modelBackend";
 import type { ModelDataSource } from "./modelBrowser";
 import { modelCatalogHtml } from "./modelCatalogHtml";
 import { DiagnosticLogger } from "./diagnostics";
@@ -26,6 +26,7 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
   private view: vscode.WebviewView | undefined;
   private loadToken = 0;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
+  private stale = true;
 
   /** Stores the extension path and the model data source. */
   constructor(private readonly extensionPath: string, private readonly source: ModelDataSource, private readonly logger?: DiagnosticLogger) {}
@@ -35,7 +36,7 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
     this.disposables.push(
       vscode.window.registerWebviewViewProvider(VIEW_ID, this, { webviewOptions: { retainContextWhenHidden: true } }),
       vscode.commands.registerCommand("djangoShell.refreshModelCatalog", () => this.refresh()),
-      this.source.onDidChangeRuntime(() => this.refresh())
+      this.source.onDidChangeRuntime(() => this.handleRuntimeChange())
     );
     context.subscriptions.push(this);
   }
@@ -46,7 +47,20 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.file(path.join(this.extensionPath, "media"))] };
     view.webview.html = modelCatalogHtml(view.webview, this.extensionPath);
     view.webview.onDidReceiveMessage((message: CatalogMessage) => void this.handleMessage(message), undefined, this.disposables);
+    view.onDidChangeVisibility(() => this.handleVisibility(view.visible), undefined, this.disposables);
     view.onDidDispose(() => { this.view = undefined; }, undefined, this.disposables);
+  }
+
+  /** Marks the catalog stale on runtime changes and reloads only while it is on screen — a hidden catalog exchanges nothing until revealed. */
+  private handleRuntimeChange(): void {
+    this.stale = true;
+    if (this.view?.visible) { this.refresh(); }
+  }
+
+  /** Reloads a stale catalog when the view is revealed and stops retry churn when it hides. */
+  private handleVisibility(visible: boolean): void {
+    if (!visible) { this.clearRetry(); return; }
+    if (this.stale) { this.refresh(); }
   }
 
   /** Releases provider listeners and any pending retry. */
@@ -98,7 +112,13 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
     }
     this.logger?.log("model.catalog.load", { attempt, models: list.models.length, ms: Date.now() - started, ok: list.ok });
     void this.view.webview.postMessage({ error: list.error, models: list.models, ok: list.ok, type: "models" });
-    if (!list.ok && attempt < CATALOG_LOAD_RETRIES) {
+    if (list.ok) {
+      this.stale = false;
+      return;
+    }
+    this.stale = true;
+    // No shell attached is a deterministic idle state: the next runtime change reloads it, so retrying now only logs noise.
+    if (list.error !== MODEL_IDLE_MESSAGE && this.view.visible && attempt < CATALOG_LOAD_RETRIES) {
       this.retryTimer = setTimeout(() => { this.retryTimer = undefined; void this.load(token, attempt + 1); }, CATALOG_RETRY_BASE_MS * (attempt + 1));
     }
   }

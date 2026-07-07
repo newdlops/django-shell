@@ -56,8 +56,11 @@ test("model catalog refresh survives busy shells and debug pauses", () => {
 
 test("remote SSH/kubectl shells tunnel the backend socket for parallel model reads", () => {
   const backendClientSource = fs.readFileSync(new URL("../src/backendClient.ts", import.meta.url), "utf8");
-  // The remote-ready path starts a backend tunnel beside the PTY instead of leaving the socket off for the session.
-  assert.ok(notebookPtySessionSource.includes("void this.forwardBackendSocket(ready.port, client).then(() => this.loadModelBrowserFeature(client))"));
+  // The remote-ready path starts a backend tunnel beside the PTY instead of leaving the socket off for the session,
+  // and only REGISTERS the deferred feature loader — nothing is exchanged until the first browse request needs it.
+  assert.ok(notebookPtySessionSource.includes("const forward = this.forwardBackendSocket(ready.port, client)"));
+  assert.ok(notebookPtySessionSource.includes("client.setModelBrowserFeatureLoader(() => forward.then(() => this.deliverModelBrowserFeature(client)))"));
+  assert.ok(backendClientSource.includes("ensureModelBrowserFeature"));
   assert.ok(notebookPtySessionSource.includes("startKubectlPortForward(kubectl, remotePort"));
   assert.ok(notebookPtySessionSource.includes("startSshPortForward(ssh as SshExecTarget, remotePort"));
   assert.ok(notebookPtySessionSource.includes("backend.portForward.ready"));

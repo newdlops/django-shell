@@ -752,11 +752,11 @@ export class CustomDjangoConsole implements vscode.Disposable {
     if (!(this.debugMode === "overlay" && (this.debugSession || this.overlayDebugSession))) { this.overlay?.hide(); }
   }
 
-  /** Refreshes hidden runtime imports used by the overlay Python analyzer. */
+  /** Refreshes hidden runtime imports used by the overlay Python analyzer; skipped entirely when the transport deterministically suppresses the prelude metadata (pure-PTY ORM/Terminal mode). */
   private async updateOverlayPrelude(generation = this.runtimeGeneration): Promise<void> {
     if (generation !== this.runtimeGeneration || !this.runtimeReady) { return; }
     const backend = this.session?.backend;
-    if (!backend?.supportsRuntimeInspection()) { return; }
+    if (!backend?.supportsRuntimeInspection() || !backend.supportsHiddenPrelude()) { return; }
     let inspection;
     try {
       inspection = await backend.prelude();

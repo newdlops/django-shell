@@ -183,6 +183,7 @@ export interface BackendRequestPayload {
   model?: string;
   offset?: number;
   order?: BackendModelOrder[];
+  partsKey?: string;
   path?: BackendRuntimePathSegment[];
   pk?: unknown;
   q?: string;
@@ -201,6 +202,8 @@ export type BackendTransportMode = "auto" | "orm" | "pty" | "tcp";
 /** Sends execution requests to the backend running inside the Django shell process. */
 export class BackendClient {
   private activeTransport: BackendTransport = "none";
+  private featureLoader: (() => Promise<void>) | undefined;
+  private featureReady: Promise<void> | undefined;
   private forwardedEndpoint: { host: string; port: number } | undefined;
   private parallelModelReads = false;
   private remoteSocketUnavailable = false;
@@ -270,6 +273,11 @@ export class BackendClient {
     return !this.socketUnavailable || Boolean(this.fallback);
   }
 
+  /** Returns whether the hidden overlay prelude can be fetched at all: ORM/Terminal modes suppress the metadata request over the PTY, so without a socket path the fetch deterministically fails and callers should skip it instead of retrying. */
+  supportsHiddenPrelude(): boolean {
+    return !this.socketUnavailable || (!this.reconstructsViaOrmCell && Boolean(this.fallback));
+  }
+
   /** Executes Python code in the backend namespace and returns captured output. */
   execute(code: string, filename?: string, lineOffset?: number, sourceText?: string, breakpointLines?: number[]): Promise<BackendExecutionResult> {
     return this.request({ breakpointLines, code, filename, kind: "execute", lineOffset, sourceText }, parseBackendResponse);
@@ -321,6 +329,24 @@ export class BackendClient {
       this.logRequest(payload.kind, started, undefined, 0, message, "tcp");
       throw error instanceof Error ? error : new Error(message);
     });
+  }
+
+  /** Registers the lazy deferred-feature loader; browse requests await it once on first use instead of loading at attach. */
+  setModelBrowserFeatureLoader(loader: () => Promise<void>): void {
+    this.featureLoader = loader;
+  }
+
+  /** Loads the deferred model-browser feature once before the first browse request. A failed delivery clears the memo so a later browse retries, and the request proceeds into the backend's still-loading guard instead of failing here. */
+  private ensureModelBrowserFeature(): Promise<void> {
+    if (!this.featureLoader) { return Promise.resolve(); }
+    if (!this.featureReady) {
+      const attempt: Promise<void> = this.featureLoader().catch((error: unknown) => {
+        if (this.featureReady === attempt) { this.featureReady = undefined; }
+        this.logger?.log("backend.feature.deferred", { error: error instanceof Error ? error.message : String(error) });
+      });
+      this.featureReady = attempt;
+    }
+    return this.featureReady;
   }
 
   /** Returns the latest running Python progress snapshot when the socket can be polled. */
@@ -402,23 +428,27 @@ export class BackendClient {
   }
 
   /** Returns the catalog of browsable Django models from the attached runtime. */
-  models(): Promise<BackendModelList> {
+  async models(): Promise<BackendModelList> {
+    await this.ensureModelBrowserFeature();
     if (this.reconstructsViaOrmCell) { return this.ormCell(buildModelsOrm(), parseOrmModelsResponse); }
     return this.request({ kind: "models" }, parseModelListResponse);
   }
 
   /** Returns column and relation metadata for one model without querying rows. */
-  modelSchema(app: string, model: string): Promise<BackendModelSchema> {
+  async modelSchema(app: string, model: string): Promise<BackendModelSchema> {
+    await this.ensureModelBrowserFeature();
     return this.request({ app, kind: "schema", model }, parseModelSchemaResponse);
   }
 
   /** Returns the filterable field/relation tree for one model so the filter UI can drill across relations (metadata RPC; suppressed in ORM/Terminal mode like schema). */
-  modelFilterFields(app: string, model: string): Promise<BackendFilterFieldTree> {
+  async modelFilterFields(app: string, model: string): Promise<BackendFilterFieldTree> {
+    await this.ensureModelBrowserFeature();
     return this.request({ app, kind: "filterfields", model }, parseFilterFieldsResponse);
   }
 
   /** Returns one bounded page of model rows with foreign keys kept as raw ids. */
-  modelRows(query: ModelRowsQuery): Promise<BackendModelRows> {
+  async modelRows(query: ModelRowsQuery): Promise<BackendModelRows> {
+    await this.ensureModelBrowserFeature();
     if (this.reconstructsViaOrmCell) {
       const requested = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
       const limit = Math.min(requested, ORM_PTY_ROW_CAP); // the PTY marker can't carry an unbounded "all" page
@@ -435,7 +465,8 @@ export class BackendClient {
   }
 
   /** Returns related rows for one source row, fetched lazily on explicit expansion. */
-  modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows> {
+  async modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows> {
+    await this.ensureModelBrowserFeature();
     if (this.reconstructsViaOrmCell) {
       const single = typeof query.single === "boolean" ? query.single : query.value !== undefined && query.value !== null;
       const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
@@ -445,7 +476,8 @@ export class BackendClient {
   }
 
   /** Searches a target model for foreign-key picker candidates matching a query string. */
-  modelLookup(query: ModelLookupQuery): Promise<BackendModelLookup> {
+  async modelLookup(query: ModelLookupQuery): Promise<BackendModelLookup> {
+    await this.ensureModelBrowserFeature();
     if (this.reconstructsViaOrmCell) {
       const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 20;
       return this.ormCell(buildLookupOrm(query.app, query.model, query.q, query.exclude ?? [], limit), (buffer) => parseOrmLookupResponse(buffer, limit));
@@ -454,7 +486,8 @@ export class BackendClient {
   }
 
   /** Lazily computes ONE @property over the current filter/order page (user-activated column), returning {pk: cell}. */
-  modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed> {
+  async modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed> {
+    await this.ensureModelBrowserFeature();
     const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
     if (this.reconstructsViaOrmCell) {
       return this.ormCell(buildComputedOrm(query.app, query.model, query.field, query.filters, query.order, limit, query.columns, query.relations, query.annotations), parseOrmComputedResponse);
@@ -463,7 +496,8 @@ export class BackendClient {
   }
 
   /** Evaluates user-written ORM code and returns its tabulated result for the grid. */
-  modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery> {
+  async modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery> {
+    await this.ensureModelBrowserFeature();
     if (this.reconstructsViaOrmCell) {
       // Terminal/ORM mode types the user's ORM as a literal cell (no `_djs_rpc`); the capture hook tabulates it and we window the grid client-side to the requested page.
       const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
@@ -474,13 +508,15 @@ export class BackendClient {
   }
 
   /** Returns the row count for the current filter set, computed on demand. */
-  modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
+  async modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
+    await this.ensureModelBrowserFeature();
     if (this.reconstructsViaOrmCell) { return this.ormCell(buildCountOrm(query.app, query.model, query.filters, query.columns, query.relations), parseOrmCountResponse); }
     return this.request({ ...query, kind: "count" }, parseModelCountResponse);
   }
 
   /** Computes grouped or global aggregates (Count/Sum/Avg/Min/Max/Exists) for the current filter set. */
-  modelAggregate(query: ModelAggregateQuery): Promise<BackendModelAggregate> {
+  async modelAggregate(query: ModelAggregateQuery): Promise<BackendModelAggregate> {
+    await this.ensureModelBrowserFeature();
     if (this.reconstructsViaOrmCell) {
       if (aggregatesNeedPython(query.aggregates, query.columns)) {
         // A computed @property aggregate needs a full Python scan, which can't be a clean ORM cell — direct to the socket.
@@ -493,7 +529,8 @@ export class BackendClient {
   }
 
   /** Applies staged cell edits in one atomic transaction and returns per-row results. */
-  modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult> {
+  async modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult> {
+    await this.ensureModelBrowserFeature();
     if (this.reconstructsViaOrmCell && Array.isArray(query.changes) && query.changes.length) { return this.ormCell(buildCommitOrm(query.app, query.model, query.changes, query.columns), (buffer) => parseOrmCommitResponse(buffer, query.changes.length)); }
     return this.request({ ...query, kind: "commit" }, parseModelCommitResponse);
   }
@@ -762,8 +799,8 @@ function parseStageDebugpyResponse(buffer: string): BackendStageDebugpyResult {
   return { error: parsed.error, ok: Boolean(parsed.ok), path: typeof parsed.path === "string" && parsed.path ? parsed.path : null, reused: Boolean(parsed.reused) };
 }
 
-/** Parses the JSON result of a "loadfeature" request. */
-function parseLoadFeatureResponse(buffer: string): BackendLoadFeatureResult {
+/** Parses the JSON result of a "loadfeature" request (socket buffer or typed PTY response marker). */
+export function parseLoadFeatureResponse(buffer: string): BackendLoadFeatureResult {
   const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendLoadFeatureResult>;
   return { error: parsed.error, ok: Boolean(parsed.ok), reused: Boolean(parsed.reused) };
 }

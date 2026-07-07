@@ -304,6 +304,15 @@ def _connect_host(bound_host):
 # Model-browser request kinds handled by the deferred feature module (loaded via "loadfeature"); guarded so a browser
 # request that races ahead of the feature load returns a clean "still loading" message instead of a NameError.
 _BROWSE_REQUEST_KINDS = frozenset({"models", "schema", "filterfields", "rows", "related", "count", "aggregate", "commit", "lookup", "computed", "query"})
+_BROWSE_LOADING_ERROR = "The model browser is still loading; try again in a moment."
+
+
+def _browse_models_or_loading():
+    """Returns the model catalog, or a degraded still-loading list while the deferred browser feature is absent —
+    the PTY capture hooks call this so a models probe can never raise NameError out of post_run_cell."""
+    if "_browse_models" in globals():
+        return _browse_models()
+    return {"error": _BROWSE_LOADING_ERROR, "models": [], "ok": False}
 
 
 def _run_request(namespace, token, request, initial_names):
@@ -325,11 +334,11 @@ def _run_request(namespace, token, request, initial_names):
     if request.get("kind") == "stagedebugpy":
         return _stage_debugpy_bundle(request)
     if request.get("kind") == "loadfeature":
-        return _load_feature(request)
+        return _load_feature(request, namespace)
     if request.get("kind") == "children":
         return _inspect_children(namespace, request.get("path"))
     if request.get("kind") in _BROWSE_REQUEST_KINDS and "_browse_models" not in globals():
-        return {"ok": False, "error": "The model browser is still loading; try again in a moment."}
+        return {"ok": False, "error": _BROWSE_LOADING_ERROR}
     if request.get("kind") == "models":
         return _browse_models()
     if request.get("kind") == "schema":
@@ -1115,11 +1124,11 @@ def _execute_debugpy_bootstrap(namespace, code):
         return {"ok": False, "stdout": stdout.getvalue(), "stderr": "", "traceback": traceback.format_exc()}
 
 
-def _load_feature(request):
+def _load_feature(request, namespace=None):
     """Loads a deferred backend feature (the model browser) into this module's globals from a deflate+base64 source blob.
 
     Keeps the initial remote bootstrap small: the core backend is typed in first, then the browser half is delivered
-    over the socket (or typed as a fallback) and exec'd into the same module dict so all cross-references resolve.
+    on first use over the socket, or typed as staged shell-namespace chunks referenced here via `partsKey`.
     Idempotent — a second call after the browser is present is a no-op."""
     if "_browse_models" in globals():
         return {"ok": True, "reused": True}
@@ -1127,6 +1136,9 @@ def _load_feature(request):
     import zlib
 
     data = request.get("data")
+    parts_key = request.get("partsKey")
+    if (not isinstance(data, str) or not data) and isinstance(parts_key, str) and parts_key and isinstance(namespace, dict):
+        data = "".join(namespace.pop(parts_key, []) or [])
     if not isinstance(data, str) or not data:
         return {"ok": False, "error": "loadfeature requires a deflate+base64 source payload."}
     try:
@@ -2312,7 +2324,7 @@ def _pty_install_ipython_capture(shell):
         raw_metadata = {}
         if error is None and _pty_is_models_probe(state.get("raw")):
             _autoimport_registered_models(shell.user_ns)
-            raw_metadata["models"] = _browse_models()
+            raw_metadata["models"] = _browse_models_or_loading()
         if error is None and _pty_is_runtime_probe(state.get("raw")):
             raw_metadata["runtime"] = _pty_runtime_inspection(shell.user_ns)
         if raw_metadata:
@@ -2388,7 +2400,7 @@ def _pty_install_plain_capture(sys, namespace):
             raw_metadata = {}
             if ok and _pty_is_models_probe(raw):
                 _autoimport_registered_models(namespace)
-                raw_metadata["models"] = _browse_models()
+                raw_metadata["models"] = _browse_models_or_loading()
             if ok and _pty_is_runtime_probe(raw):
                 raw_metadata["runtime"] = _pty_runtime_inspection(namespace)
             if matched_probe:

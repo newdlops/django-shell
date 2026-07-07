@@ -1,5 +1,8 @@
 // Types and response parsers for the additive Django model data-browser backend kinds.
 
+/** Idle status shared by model-browser data sources while no Django shell runtime is attached; consumers treat it as deterministic (no retry) rather than transient. */
+export const MODEL_IDLE_MESSAGE = "Open the Django Shell console first.";
+
 /** One browsable model entry in the catalog. */
 export interface BackendModelInfo {
   app: string;

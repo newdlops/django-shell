@@ -14,11 +14,12 @@ const {
   BACKEND_PROGRESS_PREFIX,
   BACKEND_READY_PREFIX,
   BACKEND_RESPONSE_PREFIX,
+  BACKEND_FEATURE_PARTS_KEY,
   backendBootstrapPayload,
   backendFeaturePayload,
   buildBackendBootstrap,
   buildBackendBootstrapCommand,
-  buildFeatureLoadCommand,
+  buildFeatureLoadPtyCommand,
   buildInlineBackendBootstrapCommand,
   parseBackendFailedMarker,
   parseBackendProgressMarkers,
@@ -37,9 +38,10 @@ test("remote inline bootstrap types only the core half; the model browser ships 
   assert.ok(whole.includes(marker) && whole.includes("def _browse_models") && whole.includes("def start(namespace"));
   assert.ok(feature.startsWith(marker) && feature.includes("def _browse_models"));
   assert.ok(!feature.includes("def start(namespace"), "start() stays in the core half");
-  // Core keeps the loader + dispatch guard but not the browser definitions.
+  // Core keeps the loader + dispatch guard (and the still-loading degrade helper) but not the browser definitions.
   assert.ok(core.includes("def start(namespace") && core.includes("def _load_feature") && core.includes("_BROWSE_REQUEST_KINDS"));
-  assert.ok(!core.includes("def _browse_models"), "browser definitions are deferred out of the typed core");
+  assert.ok(core.includes("def _browse_models_or_loading("), "the capture-hook degrade guard stays in the typed core");
+  assert.ok(!core.includes("def _browse_models("), "browser definitions are deferred out of the typed core");
 
   // The inline command's embedded payload reconstructs to exactly the core half (no browser defs typed on remote).
   const command = buildInlineBackendBootstrapCommand(realPath, "tok").command;
@@ -48,9 +50,14 @@ test("remote inline bootstrap types only the core half; the model browser ships 
   assert.equal(inlineSource, core);
   assert.ok(Buffer.from(backendFeaturePayload(realPath), "base64").length < Buffer.from(backendBootstrapPayload(realPath), "base64").length);
 
-  // Typed fallback exec's the feature into the live backend module and scrubs its history line.
-  const fallback = buildFeatureLoadCommand(realPath);
-  assert.ok(fallback.includes("_djs_backend_module.__dict__") && fallback.includes("_pty_history_scrub"));
+  // Typed fallback stages chunks under the shared parts key and finishes with the caller's `_djs_rpc` loadfeature line,
+  // whose id-correlated marker resolves the paced request (append-cell markers are ignored by the id map).
+  const rpcTail = `_djs_rpc("{\\"kind\\":\\"loadfeature\\"}", "feature-1")\r`;
+  const fallback = buildFeatureLoadPtyCommand(realPath, rpcTail);
+  assert.ok(fallback.includes(`globals()["${BACKEND_FEATURE_PARTS_KEY}"]=[]`));
+  const featureChunks = [...fallback.matchAll(/\.append\("([^"]*)"\)/g)].map((match) => match[1]);
+  assert.equal(zlib.inflateSync(Buffer.from(featureChunks.join(""), "base64")).toString("utf8"), feature);
+  assert.ok(fallback.trimEnd().endsWith(rpcTail.trimEnd()), "the rpc tail is the final typed line");
 });
 
 test("builds a path bootstrap command when backend source is unavailable", () => {
