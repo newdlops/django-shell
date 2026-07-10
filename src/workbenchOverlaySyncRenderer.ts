@@ -69,7 +69,6 @@ export function overlaySyncRendererSource(): string {
       }
       const model = editor.getModel && editor.getModel();
       if (root.__dsoSyncEditor === editor && root.__dsoSyncModel === model) {
-        __dsoLog(post, "model.install.skip", { reason: "same-editor-model" });
         return;
       }
       try { root.__dsoSyncDisposable && root.__dsoSyncDisposable.dispose && root.__dsoSyncDisposable.dispose(); } catch (eDisposeSync) {}
@@ -587,15 +586,30 @@ export function overlaySyncRendererSource(): string {
     window.__dsoApplyOverlayDebugLine = function (root, editor) {
       const model = editor && editor.getModel && editor.getModel();
       if (!root || !editor || !model || !editor.deltaDecorations) { return "missing-editor"; }
-      // Refresh the Enter-preview band first so it hides while paused and the stopped line stays the only highlighted row.
-      try { __dsoUpdateExecutionRangePreview(root, editor); } catch (eExecRangeRefresh) {}
       const visibleLine = root.__dsoExecutionMode === "submit" ? 0 : Math.floor(Number(root.__dsoDebugLine || window.__dsoOverlayDebugLine || 0));
       const modelLine = visibleLine > 0 ? (Number(root.__dsoInputStartLine) || 1) + visibleLine - 1 : 0;
-      const decorations = modelLine >= 1 && modelLine <= model.getLineCount() ? [{
+      const renderedLine = modelLine >= 1 && modelLine <= model.getLineCount() ? visibleLine : 0;
+      if (root.__dsoDebugRenderEditor === editor && root.__dsoDebugRenderModel === model && root.__dsoDebugRenderModelLine === modelLine) {
+        return "debug-line:" + renderedLine;
+      }
+      // Refresh the Enter-preview band first so it hides while paused and the stopped line stays the only highlighted row.
+      try { __dsoUpdateExecutionRangePreview(root, editor); } catch (eExecRangeRefresh) {}
+      const decorations = renderedLine ? [{
         options: { className: "dso-debug-line", glyphMarginClassName: "dso-debug-indicator", isWholeLine: true },
         range: { endColumn: model.getLineMaxColumn ? model.getLineMaxColumn(modelLine) : 1, endLineNumber: modelLine, startColumn: 1, startLineNumber: modelLine }
       }] : [];
-      try { root.__dsoDebugLineDecorationIds = editor.deltaDecorations(root.__dsoDebugLineDecorationIds || [], decorations); } catch (eDebugDecorations) { root.__dsoDebugLineDecorationIds = []; }
+      try {
+        const previous = root.__dsoDebugRenderEditor === editor && root.__dsoDebugRenderModel === model ? (root.__dsoDebugLineDecorationIds || []) : [];
+        root.__dsoDebugLineDecorationIds = editor.deltaDecorations(previous, decorations);
+        root.__dsoDebugRenderEditor = editor;
+        root.__dsoDebugRenderModel = model;
+        root.__dsoDebugRenderModelLine = modelLine;
+      } catch (eDebugDecorations) {
+        root.__dsoDebugLineDecorationIds = [];
+        root.__dsoDebugRenderEditor = null;
+        root.__dsoDebugRenderModel = null;
+        root.__dsoDebugRenderModelLine = -1;
+      }
       try { if (modelLine && editor.revealLineInCenterIfOutsideViewport) { editor.revealLineInCenterIfOutsideViewport(modelLine); } } catch (eRevealDebugLine) {}
       return "debug-line:" + (decorations.length ? visibleLine : 0);
     };
@@ -667,15 +681,24 @@ export function overlaySyncRendererSource(): string {
     function __dsoUpdateExecutionRangePreview(root, editor) {
       const model = editor && editor.getModel && editor.getModel();
       if (!root || !editor || !model || !editor.deltaDecorations) { return; }
-      const payload = __dsoPreviewPayload(root, editor);
       // Hide the Enter-preview band while the debugger is paused so the stopped line stays the only highlighted row.
       const pausedLine = Math.floor(Number(root.__dsoDebugLine || window.__dsoOverlayDebugLine || 0));
       const submitMode = root.__dsoExecutionMode === "submit";
-      const decorations = pausedLine > 0 || submitMode ? [] : __dsoExecutionRangeDecorations(model, payload);
-      const preview = !submitMode && payload && payload.range ? { end: payload.range.end, start: payload.range.start } : null;
+      const inactiveKey = pausedLine > 0 ? "paused" : (submitMode ? "submit" : "");
+      if (inactiveKey && root.__dsoExecutionRangeRenderEditor === editor && root.__dsoExecutionRangeRenderModel === model && root.__dsoExecutionRangeRenderKey === inactiveKey) { return; }
+      const payload = inactiveKey ? null : __dsoPreviewPayload(root, editor);
+      const hasCode = !!(payload && String(payload.code || "").trim());
+      const decorations = inactiveKey ? [] : __dsoExecutionRangeDecorations(model, payload);
+      const preview = !submitMode && payload && payload.range ? { end: payload.range.end, start: payload.range.start } : (pausedLine > 0 ? root.__dsoExecutionRangePreview || null : null);
       const previewKey = preview ? preview.start + ":" + preview.end : "";
+      const renderKey = inactiveKey || ("active:" + previewKey + ":" + (hasCode ? "code" : "empty"));
+      if (root.__dsoExecutionRangeRenderEditor === editor && root.__dsoExecutionRangeRenderModel === model && root.__dsoExecutionRangeRenderKey === renderKey) { return; }
       try {
-        root.__dsoExecutionRangeDecorationIds = editor.deltaDecorations(root.__dsoExecutionRangeDecorationIds || [], decorations);
+        const previous = root.__dsoExecutionRangeRenderEditor === editor && root.__dsoExecutionRangeRenderModel === model ? (root.__dsoExecutionRangeDecorationIds || []) : [];
+        root.__dsoExecutionRangeDecorationIds = editor.deltaDecorations(previous, decorations);
+        root.__dsoExecutionRangeRenderEditor = editor;
+        root.__dsoExecutionRangeRenderModel = model;
+        root.__dsoExecutionRangeRenderKey = renderKey;
         root.__dsoExecutionRangePreview = preview;
         if (root.__dsoExecutionRangePreviewKey !== previewKey) {
           root.__dsoExecutionRangePreviewKey = previewKey;
@@ -687,6 +710,9 @@ export function overlaySyncRendererSource(): string {
         }
       } catch (eDecorations) {
         root.__dsoExecutionRangeDecorationIds = [];
+        root.__dsoExecutionRangeRenderEditor = null;
+        root.__dsoExecutionRangeRenderModel = null;
+        root.__dsoExecutionRangeRenderKey = "";
       }
     }
 
@@ -704,6 +730,9 @@ export function overlaySyncRendererSource(): string {
         try { root.__dsoExecutionRangeDecorationIds = editor.deltaDecorations(root.__dsoExecutionRangeDecorationIds || [], []); } catch (eClearDecorations) {}
         root.__dsoExecutionRangePreview = null;
         root.__dsoExecutionRangePreviewKey = "";
+        root.__dsoExecutionRangeRenderEditor = null;
+        root.__dsoExecutionRangeRenderModel = null;
+        root.__dsoExecutionRangeRenderKey = "";
       };
     }
 
@@ -734,6 +763,9 @@ export function overlaySyncRendererSource(): string {
     window.__dsoInstallEnterRunner = function (root, editor, post) {
       if (!root || !editor) {
         __dsoLog(post, "enter.install.skip", { hasEditor: !!editor, hasRoot: !!root });
+        return;
+      }
+      if (root.__dsoEnterEditor === editor && root.__dsoEnterCleanup) {
         return;
       }
       try { root.__dsoEnterCleanup && root.__dsoEnterCleanup(); } catch (eCleanupEnter) {}
@@ -884,16 +916,10 @@ export function overlaySyncRendererSource(): string {
       const editor = root && root.__djangoShellEditor;
       const model = editor && editor.getModel && editor.getModel();
       if (model) {
-        const oldVisibility = root.style.visibility;
-        root.style.visibility = "hidden";
-        try {
-          root.__dsoPreludeText = String(text || "");
-          window.__dsoApplyPreludeHiddenArea(root, editor);
-          try { window.__dsoApplyOverlayDebugLine && window.__dsoApplyOverlayDebugLine(root, editor); } catch (eVisiblePreludeDebugLine) {}
-          try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eVisiblePreludeBreakpoints) {}
-        } finally {
-          root.style.visibility = oldVisibility || "visible";
-        }
+        root.__dsoPreludeText = String(text || "");
+        window.__dsoApplyPreludeHiddenArea(root, editor);
+        try { window.__dsoApplyOverlayDebugLine && window.__dsoApplyOverlayDebugLine(root, editor); } catch (eVisiblePreludeDebugLine) {}
+        try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eVisiblePreludeBreakpoints) {}
       }
       return "ok";
     };

@@ -37,8 +37,10 @@ export function overlayWidgetRendererSource(): string {
       try {
         const source = __dsoThemeSource();
         if (!source || !node || !window.getComputedStyle) { return; }
-        __dsoSyncThemeClasses(node, includeWorkbenchClass);
         const style = window.getComputedStyle(source);
+        const themeKey = [includeWorkbenchClass ? "workbench" : "widget", String(document.body && document.body.className || ""), String(source.className || ""), style.getPropertyValue("--vscode-foreground"), style.getPropertyValue("--vscode-editor-background"), style.getPropertyValue("--vscode-font-family"), style.getPropertyValue("--vscode-font-size")].join("|");
+        if (node.__dsoThemeSyncKey === themeKey) { return; }
+        __dsoSyncThemeClasses(node, includeWorkbenchClass);
         for (let i = 0; i < style.length; i++) {
           const name = style[i];
           if (name && name.indexOf("--vscode-") === 0) { node.style.setProperty(name, style.getPropertyValue(name)); }
@@ -46,15 +48,19 @@ export function overlayWidgetRendererSource(): string {
         node.style.setProperty("color", style.getPropertyValue("--vscode-foreground") || style.color || "inherit");
         node.style.setProperty("font-family", style.getPropertyValue("--vscode-font-family") || style.fontFamily || "inherit");
         node.style.setProperty("font-size", style.getPropertyValue("--vscode-font-size") || style.fontSize || "inherit");
+        node.__dsoThemeSyncKey = themeKey;
       } catch (eTheme) {}
     }
 
     /** Installs CSS for the viewport-level Monaco overflow widget layer. */
     function __dsoEnsureWidgetStyle() {
       let style = document.getElementById("django-shell-overlay-widget-style");
+      const version = String(window.__djangoShellOverlayPatchVersion || "");
+      if (style && style.__dsoPatchVersion === version) { return; }
       if (!style) { style = document.createElement("style"); }
       style.id = "django-shell-overlay-widget-style";
       style.textContent = ".django-shell-overlay-widget-root{position:fixed;left:0;top:0;width:0;height:0;min-width:0!important;min-height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer{position:absolute;left:0;top:0;width:100vw;height:100vh;min-width:100vw!important;min-height:100vh!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer .overflowingContentWidgets{overflow:visible!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-hover *,.django-shell-overlay-widget-layer .monaco-editor-hover,.django-shell-overlay-widget-layer .monaco-editor-hover *,.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .suggest-widget *,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .parameter-hints-widget *,.django-shell-overlay-widget-layer .context-view,.django-shell-overlay-widget-layer .context-view *{pointer-events:auto!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-editor-hover{background:var(--vscode-editorHoverWidget-background,var(--vscode-editorWidget-background,var(--vscode-editor-background)))!important;border-color:var(--vscode-editorHoverWidget-border,var(--vscode-widget-border,transparent))!important;box-sizing:border-box!important;color:var(--vscode-editorHoverWidget-foreground,var(--vscode-foreground))!important;opacity:1!important;overflow:visible!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .monaco-hover .monaco-sash,.django-shell-overlay-widget-layer .monaco-editor-hover .monaco-sash{overflow:visible!important;pointer-events:auto!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .context-view{box-sizing:border-box!important;z-index:2147483647!important}";
+      style.__dsoPatchVersion = version;
       if (!style.parentElement) { document.head.appendChild(style); }
     }
 

@@ -55,7 +55,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private debugSession: vscode.DebugSession | undefined; private overlayDebugSession: DirectDebugAdapterSession | undefined; private debugAttachPromise: Promise<void> | undefined; private debugMode: DjangoShellDebugMode = DEFAULT_DEBUG_MODE; private debugpyEndpoint: DebugpyEndpoint | undefined; private runOnNextDebugSessionStart = false;
   private breakpointCount = 0;
   private syncedDebugBreakpointUris = new Set<string>();
-  private debugControlOriginOverlay = true; private debugPaused = false; private debugRunActive = false; private debugThreadId: number | undefined; private lastDebugControlAction: DebugControlAction | undefined; private lastDebugFrameOverlay = true; private debugEnrichTimer: ReturnType<typeof setTimeout> | undefined; private debugStopGeneration = 0;
+  private debugControlOriginOverlay = true; private debugPaused = false; private debugRunActive = false; private debugThreadId: number | undefined; private lastDebugControlAction: DebugControlAction | undefined; private lastDebugFrameOverlay = true; private lastDebugPresentationKey = ""; private debugEnrichTimer: ReturnType<typeof setTimeout> | undefined; private debugStopGeneration = 0;
   private activeOverlayTabId = "overlay-1"; private overlayTabCounter = 1; private overlayTabs: OverlayTabState[] = [{ id: "overlay-1", label: "1", text: "" }];
   readonly onDidChangeRuntime = this.runtimeEmitter.event;
   /** Stores the extension path used to locate the Python backend file. */
@@ -160,7 +160,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       const forward = debugOptions.connectHost || debugOptions.connectPort ? undefined : await this.session?.forwardDebugpy(endpoint.endpoint.port);
       if (!forward && !debugOptions.connectHost && !debugOptions.connectPort && this.session?.isRemoteTerminalBackend()) { const message = remoteDebugPortForwardMessage(endpoint.endpoint.host, endpoint.endpoint.port); this.logger?.log("debug.attach.portForward.missing", { host: endpoint.endpoint.host, port: endpoint.endpoint.port }); this.postDebugStatus("error", "port forward required"); void vscode.window.showWarningMessage(message); return; }
       const attachEndpoint = forward ? { ...endpoint.endpoint, host: forward.host, port: forward.port } : endpoint.endpoint; this.logger?.log("debug.attach.endpoint", { attachHost: attachEndpoint.host, attachPort: attachEndpoint.port, debugpyHost: endpoint.endpoint.host, debugpyPort: endpoint.endpoint.port, listenHost, listenPort: debugOptions.listenPort }); const configuration = buildDjangoShellDebugConfiguration(attachEndpoint, cwd, debugOptions);
-      if (this.debugMode === "overlay") { const direct = new DirectDebugAdapterSession({ onContinued: (body) => { if (this.overlayDebugSession !== direct) { return; } invalidateDebugInspection(direct); this.logger?.log("debug.direct.continued", { all: body.allThreadsContinued ? 1 : 0, currentThreadId: this.debugThreadId ?? 0, debugRun: this.debugRunActive ? 1 : 0, threadId: body.threadId ?? 0 }); if (!this.debugRunActive) { return; } this.postDebugStatus("running", "continued"); this.postDebugInfo({ state: "running" }); }, onStopped: (body) => this.handleDirectDebugStopped(direct, body.threadId, body.reason ?? ""), onTerminated: () => { if (this.overlayDebugSession !== direct) { return; } this.overlayDebugSession = undefined; this.debugThreadId = undefined; this.debugpyEndpoint = undefined; this.syncedDebugBreakpointUris.clear(); this.postDebugStatus("idle", "ended"); this.postDebugInfo({ state: "idle" }); } }, this.logger); await this.showOverlay(); try { await direct.attach(attachEndpoint, () => this.syncActiveDebugBreakpoints("sessionStart", undefined, direct), configuration); } catch (error) { direct.dispose(); this.debugpyEndpoint = undefined; const message = error instanceof Error ? error.message : String(error); this.logger?.log("debug.direct.attach.error", { error: message, host: attachEndpoint.host, port: attachEndpoint.port }); this.postDebugStatus("error", "attach failed"); return; } this.overlayDebugSession = direct; this.debugpyEndpoint = endpoint.endpoint; this.clearInspectionCache(); this.scheduleRuntimeRefresh(); this.postTransport(); this.postDebugStatus("attached", `overlay ${attachEndpoint.host}:${attachEndpoint.port}`); this.refreshBreakpointUi(); this.debugRunActive = true; await this.runCurrentDebugInput(); return; }
+      if (this.debugMode === "overlay") { const direct = new DirectDebugAdapterSession({ onContinued: (body) => { if (this.overlayDebugSession !== direct) { return; } invalidateDebugInspection(direct); this.debugStopGeneration += 1; if (this.debugEnrichTimer) { clearTimeout(this.debugEnrichTimer); this.debugEnrichTimer = undefined; } this.logger?.log("debug.direct.continued", { all: body.allThreadsContinued ? 1 : 0, currentThreadId: this.debugThreadId ?? 0, debugRun: this.debugRunActive ? 1 : 0, threadId: body.threadId ?? 0 }); if (!this.debugRunActive) { return; } this.postDebugStatus("running", "continued"); this.postDebugInfo({ state: "running" }); }, onStopped: (body) => this.handleDirectDebugStopped(direct, body.threadId, body.reason ?? ""), onTerminated: () => { if (this.overlayDebugSession !== direct) { return; } this.overlayDebugSession = undefined; this.debugThreadId = undefined; this.debugpyEndpoint = undefined; this.syncedDebugBreakpointUris.clear(); this.postDebugStatus("idle", "ended"); this.postDebugInfo({ state: "idle" }); } }, this.logger); await this.showOverlay(); try { await direct.attach(attachEndpoint, () => this.syncActiveDebugBreakpoints("sessionStart", undefined, direct), configuration); } catch (error) { direct.dispose(); this.debugpyEndpoint = undefined; const message = error instanceof Error ? error.message : String(error); this.logger?.log("debug.direct.attach.error", { error: message, host: attachEndpoint.host, port: attachEndpoint.port }); this.postDebugStatus("error", "attach failed"); return; } this.overlayDebugSession = direct; this.debugpyEndpoint = endpoint.endpoint; this.clearInspectionCache(); this.scheduleRuntimeRefresh(); this.postTransport(); this.postDebugStatus("attached", `overlay ${attachEndpoint.host}:${attachEndpoint.port}`); this.refreshBreakpointUi(); this.debugRunActive = true; await this.runCurrentDebugInput(); return; }
       try { this.runOnNextDebugSessionStart = true;
         this.logger?.log("debug.attach.start", { host: attachEndpoint.host, port: attachEndpoint.port, reused: endpoint.endpoint.reused ? 1 : 0 });
         const started = await vscode.debug.startDebugging(vscode.workspace.workspaceFolders?.[0], configuration as vscode.DebugConfiguration);
@@ -737,16 +737,16 @@ export class CustomDjangoConsole implements vscode.Disposable {
       scheduleWorkspaceGeneratedOverlayTabCleanup();
     }
   }
-
   /** Keeps the workbench overlay lifecycle bound to the Django Shell webview tab. */
   private handleViewState(visible: boolean, active: boolean): void {
-    const wasActive = this.panelActive, keepForDebug = this.debugMode === "overlay" && Boolean(this.debugSession || this.overlayDebugSession);
+    const wasActive = this.panelActive, keepForDebug = this.debugMode === "overlay" && Boolean(this.debugAttachPromise || this.debugSession || this.overlayDebugSession);
     this.panelActive = active; this.panelVisible = visible;
-    if (visible && active) {
+    if (visible) {
+      if (!active) { return; }
       this.postStatus();
       if (wasActive) { return; }
       this.post({ show: this.runtimeReady, type: "measureEditor" });
-      if (this.runtimeReady) { void this.updateOverlayPrelude(this.runtimeGeneration); }
+      if (this.runtimeReady && this.overlayPrelude.length === 0) { void this.updateOverlayPrelude(this.runtimeGeneration); }
       return;
     }
     if (!keepForDebug) { this.overlay?.hide(); }
@@ -868,14 +868,14 @@ export class CustomDjangoConsole implements vscode.Disposable {
   /** Posts paused debugger frame details and mirrors the current line into the overlay editor. */
   private postDebugInfo(info: DebugFrameInfo): void {
     this.debugAnalysis?.setDebugAnalysisInfo(info);
-    void this.overlay?.updateDebugInfo(info);
-    if (info.state !== "paused") { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); }
-    if (info.state === "paused") {
-      const path = info.frame?.path?.replace(/\\/g, "/") ?? ""; this.lastDebugFrameOverlay = isOverlayDebugFramePath(path); if (this.debugMode === "overlay" && !this.lastDebugFrameOverlay) { void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", true); void revealExternalDebugFrame(info, this.logger).then((revealed) => { if (revealed && this.debugMode === "overlay" && !this.lastDebugFrameOverlay) { this.overlay?.park(); } }); } else { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); if (this.debugMode === "overlay" && this.lastDebugFrameOverlay) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); } }
-      void closeWorkspaceGeneratedOverlayTabs(this.debugMode !== "overlay").catch(() => undefined);
-    }
+    if (info.state !== "paused") { void this.overlay?.updateDebugInfo(info); if (info.state === "running") { return; } this.lastDebugPresentationKey = ""; clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); return; }
+    const path = info.frame?.path?.replace(/\\/g, "/") ?? "", presentationKey = `${path}:${info.frame?.line ?? 0}`;
+    if (presentationKey === this.lastDebugPresentationKey) { return; }
+    const wasOverlayFrame = this.lastDebugFrameOverlay; this.lastDebugPresentationKey = presentationKey; this.lastDebugFrameOverlay = isOverlayDebugFramePath(path); void this.overlay?.updateDebugInfo(info);
+    if (this.debugMode !== "overlay") { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); void closeWorkspaceGeneratedOverlayTabs().catch(() => undefined); return; }
+    if (!this.lastDebugFrameOverlay) { void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", true); void revealExternalDebugFrame(info, this.logger).then((revealed) => { if (revealed && this.debugMode === "overlay" && !this.lastDebugFrameOverlay && this.lastDebugPresentationKey === presentationKey) { this.overlay?.park(); } }); void closeWorkspaceGeneratedOverlayTabs(false).catch(() => undefined); return; }
+    clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); if (!wasOverlayFrame) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); }
   }
-
   /** Expands one debugger variable reference for the sidebar analysis panel. */
   private async inspectDebugVariableChildren(reference: number): Promise<DebugVariableInfo[]> { const session = this.overlayDebugSession ?? this.debugSession; return session ? inspectDebugVariables(session, Math.max(0, reference)) : []; }
 

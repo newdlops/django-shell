@@ -299,6 +299,60 @@ test("maps paused debug line onto hidden-prelude model lines", () => {
   assert.equal(editor.decorations[0].options.className, "dso-debug-line");
 });
 
+test("coalesces repeated paused-line rendering without repainting the execution preview", () => {
+  const source = overlaySyncRendererSource();
+  const state = { overlayRoot: undefined };
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { setDebugLine: window.__dsoSetOverlayDebugLine };`)(window, document, () => undefined);
+  const model = fakeModel("pass\n# --- django shell input ---\none\ntwo\nthree\n");
+  let lineReads = 0;
+  const readLine = model.getLineContent;
+  model.getLineContent = (line) => { lineReads += 1; return readLine(line); };
+  const editor = fakeEditor(model);
+  const renderCalls = [];
+  const render = editor.deltaDecorations.bind(editor);
+  editor.deltaDecorations = (previous, decorations) => {
+    renderCalls.push(decorations.map((item) => item.options.className));
+    return render(previous, decorations);
+  };
+  const root = { __djangoShellEditor: editor, __dsoInputStartLine: 3 };
+  state.overlayRoot = root;
+
+  assert.equal(api.setDebugLine(2), "debug-line:2");
+  assert.deepEqual(renderCalls, [[], ["dso-debug-line"]]);
+  assert.deepEqual(editor.revealedLines, [4]);
+  assert.equal(lineReads, 1);
+
+  assert.equal(api.setDebugLine(2), "debug-line:2");
+  assert.deepEqual(renderCalls, [[], ["dso-debug-line"]]);
+  assert.deepEqual(editor.revealedLines, [4]);
+  assert.equal(lineReads, 1);
+
+  assert.equal(api.setDebugLine(3), "debug-line:3");
+  assert.deepEqual(renderCalls, [[], ["dso-debug-line"], ["dso-debug-line"]]);
+  assert.deepEqual(editor.revealedLines, [4, 5]);
+  assert.equal(lineReads, 2);
+});
+
+test("places debug idempotence before preview work and gives paused previews a stable key", () => {
+  const source = overlaySyncRendererSource();
+  const debugStart = source.indexOf("window.__dsoApplyOverlayDebugLine = function");
+  const debugEnd = source.indexOf("window.__dsoSetOverlayDebugLine = function", debugStart);
+  const debugBody = source.slice(debugStart, debugEnd);
+  const debugGuard = debugBody.indexOf("root.__dsoDebugRenderEditor === editor");
+  const previewCall = debugBody.indexOf("__dsoUpdateExecutionRangePreview(root, editor)");
+  assert.ok(debugGuard >= 0 && previewCall >= 0 && debugGuard < previewCall);
+
+  const previewStart = source.indexOf("function __dsoUpdateExecutionRangePreview");
+  const previewEnd = source.indexOf("function __dsoInstallExecutionRangePreview", previewStart);
+  const previewBody = source.slice(previewStart, previewEnd);
+  assert.ok(previewBody.includes('const inactiveKey = pausedLine > 0 ? "paused"'));
+  const pausedGuard = previewBody.indexOf("root.__dsoExecutionRangeRenderKey === inactiveKey");
+  const payloadRead = previewBody.indexOf("__dsoPreviewPayload(root, editor)");
+  assert.ok(pausedGuard >= 0 && payloadRead >= 0 && pausedGuard < payloadRead);
+});
+
 test("keeps shell debug and breakpoint decorations out of query submit mode", () => {
   const source = overlaySyncRendererSource();
   const state = { overlayRoot: undefined };

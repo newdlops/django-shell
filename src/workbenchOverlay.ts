@@ -14,6 +14,8 @@ import { findInspectorUrlForPid, findMainPid, waitForInspectorUrlForPid } from "
 import { overlayRendererSource } from "./workbenchOverlayRenderer";
 interface CdpResponse { error?: { message?: string }; id?: number; result?: { exceptionDetails?: { exception?: { description?: string }; text?: string }; result?: { value?: unknown } }; }
 type PendingReply = (response: CdpResponse) => void; type RunHandler = (code: string, lineOffset?: number) => Promise<boolean>;
+/** Associates one CDP response callback with the socket generation that issued it. */
+interface PendingRequest { reply: PendingReply; socket: WebSocket; }
 /** Describes the Python cell editor anchor inside the custom webview viewport. */
 export interface WorkbenchOverlayGeometry { height: number; left: number; top: number; width: number; }
 /** Configures one independently-backed overlay surface and its owning webview panel. */
@@ -22,12 +24,18 @@ export interface WorkbenchOverlayProfile { analysisName?: string; contextKey?: s
 export interface WorkbenchOverlayActivationOptions { registerCommands?: boolean; registerWithContext?: boolean; }
 const BRIDGE_PATH = "/django-shell-overlay";
 const CORS_HEADERS = { "access-control-allow-headers": "content-type,x-django-shell-token", "access-control-allow-methods": "POST,OPTIONS", "access-control-allow-origin": "*", "access-control-allow-private-network": "true" };
+const CAPTURE_EVALUATE_TIMEOUT_MS = 650;
+const CDP_EVALUATE_TIMEOUT_MS = 4500;
+const CDP_REQUEST_TIMEOUT_MS = 10000;
 const GEOMETRY_SETTLE_MS = 80;
-const RENDERER_PATCH_VERSION = 90;
+const RENDERER_EXECUTE_TIMEOUT_MS = 3200;
+const RENDERER_RECOVERY_DELAY_MS = 400;
+const RENDERER_PATCH_VERSION = 92;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
-  private readonly pending = new Map<number, PendingReply>();
+  private readonly pending = new Map<number, PendingRequest>();
+  private cdpConnectPromise: Promise<void> | undefined;
   private injectPromise: Promise<void> | undefined;
   private messageId = 1;
   private rendererInjected = false;
@@ -44,10 +52,15 @@ export class WorkbenchOverlay implements vscode.Disposable {
   private geometryFlushPending = false;
   private geometrySettleTimer: ReturnType<typeof setTimeout> | undefined;
   private geometryTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastEvaluationTimeoutAt = 0;
+  private debugLineApplied = -1;
+  private debugLineFlushPromise: Promise<void> | undefined;
+  private debugLineTarget = 0;
   private readonly memoryDocument: OverlayMemoryDocument;
   private readonly featureBridge: OverlayPythonFeatureBridge;
   private readonly profile: Required<WorkbenchOverlayProfile>;
   private prelude = ""; private shellCommands: OverlayShellCommandController | undefined;
+  private showPromise: Promise<boolean> | undefined;
 
   /** Stores diagnostics and resolves the backing files and owning panel for this overlay. */
   constructor(private readonly logger?: DiagnosticLogger, profile: WorkbenchOverlayProfile = {}) {
@@ -76,9 +89,25 @@ export class WorkbenchOverlay implements vscode.Disposable {
     if (this.shutdownPromise) {
       throw new Error("Django Shell overlay has been disposed.");
     }
+    if (this.showPromise) {
+      return this.showPromise;
+    }
+    const pending = this.showNow();
+    this.showPromise = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.showPromise === pending) {
+        this.showPromise = undefined;
+      }
+      this.resumeHeldGeometry();
+    }
+  }
+
+  /** Performs one renderer show transaction; concurrent callers share it through show(). */
+  private async showNow(): Promise<boolean> {
     const started = Date.now();
     await this.ensureInjected();
-    if (await this.rendererPatchVersion() !== String(RENDERER_PATCH_VERSION)) { await this.inject(); }
     let report = await this.evalInWorkbench(showExpression(this.geometry, this.token));
     if (report === "overlay-not-installed" || report === "owner-mismatch") { await this.inject(); report = await this.evalInWorkbench(showExpression(this.geometry, this.token)); }
     const ctorMatch = /\bctors=(\d+)/.exec(report);
@@ -95,13 +124,15 @@ export class WorkbenchOverlay implements vscode.Disposable {
     scheduleGeneratedOverlayTabCleanup([this.memoryDocument.analysisUri]);
     const visible = report.includes(":editor:");
     void vscode.commands.executeCommand("setContext", this.profile.contextKey, visible);
+    void this.queueDebugLineFlush();
     return visible;
   }
 
   /** Updates the workbench overlay position from the webview cell anchor. */
   updateGeometry(geometry: WorkbenchOverlayGeometry): void {
     this.geometry = geometry;
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) { return; }
+    this.geometryFlushPending = true;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.rendererTransactionPending()) { return; }
     this.queueGeometryFlush(0);
     clearTimeout(this.geometrySettleTimer);
     this.geometrySettleTimer = setTimeout(() => { this.geometrySettleTimer = undefined; this.queueGeometryFlush(0); }, GEOMETRY_SETTLE_MS);
@@ -110,7 +141,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   /** Queues a geometry update while coalescing rapid scroll measurements. */
   private queueGeometryFlush(delayMs: number): void {
     this.geometryFlushPending = true;
-    if (this.geometryFlushInFlight || this.geometryTimer) { return; }
+    if (this.geometryFlushInFlight || this.geometryTimer || this.rendererTransactionPending()) { return; }
     if (delayMs <= 0) {
       this.flushGeometry();
       return;
@@ -124,14 +155,26 @@ export class WorkbenchOverlay implements vscode.Disposable {
   /** Applies the latest measured geometry to the renderer overlay. */
   private flushGeometry(): void {
     const geometry = this.geometry;
+    if (!geometry || !this.ws || this.ws.readyState !== WebSocket.OPEN || this.rendererTransactionPending()) { return; }
     this.geometryFlushPending = false;
-    if (!geometry || !this.ws || this.ws.readyState !== WebSocket.OPEN) { return; }
     this.geometryFlushInFlight = true;
     this.logger?.log("overlay.geometry", { height: Math.round(geometry.height), left: Math.round(geometry.left), top: Math.round(geometry.top), width: Math.round(geometry.width) });
     void this.evalInWorkbench(geometryExpression(geometry, this.token)).catch((error: unknown) => { this.logger?.log("overlay.geometry.error", { error: error instanceof Error ? error.message : String(error) }); }).finally(() => {
       this.geometryFlushInFlight = false;
-      if (this.geometryFlushPending) { this.queueGeometryFlush(0); }
+      this.resumeHeldGeometry();
     });
+  }
+
+  /** Returns whether a renderer show or patch transaction currently owns the CDP lane. */
+  private rendererTransactionPending(): boolean {
+    return Boolean(this.showPromise || this.injectPromise);
+  }
+
+  /** Resumes one coalesced geometry update after renderer work and timeout cooldowns settle. */
+  private resumeHeldGeometry(): void {
+    if (!this.geometryFlushPending || this.geometryFlushInFlight || this.geometryTimer || this.rendererTransactionPending() || this.ws?.readyState !== WebSocket.OPEN) { return; }
+    const cooldown = Math.max(0, this.lastEvaluationTimeoutAt + RENDERER_RECOVERY_DELAY_MS - Date.now());
+    this.queueGeometryFlush(cooldown);
   }
 
   /** Updates editor-only hidden imports without changing raw analysis text. */
@@ -152,9 +195,6 @@ export class WorkbenchOverlay implements vscode.Disposable {
 
   /** Updates the highlighted paused debugger line inside the overlay editor. */
   async updateDebugInfo(info: DebugFrameInfo): Promise<void> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected) {
-      return;
-    }
     // Keep the last paused line highlighted through the transient "running" state between steps: clearing it there and
     // re-adding it on the next stop makes the current-line marker blink on every step. It moves on the next "paused" and
     // clears only when the run ends (idle/error).
@@ -162,9 +202,47 @@ export class WorkbenchOverlay implements vscode.Disposable {
       return;
     }
     const visibleLine = info.state === "paused" && info.frame && this.isOverlayFrame(info.frame.path) ? info.frame.line : 0;
-    await this.evalInWorkbench(debugLineExpression(visibleLine >= 1 ? visibleLine : 0, this.token)).catch((error: unknown) => {
-      this.logger?.log("overlay.debug.info.error", { error: error instanceof Error ? error.message : String(error) });
+    this.debugLineTarget = visibleLine >= 1 ? visibleLine : 0;
+    await this.queueDebugLineFlush();
+  }
+
+  /** Coalesces debug-line updates so rapid stepping sends only the latest renderer target. */
+  private queueDebugLineFlush(): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected || this.debugLineApplied === this.debugLineTarget) {
+      return Promise.resolve();
+    }
+    if (this.debugLineFlushPromise) {
+      return this.debugLineFlushPromise;
+    }
+    let mayContinue = false;
+    const pending = this.flushDebugLine().then((completed) => { mayContinue = completed; }).finally(() => {
+      if (this.debugLineFlushPromise === pending) {
+        this.debugLineFlushPromise = undefined;
+      }
+      if (mayContinue && this.ws?.readyState === WebSocket.OPEN && this.rendererInjected && this.debugLineApplied !== this.debugLineTarget) {
+        void this.queueDebugLineFlush();
+      }
     });
+    this.debugLineFlushPromise = pending;
+    return pending;
+  }
+
+  /** Applies coalesced debug-line targets serially, skipping intermediate lines superseded during a CDP round trip. */
+  private async flushDebugLine(): Promise<boolean> {
+    while (this.ws?.readyState === WebSocket.OPEN && this.rendererInjected && this.debugLineApplied !== this.debugLineTarget) {
+      const target = this.debugLineTarget;
+      try {
+        const report = await this.evalInWorkbench(debugLineExpression(target, this.token));
+        if (report === "owner-mismatch" || report.includes("missing")) {
+          return false;
+        }
+        this.debugLineApplied = target;
+      } catch (error) {
+        this.logger?.log("overlay.debug.info.error", { error: error instanceof Error ? error.message : String(error) });
+        return false;
+      }
+    }
+    return this.debugLineApplied === this.debugLineTarget;
   }
 
   /** Mirrors the one-based lines that have breakpoints into overlay glyph-margin dots so users can see where breakpoints are set. */
@@ -211,16 +289,9 @@ export class WorkbenchOverlay implements vscode.Disposable {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected) {
       return;
     }
-    const report = await this.evalInWorkbench(visibleTextWriteExpression(text, this.token)).catch((error: unknown) => {
+    await this.evalInWorkbench(visibleTextWriteExpression(text, this.token)).catch((error: unknown) => {
       this.logger?.log("overlay.text.replace.error", { error: error instanceof Error ? error.message : String(error) });
-      return "";
     });
-    if (report.includes("missing")) {
-      await this.inject();
-      await this.evalInWorkbench(visibleTextWriteExpression(text, this.token)).catch((error: unknown) => {
-        this.logger?.log("overlay.text.replace.retry.error", { error: error instanceof Error ? error.message : String(error) });
-      });
-    }
   }
 
   /** Synchronizes the full visible editor text into backing files without changing renderer contents. */
@@ -247,11 +318,11 @@ export class WorkbenchOverlay implements vscode.Disposable {
   /** Hides the renderer overlay while keeping editor and bridge state alive. */
   park(): void { void this.parkRendererOverlay(); }
 
-  /** Tears down the renderer overlay without closing the reusable bridge. */
-  hide(): void { void this.disposeRendererOverlay(false, "overlay.hide.error"); }
+  /** Hides the renderer overlay without destroying its reusable Monaco editor. */
+  hide(): void { void this.parkRendererOverlay(); }
 
   /** Clears overlay text and generated prelude for a fresh backend session. */
-  async reset(): Promise<void> { this.prelude = ""; await this.memoryDocument.reset(); void vscode.commands.executeCommand("setContext", this.profile.contextKey, false); if (this.ws?.readyState === WebSocket.OPEN) { await this.evalInWorkbench(resetExpression(this.memoryDocument.visibleText(), this.token)).catch((error: unknown) => { this.logger?.log("overlay.reset.error", { error: error instanceof Error ? error.message : String(error) }); }); } }
+  async reset(): Promise<void> { this.prelude = ""; this.debugLineTarget = 0; this.debugLineApplied = -1; await this.memoryDocument.reset(); void vscode.commands.executeCommand("setContext", this.profile.contextKey, false); if (this.ws?.readyState === WebSocket.OPEN) { await this.evalInWorkbench(resetExpression(this.memoryDocument.visibleText(), this.token)).catch((error: unknown) => { this.logger?.log("overlay.reset.error", { error: error instanceof Error ? error.message : String(error) }); }); } }
 
   /** Asks the renderer-owned overlay editor to run the current cursor execution unit. */
   async runCurrentInput(): Promise<string> { await this.ensureInjected(); const raw = await this.evalInWorkbench("(function(){const root=document.getElementById('django-shell-overlay');const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(!root||!editor||!model){return JSON.stringify({ok:false,reason:'missing-overlay'});}const payload=root.__dsoCurrentInputPayload?root.__dsoCurrentInputPayload():{code:''};const code=String(payload&&payload.code||'');const rawStart=payload&&payload.range?Number(payload.range.start)||1:1;const inputStart=Number(root.__dsoInputStartLine)||1;const start=Math.max(1,rawStart-inputStart+1);return JSON.stringify({code,ok:!!code.trim(),reason:code.trim()?undefined:'empty',start,text:String(model.getValue&&model.getValue()||'')});})()").catch((error: unknown) => JSON.stringify({ ok: false, reason: error instanceof Error ? error.message : String(error) })); const payload = JSON.parse(raw) as { code?: string; ok?: boolean; start?: number; text?: string }; if (payload.ok && typeof payload.code === "string") { if (typeof payload.text === "string") { await this.memoryDocument.sync(payload.text); } void this.runHandler?.(payload.code, this.relativeLineOffset(payload.start ?? 1)).catch((error: unknown) => this.logger?.log("overlay.command.rerun.error", { error: error instanceof Error ? error.message : String(error) })); this.logger?.log("overlay.command.rerun.host", { chars: payload.code.length, start: payload.start ?? 1 }); return "host-requested"; } const report = await this.evalInWorkbench("window.__dsoRunCurrentOverlayInput ? window.__dsoRunCurrentOverlayInput() : 'missing-runner'").catch((error: unknown) => `error:${error instanceof Error ? error.message : String(error)}`); this.logger?.log("overlay.command.rerun.eval", { report }); return report; }
@@ -302,6 +373,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
       this.logger?.log("overlay.dispose.renderer", { report });
     } catch (error) {
       this.logger?.log(errorEvent, { error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.debugLineApplied = -1;
     }
   }
 
@@ -324,26 +397,29 @@ export class WorkbenchOverlay implements vscode.Disposable {
 
   /** Ensures the local bridge and renderer patch are available. */
   private async ensureInjected(): Promise<void> {
-    const bridge = await this.ensureServer();
-    let needsInject = this.ws?.readyState !== WebSocket.OPEN || !this.rendererInjected;
-    if (!needsInject) {
-      const state = await this.rendererPatchState();
-      needsInject = state.version !== String(RENDERER_PATCH_VERSION) || state.bridgePort !== String(bridge.port);
-    }
-    if (!needsInject) {
-      return;
-    }
+    await this.ensureServer();
+    await this.ensureCdpSocket();
+    if (this.rendererInjected) { return; }
+    await this.inject();
+  }
+
+  /** Runs one renderer patch transaction and shares it across concurrent callers. */
+  private async inject(): Promise<void> {
     if (this.injectPromise) {
       return this.injectPromise;
     }
-    this.injectPromise = this.inject().finally(() => {
-      this.injectPromise = undefined;
-    });
-    return this.injectPromise;
+    const pending = this.injectNow();
+    this.injectPromise = pending;
+    try {
+      await pending;
+    } finally {
+      if (this.injectPromise === pending) { this.injectPromise = undefined; }
+      this.resumeHeldGeometry();
+    }
   }
 
   /** Connects to the main-process inspector and injects the overlay patch. */
-  private async inject(): Promise<void> {
+  private async injectNow(): Promise<void> {
     const bridge = await this.ensureServer();
     await this.ensureCdpSocket();
     const report = await this.evalInWorkbench(patchExpression(bridge.port, bridge.token, this.memoryDocument.editorUri.toString(), this.memoryDocument.visibleText(), this.geometry, this.prelude, this.profile.panelTitle, this.profile.executionMode));
@@ -351,21 +427,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
       throw new Error(`overlay patch failed: ${report}`);
     }
     this.rendererInjected = true;
+    this.debugLineApplied = -1;
     this.logger?.log("overlay.inject", { key: this.profile.key, report });
-  }
-  /** Returns the renderer patch version currently installed in the workbench window. */
-  private rendererPatchVersion(): Promise<string> {
-    return this.evalInWorkbench("String(window.__djangoShellOverlayPatchVersion || '')").catch(() => "");
-  }
-  /** Returns the renderer patch and bridge state currently installed in the workbench window. */
-  private async rendererPatchState(): Promise<{ bridgePort: string; version: string }> {
-    const raw = await this.evalInWorkbench("JSON.stringify({bridgePort:String((window.__djangoShellOverlayBridge||{}).port||''),version:String(window.__djangoShellOverlayPatchVersion||'')})").catch(() => "");
-    try {
-      const parsed = JSON.parse(raw) as { bridgePort?: unknown; version?: unknown };
-      return { bridgePort: String(parsed.bridgePort ?? ""), version: String(parsed.version ?? "") };
-    } catch {
-      return { bridgePort: "", version: "" };
-    }
   }
   /** Debounces generated tab cleanup after overlay input settles. */
   private scheduleGeneratedCleanup(): void { clearTimeout(this.generatedCleanupTimer); this.generatedCleanupTimer = setTimeout(() => { void closeGeneratedOverlayTabs([this.memoryDocument.analysisUri, this.memoryDocument.editorUri]).catch(() => undefined); }, 450); }
@@ -484,9 +547,23 @@ export class WorkbenchOverlay implements vscode.Disposable {
 
   /** Ensures the CDP WebSocket for the Electron main process is open. */
   private async ensureCdpSocket(): Promise<void> {
+    if (this.cdpConnectPromise) {
+      return this.cdpConnectPromise;
+    }
     if (this.ws?.readyState === WebSocket.OPEN) {
       return;
     }
+    const pending = this.connectCdpSocket();
+    this.cdpConnectPromise = pending;
+    try {
+      await pending;
+    } finally {
+      if (this.cdpConnectPromise === pending) { this.cdpConnectPromise = undefined; }
+    }
+  }
+
+  /** Opens and enables one generation-bound CDP connection to the Electron main process. */
+  private async connectCdpSocket(): Promise<void> {
     const pid = findMainPid();
     if (!pid) {
       throw new Error("Could not locate VS Code main process.");
@@ -507,29 +584,41 @@ export class WorkbenchOverlay implements vscode.Disposable {
       socket.once("error", reject);
     });
     this.ws = socket;
-    socket.on("message", (data) => this.handleSocketMessage(data));
-    socket.on("close", () => this.closeSocket("closed"));
-    await this.send("Runtime.enable", {});
+    socket.on("message", (data) => this.handleSocketMessage(data, socket));
+    socket.on("close", () => this.retireSocket(socket, "closed"));
+    socket.on("error", (error) => this.retireSocket(socket, `error:${error.message}`));
+    const response = await this.send("Runtime.enable", {}, CDP_REQUEST_TIMEOUT_MS);
+    if (response.error?.message) {
+      this.retireSocket(socket, "enable-failed");
+      throw new Error(response.error.message);
+    }
   }
 
   /** Evaluates JavaScript inside the focused workbench renderer. */
-  private async evalInWorkbench(expression: string): Promise<string> {
+  private async evalInWorkbench(expression: string, rendererTimeoutMs = RENDERER_EXECUTE_TIMEOUT_MS): Promise<string> {
     await this.ensureCdpSocket();
-    const script = mainProcessEvalExpression(expression, this.workbenchWindowId);
+    const script = mainProcessEvalExpression(expression, this.workbenchWindowId, rendererTimeoutMs);
+    const cdpTimeoutMs = Math.min(CDP_EVALUATE_TIMEOUT_MS, Math.max(1200, rendererTimeoutMs + 800));
     const response = await this.send("Runtime.evaluate", {
       awaitPromise: true,
       expression: script,
       includeCommandLineAPI: true,
       returnByValue: true
-    });
+    }, cdpTimeoutMs);
     if (response.error?.message) {
+      if (isEvaluationTimeoutMessage(response.error.message)) { this.lastEvaluationTimeoutAt = Date.now(); }
       throw new Error(response.error.message);
     }
     const exception = response.result?.exceptionDetails;
     if (exception) {
       throw new Error(exception.exception?.description || exception.text || "CDP Runtime.evaluate failed.");
     }
-    return this.recordWorkbenchWindow(String(response.result?.result?.value ?? ""));
+    const raw = this.recordWorkbenchWindow(String(response.result?.result?.value ?? ""));
+    if (raw.startsWith("renderer-execute-timeout:")) {
+      this.lastEvaluationTimeoutAt = Date.now();
+      throw new Error(`Renderer transport timed out after ${raw.slice("renderer-execute-timeout:".length)}ms.`);
+    }
+    return raw;
   }
 
   /** Remembers the BrowserWindow id selected during the first successful overlay evaluation. */
@@ -543,7 +632,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   }
 
   /** Sends one CDP request and waits for its response. */
-  private async send(method: string, params: Record<string, unknown>): Promise<CdpResponse> {
+  private async send(method: string, params: Record<string, unknown>, timeoutMs = method === "Runtime.evaluate" ? CDP_EVALUATE_TIMEOUT_MS : CDP_REQUEST_TIMEOUT_MS): Promise<CdpResponse> {
     const socket = this.ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new Error("CDP WebSocket is not open.");
@@ -552,19 +641,30 @@ export class WorkbenchOverlay implements vscode.Disposable {
     const payload = JSON.stringify({ id, method, params });
     return new Promise<CdpResponse>((resolve) => {
       const timer = setTimeout(() => {
+        const request = this.pending.get(id);
+        if (!request || request.socket !== socket) { return; }
         this.pending.delete(id);
         resolve({ error: { message: `CDP request timed out: ${method}` }, id });
-      }, 15000);
-      this.pending.set(id, (response) => {
+        this.retireSocket(socket, `timeout:${method}`);
+      }, timeoutMs);
+      const reply = (response: CdpResponse) => {
         clearTimeout(timer);
         resolve(response);
-      });
-      socket.send(payload);
+      };
+      this.pending.set(id, { reply, socket });
+      try {
+        socket.send(payload);
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        resolve({ error: { message: error instanceof Error ? error.message : String(error) }, id });
+        this.retireSocket(socket, `send-failed:${method}`);
+      }
     });
   }
 
   /** Routes one CDP WebSocket message to the pending caller. */
-  private handleSocketMessage(data: WebSocket.RawData): void {
+  private handleSocketMessage(data: WebSocket.RawData, socket: WebSocket): void {
     let message: CdpResponse;
     try {
       message = JSON.parse(String(data)) as CdpResponse;
@@ -572,9 +672,10 @@ export class WorkbenchOverlay implements vscode.Disposable {
       return;
     }
     if (typeof message.id === "number") {
-      const reply = this.pending.get(message.id);
+      const request = this.pending.get(message.id);
+      if (!request || request.socket !== socket) { return; }
       this.pending.delete(message.id);
-      reply?.(message);
+      request.reply(message);
     }
   }
 
@@ -591,16 +692,23 @@ export class WorkbenchOverlay implements vscode.Disposable {
 
   /** Closes the CDP socket and rejects pending requests. */
   private closeSocket(reason: string): void {
-    for (const reply of this.pending.values()) {
-      reply({ error: { message: `CDP socket closed: ${reason}` } });
+    const socket = this.ws;
+    if (socket) { this.retireSocket(socket, reason); }
+  }
+
+  /** Retires one CDP socket generation without disturbing a newer live connection. */
+  private retireSocket(socket: WebSocket, reason: string): void {
+    for (const [id, request] of this.pending) {
+      if (request.socket !== socket) { continue; }
+      this.pending.delete(id);
+      request.reply({ error: { message: `CDP socket closed: ${reason}` }, id });
     }
-    this.pending.clear();
+    if (this.ws === socket) { this.ws = undefined; }
     try {
-      this.ws?.close();
+      if (socket.readyState !== WebSocket.CLOSED && socket.readyState !== WebSocket.CLOSING) { socket.close(); }
     } catch {
       // The socket may already be closed by the inspector.
     }
-    this.ws = undefined;
   }
 
   /** Opens a temporary Python editor briefly so VS Code creates an editor widget to capture. */
@@ -627,7 +735,13 @@ export class WorkbenchOverlay implements vscode.Disposable {
     let report = "";
     while (Date.now() - started < 2500) {
       await delay(100);
-      report = await this.evalInWorkbench(showExpression(this.geometry, this.token));
+      const remaining = Math.max(100, 2500 - (Date.now() - started));
+      try {
+        report = await this.evalInWorkbench(showExpression(this.geometry, this.token), Math.min(CAPTURE_EVALUATE_TIMEOUT_MS, remaining));
+      } catch (error) {
+        if (!isRendererTransportTimeout(error)) { throw error; }
+        continue;
+      }
       const ctorMatch = /\bctors=(\d+)/.exec(report);
       if (report.includes(":editor:") || report.includes("no-webview-host") || Number(ctorMatch?.[1] ?? 0) > 0) {
         return report;
@@ -651,6 +765,12 @@ async function readRequestBody(req: http.IncomingMessage): Promise<string> {
 
 /** Waits without blocking the extension host event loop. */
 function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+/** Returns whether a CDP or renderer transport diagnostic represents a deadline expiry. */
+function isEvaluationTimeoutMessage(message: string): boolean { return /timed out/i.test(message); }
+
+/** Returns whether a failed capture poll hit only its bounded renderer IPC deadline. */
+function isRendererTransportTimeout(error: unknown): boolean { return error instanceof Error && error.message.startsWith("Renderer transport timed out after "); }
 
 /** Returns compact size fields for text diagnostics. */
 function textFields(text: string): { chars: number; lines: number } { return { chars: text.length, lines: text ? text.split(/\r?\n/).length : 0 }; }
@@ -707,8 +827,8 @@ function tabUri(tab: vscode.Tab): vscode.Uri | undefined {
   return input?.uri;
 }
 
-/** Wraps renderer JavaScript so it runs inside the owning workbench window. */
-function mainProcessEvalExpression(rendererExpression: string, windowId?: number): string {
+/** Wraps renderer JavaScript so it runs inside the owning workbench window with a bounded IPC wait. */
+function mainProcessEvalExpression(rendererExpression: string, windowId: number | undefined, rendererTimeoutMs: number): string {
   const wrappedRendererExpression = `
     (async function () {
       try {
@@ -733,14 +853,18 @@ function mainProcessEvalExpression(rendererExpression: string, windowId?: number
       if (!target) { return requestedId ? "no-owned-workbench-window:" + requestedId : "no-focused-workbench-window:" + wins.length; }
       if (!requestedId) {
         const orphanCleanup = "try{const root=document.getElementById('django-shell-overlay');if(root&&!root.__dsoOwnerToken){if(window.__dsoDisposeOverlay){window.__dsoDisposeOverlay(root,true);}else{root.remove();}}}catch(e){}";
-        await Promise.all(wins.filter(function (win) { return win !== target; }).map(function (win) { return win.webContents.executeJavaScript(orphanCleanup, true).catch(function () { return undefined; }); }));
+        wins.filter(function (win) { return win !== target; }).forEach(function (win) { try { void win.webContents.executeJavaScript(orphanCleanup, true).catch(function () { return undefined; }); } catch (eOrphanCleanup) {} });
       }
-      var value;
-      try {
-        value = await target.webContents.executeJavaScript(${JSON.stringify(wrappedRendererExpression)}, true);
-      } catch (error) {
-        return "renderer-execute-error:" + String(error && (error.stack || error.message) || error);
-      }
+      var timeoutHandle;
+      const execution = target.webContents.executeJavaScript(${JSON.stringify(wrappedRendererExpression)}, true).then(
+        function (value) { return { kind: "value", value: value }; },
+        function (error) { return { error: error, kind: "error" }; }
+      );
+      const outcome = await Promise.race([execution, new Promise(function (resolve) { timeoutHandle = setTimeout(function () { resolve({ kind: "timeout" }); }, ${JSON.stringify(rendererTimeoutMs)}); })]);
+      if (timeoutHandle) { clearTimeout(timeoutHandle); }
+      if (outcome.kind === "timeout") { return "__DSO_WINDOW_ID__:" + target.id + "\\nrenderer-execute-timeout:" + ${JSON.stringify(rendererTimeoutMs)}; }
+      if (outcome.kind === "error") { const error = outcome.error; return "renderer-execute-error:" + String(error && (error.stack || error.message) || error); }
+      const value = outcome.value;
       return "__DSO_WINDOW_ID__:" + target.id + "\\n" + (value === undefined || value === null ? "" : String(value));
     })()
   `.trim();
@@ -821,7 +945,7 @@ function visibleTextWriteExpression(text: string, token: string): string { retur
 function disposeExpression(token: string): string { return `(function(){const root=document.getElementById("django-shell-overlay");if(!root){return "no-overlay";}if(root.__dsoOwnerToken&&root.__dsoOwnerToken!==${JSON.stringify(token)}){return "owner-mismatch";}if(window.__dsoDisposeOverlay){return window.__dsoDisposeOverlay(root,true);}if(root.parentElement){root.parentElement.removeChild(root);return "removed";}return "no-overlay";})()`; }
 
 /** Returns the expression that hides renderer-owned overlay DOM without disposing it. */
-function parkExpression(token: string): string { return `(function(){const root=document.getElementById("django-shell-overlay");if(!root){return "no-overlay";}if(root.__dsoOwnerToken&&root.__dsoOwnerToken!==${JSON.stringify(token)}){return "owner-mismatch";}root.style.display="none";root.style.visibility="hidden";return "parked";})()`; }
+function parkExpression(token: string): string { return `(function(){const root=document.getElementById("django-shell-overlay");if(!root){return "no-overlay";}if(root.__dsoOwnerToken&&root.__dsoOwnerToken!==${JSON.stringify(token)}){return "owner-mismatch";}root.style.display="none";root.style.visibility="hidden";try{if(root.__dsoWidgetRoot){root.__dsoWidgetRoot.style.display="none";}}catch(eWidgetPark){}return "parked";})()`; }
 
 /** Returns the expression that clears stale renderer overlay state after backend restart. */
 function resetExpression(initialText: string, token: string): string { return `(function(){const root=document.getElementById("django-shell-overlay");if(root?root.__dsoOwnerToken!==${JSON.stringify(token)}:window.__djangoShellOverlayOwnerToken!==${JSON.stringify(token)}){return "owner-mismatch";}window.__djangoShellOverlayInitialText=${JSON.stringify(initialText)};window.__djangoShellOverlayPrelude="";if(window.__djangoShellOverlayReset){return window.__djangoShellOverlayReset(window.__djangoShellOverlayInitialText,${JSON.stringify(token)});}try{const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(model&&model.setValue){model.setValue(window.__djangoShellOverlayInitialText);}}catch(eResetModel){}return window.__djangoShellOverlayHide?window.__djangoShellOverlayHide():'overlay-not-installed';})()`; }

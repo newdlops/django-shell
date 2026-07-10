@@ -46,6 +46,15 @@ test("overlay shutdown waits for renderer disposal before closing the CDP socket
   assert.ok(socketClose > rendererDispose, "socket should close after renderer cleanup is requested");
 });
 
+test("overlay hide parks Monaco while final shutdown disposes renderer resources", () => {
+  const publicLifecycle = overlaySource.slice(overlaySource.indexOf("park(): void"), overlaySource.indexOf("async reset(): Promise<void>"));
+  const shutdownBody = overlaySource.slice(overlaySource.indexOf("private async shutdownNow()"), overlaySource.indexOf("private async disposeRendererOverlay"));
+
+  assert.ok(publicLifecycle.includes("hide(): void { void this.parkRendererOverlay(); }"));
+  assert.equal(publicLifecycle.includes("disposeRendererOverlay"), false, "ordinary tab visibility changes must preserve Monaco");
+  assert.ok(shutdownBody.includes('await this.disposeRendererOverlay(true, "overlay.dispose.error")'));
+});
+
 test("overlay geometry coalesces scroll updates while keeping a settle pass", () => {
   const updateGeometryBody = overlaySource.slice(overlaySource.indexOf("updateGeometry(geometry"), overlaySource.indexOf("private queueGeometryFlush"));
   const queueGeometryBody = overlaySource.slice(overlaySource.indexOf("private queueGeometryFlush"), overlaySource.indexOf("private flushGeometry"));
@@ -56,8 +65,12 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
   assert.ok(overlaySource.includes("const GEOMETRY_SETTLE_MS = 80"));
   assert.ok(updateGeometryBody.includes("this.queueGeometryFlush(0);"), "scroll geometry should not wait until scrolling stops");
   assert.ok(updateGeometryBody.includes("this.geometrySettleTimer = setTimeout"));
-  assert.ok(queueGeometryBody.includes("this.geometryFlushInFlight || this.geometryTimer"));
-  assert.ok(flushGeometryBody.includes("if (this.geometryFlushPending) { this.queueGeometryFlush(0); }"));
+  assert.ok(updateGeometryBody.includes("this.rendererTransactionPending()"), "geometry waits until show or injection completes");
+  assert.ok(queueGeometryBody.includes("this.geometryFlushInFlight || this.geometryTimer || this.rendererTransactionPending()"));
+  assert.ok(flushGeometryBody.includes("this.resumeHeldGeometry()"), "a completed request resumes only the latest held geometry");
+  assert.equal(flushGeometryBody.includes("if (this.geometryFlushPending) { this.queueGeometryFlush(0); }"), false, "timeout completion must not recurse immediately");
+  assert.ok(overlaySource.includes("const RENDERER_RECOVERY_DELAY_MS"));
+  assert.ok(overlaySource.includes("this.lastEvaluationTimeoutAt + RENDERER_RECOVERY_DELAY_MS - Date.now()"));
   assert.ok(rendererSource.includes("function __dsoInstallGeometrySync(root)"));
   assert.ok(rendererSource.includes('document.addEventListener("scroll", schedule, true)'));
   assert.ok(rendererSource.includes("__dsoApplyGeometry(root, window.__djangoShellOverlayGeometry)"));
@@ -70,7 +83,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 90"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 92"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -163,6 +176,8 @@ test("overlay model stays user-only instead of hiding generated prelude DOM", ()
   assert.ok(syncSource.includes("prelude.guard.strip"));
   assert.equal(syncSource.includes("overlayDiagnosticPrefixRendererSource"), false);
   assert.equal(syncSource.includes("__dsoDiagnosticPrefix"), false);
+  const preludeUpdate = syncSource.slice(syncSource.indexOf("window.__djangoShellOverlaySetPrelude"), syncSource.indexOf("return \"ok\";", syncSource.indexOf("window.__djangoShellOverlaySetPrelude")));
+  assert.equal(preludeUpdate.includes("root.style.visibility"), false, "analysis-prelude refreshes never flash-hide the live editor");
   assert.equal(preludeViewSource.includes("protectedLines.indexOf"), false);
   assert.equal(preludeViewSource.includes("leadingPrefix"), false);
   assert.equal(preludeViewSource.includes("topOf(line)"), false);
@@ -189,7 +204,9 @@ test("overlay input keeps the cursor visible while typing grows the model", () =
 
 test("confirmed console overlays do not fall back to unrelated webview frames", () => {
   assert.ok(frameRendererSource.includes("root.__dsoHadConsoleFrame = true"));
-  assert.ok(frameRendererSource.includes("if (!rects.length) { root.__dsoFrame = null; return null; }"));
+  assert.ok(frameRendererSource.includes("const visibleCachedFrame = root.__dsoFrame"));
+  assert.ok(frameRendererSource.includes("__dsoFrameArea(root.__dsoFrame) > 4000"), "only a still-visible owned frame survives transient tab metadata loss");
+  assert.ok(frameRendererSource.includes("root.__dsoPortalHost && root.__dsoPortalHost.isConnected"));
   assert.ok(frameRendererSource.includes("__dsoFrameIsConsole(root.__dsoFrame, rects)"));
   assert.ok(frameRendererSource.includes("function __dsoConsoleGroupEntries()"));
   assert.ok(frameRendererSource.includes("function __dsoConsoleGroupForFrame(frame, entries)"));
@@ -209,6 +226,52 @@ test("overlay CDP evaluation stays bound to the owning VS Code window", () => {
   assert.ok(overlaySource.includes("no-focused-workbench-window"));
   assert.ok(overlaySource.includes("root&&!root.__dsoOwnerToken"));
   assert.equal(overlaySource.includes("wins.includes(focused) ? focused : wins[0]"), false);
+});
+
+test("orphan-window cleanup never blocks the owning renderer evaluation", () => {
+  const wrapperStart = overlaySource.indexOf("function mainProcessEvalExpression");
+  const wrapperEnd = overlaySource.indexOf("function patchExpression", wrapperStart);
+  const wrapperBody = overlaySource.slice(wrapperStart, wrapperEnd);
+
+  assert.ok(wrapperBody.includes("orphanCleanup"));
+  assert.ok(wrapperBody.includes("win.webContents.executeJavaScript(orphanCleanup"));
+  assert.equal(wrapperBody.includes("await Promise.all"), false, "an unresponsive orphan window must not delay the target window");
+  assert.ok(wrapperBody.includes("const outcome = await Promise.race"), "the owning renderer IPC call is bounded too");
+  assert.ok(wrapperBody.includes("renderer-execute-timeout:"));
+});
+
+test("CDP evaluation timeouts retire the exact socket generation", () => {
+  const sendStart = overlaySource.indexOf("private async send(method: string");
+  const sendEnd = overlaySource.indexOf("private handleSocketMessage", sendStart);
+  const sendBody = overlaySource.slice(sendStart, sendEnd);
+
+  assert.ok(overlaySource.includes("const CDP_EVALUATE_TIMEOUT_MS"));
+  assert.ok(overlaySource.includes("const RENDERER_EXECUTE_TIMEOUT_MS"));
+  assert.ok(overlaySource.includes("const CAPTURE_EVALUATE_TIMEOUT_MS"));
+  assert.ok(sendBody.includes("const socket = this.ws"));
+  assert.ok(sendBody.includes("request.socket !== socket"), "a stale timeout cannot retire another socket's request");
+  assert.ok(sendBody.includes("this.pending.set(id, { reply, socket })"));
+  assert.ok(sendBody.includes('this.retireSocket(socket, `timeout:${method}`)'));
+  assert.equal(sendBody.includes("this.closeSocket("), false, "request timeout cleanup stays generation-scoped");
+});
+
+test("late events from a retired CDP socket cannot close or resolve the new connection", () => {
+  const connectStart = overlaySource.indexOf("private async connectCdpSocket()");
+  const connectEnd = overlaySource.indexOf("private async evalInWorkbench", connectStart);
+  const connectBody = overlaySource.slice(connectStart, connectEnd);
+  const messageStart = overlaySource.indexOf("private handleSocketMessage");
+  const messageEnd = overlaySource.indexOf("private closeServer", messageStart);
+  const messageBody = overlaySource.slice(messageStart, messageEnd);
+  const retireStart = overlaySource.indexOf("private retireSocket");
+  const retireEnd = overlaySource.indexOf("private async openWarmupEditor", retireStart);
+  const retireBody = overlaySource.slice(retireStart, retireEnd);
+
+  assert.ok(overlaySource.includes("private cdpConnectPromise"), "concurrent reconnects share one socket generation");
+  assert.ok(connectBody.includes('socket.on("message", (data) => this.handleSocketMessage(data, socket))'));
+  assert.ok(connectBody.includes('socket.on("close", () => this.retireSocket(socket, "closed"))'));
+  assert.ok(messageBody.includes("request.socket !== socket"), "old replies are ignored");
+  assert.ok(retireBody.includes("request.socket !== socket"), "retirement only rejects requests owned by that socket");
+  assert.ok(retireBody.includes("if (this.ws === socket) { this.ws = undefined; }"), "an old close event preserves the newer live socket");
 });
 
 test("renderer overlay root carries an owner token before reuse or disposal", () => {
@@ -247,12 +310,16 @@ test("overlay breakpoints use native VS Code breakpoint handling instead of cust
   assert.equal(overlaySource.includes("lastBreakpointToggleKey"), false);
 });
 
-test("overlay reinjects when the renderer bridge port is stale", () => {
-  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+test("warm overlay injection trusts live host state instead of probing and misclassifying timeouts", () => {
+  const ensureStart = overlaySource.indexOf("private async ensureInjected()");
+  const ensureEnd = overlaySource.indexOf("private async inject()", ensureStart);
+  const ensureBody = overlaySource.slice(ensureStart, ensureEnd);
 
-  assert.ok(overlaySource.includes("private async rendererPatchState()"));
-  assert.ok(overlaySource.includes("state.bridgePort !== String(bridge.port)"));
-  assert.ok(rendererSource.includes("__djangoShellOverlayBridgeFailedPort"));
+  assert.ok(ensureBody.includes("this.rendererInjected"));
+  assert.ok(ensureBody.includes("return;"), "an already injected renderer takes the warm fast path");
+  assert.equal(ensureBody.includes("rendererPatchState"), false, "warm shows must not add a health-probe Runtime.evaluate");
+  assert.equal(overlaySource.includes("private async rendererPatchState()"), false, "transport failures cannot be converted into empty patch state");
+  assert.ok(overlaySource.includes('report === "overlay-not-installed"'), "only a definitive renderer response triggers reinjection");
 });
 
 test("overlay renderer exposes a paused debug line marker", () => {
@@ -290,12 +357,64 @@ test("overlay prompt gutter keeps the glyph margin and reveals breakpoints there
 
 test("overlay renderer caches expensive widget layout work", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+  const syncSource = fs.readFileSync(new URL("../src/workbenchOverlaySyncRenderer.ts", import.meta.url), "utf8");
+  const widgetSource = fs.readFileSync(new URL("../src/workbenchOverlayWidgetRenderer.ts", import.meta.url), "utf8");
 
   assert.ok(rendererSource.includes("window.__dsoWidgetCache"));
   assert.ok(rendererSource.includes("if (__dsoIsWidget(cached))"));
   assert.ok(rendererSource.includes("cache && start && cache.set(start, widget)"));
   assert.ok(rendererSource.includes("root.__dsoLastEditorLayoutKey === layoutKey"));
+  assert.ok(rendererSource.includes("style.__dsoPatchVersion === version"), "warm shows do not rewrite the overlay stylesheet");
+  assert.ok(widgetSource.includes("node.__dsoThemeSyncKey === themeKey"), "unchanged themes skip the full VS Code variable copy");
+  assert.ok(widgetSource.includes("style.__dsoPatchVersion === version"), "widget CSS is installed once per renderer patch");
+  assert.ok(syncSource.includes("root.__dsoEnterEditor === editor && root.__dsoEnterCleanup"), "warm shows keep the existing key handlers and Monaco commands");
   assert.equal(rendererSource.includes("__dsoBreakpointLayer"), false);
+});
+
+test("overlay service capture uses bounded DOM scans without patching global prototypes", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+  const captureStart = rendererSource.indexOf("function __dsoCaptureReady()");
+  const captureEnd = rendererSource.indexOf("function __dsoFactory()", captureStart);
+  const captureBody = rendererSource.slice(captureStart, captureEnd);
+
+  assert.ok(captureBody.includes("function __dsoStartCapture()"));
+  assert.ok(captureBody.includes("window.__dsoCaptureScanActive"));
+  assert.ok(captureBody.includes("window.__dsoCaptureScanTimer"));
+  assert.ok(captureBody.includes("attempts >= 12"), "capture must stop after a bounded number of scans");
+  assert.ok(captureBody.includes("window.setTimeout(scan, 100)"), "capture yields between DOM scans");
+  assert.ok(captureBody.includes("__dsoScanDom()"));
+  for (const mutation of ["Array.prototype.push =", "Map.prototype.set =", "WeakMap.prototype.set =", "Set.prototype.add =", "Reflect.construct ="]) {
+    assert.equal(rendererSource.includes(mutation), false, `capture must not replace ${mutation.slice(0, -2)}`);
+  }
+  assert.equal(rendererSource.includes("__dsoCaptureOriginals"), false);
+  assert.equal(rendererSource.includes("__dsoStopCapture"), false);
+});
+
+test("overlay status reporting never performs another editor factory scan", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+  const statusStart = rendererSource.indexOf("function __dsoStatus()");
+  const statusEnd = rendererSource.indexOf("function __dsoUri()", statusStart);
+  const statusBody = rendererSource.slice(statusStart, statusEnd);
+
+  assert.ok(statusBody.includes("root.__djangoShellEditor || __dsoCaptureReady()"));
+  assert.equal(statusBody.includes("__dsoFactory()"), false, "diagnostic status must stay a constant-time read");
+});
+
+test("transient owning-frame misses park the editor after a grace period instead of disposing Monaco", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+  const missStart = rendererSource.indexOf("function __dsoHandleGeometryMiss");
+  const missEnd = rendererSource.indexOf("function __dsoEnsureStyle", missStart);
+  const missBody = rendererSource.slice(missStart, missEnd);
+  const timerStart = rendererSource.indexOf("root.__dsoGeometryTimer = window.setInterval");
+  const timerEnd = rendererSource.indexOf("const editor = __dsoEnsureEditor", timerStart);
+  const timerBody = rendererSource.slice(timerStart, timerEnd);
+
+  assert.ok(missBody.includes("now - root.__dsoGeometryMissingSince < 700"));
+  assert.ok(missBody.includes("root.__dsoGeometryParked = true"));
+  assert.ok(missBody.includes('root.style.visibility = "hidden"'));
+  assert.equal(missBody.includes("__dsoDisposeOverlay"), false, "a transient workbench layout gap never destroys the editor/model");
+  assert.ok(timerBody.includes("__dsoHandleGeometryMiss(root)"));
+  assert.equal(timerBody.includes("__dsoDisposeOverlay(root)"), false);
 });
 
 test("debugger controls live in the Python cell toolbar", () => {
@@ -345,6 +464,21 @@ test("debug start clicks always reach the extension host for diagnostics", () =>
   assert.ok(customConsoleSource.includes("startDebugpyWithTimeout"));
   assert.ok(customConsoleSource.includes("DEBUG_ATTACH_TIMEOUT_MS"));
   assert.ok(customConsoleSource.includes("debugpyEndpoint = undefined"));
+});
+
+test("console focus changes keep the overlay alive while visible or attaching a debugger", () => {
+  const viewStart = customConsoleSource.indexOf("private handleViewState(visible: boolean, active: boolean)");
+  const viewEnd = customConsoleSource.indexOf("private async updateOverlayPrelude", viewStart);
+  const viewBody = customConsoleSource.slice(viewStart, viewEnd);
+  const visibleBranch = viewBody.indexOf("if (visible)");
+  const inactiveReturn = viewBody.indexOf("if (!active) { return; }", visibleBranch);
+  const hide = viewBody.indexOf("this.overlay?.hide()", visibleBranch);
+
+  assert.ok(viewBody.includes("Boolean(this.debugAttachPromise || this.debugSession || this.overlayDebugSession)"));
+  assert.ok(visibleBranch >= 0 && inactiveReturn > visibleBranch, "visible-but-inactive panels return without hiding");
+  assert.ok(hide > inactiveReturn, "hide remains exclusive to the non-visible branch");
+  assert.ok(viewBody.includes("if (!keepForDebug) { this.overlay?.hide(); }"), "debug attachment keeps a hidden overlay warm");
+  assert.ok(viewBody.includes("this.runtimeReady && this.overlayPrelude.length === 0"), "focus restoration does not refetch a large prelude already held in memory");
 });
 
 test("debug attach keeps model-browser transport independent from debugpy", () => {
@@ -457,7 +591,7 @@ test("overlay step-in can reveal external source frames", () => {
   assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", true'));
   assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", false'));
   assert.ok(customConsoleSource.includes("if (!this.panel?.visible || !this.panel.active)"));
-  assert.ok(customConsoleSource.includes("this.lastDebugFrameOverlay) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); }"));
+  assert.ok(customConsoleSource.includes("if (!wasOverlayFrame) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); }"));
   assert.ok(customConsoleSource.includes("this.overlay?.park();"));
   assert.ok(customConsoleSource.includes('revealed && this.debugMode === "overlay" && !this.lastDebugFrameOverlay'));
   assert.ok(overlaySource.includes("park(): void"));
@@ -568,7 +702,7 @@ test("full debug teardown (restart/close) interrupts the backend and disconnects
 });
 
 test("paused overlay debug keeps the executable console source tab out of cleanup", () => {
-  assert.ok(customConsoleSource.includes('closeWorkspaceGeneratedOverlayTabs(this.debugMode !== "overlay")'));
+  assert.ok(customConsoleSource.includes("closeWorkspaceGeneratedOverlayTabs(false)"));
   assert.ok(generatedTabsSource.includes("includeExecutable = true"));
   assert.ok(generatedTabsSource.includes("if (includeExecutable)"));
   assert.ok(debugEventsSource.includes("debug.session.terminate"));
@@ -680,6 +814,45 @@ test("stepping keeps the current-line marker stable (no per-step blink) and cent
   // Arrow centering: flex-center the triangle within Monaco's per-line glyph div instead of height:100% + top:50%.
   assert.ok(rendererSource.includes(".dso-debug-indicator{align-items:center;background:transparent;display:flex;justify-content:center;"), "arrow is flex-centered");
   assert.ok(!rendererSource.includes(".dso-debug-indicator{background:transparent;height:100%!important"), "no height:100% override that breaks centering");
+});
+
+test("overlay show and debug-line renderer traffic are single-flight and latest-value coalesced", () => {
+  const showBody = overlaySource.slice(overlaySource.indexOf("async show(): Promise<boolean>"), overlaySource.indexOf("/** Updates the workbench overlay position"));
+  const debugBody = overlaySource.slice(overlaySource.indexOf("async updateDebugInfo"), overlaySource.indexOf("/** Mirrors the one-based lines"));
+
+  assert.ok(showBody.includes("if (this.showPromise)"));
+  assert.ok(showBody.includes("const pending = this.showNow()"));
+  assert.equal(showBody.includes("rendererPatchVersion"), false, "warm show must not perform a renderer health/version probe");
+  assert.ok(showBody.includes("void this.queueDebugLineFlush()"), "debug decoration delivery must not delay a visible overlay");
+  assert.equal(showBody.includes("await this.queueDebugLineFlush()"), false);
+  assert.ok(showBody.includes("this.resumeHeldGeometry()"), "show completion releases the latest held geometry");
+  assert.ok(debugBody.includes("this.debugLineTarget = visibleLine >= 1 ? visibleLine : 0"));
+  assert.ok(debugBody.includes("if (this.debugLineFlushPromise)"));
+  assert.ok(debugBody.includes("while (this.ws?.readyState === WebSocket.OPEN && this.rendererInjected && this.debugLineApplied !== this.debugLineTarget)"));
+  assert.ok(debugBody.includes("const target = this.debugLineTarget"), "a queued update snapshots only the latest target before each CDP call");
+});
+
+test("paused-frame presentation is location-deduped across fast and enriched inspection", () => {
+  const body = customConsoleSource.slice(customConsoleSource.indexOf("private postDebugInfo(info"), customConsoleSource.indexOf("private async inspectDebugVariableChildren"));
+  const duplicateGuard = body.indexOf("presentationKey === this.lastDebugPresentationKey");
+  const markerUpdate = body.indexOf("this.overlay?.updateDebugInfo(info)", duplicateGuard);
+
+  assert.ok(duplicateGuard >= 0 && markerUpdate > duplicateGuard, "duplicate locations stop before renderer presentation");
+  assert.equal((body.match(/revealExternalDebugFrame\(/g) ?? []).length, 1, "one external navigation site");
+  assert.equal((body.match(/closeWorkspaceGeneratedOverlayTabs\(false\)/g) ?? []).length, 1, "one overlay-mode external tab cleanup site");
+  assert.ok(body.includes("if (!wasOverlayFrame) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); }"), "overlay-to-overlay steps only update the marker");
+  assert.ok(body.includes("this.lastDebugPresentationKey === presentationKey"), "stale external reveals cannot park a newer frame");
+  assert.ok(body.includes('if (info.state === "running") { return; } this.lastDebugPresentationKey = "";'), "terminal states reset presentation while transient running preserves it");
+});
+
+test("direct continued invalidates pending paused-frame inspection before posting running", () => {
+  const continued = customConsoleSource.slice(customConsoleSource.indexOf("onContinued: (body)"), customConsoleSource.indexOf("onStopped: (body)"));
+  const generation = continued.indexOf("this.debugStopGeneration += 1");
+  const cancelEnrich = continued.indexOf("clearTimeout(this.debugEnrichTimer)");
+  const postRunning = continued.indexOf('this.postDebugStatus("running", "continued")');
+
+  assert.ok(generation >= 0 && generation < postRunning, "stale fast inspection is generation-guarded before running");
+  assert.ok(cancelEnrich >= 0 && cancelEnrich < postRunning, "settled enrichment is cancelled before running");
 });
 
 test("backend only traces the request thread for debug runs so warm connections stay fast", () => {

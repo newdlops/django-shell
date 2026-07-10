@@ -100,12 +100,17 @@ export function overlayFrameRendererSource(panelTitle = "Django Shell"): string 
       const rects = entries.map(function (entry) { return entry.rect; });
       const owned = __dsoConsoleFrame(rects);
       if (owned) { root.__dsoHadConsoleFrame = true; }
-      if (!rects.length) { root.__dsoFrame = null; return null; }
+      if (!rects.length) {
+        const visibleCachedFrame = root.__dsoFrame && root.__dsoFrame.isConnected && __dsoFrameArea(root.__dsoFrame) > 4000 ? root.__dsoFrame : null;
+        const cachedHost = root.__dsoPortalHost && root.__dsoPortalHost.isConnected ? root.__dsoPortalHost : null;
+        if (visibleCachedFrame && cachedHost) { return { frame: visibleCachedFrame, host: cachedHost }; }
+        root.__dsoFrame = null; root.__dsoPortalHost = null; return null;
+      }
       const cached = root.__dsoFrame && root.__dsoFrame.isConnected && __dsoFrameIsConsole(root.__dsoFrame, rects) ? root.__dsoFrame : null;
       const frame = owned || cached || __dsoFindWebviewFrame(rects);
       const host = __dsoOverlayPortalHost(frame, entries);
-      if (!frame || !host) { root.__dsoFrame = null; return null; }
-      root.__dsoFrame = frame;
+      if (!frame || !host) { root.__dsoFrame = null; root.__dsoPortalHost = null; return null; }
+      root.__dsoFrame = frame; root.__dsoPortalHost = host;
       if (host !== document.body && host !== document.documentElement && window.getComputedStyle(host).position === "static") { host.style.position = "relative"; }
       if (root.parentElement !== host) { host.appendChild(root); }
       return { frame: frame, host: host };
