@@ -526,22 +526,83 @@ function createEditor(ctx) {
 }
 
 // media/gridQuery.js
-function enterQueryMode(post) {
+var queryPost;
+var geometryFrame = 0;
+var lastGeometryKey = "";
+function enterQueryMode(post, initialCode = "") {
   const input = document.getElementById("queryinput");
-  const run = () => post({ code: input.value, type: "runQuery" });
+  queryPost = post;
+  if (typeof initialCode === "string") {
+    input.value = initialCode;
+  }
   document.getElementById("querybar").hidden = false;
   document.getElementById("filterbar").hidden = true;
   const count = document.getElementById("count");
   if (count) {
     count.hidden = true;
   }
+  if (input.dataset.queryOverlayWired) {
+    requestQueryOverlay(true);
+    return;
+  }
+  input.dataset.queryOverlayWired = "true";
+  const run = () => post({ code: input.value, type: "runQuery", useOverlay: true });
   document.getElementById("runQuery").addEventListener("click", run);
+  input.addEventListener("input", () => post({ code: input.value, type: "queryDraftChanged" }));
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
       run();
     }
   });
+  input.addEventListener("click", () => requestQueryOverlay(true));
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(() => scheduleQueryGeometry()).observe(input);
+  }
+  window.addEventListener("resize", scheduleQueryGeometry);
+  window.addEventListener("scroll", scheduleQueryGeometry, true);
+  window.visualViewport?.addEventListener("resize", scheduleQueryGeometry);
+  window.visualViewport?.addEventListener("scroll", scheduleQueryGeometry);
+  requestQueryOverlay(true);
+}
+function measureQueryEditor(show = false) {
+  if (show) {
+    requestQueryOverlay(true);
+  } else {
+    scheduleQueryGeometry();
+  }
+}
+function setQueryDraft(code) {
+  const input = document.getElementById("queryinput");
+  if (input && typeof code === "string") {
+    input.value = code;
+  }
+}
+function scheduleQueryGeometry() {
+  if (geometryFrame) {
+    return;
+  }
+  geometryFrame = requestAnimationFrame(() => {
+    geometryFrame = 0;
+    requestQueryOverlay(false);
+  });
+}
+function requestQueryOverlay(show) {
+  const input = document.getElementById("queryinput");
+  if (!input || !queryPost) {
+    return;
+  }
+  const rect = input.getBoundingClientRect();
+  if (rect.width <= 40 || rect.height <= 40) {
+    return;
+  }
+  const geometry = { height: rect.height, left: rect.left, top: rect.top, width: rect.width };
+  const key = `${geometry.left}:${geometry.top}:${geometry.width}:${geometry.height}`;
+  if (!show && key === lastGeometryKey) {
+    return;
+  }
+  lastGeometryKey = key;
+  queryPost({ rect: geometry, type: show ? "showQueryOverlay" : "queryEditorGeometry" });
 }
 
 // media/gridResize.js
@@ -1282,7 +1343,7 @@ function createFilterBar(deps) {
     if (lookup === "isnull") {
       const select = el2("select", {});
       select.append(el2("option", { value: "false" }, "has value"), el2("option", { value: "true" }, "is null"));
-      select.value = isTruthy(presetValue) ? "true" : "false";
+      select.value = isTruthy2(presetValue) ? "true" : "false";
       return { getValue: () => select.value, node: select };
     }
     if (lookup === "range") {
@@ -1294,7 +1355,7 @@ function createFilterBar(deps) {
     if ((lookup === "exact" || lookup === "iexact") && terminal && terminal.type === "BooleanField") {
       const select = el2("select", {});
       select.append(el2("option", { value: "True" }, "true"), el2("option", { value: "False" }, "false"));
-      select.value = isTruthy(presetValue) ? "True" : "False";
+      select.value = isTruthy2(presetValue) ? "True" : "False";
       return { getValue: () => select.value, node: select };
     }
     if ((lookup === "exact" || lookup === "iexact") && terminal && Array.isArray(terminal.choices) && terminal.choices.length) {
@@ -1365,7 +1426,7 @@ function createFilterBar(deps) {
     render();
     return { getValue: () => values.join(","), node };
   }
-  function isTruthy(value) {
+  function isTruthy2(value) {
     return /^(true|1|t|yes|on)$/i.test(String(value === void 0 || value === null ? "" : value).trim());
   }
   function pathOf(term) {
@@ -1493,7 +1554,7 @@ function createPathPicker(deps) {
   function nestedOptions(tree) {
     const options = [];
     for (const field of tree && tree.fields || []) {
-      options.push({ label: field.attname, role: "field", type: field.type, value: `${FIELD2}${field.attname}` });
+      options.push({ choices: field.choices, label: field.attname, role: "field", type: field.type, value: `${FIELD2}${field.attname}` });
     }
     for (const relation of tree && tree.relations || []) {
       options.push({ kind: relation.kind, label: `${relation.name} \u2192`, role: "relation", target: relation.target, title: `${relation.kind} \u2192 ${bareModel(relation.target)} (drill in)`, value: `${REL2}${relation.name}` });
@@ -1575,6 +1636,291 @@ function createPathPicker(deps) {
   return { getPath, node, terminal, toMany };
 }
 
+// media/gridColumnConditions.js
+var MAX_CONDITIONS = 8;
+var TEXT_TYPES2 = /Char|Text|Email|Slug|URL|UUID|IP|File|FilePath|Duration|Generic/;
+var LENGTH_TYPES2 = /Char|Text|Email|Slug|URL|FilePath/;
+var NUM_TYPES2 = /Integer|Float|Decimal|AutoField/;
+var INT_LOOKUPS2 = /* @__PURE__ */ new Set(["year", "month", "day", "week_day", "quarter", "hour", "minute", "second"]);
+var VALUE_ONLY_LOOKUPS = /* @__PURE__ */ new Set(["in", "isnull", "range"]);
+var JOIN_OPTIONS = [{ label: "all (AND)", value: "all" }, { label: "any (OR)", value: "any" }];
+var LOOKUP_LABEL2 = {
+  exact: "=",
+  iexact: "= (i)",
+  contains: "contains",
+  icontains: "contains (i)",
+  gt: ">",
+  gte: "\u2265",
+  lt: "<",
+  lte: "\u2264",
+  startswith: "starts with",
+  istartswith: "starts with (i)",
+  endswith: "ends with",
+  iendswith: "ends with (i)",
+  in: "in (list)",
+  isnull: "is null",
+  range: "between",
+  date: "date =",
+  year: "year",
+  month: "month",
+  day: "day",
+  week_day: "weekday",
+  quarter: "quarter",
+  hour: "hour",
+  minute: "minute",
+  second: "second",
+  length: "length =",
+  length__gt: "length >",
+  length__gte: "length \u2265",
+  length__lt: "length <",
+  length__lte: "length \u2264",
+  trim: "trimmed ="
+};
+function lookupsForTerminal2(terminal, allLookups) {
+  const allowed = new Set(allLookups || []);
+  if (!terminal || terminal.role === "relation") {
+    return allowed.has("isnull") ? ["isnull"] : [];
+  }
+  const type = String(terminal.type || "");
+  let preferred;
+  if (type === "BooleanField") {
+    preferred = ["exact", "isnull"];
+  } else if (type === "DateTimeField") {
+    preferred = ["exact", "gt", "gte", "lt", "lte", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "isnull"];
+  } else if (type === "DateField") {
+    preferred = ["exact", "gt", "gte", "lt", "lte", "range", "year", "quarter", "month", "week_day", "day", "isnull"];
+  } else if (type === "TimeField") {
+    preferred = ["exact", "gt", "gte", "lt", "lte", "range", "hour", "minute", "second", "isnull"];
+  } else if (NUM_TYPES2.test(type)) {
+    preferred = ["exact", "gt", "gte", "lt", "lte", "in", "range", "isnull"];
+  } else if (TEXT_TYPES2.test(type)) {
+    preferred = ["exact", "iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull"];
+    if (LENGTH_TYPES2.test(type)) {
+      preferred.push("trim", "length", "length__gt", "length__gte", "length__lt", "length__lte");
+    }
+  } else {
+    preferred = [...allowed];
+  }
+  return preferred.filter((lookup) => allowed.has(lookup));
+}
+function defaultLookup2(terminal, names) {
+  if (!terminal || terminal.role === "relation") {
+    return names[0] || "";
+  }
+  if (TEXT_TYPES2.test(String(terminal.type || "")) && names.includes("icontains")) {
+    return "icontains";
+  }
+  return names.includes("exact") ? "exact" : names[0] || "";
+}
+function inputTypeFor2(type) {
+  if (type === "DateField") {
+    return "date";
+  }
+  if (type === "DateTimeField") {
+    return "datetime-local";
+  }
+  if (type === "TimeField") {
+    return "time";
+  }
+  if (NUM_TYPES2.test(String(type || ""))) {
+    return "number";
+  }
+  return "text";
+}
+function isTruthy(value) {
+  return /^(true|1|t|yes|on)$/i.test(String(value === void 0 || value === null ? "" : value).trim());
+}
+function literalValueComplete(lookup, value) {
+  if (lookup === "isnull") {
+    return true;
+  }
+  const parts = String(value === void 0 || value === null ? "" : value).split(",").map((part) => part.trim());
+  if (lookup === "range") {
+    return parts.length === 2 && parts.every(Boolean);
+  }
+  if (lookup === "in") {
+    return parts.some(Boolean);
+  }
+  return String(value === void 0 || value === null ? "" : value).trim().length > 0;
+}
+function permitsExpressionRhs(lookup) {
+  return Boolean(lookup) && !VALUE_ONLY_LOOKUPS.has(lookup);
+}
+function createColumnConditionBuilder(deps) {
+  const { el: el2, fetchTree, getModel, rootOptions, allLookups = [], outer } = deps;
+  const node = el2("span", { className: "colconditions" });
+  const toolbar = el2("span", { className: "colcondition-toolbar" });
+  const list = el2("span", { className: "colcondition-list", dataset: { role: "condition-list" } });
+  const joinCombo = createCombobox({ dataset: { role: "condition-join" }, el: el2, options: JOIN_OPTIONS, value: "all" });
+  const addButton = el2("button", { className: "linkbtn", dataset: { role: "condition-add" }, title: `Add a condition (maximum ${MAX_CONDITIONS})`, type: "button" }, "+ condition");
+  toolbar.append(el2("span", { className: "tag" }, "where"), joinCombo.node, addButton);
+  node.append(toolbar, list);
+  function rhsKindOptions(lookup) {
+    const options = [{ label: "value", value: "value" }];
+    if (permitsExpressionRhs(lookup)) {
+      options.push({ label: "target field (F)", value: "field" });
+      if (outer) {
+        options.push({ label: "current row (OuterRef)", value: "outer" });
+      }
+    }
+    return options;
+  }
+  function refreshGroupUi() {
+    const count = list.querySelectorAll("[data-role=column-condition]").length;
+    addButton.disabled = count >= MAX_CONDITIONS;
+    joinCombo.node.style.display = count > 1 ? "" : "none";
+  }
+  function rangeControl(terminal, presetValue) {
+    const type = inputTypeFor2(terminal ? terminal.type : "");
+    const from = el2("input", { className: "rangefrom", placeholder: "from", type });
+    const to = el2("input", { className: "rangeto", placeholder: "to", type });
+    const parts = String(presetValue || "").split(",");
+    from.value = (parts[0] || "").trim();
+    to.value = (parts[1] || "").trim();
+    return { getValue: () => `${from.value},${to.value}`, node: el2("span", { className: "rangewrap", dataset: { role: "condition-value" } }, from, document.createTextNode(" \u2013 "), to) };
+  }
+  function listControl(presetValue) {
+    const input = el2("input", { className: "condition-list-value", dataset: { role: "condition-value" }, placeholder: "a, b, c", type: "text" });
+    input.value = presetValue == null ? "" : String(presetValue);
+    return { getValue: () => input.value, node: input };
+  }
+  function literalControl(terminal, lookup, presetValue) {
+    if (lookup === "isnull") {
+      const select = el2("select", { dataset: { role: "condition-value" } });
+      select.append(el2("option", { value: "false" }, "has value"), el2("option", { value: "true" }, "is null"));
+      select.value = isTruthy(presetValue) ? "true" : "false";
+      return { getValue: () => select.value, node: select };
+    }
+    if (lookup === "range") {
+      return rangeControl(terminal, presetValue);
+    }
+    if (lookup === "in") {
+      return listControl(presetValue);
+    }
+    if ((lookup === "exact" || lookup === "iexact") && terminal && terminal.type === "BooleanField") {
+      const select = el2("select", { dataset: { role: "condition-value" } });
+      select.append(el2("option", { value: "True" }, "true"), el2("option", { value: "False" }, "false"));
+      select.value = isTruthy(presetValue) ? "True" : "False";
+      return { getValue: () => select.value, node: select };
+    }
+    if ((lookup === "exact" || lookup === "iexact") && terminal && Array.isArray(terminal.choices) && terminal.choices.length) {
+      const options = terminal.choices.map((choice) => ({ label: String(choice[1]), value: String(choice[0]) }));
+      const selected = options.some((option) => option.value === String(presetValue)) ? String(presetValue) : options[0].value;
+      const combo = createCombobox({ dataset: { role: "condition-value" }, el: el2, options, value: selected });
+      return { getValue: () => combo.getValue(), node: combo.node };
+    }
+    const extractedType = lookup === "date" ? "DateField" : INT_LOOKUPS2.has(lookup) || lookup.startsWith("length") ? "IntegerField" : terminal ? terminal.type : "";
+    const input = el2("input", { dataset: { role: "condition-value" }, type: inputTypeFor2(extractedType) });
+    if (presetValue !== void 0 && presetValue !== null) {
+      input.value = String(presetValue);
+    }
+    return { getValue: () => input.value, node: input };
+  }
+  function expressionControl(kind) {
+    const source = kind === "outer" ? outer : { getModel, rootOptions };
+    const picker = createPathPicker({ el: el2, fetchTree, getModel: source.getModel, placeholder: kind === "outer" ? "current field" : "target field", rootOptions: source.rootOptions });
+    return { getValue: () => picker.getPath(), node: picker.node, picker };
+  }
+  function rebuildRhs(row, presetValue) {
+    const slot = row.querySelector("[data-role=condition-rhs]");
+    const lookup = row._lookup.node.value;
+    const priorKind = row._rhsKind.node.value;
+    const options = rhsKindOptions(lookup);
+    row._rhsKind.setOptions(options);
+    row._rhsKind.setValue(options.some((option) => option.value === priorKind) ? priorKind : "value");
+    const kind = row._rhsKind.node.value;
+    const control = kind === "value" ? literalControl(row._field.terminal(), lookup, presetValue) : expressionControl(kind);
+    slot.innerHTML = "";
+    slot.appendChild(control.node);
+    row._rhs = control;
+  }
+  function refreshLookups(row) {
+    const terminal = row._field.terminal();
+    const names = lookupsForTerminal2(terminal, allLookups);
+    const previous = row._lookup.node.value;
+    row._lookup.setOptions(names.map((name) => ({ label: LOOKUP_LABEL2[name] || name, value: name })));
+    row._lookup.setValue(names.includes(previous) ? previous : defaultLookup2(terminal, names));
+    rebuildRhs(row);
+  }
+  function addTerm(initial) {
+    if (list.querySelectorAll("[data-role=column-condition]").length >= MAX_CONDITIONS) {
+      return null;
+    }
+    const row = el2("span", { className: "colcondition", dataset: { role: "column-condition" } });
+    const fieldSlot = el2("span", { className: "pathpick", dataset: { role: "condition-field" } });
+    const field = createPathPicker({ el: el2, fetchTree, getModel, onChange: () => refreshLookups(row), placeholder: "field / relation \u2192", rootOptions });
+    const lookup = createCombobox({ dataset: { role: "condition-lookup" }, el: el2, onChange: () => rebuildRhs(row), options: [], placeholder: "lookup" });
+    const rhsKind = createCombobox({ dataset: { role: "condition-rhs-kind" }, el: el2, onChange: () => rebuildRhs(row), options: [{ label: "value", value: "value" }], value: "value" });
+    const rhsSlot = el2("span", { className: "condition-rhs", dataset: { role: "condition-rhs" } });
+    const negate = el2("input", { checked: Boolean(initial && initial.negate), dataset: { role: "condition-negate" }, type: "checkbox" });
+    const remove = el2("button", { className: "chipx", dataset: { role: "condition-remove" }, title: "Remove condition", type: "button" }, "\u2715");
+    remove.addEventListener("click", () => {
+      row.remove();
+      refreshGroupUi();
+    });
+    row._field = field;
+    row._lookup = lookup;
+    row._rhsKind = rhsKind;
+    row._rhs = null;
+    fieldSlot.appendChild(field.node);
+    row.append(fieldSlot, lookup.node, rhsKind.node, rhsSlot, el2("label", { className: "condition-neg" }, negate, "not"), remove);
+    list.appendChild(row);
+    refreshGroupUi();
+    return row;
+  }
+  function readTerm(row) {
+    const field = row._field.getPath();
+    const terminal = row._field.terminal();
+    const lookup = row._lookup.node.value;
+    const kind = row._rhsKind.node.value;
+    if (!field || !terminal || !lookup || !row._rhs || !lookupsForTerminal2(terminal, allLookups).includes(lookup)) {
+      return null;
+    }
+    const value = row._rhs.getValue();
+    if (kind === "value" && !literalValueComplete(lookup, value) || kind !== "value" && (!permitsExpressionRhs(lookup) || !value)) {
+      return null;
+    }
+    if (kind !== "value" && (!row._rhs.picker || !row._rhs.picker.terminal() || row._rhs.picker.terminal().role === "relation")) {
+      return null;
+    }
+    if (kind === "outer" && !outer) {
+      return null;
+    }
+    const term = { field, lookup, rhs: kind === "value" ? { kind, value } : { field: value, kind } };
+    if (terminal.type) {
+      term.fieldType = terminal.type;
+    }
+    if (row.querySelector("[data-role=condition-negate]").checked) {
+      term.negate = true;
+    }
+    if (row._field.toMany() || kind === "field" && row._rhs.picker && row._rhs.picker.toMany()) {
+      term.toMany = true;
+    }
+    return term;
+  }
+  function collect() {
+    const rows = [...list.querySelectorAll("[data-role=column-condition]")];
+    if (!rows.length) {
+      return { conditions: void 0, invalid: false };
+    }
+    if (rows.length > MAX_CONDITIONS) {
+      return { conditions: void 0, invalid: true };
+    }
+    const terms = rows.map((row) => {
+      const term = readTerm(row);
+      row.classList.toggle("invalid", !term);
+      return term;
+    });
+    if (terms.some((term) => !term)) {
+      return { conditions: void 0, invalid: true };
+    }
+    return { conditions: { join: joinCombo.node.value === "any" ? "any" : "all", terms }, invalid: false };
+  }
+  addButton.addEventListener("click", () => addTerm(null));
+  refreshGroupUi();
+  return { addTerm: () => addTerm(null), collect, node };
+}
+
 // media/gridAggregate.js
 var KINDS = [{ label: "Aggregate", value: "aggregate" }, { label: "Subquery", value: "subquery" }, { label: "Annotate", value: "annotate" }, { label: "Window", value: "window" }, { label: "Expr (F)", value: "expr" }];
 var AGG_FUNCS = [{ label: "Count", value: "count" }, { label: "Sum", value: "sum" }, { label: "Avg", value: "avg" }, { label: "Min", value: "min" }, { label: "Max", value: "max" }];
@@ -1587,7 +1933,7 @@ function bareModel2(target) {
   return String(target || "").split(".").pop();
 }
 function createColumnBuilder(deps) {
-  const { el: el2, groupEl, termsEl, getState, postRaw } = deps;
+  const { el: el2, groupEl, termsEl, getState, lookups, postRaw } = deps;
   const treeService = createTreeService(postRaw);
   const modelRequests = /* @__PURE__ */ new Map();
   let modelRequestSeq = 0;
@@ -1603,14 +1949,14 @@ function createColumnBuilder(deps) {
   }
   function levelFields(tree) {
     if (tree) {
-      return (tree.fields || []).map((field) => ({ attname: field.attname, type: field.type }));
+      return (tree.fields || []).map((field) => ({ attname: field.attname, choices: field.choices, type: field.type }));
     }
-    return (getState().columns || []).filter((column) => !column.computed && !column.annotation).map((column) => ({ attname: column.attname, type: column.type }));
+    return (getState().columns || []).filter((column) => !column.computed && !column.annotation).map((column) => ({ attname: column.attname, choices: column.choices, type: column.type }));
   }
   function aggRootOptions(tree) {
     const options = [];
     for (const field of levelFields(tree)) {
-      options.push({ label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
+      options.push({ choices: field.choices, label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
     }
     for (const column of getState().columns || []) {
       if (column.computed) {
@@ -1625,7 +1971,7 @@ function createColumnBuilder(deps) {
   function groupRootOptions(tree) {
     const options = [];
     for (const field of levelFields(tree)) {
-      options.push({ label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
+      options.push({ choices: field.choices, label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
     }
     for (const relation of relationsOf(tree)) {
       options.push({ kind: relation.kind, label: `${relation.name} \u2192`, role: "relation", target: relation.target, title: `${relation.kind} \u2192 drill in`, value: `r:${relation.name}` });
@@ -1649,7 +1995,7 @@ function createColumnBuilder(deps) {
   function subqueryTargetOptions(tree) {
     const options = [];
     for (const field of tree && tree.fields || []) {
-      options.push({ label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
+      options.push({ choices: field.choices, label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
     }
     for (const relation of tree && tree.relations || []) {
       options.push({ kind: relation.kind, label: `${relation.name} \u2192`, role: "relation", target: relation.target, title: `${relation.kind} \u2192 ${bareModel2(relation.target)} (drill in)`, value: `r:${relation.name}` });
@@ -1680,6 +2026,10 @@ function createColumnBuilder(deps) {
   function pathPicker(rootOptions, placeholder) {
     return createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => getState().model, placeholder, rootOptions });
   }
+  function conditionSpec(builder) {
+    const result = builder.collect();
+    return { conditions: result.conditions, invalidConditions: result.invalid };
+  }
   function addGroupBy() {
     const row = el2("span", { className: "aggchip" });
     const picker = pathPicker(groupRootOptions, "field / fk \u2192");
@@ -1704,13 +2054,14 @@ function createColumnBuilder(deps) {
     const picker = pathPicker(aggRootOptions, "all rows / field / fk \u2192");
     const distinct = el2("input", { checked: Boolean(initial && initial.distinct), title: "Count distinct values", type: "checkbox" });
     const distinctLabel = el2("label", { className: "aggdistinct" }, distinct, "distinct");
+    const conditions = createColumnConditionBuilder({ allLookups: lookups, el: el2, fetchTree: treeService.fetchTree, getModel: () => getState().model, rootOptions: groupRootOptions });
     const sync = () => {
       distinctLabel.style.display = funcCombo.node.value === "count" ? "" : "none";
     };
     funcCombo.node.addEventListener("change", sync);
-    body.append(funcCombo.node, document.createTextNode(" of "), picker.node, distinctLabel);
+    body.append(funcCombo.node, document.createTextNode(" of "), picker.node, distinctLabel, conditions.node);
     sync();
-    return () => ({ distinct: distinct.checked, field: picker.getPath(), func: funcCombo.node.value, toMany: picker.toMany() });
+    return () => ({ distinct: distinct.checked, field: picker.getPath(), func: funcCombo.node.value, toMany: picker.toMany(), ...conditionSpec(conditions) });
   }
   function windowBody(body, initial) {
     const funcCombo = createCombobox({ el: el2, options: WINDOW_FUNCS, value: initial && initial.func || "row_number" });
@@ -1764,11 +2115,13 @@ function createColumnBuilder(deps) {
     const relationCombo = createCombobox({ el: el2, onChange: () => rebuildPickers(), options: [], placeholder: "relation \u2192", value: initial && initial.relation || "" });
     const valueSlot = el2("span", { className: "pathpick" });
     const orderSlot = el2("span", { className: "pathpick" });
+    const conditionSlot = el2("span", { className: "condition-slot" });
     const dirCombo = createCombobox({ el: el2, options: ORDER_DIR, value: initial && initial.orderBy && initial.orderBy[0] && initial.orderBy[0].desc ? "desc" : "asc" });
     let targetModel = "";
     let valuePicker = null;
     let orderPicker = null;
-    body.append(document.createTextNode("from "), relationCombo.node, document.createTextNode(" take "), valueSlot, document.createTextNode(" order "), orderSlot, dirCombo.node);
+    let conditions = null;
+    body.append(document.createTextNode("from "), relationCombo.node, document.createTextNode(" take "), valueSlot, document.createTextNode(" order "), orderSlot, dirCombo.node, conditionSlot);
     treeService.fetchTree(getState().model).then((tree) => {
       const options = subqueryRelationOptions(tree);
       relationMap.clear();
@@ -1786,8 +2139,10 @@ function createColumnBuilder(deps) {
       targetModel = relation && relation.target ? relation.target : "";
       valueSlot.innerHTML = "";
       orderSlot.innerHTML = "";
+      conditionSlot.innerHTML = "";
       valuePicker = null;
       orderPicker = null;
+      conditions = null;
       if (!targetModel) {
         valueSlot.appendChild(el2("span", { className: "tag" }, "field"));
         orderSlot.appendChild(el2("span", { className: "tag" }, "field"));
@@ -1795,8 +2150,17 @@ function createColumnBuilder(deps) {
       }
       valuePicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "value field", rootOptions: subqueryTargetOptions });
       orderPicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "order field", rootOptions: subqueryTargetOptions });
+      conditions = createColumnConditionBuilder({
+        allLookups: lookups,
+        el: el2,
+        fetchTree: treeService.fetchTree,
+        getModel: () => targetModel,
+        outer: { getModel: () => getState().model, rootOptions: groupRootOptions },
+        rootOptions: subqueryTargetOptions
+      });
       valueSlot.appendChild(valuePicker.node);
       orderSlot.appendChild(orderPicker.node);
+      conditionSlot.appendChild(conditions.node);
     }
     return () => {
       const relation = relationMap.get(relationCombo.node.value) || {};
@@ -1812,7 +2176,8 @@ function createColumnBuilder(deps) {
         throughOwner: relation.throughOwner,
         throughRelation: relation.throughRelation,
         throughSource: relation.throughSource,
-        throughTarget: relation.throughTarget
+        throughTarget: relation.throughTarget,
+        ...conditions ? conditionSpec(conditions) : {}
       };
     };
   }
@@ -1822,12 +2187,14 @@ function createColumnBuilder(deps) {
     const outerSlot = el2("span", { className: "pathpick" });
     const valueSlot = el2("span", { className: "pathpick" });
     const orderSlot = el2("span", { className: "pathpick" });
+    const conditionSlot = el2("span", { className: "condition-slot" });
     const dirCombo = createCombobox({ el: el2, options: ORDER_DIR, value: initial && initial.orderBy && initial.orderBy[0] && initial.orderBy[0].desc ? "desc" : "asc" });
     let filterPicker = null;
     let outerPicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => getState().model, placeholder: "current field", rootOptions: subqueryTargetOptions });
     let valuePicker = null;
     let orderPicker = null;
-    body.append(document.createTextNode("from "), modelCombo.node, document.createTextNode(" where "), filterSlot, document.createTextNode(" = current "), outerSlot, document.createTextNode(" take "), valueSlot, document.createTextNode(" order "), orderSlot, dirCombo.node);
+    let conditions = null;
+    body.append(document.createTextNode("from "), modelCombo.node, document.createTextNode(" where "), filterSlot, document.createTextNode(" = current "), outerSlot, document.createTextNode(" take "), valueSlot, document.createTextNode(" order "), orderSlot, dirCombo.node, conditionSlot);
     outerSlot.appendChild(outerPicker.node);
     fetchModelOptions().then((options) => {
       modelCombo.setOptions(options);
@@ -1840,9 +2207,11 @@ function createColumnBuilder(deps) {
       filterSlot.innerHTML = "";
       valueSlot.innerHTML = "";
       orderSlot.innerHTML = "";
+      conditionSlot.innerHTML = "";
       filterPicker = null;
       valuePicker = null;
       orderPicker = null;
+      conditions = null;
       const targetModel = modelCombo.node.value;
       if (!targetModel) {
         filterSlot.appendChild(el2("span", { className: "tag" }, "target field"));
@@ -1853,9 +2222,18 @@ function createColumnBuilder(deps) {
       filterPicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "target field", rootOptions: subqueryTargetOptions });
       valuePicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "value field", rootOptions: subqueryTargetOptions });
       orderPicker = createPathPicker({ el: el2, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "order field", rootOptions: subqueryTargetOptions });
+      conditions = createColumnConditionBuilder({
+        allLookups: lookups,
+        el: el2,
+        fetchTree: treeService.fetchTree,
+        getModel: () => targetModel,
+        outer: { getModel: () => getState().model, rootOptions: groupRootOptions },
+        rootOptions: subqueryTargetOptions
+      });
       filterSlot.appendChild(filterPicker.node);
       valueSlot.appendChild(valuePicker.node);
       orderSlot.appendChild(orderPicker.node);
+      conditionSlot.appendChild(conditions.node);
     }
     return () => {
       const orderField = orderPicker ? orderPicker.getPath() : "";
@@ -1864,7 +2242,8 @@ function createColumnBuilder(deps) {
         filterField: filterPicker ? filterPicker.getPath() : "",
         orderBy: orderField ? [{ desc: dirCombo.node.value === "desc", field: orderField }] : [],
         outerField: outerPicker ? outerPicker.getPath() : "",
-        target: modelCombo.node.value
+        target: modelCombo.node.value,
+        ...conditions ? conditionSpec(conditions) : {}
       };
     };
   }
@@ -1877,8 +2256,9 @@ function createColumnBuilder(deps) {
       type: "text",
       value: initial && initial.expression != null ? String(initial.expression) : ""
     });
-    body.append(expression);
-    return () => ({ expression: expression.value.trim() });
+    const conditions = createColumnConditionBuilder({ allLookups: lookups, el: el2, fetchTree: treeService.fetchTree, getModel: () => getState().model, rootOptions: groupRootOptions });
+    body.append(expression, conditions.node);
+    return () => ({ expression: expression.value.trim(), ...conditionSpec(conditions) });
   }
   function addTerm(initial) {
     let seed = initial || {};
@@ -1933,9 +2313,14 @@ function createColumnBuilder(deps) {
     }
     const terms = [];
     let droppedToMany = 0;
+    let invalidConditions = 0;
     for (const row of termsEl.querySelectorAll(".aggterm")) {
       const spec = row._read();
-      if (spec.kind === "aggregate" && spec.toMany) {
+      if (spec.invalidConditions) {
+        invalidConditions += 1;
+      }
+      const conditionToMany = Boolean(spec.conditions && spec.conditions.terms && spec.conditions.terms.some((term) => term.toMany));
+      if (spec.kind === "aggregate" && (spec.toMany || conditionToMany)) {
         if (spec.func === "count") {
           spec.distinct = true;
         } else {
@@ -1943,13 +2328,14 @@ function createColumnBuilder(deps) {
           continue;
         }
       }
+      delete spec.invalidConditions;
       delete spec.toMany;
       if (!spec.alias) {
         spec.alias = defaultAlias(spec);
       }
       terms.push(spec);
     }
-    return { droppedToMany, groupBy, terms };
+    return { droppedToMany, groupBy, invalidConditions, terms };
   }
   function clear() {
     groupEl.innerHTML = "";
@@ -1989,7 +2375,7 @@ var els = {};
 for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "activefilters", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode", "groupToggle", "aggregatebar", "aggregateGroupBy", "aggregateTerms", "addGroupBy", "addAggregate", "runAggregate", "aggregateOff", "fieldfinder", "fieldfindslot", "fieldfindClose"]) {
   els[id] = document.getElementById(id);
 }
-var LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"];
+var LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "length", "length__gt", "length__gte", "length__lt", "length__lte", "trim"];
 var MAX_LOG_ENTRIES = 200;
 var ALL_PAGE_SIZE = 1e9;
 var state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, filters: [], order: [], annotations: [], model: "", pinned: /* @__PURE__ */ new Set(), widths: {}, computed: {}, computedActive: /* @__PURE__ */ new Set(), aggregateActive: false, aggregateGroupBy: [], aggregateColumns: [] };
@@ -2032,6 +2418,7 @@ var columnBuilder = createColumnBuilder({
   groupEl: els.aggregateGroupBy,
   termsEl: els.aggregateTerms,
   getState: () => state,
+  lookups: LOOKUPS,
   postRaw: (message) => vscode.postMessage(message)
 });
 window.addEventListener("message", (event) => handleMessage(event.data));
@@ -2108,7 +2495,16 @@ function handleMessage(message) {
     els.transport.value = message.mode || "auto";
     els.transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">\u25CF ORM cell</span>' : message.active === "tcp" ? '<span class="on">\u25CF socket</span>' : message.active === "pty" ? '<span class="pty">\u25CF terminal</span>' : '<span class="off">\u25CB not connected</span>';
   } else if (message.type === "queryMode") {
-    enterQueryMode((payload) => send(payload));
+    enterQueryMode((payload) => send(payload), message.code || "");
+  } else if (message.type === "measureQueryEditor") {
+    measureQueryEditor(Boolean(message.show));
+  } else if (message.type === "queryDraft") {
+    setQueryDraft(message.code);
+  } else if (message.type === "queryStarted") {
+    startProgress("Running query");
+  } else if (message.type === "overlayRunPython") {
+    const code = typeof message.text === "string" ? message.text : String(message.code || "");
+    send({ code, type: "runQuery", useOverlay: false });
   } else if (message.type === "busy") {
     renderBusy(message.message);
   } else if (message.type === "error") {
@@ -2534,12 +2930,16 @@ function removeFilter(next) {
   send({ annotations: state.annotations, filters: next, order: state.order, type: "applyQuery" });
 }
 function applyColumns(filtersOverride) {
-  const { droppedToMany, groupBy, terms } = columnBuilder.collect();
+  const { droppedToMany, groupBy, invalidConditions, terms } = columnBuilder.collect();
+  if (invalidConditions) {
+    els.status.textContent = "Complete or remove every column condition before applying.";
+    return;
+  }
   state.filters = filtersOverride !== void 0 ? filtersOverride : filterBar.collect();
   filterBar.renderSummary(state.filters);
-  const drillNote = droppedToMany ? " \xB7 skipped Sum/Avg over a to-many relation (use Count, or group by the related model)" : "";
+  const drillNote = droppedToMany ? " \xB7 skipped Sum/Avg/Min/Max with a to-many path (use Count, or group by the related model)" : "";
   if (groupBy.length) {
-    const aggregates = terms.filter((term) => term.kind === "aggregate").map((term) => ({ alias: term.alias, distinct: term.distinct, field: term.field, func: term.func }));
+    const aggregates = terms.filter((term) => term.kind === "aggregate").map((term) => ({ alias: term.alias, conditions: term.conditions, distinct: term.distinct, field: term.field, func: term.func }));
     if (!aggregates.length) {
       els.status.textContent = "Add at least one Aggregate column to summarize per group (Annotate/Window/Expr are per-row only).";
       return;

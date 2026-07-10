@@ -14,6 +14,7 @@ import { ModelCatalog } from "./modelCatalog";
 import { NOTEBOOK_TYPE } from "./notebookConstants";
 import { DjangoConsoleSerializer } from "./notebookSerializer";
 import { RuntimeInspector } from "./runtimeInspector";
+import { runtimePreludeLines } from "./runtimePrelude";
 import type { DjangoNotebookConsole } from "./notebookConsole";
 
 type OutputChannelFactory = () => vscode.OutputChannel;
@@ -103,6 +104,14 @@ class LazyRuntimeSource implements vscode.Disposable {
   /** Runs a custom ORM query or returns an idle status without starting a shell. */
   modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery> {
     return this.console?.activeBackend?.modelQuery(query) ?? Promise.resolve({ columns: [], editable: false, error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, orm: "", relations: [], rows: [], sql: [] });
+  }
+
+  /** Returns imports/declarations that expose the live shell namespace to query IntelliSense. */
+  async modelQueryPrelude(): Promise<string[]> {
+    const backend = this.console?.activeBackend;
+    if (!backend?.supportsRuntimeInspection() || !backend.supportsHiddenPrelude()) { return []; }
+    const inspection = await backend.prelude();
+    return inspection.ok ? runtimePreludeLines(inspection.variables) : [];
   }
 
   /** Sets the model browser transport preference on the active backend. */

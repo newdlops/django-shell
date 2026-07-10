@@ -178,9 +178,32 @@ export interface ModelAnnotationOrder {
   field: string;
 }
 
+/** The right-hand operand of one structured annotation/aggregate condition. */
+export type ModelConditionRhs =
+  | { kind: "value"; value: unknown }
+  | { field: string; kind: "field" }
+  | { field: string; kind: "outer" };
+
+/** One validated predicate inside a structured annotation/aggregate condition group. */
+export interface ModelConditionTerm {
+  field: string;
+  fieldType?: string;
+  lookup: string;
+  negate?: boolean;
+  rhs: ModelConditionRhs;
+  toMany?: boolean;
+}
+
+/** A bounded all/any group of structured predicates used by a computed column. */
+export interface ModelConditionGroup {
+  join?: "all" | "any";
+  terms: ModelConditionTerm[];
+}
+
 /** One per-row annotation column: an aggregate, window function, F-expression, or raw Django annotate expression. */
 export interface ModelAnnotationSpec {
   alias?: string;
+  conditions?: ModelConditionGroup;
   distinct?: boolean;
   expression?: string;
   filterField?: string;
@@ -228,6 +251,7 @@ export interface ModelCountQuery {
 /** One aggregate term: a function (count/sum/avg/min/max/exists) over a field; count accepts "*"/pk for all rows. */
 export interface ModelAggregateTerm {
   alias?: string;
+  conditions?: ModelConditionGroup;
   distinct?: boolean;
   field?: string;
   func: string;

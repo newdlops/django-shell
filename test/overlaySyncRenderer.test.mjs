@@ -77,6 +77,38 @@ test("runs Python from lightweight Monaco Enter handling", async () => {
   assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 3 });
 });
 
+test("query submit mode leaves plain Enter to Monaco and runs the whole document on Ctrl/Cmd Enter", async () => {
+  const source = overlaySyncRendererSource();
+  const state = { overlayRoot: undefined };
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };`)(window, document, () => undefined);
+  let keyHandler;
+  const code = "from app.models import Company\n\nCompany.objects.filter(active=True)\n";
+  const editor = fakeEditor(fakeModel(code), { column: 10, lineNumber: 3 });
+  editor.onKeyDown = (callback) => { keyHandler = callback; return { dispose() {} }; };
+  const posts = [];
+  const root = { __dsoExecutionMode: "submit", __dsoInputStartLine: 1 };
+  state.overlayRoot = root;
+
+  api.installEnterRunner(root, editor, (payload) => {
+    posts.push(payload);
+    return { json: async () => ({ executed: true }) };
+  });
+  keyHandler(monacoEnterEvent());
+  assert.equal(posts.some((payload) => payload.type === "run"), false);
+
+  keyHandler(monacoEnterEvent({ ctrlKey: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const runPayload = posts.find((payload) => payload.type === "run");
+  assert.equal(runPayload.code, code.trimEnd());
+  assert.deepEqual(runPayload.range, { end: 4, start: 1 });
+  assert.equal(runPayload.text, code);
+  assert.deepEqual(editor.getPosition(), { column: 10, lineNumber: 3 });
+  assert.equal(root.__dsoExecutionRangePreview, null);
+  assert.equal(editor.options.lineNumbers, "on");
+});
+
 test("sends full overlay text while running only the selected source", async () => {
   const source = overlaySyncRendererSource();
   const state = { overlayRoot: undefined };
@@ -265,6 +297,22 @@ test("maps paused debug line onto hidden-prelude model lines", () => {
 
   assert.deepEqual(editor.decorations.map((item) => item.range.startLineNumber), [4]);
   assert.equal(editor.decorations[0].options.className, "dso-debug-line");
+});
+
+test("keeps shell debug and breakpoint decorations out of query submit mode", () => {
+  const source = overlaySyncRendererSource();
+  const state = { overlayRoot: undefined };
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "", __dsoOverlayBreakpointLines: [1, 3], __dsoOverlayDebugLine: 2 };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { applyBreakpoints: window.__dsoApplyOverlayBreakpoints, applyDebugLine: window.__dsoApplyOverlayDebugLine };`)(window, document, () => undefined);
+  const editor = fakeEditor(fakeModel("one\ntwo\nthree\n"));
+  const root = { __djangoShellEditor: editor, __dsoExecutionMode: "submit", __dsoInputStartLine: 1 };
+  state.overlayRoot = root;
+
+  assert.equal(api.applyDebugLine(root, editor), "debug-line:0");
+  assert.deepEqual(editor.decorations, []);
+  assert.equal(api.applyBreakpoints(root, editor), "breakpoints:0");
+  assert.deepEqual(editor.decorations, []);
 });
 
 test("skips the current execution range on Alt Enter without running Python", () => {

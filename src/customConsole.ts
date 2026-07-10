@@ -28,7 +28,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private readonly runtimeEmitter = new vscode.EventEmitter<void>();
   private activationContext: vscode.ExtensionContext | undefined;
-  private panel: vscode.WebviewPanel | undefined;
+  private panel: vscode.WebviewPanel | undefined; private panelActive = false;
   private inspectionCache: BackendRuntimeInspection | undefined;
   private inspectionInFlight: Promise<BackendRuntimeInspection> | undefined;
   private lastEditorGeometry: WorkbenchOverlayGeometry | undefined;
@@ -97,10 +97,10 @@ export class CustomDjangoConsole implements vscode.Disposable {
       localResourceRoots: [vscode.Uri.file(path.join(this.extensionPath, "media"))],
       retainContextWhenHidden: true
     });
-    this.panelVisible = this.panel.visible;
+    this.panelActive = this.panel.active; this.panelVisible = this.panel.visible;
     this.panel.webview.html = webviewHtml(this.panel.webview, this.extensionPath);
     this.panel.onDidDispose(() => this.closePanel(), undefined, this.disposables);
-    this.panel.onDidChangeViewState((event) => this.handleViewState(event.webviewPanel.visible), undefined, this.disposables);
+    this.panel.onDidChangeViewState((event) => this.handleViewState(event.webviewPanel.visible, event.webviewPanel.active), undefined, this.disposables);
     this.panel.webview.onDidReceiveMessage((message) => void this.handleMessage(message), undefined, this.disposables);
     this.ensureSession();
   }
@@ -459,7 +459,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.runtimeEmitter.fire();
     void this.updateOverlayPrelude(this.runtimeGeneration);
     scheduleWorkspaceGeneratedOverlayTabCleanup();
-    this.post({ show: true, type: "measureEditor" });
+    if (this.panelActive) { this.post({ show: true, type: "measureEditor" }); }
     this.postTransport();
   }
 
@@ -472,7 +472,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       this.postDebugMode();
       this.postOverlayTabs();
       this.refreshBreakpointUi();
-      this.post({ show: this.runtimeReady, type: "measureEditor" });
+      if (this.panelActive) { this.post({ show: this.runtimeReady, type: "measureEditor" }); }
       return;
     }
     if (typed.type === "setTransport" && typeof typed.mode === "string") {
@@ -481,14 +481,14 @@ export class CustomDjangoConsole implements vscode.Disposable {
     }
     if (typed.type === "setDebugMode") { this.setDebugMode(typed.debugMode); return; }
     if (typed.type === "editorGeometry") {
-      if (this.panel?.visible && isOverlayGeometry(typed.rect)) {
+      if (this.panel?.visible && this.panel.active && isOverlayGeometry(typed.rect)) {
         this.updateOverlayGeometry(typed.rect);
       }
       return;
     }
     if (typed.type === "e2eOutputRendered" && typeof typed.text === "string") { this.lastRenderedOutput = { ...typed, execution: Number(typed.execution) || 0, ok: Boolean(typed.ok), text: typed.text }; return; }
     if (typed.type === "showOverlayEditor") {
-      if (!this.panel?.visible || !this.runtimeReady) {
+      if (!this.panel?.visible || !this.panel.active || !this.runtimeReady) {
         return;
       }
       if (isOverlayGeometry(typed.rect)) {
@@ -720,7 +720,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
 
   /** Shows the workbench overlay editor without failing the webview flow. */
   private async showOverlay(): Promise<void> {
-    if (!this.panel?.visible && !(this.debugMode === "overlay" && (this.debugSession || this.overlayDebugSession))) {
+    if (!this.panel?.visible || !this.panel.active) {
       return;
     }
     try {
@@ -739,17 +739,17 @@ export class CustomDjangoConsole implements vscode.Disposable {
   }
 
   /** Keeps the workbench overlay lifecycle bound to the Django Shell webview tab. */
-  private handleViewState(visible: boolean): void {
-    const wasVisible = this.panelVisible;
-    this.panelVisible = visible;
-    if (visible) {
+  private handleViewState(visible: boolean, active: boolean): void {
+    const wasActive = this.panelActive, keepForDebug = this.debugMode === "overlay" && Boolean(this.debugSession || this.overlayDebugSession);
+    this.panelActive = active; this.panelVisible = visible;
+    if (visible && active) {
       this.postStatus();
-      if (wasVisible || (this.debugMode === "overlay" && (this.debugSession || this.overlayDebugSession))) { return; }
+      if (wasActive) { return; }
       this.post({ show: this.runtimeReady, type: "measureEditor" });
       if (this.runtimeReady) { void this.updateOverlayPrelude(this.runtimeGeneration); }
       return;
     }
-    if (!(this.debugMode === "overlay" && (this.debugSession || this.overlayDebugSession))) { this.overlay?.hide(); }
+    if (!keepForDebug) { this.overlay?.hide(); }
   }
 
   /** Refreshes hidden runtime imports used by the overlay Python analyzer; skipped entirely when the transport deterministically suppresses the prelude metadata (pure-PTY ORM/Terminal mode). */
@@ -926,7 +926,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.overlayDebugSession?.dispose(); this.overlayDebugSession = undefined;
     this.debugpyEndpoint = undefined;
     this.panel = undefined;
-    this.panelVisible = false;
+    this.panelActive = false; this.panelVisible = false;
     this.runtimeReady = false;
     this.runtimeGeneration += 1;
     this.releaseOverlay();

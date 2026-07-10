@@ -67,7 +67,7 @@ export function createPathPicker(deps) {
   function nestedOptions(tree) {
     const options = [];
     for (const field of (tree && tree.fields) || []) {
-      options.push({ label: field.attname, role: "field", type: field.type, value: `${FIELD}${field.attname}` });
+      options.push({ choices: field.choices, label: field.attname, role: "field", type: field.type, value: `${FIELD}${field.attname}` });
     }
     for (const relation of (tree && tree.relations) || []) {
       options.push({ kind: relation.kind, label: `${relation.name} →`, role: "relation", target: relation.target, title: `${relation.kind} → ${bareModel(relation.target)} (drill in)`, value: `${REL}${relation.name}` });

@@ -95,9 +95,9 @@ export function overlayCleanupRendererSource(): string {
     };
 
     /** Clears stale shell input before tearing down the overlay for a fresh backend. */
-    window.__djangoShellOverlayReset = function (initialText) {
+    window.__djangoShellOverlayReset = function (initialText, ownerToken) {
       const root = document.getElementById("django-shell-overlay");
-      if (root && root.__dsoOwnerToken && root.__dsoOwnerToken !== window.__djangoShellOverlayOwnerToken) { return "owner-mismatch"; }
+      if (ownerToken && (root ? root.__dsoOwnerToken !== ownerToken : window.__djangoShellOverlayOwnerToken !== ownerToken)) { return "owner-mismatch"; }
       __dsoResetOverlayText(root, initialText);
       return window.__dsoDisposeOverlay(root);
     };

@@ -20,7 +20,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   constructor(private readonly documents: OverlayMemoryDocument, private readonly logger?: DiagnosticLogger) { this.completionCache = new OverlayCompletionRequestCache(logger); }
 
   /** Registers Python providers for this instance's overlay editor file (console-cell.py or query-cell.py). */
-  activate(context: vscode.ExtensionContext): void {
+  activate(): void {
     const file = path.basename(this.documents.editorUri.fsPath);
     const selector: vscode.DocumentSelector = [{ language: "python", pattern: `**/.django-shell/${file}`, scheme: "file" }];
     this.disposables.push(
@@ -31,7 +31,6 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       vscode.languages.registerDocumentHighlightProvider(selector, this),
       vscode.languages.registerSignatureHelpProvider(selector, this, "(", ",")
     );
-    context.subscriptions.push(this);
   }
 
   /** Releases provider registrations. */

@@ -121,21 +121,24 @@ export function overlaySyncRendererSource(): string {
     }
 
     /** Returns only user-visible source from the active overlay editor. */
-    window.__dsoGetOverlayVisibleText = function () {
+    window.__dsoGetOverlayVisibleText = function (ownerToken) {
       const root = document.getElementById("django-shell-overlay");
+      if (ownerToken && root && root.__dsoOwnerToken !== ownerToken) { return ""; }
       const editor = root && root.__djangoShellEditor;
       const model = editor && editor.getModel && editor.getModel();
       return model ? __dsoUserText(model.getValue(), root) : String(window.__djangoShellOverlayInitialText || "");
     };
 
     /** Replaces only user-visible source while preserving hidden generated prefix state. */
-    window.__dsoSetOverlayVisibleText = function (text) {
+    window.__dsoSetOverlayVisibleText = function (text, ownerToken) {
       const userText = String(text || "");
-      window.__djangoShellOverlayInitialText = userText;
       const root = document.getElementById("django-shell-overlay");
+      if (ownerToken && (root ? root.__dsoOwnerToken !== ownerToken : window.__djangoShellOverlayOwnerToken !== ownerToken)) { return "owner-mismatch"; }
+      window.__djangoShellOverlayInitialText = userText;
       const editor = root && root.__djangoShellEditor;
       const model = editor && editor.getModel && editor.getModel();
       window.__dsoPendingOverlayVisibleText = userText;
+      window.__dsoPendingOverlayOwnerToken = ownerToken || window.__djangoShellOverlayOwnerToken || "";
       if (!root || !editor || !model) { return "queued"; }
       const oldVisibility = root.style.visibility;
       root.__dsoMultilineMode = false;
@@ -158,6 +161,7 @@ export function overlaySyncRendererSource(): string {
         editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(startLine);
       } catch (eVisibleCursor) {}
       delete window.__dsoPendingOverlayVisibleText;
+      delete window.__dsoPendingOverlayOwnerToken;
       root.__dsoHasAppliedInitialText = true;
       try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eVisibleTextBreakpoints) {}
       root.style.visibility = oldVisibility || "visible";
@@ -258,6 +262,18 @@ export function overlaySyncRendererSource(): string {
         };
       }
       return __dsoMultilinePayload(root, editor);
+    }
+
+    /** Returns the entire visible document as one submit-style execution payload. */
+    function __dsoSubmitPayload(root, editor) {
+      const model = editor.getModel && editor.getModel();
+      if (!model) { return { code: "", range: null }; }
+      const startLine = Math.max(1, Number(root && root.__dsoInputStartLine) || 1);
+      const endLine = model.getLineCount();
+      return {
+        code: model.getValueInRange({ startLineNumber: startLine, startColumn: 1, endLineNumber: endLine, endColumn: model.getLineMaxColumn(endLine) }).trimEnd(),
+        range: { end: endLine, start: startLine }
+      };
     }
 
     /** Returns the contiguous non-blank block at the cursor as one execution unit. */
@@ -563,6 +579,7 @@ export function overlaySyncRendererSource(): string {
 
     /** Returns the payload that Enter would run from the current editor state. */
     function __dsoPreviewPayload(root, editor) {
+      if (root && root.__dsoExecutionMode === "submit") { return __dsoSubmitPayload(root, editor); }
       return root && root.__dsoMultilineMode ? __dsoMultilinePayload(root, editor) : __dsoEnterPayload(root, editor);
     }
 
@@ -572,7 +589,7 @@ export function overlaySyncRendererSource(): string {
       if (!root || !editor || !model || !editor.deltaDecorations) { return "missing-editor"; }
       // Refresh the Enter-preview band first so it hides while paused and the stopped line stays the only highlighted row.
       try { __dsoUpdateExecutionRangePreview(root, editor); } catch (eExecRangeRefresh) {}
-      const visibleLine = Math.floor(Number(root.__dsoDebugLine || window.__dsoOverlayDebugLine || 0));
+      const visibleLine = root.__dsoExecutionMode === "submit" ? 0 : Math.floor(Number(root.__dsoDebugLine || window.__dsoOverlayDebugLine || 0));
       const modelLine = visibleLine > 0 ? (Number(root.__dsoInputStartLine) || 1) + visibleLine - 1 : 0;
       const decorations = modelLine >= 1 && modelLine <= model.getLineCount() ? [{
         options: { className: "dso-debug-line", glyphMarginClassName: "dso-debug-indicator", isWholeLine: true },
@@ -584,8 +601,9 @@ export function overlaySyncRendererSource(): string {
     };
 
     /** Stores the current paused debugger line and applies it to the live editor. */
-    window.__dsoSetOverlayDebugLine = function (line) {
+    window.__dsoSetOverlayDebugLine = function (line, ownerToken) {
       const root = document.getElementById("django-shell-overlay");
+      if (ownerToken && (root ? root.__dsoOwnerToken !== ownerToken : window.__djangoShellOverlayOwnerToken !== ownerToken)) { return "owner-mismatch"; }
       window.__dsoOverlayDebugLine = Math.max(0, Math.floor(Number(line) || 0));
       if (!root) { return "debug-line:" + window.__dsoOverlayDebugLine; }
       root.__dsoDebugLine = window.__dsoOverlayDebugLine;
@@ -598,7 +616,7 @@ export function overlaySyncRendererSource(): string {
       const model = editor && editor.getModel && editor.getModel();
       if (!root || !editor || !model || !editor.deltaDecorations) { return "missing-editor"; }
       const startLine = Number(root.__dsoInputStartLine) || 1;
-      const lines = root.__dsoBreakpointLines || window.__dsoOverlayBreakpointLines || [];
+      const lines = root.__dsoExecutionMode === "submit" ? [] : (root.__dsoBreakpointLines || window.__dsoOverlayBreakpointLines || []);
       const seen = {};
       const decorations = [];
       for (let i = 0; i < lines.length; i += 1) {
@@ -613,8 +631,9 @@ export function overlaySyncRendererSource(): string {
     };
 
     /** Stores the breakpoint lines (one-based user-input lines) and renders their glyphs on the live editor. */
-    window.__dsoSetOverlayBreakpoints = function (lines) {
+    window.__dsoSetOverlayBreakpoints = function (lines, ownerToken) {
       const root = document.getElementById("django-shell-overlay");
+      if (ownerToken && (root ? root.__dsoOwnerToken !== ownerToken : window.__djangoShellOverlayOwnerToken !== ownerToken)) { return "owner-mismatch"; }
       window.__dsoOverlayBreakpointLines = Array.isArray(lines) ? lines : [];
       if (!root) { return "breakpoints:queued"; }
       root.__dsoBreakpointLines = window.__dsoOverlayBreakpointLines;
@@ -651,8 +670,9 @@ export function overlaySyncRendererSource(): string {
       const payload = __dsoPreviewPayload(root, editor);
       // Hide the Enter-preview band while the debugger is paused so the stopped line stays the only highlighted row.
       const pausedLine = Math.floor(Number(root.__dsoDebugLine || window.__dsoOverlayDebugLine || 0));
-      const decorations = pausedLine > 0 ? [] : __dsoExecutionRangeDecorations(model, payload);
-      const preview = payload && payload.range ? { end: payload.range.end, start: payload.range.start } : null;
+      const submitMode = root.__dsoExecutionMode === "submit";
+      const decorations = pausedLine > 0 || submitMode ? [] : __dsoExecutionRangeDecorations(model, payload);
+      const preview = !submitMode && payload && payload.range ? { end: payload.range.end, start: payload.range.start } : null;
       const previewKey = preview ? preview.start + ":" + preview.end : "";
       try {
         root.__dsoExecutionRangeDecorationIds = editor.deltaDecorations(root.__dsoExecutionRangeDecorationIds || [], decorations);
@@ -660,7 +680,9 @@ export function overlaySyncRendererSource(): string {
         if (root.__dsoExecutionRangePreviewKey !== previewKey) {
           root.__dsoExecutionRangePreviewKey = previewKey;
           if (editor.updateOptions) {
-            editor.updateOptions({ glyphMargin: true, lineDecorationsWidth: 0, lineNumbers: function (line) { return __dsoPromptForLine(model, root.__dsoInputStartLine || __dsoFindInputStartLine(model), line, root); }, lineNumbersMinChars: 1 });
+            editor.updateOptions(submitMode
+              ? { glyphMargin: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 3 }
+              : { glyphMargin: true, lineDecorationsWidth: 0, lineNumbers: function (line) { return __dsoPromptForLine(model, root.__dsoInputStartLine || __dsoFindInputStartLine(model), line, root); }, lineNumbersMinChars: 1 });
           }
         }
       } catch (eDecorations) {
@@ -723,8 +745,9 @@ export function overlaySyncRendererSource(): string {
       __dsoLog(post, "enter.install", { hasNode: true, sameEditor: root.__dsoEnterEditor === editor });
       const execute = function (event, source, allowContinuation) {
         const inputStartLine = root.__dsoInputStartLine || 1;
+        const submitMode = root.__dsoExecutionMode === "submit";
         const multilineMode = !!root.__dsoMultilineMode;
-        const payload = multilineMode ? __dsoMultilinePayload(root, editor) : __dsoEnterPayload(root, editor);
+        const payload = submitMode ? __dsoSubmitPayload(root, editor) : (multilineMode ? __dsoMultilinePayload(root, editor) : __dsoEnterPayload(root, editor));
         if (!payload.code.trim()) {
           __dsoLog(post, "enter.empty", { multiline: multilineMode, source: source });
           return false;
@@ -754,7 +777,7 @@ export function overlaySyncRendererSource(): string {
             return true;
           }
         }
-        if (__dsoLikelyIncompletePython(payload.code)) {
+        if (!submitMode && __dsoLikelyIncompletePython(payload.code)) {
           __dsoLog(post, "enter.incomplete.local", { chars: payload.code.length, inputStartLine: inputStartLine, multiline: multilineMode, source: source });
           if (allowContinuation !== false) {
             root.__dsoMultilineMode = true;
@@ -771,7 +794,7 @@ export function overlaySyncRendererSource(): string {
           }
           root.__dsoMultilineMode = false;
           __dsoLog(post, "enter.execute", { end: payload.range ? payload.range.end : 0, inputStartLine: inputStartLine, source: source, start: payload.range ? payload.range.start : 0 });
-          __dsoAdvanceAfterRun(editor, payload.range, post, source);
+          if (!submitMode) { __dsoAdvanceAfterRun(editor, payload.range, post, source); }
         });
         return true;
       };
@@ -780,6 +803,10 @@ export function overlaySyncRendererSource(): string {
         if (!__dsoIsEnter(event, raw)) { return; }
         const suggest = __dsoSuggestOpen();
         __dsoLog(post, "key.enter", { alt: !!raw.altKey, composing: !!raw.isComposing, ctrl: !!raw.ctrlKey, meta: !!raw.metaKey, shift: !!raw.shiftKey, source: source, suggest: suggest });
+        if (root.__dsoExecutionMode === "submit") {
+          if ((raw.ctrlKey || raw.metaKey) && !raw.altKey && !raw.shiftKey && !raw.isComposing && !suggest) { execute(event, source + "-submit", false); }
+          return;
+        }
         if (raw.shiftKey && !raw.metaKey) {
           if (event.preventDefault) { event.preventDefault(); }
           if (event.stopPropagation) { event.stopPropagation(); }
@@ -850,9 +877,10 @@ export function overlaySyncRendererSource(): string {
         try { previewCleanup && previewCleanup(); } catch (ePreviewCleanup) {}
       };
     };
-    window.__djangoShellOverlaySetPrelude = function (text) {
-      window.__djangoShellOverlayPrelude = String(text || "");
+    window.__djangoShellOverlaySetPrelude = function (text, ownerToken) {
       const root = document.getElementById("django-shell-overlay");
+      if (ownerToken && (root ? root.__dsoOwnerToken !== ownerToken : window.__djangoShellOverlayOwnerToken !== ownerToken)) { return "owner-mismatch"; }
+      window.__djangoShellOverlayPrelude = String(text || "");
       const editor = root && root.__djangoShellEditor;
       const model = editor && editor.getModel && editor.getModel();
       if (model) {

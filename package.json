@@ -2,7 +2,7 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "0.0.907023",
+  "version": "0.0.907024",
   "publisher": "newdlops",
   "license": "UNLICENSED",
   "icon": "media/icon.png",
@@ -64,6 +64,7 @@
     "onCommand:djangoShell.refreshInspector",
     "onCommand:djangoShell.refreshModelCatalog",
     "onCommand:djangoShell.runModelQuery",
+    "onCommand:djangoShell.runCurrentModelQuery",
     "onCommand:djangoShell.showOverlayEditor",
     "onCommand:djangoShell.showEnvironment",
     "onCommand:djangoShell.showDiagnostics",
@@ -188,6 +189,12 @@
         "title": "Django Shell: Run ORM Query",
         "category": "Django Shell",
         "icon": "$(play)"
+      },
+      {
+        "command": "djangoShell.runCurrentModelQuery",
+        "title": "Django Shell: Run Current ORM Query",
+        "category": "Django Shell",
+        "icon": "$(run)"
       },
       {
         "command": "djangoShell.refreshModelCatalog",
@@ -445,6 +452,12 @@
         "key": "alt+enter",
         "mac": "alt+enter",
         "when": "djangoShell.overlayVisible && (!editorTextFocus || resourceFilename == 'console-cell.py')"
+      },
+      {
+        "command": "djangoShell.runCurrentModelQuery",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "djangoShell.queryOverlayVisible && (!editorTextFocus || resourceFilename == 'query-cell.py')"
       },
       {
         "command": "djangoShell.acceptInput",

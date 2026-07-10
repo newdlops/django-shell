@@ -17,6 +17,8 @@ export interface ModelDataSource {
   modelFilterFields(app: string, model: string): Promise<BackendFilterFieldTree>;
   modelLookup(query: ModelLookupQuery): Promise<BackendModelLookup>;
   modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery>;
+  /** Returns hidden runtime imports used to analyze custom ORM query input. */
+  modelQueryPrelude?(): Promise<string[]>;
   modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows>;
   modelRows(query: ModelRowsQuery): Promise<BackendModelRows>;
   modelSchema(app: string, model: string): Promise<BackendModelSchema>;

@@ -70,7 +70,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 89"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 90"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -216,7 +216,7 @@ test("renderer overlay root carries an owner token before reuse or disposal", ()
   const cleanupSource = fs.readFileSync(new URL("../src/workbenchOverlayCleanupRenderer.ts", import.meta.url), "utf8");
 
   assert.ok(overlaySource.includes("__djangoShellOverlayOwnerToken"));
-  assert.ok(rendererSource.includes("root.__dsoOwnerToken = window.__djangoShellOverlayOwnerToken"));
+  assert.ok(rendererSource.includes("root.__dsoOwnerToken = requestedOwner"));
   assert.ok(rendererSource.includes("owner-mismatch"));
   assert.ok(cleanupSource.includes("owner-mismatch"));
 });
@@ -237,7 +237,7 @@ test("overlay breakpoints use native VS Code breakpoint handling instead of cust
 
   assert.ok(rendererSource.includes("glyphMargin: true"));
   assert.ok(syncSource.includes("glyphMargin: true"));
-  assert.ok(preludeViewSource.includes("glyphMargin: true"));
+  assert.ok(preludeViewSource.includes("glyphMargin: !submitMode"));
   assert.ok(customConsoleSource.includes("sourceBreakpointLocations"));
   assert.equal(syncSource.includes("overlayBreakpointRendererSource"), false);
   assert.equal(overlaySource.includes('payload?.type === "toggleBreakpoint"'), false);
@@ -401,8 +401,11 @@ test("overlay debug uses a direct DAP session so the shell overlay stays focused
   assert.ok(debugSteppingRulesSource.includes('path: "**/django_shell_backend.py"'));
   assert.ok(customConsoleSource.includes('this.debugMode === "overlay" && this.debugControlOriginOverlay'));
   assert.ok(customConsoleSource.includes('this.debugMode === "overlay" || this.lastDebugFrameOverlay'));
-  assert.ok(customConsoleSource.includes('wasVisible || (this.debugMode === "overlay" && (this.debugSession || this.overlayDebugSession))'));
-  assert.ok(customConsoleSource.includes('if (!(this.debugMode === "overlay" && (this.debugSession || this.overlayDebugSession))) { this.overlay?.hide(); }'));
+  assert.ok(customConsoleSource.includes('keepForDebug = this.debugMode === "overlay"'));
+  assert.ok(customConsoleSource.includes("if (wasActive) { return; }"));
+  assert.ok(customConsoleSource.includes("if (!keepForDebug) { this.overlay?.hide(); }"));
+  assert.ok(customConsoleSource.includes("if (!this.panel?.visible || !this.panel.active)"));
+  assert.ok(customConsoleSource.includes("this.panel?.visible && this.panel.active && isOverlayGeometry"));
   assert.equal(customConsoleSource.includes("debug.overlay.refocus"), false);
   assert.equal(customConsoleSource.includes("refocusDebugOverlay"), false);
   assert.ok(customConsoleSource.includes("shouldRefocusOverlay"));
@@ -453,7 +456,7 @@ test("overlay step-in can reveal external source frames", () => {
   assert.ok(customConsoleSource.includes("clearExternalDebugFrameDecoration"));
   assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", true'));
   assert.ok(customConsoleSource.includes('"djangoShell.externalDebugFrame", false'));
-  assert.ok(customConsoleSource.includes('!this.panel?.visible && !(this.debugMode === "overlay"'));
+  assert.ok(customConsoleSource.includes("if (!this.panel?.visible || !this.panel.active)"));
   assert.ok(customConsoleSource.includes("this.lastDebugFrameOverlay) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); }"));
   assert.ok(customConsoleSource.includes("this.overlay?.park();"));
   assert.ok(customConsoleSource.includes('revealed && this.debugMode === "overlay" && !this.lastDebugFrameOverlay'));

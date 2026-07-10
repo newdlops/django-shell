@@ -1,15 +1,16 @@
 // Renderer-side webview-frame targeting for the Django shell workbench overlay.
 
-/** Builds JavaScript that binds the overlay to the Django Shell console webview frame, preferring it over any other webview. */
-export function overlayFrameRendererSource(): string {
+/** Builds JavaScript that binds the overlay to the requested webview panel frame. */
+export function overlayFrameRendererSource(panelTitle = "Django Shell"): string {
   return `
-    /** Returns editor groups whose ACTIVE tab is the Django Shell console (title set in customConsole.ts createWebviewPanel(..., "Django Shell", ...)); never the model browser ("… — data") or the catalog ("Models"). */
+    const __dsoTargetPanelTitle = ${JSON.stringify(panelTitle)};
+    /** Returns editor groups whose active tab matches this overlay instance's owning panel. */
     function __dsoConsoleGroupEntries() {
       const tabs = document.querySelectorAll(".tab.active,.tab.checked,.tab[aria-selected='true']");
       const entries = [];
       for (let i = 0; i < tabs.length; i++) {
         const label = tabs[i].getAttribute("aria-label") || tabs[i].getAttribute("title") || "";
-        if (label.indexOf("Django Shell") < 0) { continue; }
+        if (label.indexOf(__dsoTargetPanelTitle) < 0) { continue; }
         const group = tabs[i].closest(".editor-group-container,.split-view-view,.editor-group,.part.editor");
         if (group) { entries.push({ element: group, rect: group.getBoundingClientRect() }); }
       }

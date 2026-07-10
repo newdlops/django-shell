@@ -3084,6 +3084,128 @@ def _browse_jsonable(value):
 _BROWSE_LOOKUPS = frozenset({"exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "length", "length__gt", "length__gte", "length__lt", "length__lte", "trim"})
 
 
+def _browse_item_condition_group(model, item, outer_model=None, prefix=None):
+    """Returns the validated optional condition group on one column/aggregate item.
+
+    Omitting ``conditions`` means no predicate. Once the key is present, however, the
+    complete group must validate; this distinction prevents a malformed UI payload
+    from silently becoming an unfiltered aggregate, annotation, or subquery.
+    """
+    if "conditions" not in item:
+        return {"log": None, "q": None, "to_many": False, "valid": True}
+    return _browse_condition_group(model, item.get("conditions"), outer_model, prefix)
+
+
+def _browse_condition_group(model, group, outer_model=None, prefix=None):
+    """Builds a safe all/any Q group from one bounded structured condition payload."""
+    invalid = {"log": None, "q": None, "to_many": False, "valid": False}
+    if not isinstance(group, dict):
+        return invalid
+    join = group.get("join", "all")
+    terms = group.get("terms")
+    if join not in ("all", "any") or not isinstance(terms, list) or not 1 <= len(terms) <= 8:
+        return invalid
+    parsed = [_browse_condition_term(model, term, outer_model, prefix) for term in terms]
+    if any(term is None for term in parsed):
+        return invalid
+    query = parsed[0]["q"]
+    for term in parsed[1:]:
+        query = query & term["q"] if join == "all" else query | term["q"]
+    operator = " & " if join == "all" else " | "
+    log = "(" + operator.join(term["log"] for term in parsed) + ")"
+    return {"log": log, "q": query, "to_many": any(term["to_many"] for term in parsed), "valid": True}
+
+
+def _browse_condition_term(model, term, outer_model=None, prefix=None):
+    """Parses one strict condition term into a Q clause, readable log, and fan-out flag."""
+    from django.db.models import Q
+
+    if not isinstance(term, dict):
+        return None
+    field = term.get("field")
+    lookup = term.get("lookup")
+    if not isinstance(lookup, str) or lookup not in _BROWSE_LOOKUPS or ("negate" in term and not isinstance(term.get("negate"), bool)):
+        return None
+    resolved = _browse_condition_lhs(model, field, lookup)
+    if resolved is None:
+        return None
+    leaf, to_many = resolved
+    rhs = _browse_condition_rhs(model, outer_model, term.get("rhs"), lookup, leaf, prefix)
+    if rhs is None:
+        return None
+    key = _browse_condition_prefixed_path(prefix, field)
+    lookup_key = f"{key}__{lookup}"
+    clause = Q(**{lookup_key: rhs["value"]})
+    log = "Q(**{%r: %s})" % (lookup_key, rhs["log"])
+    if term.get("negate"):
+        clause, log = ~clause, "~" + log
+    return {"log": log, "q": clause, "to_many": to_many or rhs["to_many"]}
+
+
+def _browse_condition_lhs(model, path, lookup):
+    """Validates a condition's left-hand model path and returns its leaf plus fan-out flag."""
+    if not _browse_condition_path_shape(path):
+        return None
+    resolved = _browse_resolve_filter_path(model, path)
+    if resolved is None:
+        return None
+    leaf, to_many, relation_leaf = resolved
+    if relation_leaf and lookup != "isnull":
+        return None
+    is_text_transform = lookup == "trim" or lookup == "length" or lookup.startswith("length__")
+    if is_text_transform and (relation_leaf or type(leaf).__name__ not in _BROWSE_TEXT_TYPES):
+        return None
+    return leaf, to_many
+
+
+def _browse_condition_rhs(model, outer_model, rhs, lookup, leaf, prefix):
+    """Validates/coerces a literal, F-field, or subquery-only OuterRef condition operand."""
+    from django.db.models import F, OuterRef
+
+    if not isinstance(rhs, dict):
+        return None
+    kind = rhs.get("kind")
+    if kind == "value":
+        if "value" not in rhs:
+            return None
+        value = _browse_coerce_filter_value(lookup, rhs.get("value"), leaf if getattr(leaf, "concrete", False) else None)
+        if lookup == "range" and (not isinstance(value, list) or len(value) != 2):
+            return None
+        if lookup == "in" and (not isinstance(value, list) or not value):
+            return None
+        return {"log": repr(value), "to_many": False, "value": value}
+    if kind not in ("field", "outer") or lookup in ("in", "isnull", "range"):
+        return None
+    rhs_path = rhs.get("field")
+    rhs_model = model if kind == "field" else outer_model
+    resolved = _browse_condition_scalar_path(rhs_model, rhs_path)
+    if resolved is None:
+        return None
+    to_many = bool(resolved[1])
+    if kind == "field":
+        name = _browse_condition_prefixed_path(prefix, rhs_path)
+        return {"log": "F(%r)" % name, "to_many": to_many, "value": F(name)}
+    return {"log": "OuterRef(%r)" % rhs_path, "to_many": to_many, "value": OuterRef(rhs_path)}
+
+
+def _browse_condition_scalar_path(model, path):
+    """Returns a validated scalar model path and its fan-out flag, or None."""
+    if model is None or not _browse_condition_path_shape(path):
+        return None
+    resolved = _browse_resolve_filter_path(model, path)
+    return None if resolved is None or resolved[2] else (resolved[0], resolved[1])
+
+
+def _browse_condition_path_shape(path):
+    """Bounds a structured condition path before walking the live model graph."""
+    return isinstance(path, str) and bool(path) and len(path) <= 240 and len(path.split("__")) <= 12
+
+
+def _browse_condition_prefixed_path(prefix, path):
+    """Prefixes a validated target path when conditions execute through an M2M table."""
+    return f"{prefix}__{path}" if prefix else path
+
+
 def _browse_count(request):
     """Returns the row count for the current filter set, computed only on explicit request."""
     with _browse_parallel_context():
@@ -3146,9 +3268,11 @@ def _browse_aggregate(request):
             builders = {"count": Count, "sum": Sum, "avg": Avg, "min": Min, "max": Max}
 
             def _expr(spec):
+                """Builds one native conditional aggregate expression from a validated spec."""
+                options = {"filter": spec["condition"]} if spec.get("condition") is not None else {}
                 if spec["func"] == "count":
-                    return Count(spec["arg"], distinct=spec["distinct"])
-                return builders[spec["func"]](spec["arg"])
+                    return Count(spec["arg"], distinct=spec["distinct"], **options)
+                return builders[spec["func"]](spec["arg"], **options)
 
             with _browse_capture() as ctx:
                 if group_by:
@@ -3179,7 +3303,8 @@ def _browse_aggregate(request):
                     if aggregate:
                         result.update(queryset.aggregate(**aggregate))
                     for spec in exists_specs:
-                        result[spec["alias"]] = queryset.exists()
+                        source = queryset.filter(spec["condition"]) if spec.get("condition") is not None else queryset
+                        result[spec["alias"]] = source.exists()
                     if py_specs:
                         result.update(_browse_agg_python_global(queryset, py_specs))
                     # Non-exists first, then exists, matching the ORM-mode cell's dict order so both transports agree.
@@ -3220,9 +3345,9 @@ def _browse_agg_group_by(group_by, attset, pk_attname, model):
 
 
 def _browse_agg_specs(model, aggregates, attset, pk_attname, grouped):
-    """Parses aggregate terms into safe {func, arg, alias, distinct, kind} specs. `kind` is `db` (concrete column, or
+    """Parses aggregate terms into safe {func, arg, alias, distinct, kind, condition} specs. `kind` is `db` (concrete column, or
     Count over a reverse/M2M relation query name), `py` (a @property computed object-by-object), or `exists` (global-only).
-    Functions/fields are allowlisted, aliases sanitized to unique identifiers, and `exists` is dropped when grouping."""
+    Functions/fields/conditions are allowlisted, aliases are sanitized, and `exists` is dropped when grouping."""
     specs = []
     used = set()
     if not isinstance(aggregates, list):
@@ -3271,11 +3396,20 @@ def _browse_agg_specs(model, aggregates, attset, pk_attname, grouped):
             else:
                 # Relations are only countable (Sum/Avg/… over a bare relation is invalid); unknown args are dropped.
                 continue
+        conditions = _browse_item_condition_group(model, term)
+        if not conditions["valid"]:
+            continue
+        # A Python @property has no SQL-side row on which a Q predicate can run. Never ignore a requested condition.
+        if kind == "py" and conditions["q"] is not None:
+            continue
+        # A to-many join in a non-count aggregate condition can multiply the value rows; distinct cannot repair Sum/Avg.
+        if func not in ("count", "exists") and conditions["to_many"]:
+            continue
         alias = _browse_agg_alias(term.get("alias"), func, arg, used)
         used.add(alias)
-        # Count over a to-many relation/traversal must be distinct, else a sibling to-many join multiplies the tally.
-        distinct = func == "count" and (bool(term.get("distinct")) or to_many)
-        specs.append({"alias": alias, "arg": arg, "distinct": distinct, "func": func, "kind": kind})
+        # Count over a to-many aggregate or condition path must be distinct, else sibling joins multiply the tally.
+        distinct = func == "count" and (bool(term.get("distinct")) or to_many or conditions["to_many"])
+        specs.append({"alias": alias, "arg": arg, "condition": conditions["q"], "condition_log": conditions["log"], "distinct": distinct, "func": func, "kind": kind})
         if len(specs) >= 20:
             break
     return specs
@@ -3442,21 +3576,33 @@ def _browse_annotation_specs(model, annotations, attset, pk_attname, namespace=N
 def _browse_build_annotation(model, item, attset, pk_attname, relation_names, namespace=None):
     """Builds one safe per-row annotation expression (and a readable log string) from a column-builder spec, or None.
     Field/relation/order/partition identifiers are allowlisted against the live model graph (no injection)."""
-    from django.db.models import Avg, Count, F, Max, Min, Sum, Window
+    from django.db.models import Avg, Case, Count, F, Max, Min, Sum, Value, When, Window
     from django.db.models.functions import DenseRank, Rank, RowNumber
 
     aggregates = {"count": Count, "sum": Sum, "avg": Avg, "min": Min, "max": Max}
     kind = item.get("kind")
+    if "conditions" in item and kind not in ("aggregate", "annotate", "subquery"):
+        return None
     if kind == "annotate":
         expr = _browse_eval_annotation_expression(item.get("expression"), namespace)
         if expr is None:
             return None
-        return {"expr": expr, "label": "annotate", "log": str(item.get("expression", "")).strip(), "window": False}
+        conditions = _browse_item_condition_group(model, item)
+        if not conditions["valid"]:
+            return None
+        log = str(item.get("expression", "")).strip()
+        if conditions["q"] is not None:
+            expr = Case(When(conditions["q"], then=expr), default=Value(None))
+            log = f"Case(When({conditions['log']}, then={log}), default=Value(None))"
+        return {"expr": expr, "label": "annotate", "log": log, "window": False}
     if kind == "subquery":
         return _browse_build_subquery_annotation(model, item, pk_attname)
     if kind == "aggregate":
         func = item.get("func")
         if func not in aggregates:
+            return None
+        conditions = _browse_item_condition_group(model, item)
+        if not conditions["valid"]:
             return None
         raw = item.get("field")
         if func == "count":
@@ -3468,9 +3614,15 @@ def _browse_build_annotation(model, item, attset, pk_attname, relation_names, na
                 arg = raw
             else:
                 return None
-            # Count over a to-many relation/traversal must be distinct (a sibling to-many join would multiply it).
-            distinct = bool(item.get("distinct")) or _browse_path_is_to_many(model, arg)
-            return {"expr": Count(arg, distinct=distinct), "label": func, "log": f"Count({arg!r}{', distinct=True' if distinct else ''})", "window": False}
+            # Count over a to-many aggregate or condition path must be distinct (sibling joins multiply it).
+            distinct = bool(item.get("distinct")) or _browse_path_is_to_many(model, arg) or conditions["to_many"]
+            options = {"filter": conditions["q"]} if conditions["q"] is not None else {}
+            parts = [repr(arg)]
+            if conditions["log"] is not None:
+                parts.append(f"filter={conditions['log']}")
+            if distinct:
+                parts.append("distinct=True")
+            return {"expr": Count(arg, distinct=distinct, **options), "label": func, "log": f"Count({', '.join(parts)})", "window": False}
         arg = pk_attname if raw == "pk" else raw
         if not isinstance(arg, str):
             return None
@@ -3479,7 +3631,11 @@ def _browse_build_annotation(model, item, attset, pk_attname, relation_names, na
             # Reject a path that is invalid, ends on a relation, or crosses a to-many relation (Sum/Avg fan-out can't be deduped).
             if resolved is None or resolved[2] or resolved[1]:
                 return None
-        return {"expr": aggregates[func](arg), "label": func, "log": f"{_BROWSE_AGG_LABELS[func]}({arg!r})", "window": False}
+        if conditions["to_many"]:
+            return None
+        options = {"filter": conditions["q"]} if conditions["q"] is not None else {}
+        condition_log = f", filter={conditions['log']}" if conditions["log"] is not None else ""
+        return {"expr": aggregates[func](arg, **options), "label": func, "log": f"{_BROWSE_AGG_LABELS[func]}({arg!r}{condition_log})", "window": False}
     if kind == "window":
         func = item.get("func")
         raw_partition = item.get("partitionBy")
@@ -3524,7 +3680,7 @@ def _browse_build_annotation(model, item, attset, pk_attname, relation_names, na
 
 
 def _browse_build_subquery_annotation(model, item, pk_attname):
-    """Builds a correlated one-row Subquery for a selected relation, value field, and optional order fields."""
+    """Builds a correlated one-row Subquery with optional target-model conditions and ordering."""
     from django.db.models import OuterRef, Subquery
 
     relation = _browse_find_subquery_relation(model, item.get("relation"))
@@ -3537,17 +3693,25 @@ def _browse_build_subquery_annotation(model, item, pk_attname):
     if relation is None:
         return _browse_build_custom_subquery(model, target, item, value_path)
     if getattr(relation, "many_to_many", False):
-        query = _browse_m2m_subquery(relation, pk_attname, value_path, item.get("orderBy"))
+        query = _browse_m2m_subquery(relation, pk_attname, value_path, item.get("orderBy"), item, model)
         if query is None:
             return None
         inner, log = query
     else:
+        conditions = _browse_item_condition_group(target, item, model)
+        if not conditions["valid"]:
+            return None
         filter_key, outer_field = _browse_subquery_correlation(model, relation, pk_attname)
         if filter_key is None or outer_field is None:
             return None
         order, order_log = _browse_subquery_order(target, item.get("orderBy"), target._meta.pk.attname)
-        inner = target._base_manager.filter(**{filter_key: OuterRef(outer_field)}).order_by(*order).values(value_path)
-        log = "Subquery(%s._base_manager.filter(%s=OuterRef(%r)).order_by(%s).values(%r)[:1])" % (target.__name__, filter_key, outer_field, order_log, value_path)
+        inner = target._base_manager.filter(**{filter_key: OuterRef(outer_field)})
+        log = "%s._base_manager.filter(%s=OuterRef(%r))" % (target.__name__, filter_key, outer_field)
+        if conditions["q"] is not None:
+            inner = inner.filter(conditions["q"])
+            log += ".filter(%s)" % conditions["log"]
+        inner = inner.order_by(*order).values(value_path)
+        log = "Subquery(%s.order_by(%s).values(%r)[:1])" % (log, order_log, value_path)
     return {"expr": Subquery(inner[:1]), "label": "subquery", "log": log, "window": False}
 
 
@@ -3565,16 +3729,24 @@ def _browse_resolve_model_label(label):
 
 
 def _browse_build_custom_subquery(model, target, item, value_path):
-    """Builds a correlated Subquery that compares an arbitrary target-model field to a current-row field."""
+    """Builds a custom correlated Subquery plus optional target-model condition group."""
     from django.db.models import OuterRef, Subquery
 
     filter_path = _browse_subquery_value_path(target, item.get("filterField"))
     outer_path = _browse_subquery_value_path(model, item.get("outerField"))
     if filter_path is None or outer_path is None:
         return None
+    conditions = _browse_item_condition_group(target, item, model)
+    if not conditions["valid"]:
+        return None
     order, order_log = _browse_subquery_order(target, item.get("orderBy"), target._meta.pk.attname)
-    inner = target._base_manager.filter(**{filter_path: OuterRef(outer_path)}).order_by(*order).values(value_path)
-    log = "Subquery(%s._base_manager.filter(%s=OuterRef(%r)).order_by(%s).values(%r)[:1])" % (target.__name__, filter_path, outer_path, order_log, value_path)
+    inner = target._base_manager.filter(**{filter_path: OuterRef(outer_path)})
+    log = "%s._base_manager.filter(%s=OuterRef(%r))" % (target.__name__, filter_path, outer_path)
+    if conditions["q"] is not None:
+        inner = inner.filter(conditions["q"])
+        log += ".filter(%s)" % conditions["log"]
+    inner = inner.order_by(*order).values(value_path)
+    log = "Subquery(%s.order_by(%s).values(%r)[:1])" % (log, order_log, value_path)
     return {"expr": Subquery(inner[:1]), "label": "subquery", "log": log, "window": False}
 
 
@@ -3630,8 +3802,8 @@ def _browse_subquery_order(model, order_by, default_path):
     return terms, ", ".join(logs)
 
 
-def _browse_m2m_subquery(relation, pk_attname, value_path, order_by):
-    """Builds the through-table queryset used for M2M Subquery annotations, returning (queryset, log)."""
+def _browse_m2m_subquery(relation, pk_attname, value_path, order_by, item, outer_model):
+    """Builds an M2M through-table subquery with correlated and target-prefixed predicates."""
     try:
         relation_field = getattr(relation, "field", relation)
         through = relation_field.remote_field.through
@@ -3649,9 +3821,17 @@ def _browse_m2m_subquery(relation, pk_attname, value_path, order_by):
     order, order_log = _browse_subquery_prefixed_order(related_model, order_by, target_name, target_default)
     from django.db.models import OuterRef
 
+    conditions = _browse_item_condition_group(related_model, item, outer_model, target_name)
+    if not conditions["valid"]:
+        return None
     filter_key = f"{source_name}_id"
-    inner = through._base_manager.filter(**{filter_key: OuterRef(pk_attname)}).order_by(*order).values(target_value)
-    log = "Subquery(%s._base_manager.filter(%s=OuterRef(%r)).order_by(%s).values(%r)[:1])" % (through.__name__, filter_key, pk_attname, order_log, target_value)
+    inner = through._base_manager.filter(**{filter_key: OuterRef(pk_attname)})
+    log = "%s._base_manager.filter(%s=OuterRef(%r))" % (through.__name__, filter_key, pk_attname)
+    if conditions["q"] is not None:
+        inner = inner.filter(conditions["q"])
+        log += ".filter(%s)" % conditions["log"]
+    inner = inner.order_by(*order).values(target_value)
+    log = "Subquery(%s.order_by(%s).values(%r)[:1])" % (log, order_log, target_value)
     return inner, log
 
 
@@ -3893,7 +4073,8 @@ def _browse_orm_aggregate(model, filters, attnames, group_by, specs, having_filt
             lines.append(f"    .aggregate({', '.join(_browse_agg_expr_text(spec) for spec in db_specs)})")
         for spec in specs:
             if spec["kind"] == "exists":
-                lines.append(f"    # {spec['alias']}: .exists()")
+                condition = f".filter({spec['condition_log']})" if spec.get("condition_log") is not None else ""
+                lines.append(f"    # {spec['alias']}: {condition}.exists()")
     for spec in specs:
         if spec["kind"] == "py":
             lines.append(f"    # {spec['alias']}: Python @property {spec['arg']!r} ({spec['func']})")
@@ -3901,10 +4082,15 @@ def _browse_orm_aggregate(model, filters, attnames, group_by, specs, having_filt
 
 
 def _browse_agg_expr_text(spec):
-    """Returns the readable `alias=Func('field')` text for one aggregate spec."""
+    """Returns readable ``alias=Func('field', filter=Q(...))`` text for one aggregate spec."""
     label = _BROWSE_AGG_LABELS.get(spec["func"], spec["func"])
-    distinct = ", distinct=True" if spec.get("distinct") else ""
-    return f"{spec['alias']}={label}({spec['arg']!r}{distinct})"
+    options = []
+    if spec.get("condition_log") is not None:
+        options.append(f"filter={spec['condition_log']}")
+    if spec.get("distinct"):
+        options.append("distinct=True")
+    suffix = ", " + ", ".join(options) if options else ""
+    return f"{spec['alias']}={label}({spec['arg']!r}{suffix})"
 
 
 def _browse_capture():

@@ -38,7 +38,7 @@ button:disabled{opacity:.5;cursor:default}
 .filterbar[hidden]{display:none}
 .querybar{grid-row:2;display:flex;gap:8px;align-items:flex-start;padding:6px 12px;border-bottom:1px solid var(--vscode-panel-border)}
 .querybar[hidden]{display:none}
-.queryinput{flex:1;min-height:46px;resize:vertical;font-family:var(--vscode-editor-font-family);font-size:12px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,var(--vscode-panel-border));border-radius:3px;padding:4px 6px;outline:none}
+.queryinput{box-sizing:border-box;flex:1;height:132px;min-height:80px;resize:vertical;font-family:var(--vscode-editor-font-family);font-size:12px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,var(--vscode-panel-border));border-radius:3px;padding:4px 6px;outline:none}
 .queryinput:focus{border-color:var(--vscode-focusBorder)}
 .filterbar .grow{flex:1}
 .terms{display:flex;flex-wrap:wrap;gap:6px}
@@ -71,6 +71,15 @@ button:disabled{opacity:.5;cursor:default}
 .aggchip,.aggterm{display:inline-flex;align-items:center;gap:4px;padding:2px 5px;border:1px solid var(--vscode-panel-border);border-radius:6px;font-size:11px;flex-wrap:wrap}
 .termbody{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
 .pathpick{display:inline-flex;align-items:center;gap:3px;flex-wrap:wrap}
+.colconditions{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;margin-left:3px;padding-left:6px;border-left:1px solid var(--vscode-panel-border)}
+.colcondition-toolbar,.colcondition-list,.colcondition{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
+.colcondition{padding:2px 4px;border:1px dashed var(--vscode-panel-border);border-radius:5px}
+.colcondition.invalid{border-color:var(--vscode-inputValidation-errorBorder,var(--vscode-errorForeground));background:var(--vscode-inputValidation-errorBackground,transparent)}
+.colcondition select,.colcondition input{font:inherit;font-size:11px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:3px;padding:1px 3px}
+.colcondition .condition-rhs{display:inline-flex;align-items:center;gap:3px}
+.colcondition .condition-rhs>input{width:110px}
+.colcondition .rangewrap input{width:72px}
+.colcondition .condition-neg{display:inline-flex;align-items:center;gap:2px;color:var(--vscode-descriptionForeground)}
 .winwrap{display:inline-flex;align-items:center;gap:3px;flex-wrap:wrap}
 .winchip{display:inline-flex;align-items:center;gap:2px;padding:1px 3px;border:1px solid var(--vscode-panel-border);border-radius:5px}
 th.annotation{cursor:pointer;color:var(--vscode-charts-purple,var(--vscode-textLink-foreground))}

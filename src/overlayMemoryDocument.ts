@@ -24,8 +24,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   }
 
   /** Opens the file document so file-only language extensions can attach to it. */
-  activate(context: vscode.ExtensionContext): void {
-    context.subscriptions.push(this);
+  activate(): void {
     void this.enqueueWrite(async () => { await Promise.all([this.writeEditor(), this.writeAnalysis()]); });
   }
 

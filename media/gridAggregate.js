@@ -5,6 +5,7 @@
 // grid; with group-by → the rows collapse into per-group summaries. Field/relation identifiers are picked from comboboxes.
 
 import { createCombobox } from "./gridCombobox.js";
+import { createColumnConditionBuilder } from "./gridColumnConditions.js";
 import { createPathPicker, createTreeService } from "./gridFieldPath.js";
 
 const KINDS = [{ label: "Aggregate", value: "aggregate" }, { label: "Subquery", value: "subquery" }, { label: "Annotate", value: "annotate" }, { label: "Window", value: "window" }, { label: "Expr (F)", value: "expr" }];
@@ -22,7 +23,7 @@ function bareModel(target) {
 
 /** Creates the column-builder controller bound to the term and group-by containers. */
 export function createColumnBuilder(deps) {
-  const { el, groupEl, termsEl, getState, postRaw } = deps;
+  const { el, groupEl, termsEl, getState, lookups, postRaw } = deps;
   const treeService = createTreeService(postRaw);
   const modelRequests = new Map();
   let modelRequestSeq = 0;
@@ -44,16 +45,16 @@ export function createColumnBuilder(deps) {
   /** Returns the concrete-field options at a level (the tree's leaves, or the model's own columns as a fallback). */
   function levelFields(tree) {
     if (tree) {
-      return (tree.fields || []).map((field) => ({ attname: field.attname, type: field.type }));
+      return (tree.fields || []).map((field) => ({ attname: field.attname, choices: field.choices, type: field.type }));
     }
-    return (getState().columns || []).filter((column) => !column.computed && !column.annotation).map((column) => ({ attname: column.attname, type: column.type }));
+    return (getState().columns || []).filter((column) => !column.computed && !column.annotation).map((column) => ({ attname: column.attname, choices: column.choices, type: column.type }));
   }
 
   /** Root options for an aggregate-field path picker: concrete fields, computed @property, and relations (drill into FKs). */
   function aggRootOptions(tree) {
     const options = [];
     for (const field of levelFields(tree)) {
-      options.push({ label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
+      options.push({ choices: field.choices, label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
     }
     for (const column of getState().columns || []) {
       if (column.computed) {
@@ -70,7 +71,7 @@ export function createColumnBuilder(deps) {
   function groupRootOptions(tree) {
     const options = [];
     for (const field of levelFields(tree)) {
-      options.push({ label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
+      options.push({ choices: field.choices, label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
     }
     for (const relation of relationsOf(tree)) {
       options.push({ kind: relation.kind, label: `${relation.name} →`, role: "relation", target: relation.target, title: `${relation.kind} → drill in`, value: `r:${relation.name}` });
@@ -98,7 +99,7 @@ export function createColumnBuilder(deps) {
   function subqueryTargetOptions(tree) {
     const options = [];
     for (const field of (tree && tree.fields) || []) {
-      options.push({ label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
+      options.push({ choices: field.choices, label: field.attname, role: "field", type: field.type, value: `f:${field.attname}` });
     }
     for (const relation of (tree && tree.relations) || []) {
       options.push({ kind: relation.kind, label: `${relation.name} →`, role: "relation", target: relation.target, title: `${relation.kind} → ${bareModel(relation.target)} (drill in)`, value: `r:${relation.name}` });
@@ -132,6 +133,12 @@ export function createColumnBuilder(deps) {
     return createPathPicker({ el, fetchTree: treeService.fetchTree, getModel: () => getState().model, placeholder, rootOptions });
   }
 
+  /** Converts a condition-builder result into fields merged into one column spec. */
+  function conditionSpec(builder) {
+    const result = builder.collect();
+    return { conditions: result.conditions, invalidConditions: result.invalid };
+  }
+
   /** Appends one group-by field picker row (drills through FKs to a related field). */
   function addGroupBy() {
     const row = el("span", { className: "aggchip" });
@@ -161,11 +168,12 @@ export function createColumnBuilder(deps) {
     const picker = pathPicker(aggRootOptions, "all rows / field / fk →");
     const distinct = el("input", { checked: Boolean(initial && initial.distinct), title: "Count distinct values", type: "checkbox" });
     const distinctLabel = el("label", { className: "aggdistinct" }, distinct, "distinct");
+    const conditions = createColumnConditionBuilder({ allLookups: lookups, el, fetchTree: treeService.fetchTree, getModel: () => getState().model, rootOptions: groupRootOptions });
     const sync = () => { distinctLabel.style.display = funcCombo.node.value === "count" ? "" : "none"; };
     funcCombo.node.addEventListener("change", sync);
-    body.append(funcCombo.node, document.createTextNode(" of "), picker.node, distinctLabel);
+    body.append(funcCombo.node, document.createTextNode(" of "), picker.node, distinctLabel, conditions.node);
     sync();
-    return () => ({ distinct: distinct.checked, field: picker.getPath(), func: funcCombo.node.value, toMany: picker.toMany() });
+    return () => ({ distinct: distinct.checked, field: picker.getPath(), func: funcCombo.node.value, toMany: picker.toMany(), ...conditionSpec(conditions) });
   }
 
   /** Builds the window sub-controls (func · field · partition · order) and returns a spec getter. */
@@ -224,11 +232,13 @@ export function createColumnBuilder(deps) {
     const relationCombo = createCombobox({ el, onChange: () => rebuildPickers(), options: [], placeholder: "relation →", value: (initial && initial.relation) || "" });
     const valueSlot = el("span", { className: "pathpick" });
     const orderSlot = el("span", { className: "pathpick" });
+    const conditionSlot = el("span", { className: "condition-slot" });
     const dirCombo = createCombobox({ el, options: ORDER_DIR, value: initial && initial.orderBy && initial.orderBy[0] && initial.orderBy[0].desc ? "desc" : "asc" });
     let targetModel = "";
     let valuePicker = null;
     let orderPicker = null;
-    body.append(document.createTextNode("from "), relationCombo.node, document.createTextNode(" take "), valueSlot, document.createTextNode(" order "), orderSlot, dirCombo.node);
+    let conditions = null;
+    body.append(document.createTextNode("from "), relationCombo.node, document.createTextNode(" take "), valueSlot, document.createTextNode(" order "), orderSlot, dirCombo.node, conditionSlot);
     treeService.fetchTree(getState().model).then((tree) => {
       const options = subqueryRelationOptions(tree);
       relationMap.clear();
@@ -244,8 +254,10 @@ export function createColumnBuilder(deps) {
       targetModel = relation && relation.target ? relation.target : "";
       valueSlot.innerHTML = "";
       orderSlot.innerHTML = "";
+      conditionSlot.innerHTML = "";
       valuePicker = null;
       orderPicker = null;
+      conditions = null;
       if (!targetModel) {
         valueSlot.appendChild(el("span", { className: "tag" }, "field"));
         orderSlot.appendChild(el("span", { className: "tag" }, "field"));
@@ -253,8 +265,17 @@ export function createColumnBuilder(deps) {
       }
       valuePicker = createPathPicker({ el, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "value field", rootOptions: subqueryTargetOptions });
       orderPicker = createPathPicker({ el, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "order field", rootOptions: subqueryTargetOptions });
+      conditions = createColumnConditionBuilder({
+        allLookups: lookups,
+        el,
+        fetchTree: treeService.fetchTree,
+        getModel: () => targetModel,
+        outer: { getModel: () => getState().model, rootOptions: groupRootOptions },
+        rootOptions: subqueryTargetOptions
+      });
       valueSlot.appendChild(valuePicker.node);
       orderSlot.appendChild(orderPicker.node);
+      conditionSlot.appendChild(conditions.node);
     }
 
     return () => {
@@ -271,7 +292,8 @@ export function createColumnBuilder(deps) {
         throughOwner: relation.throughOwner,
         throughRelation: relation.throughRelation,
         throughSource: relation.throughSource,
-        throughTarget: relation.throughTarget
+        throughTarget: relation.throughTarget,
+        ...(conditions ? conditionSpec(conditions) : {})
       };
     };
   }
@@ -283,12 +305,14 @@ export function createColumnBuilder(deps) {
     const outerSlot = el("span", { className: "pathpick" });
     const valueSlot = el("span", { className: "pathpick" });
     const orderSlot = el("span", { className: "pathpick" });
+    const conditionSlot = el("span", { className: "condition-slot" });
     const dirCombo = createCombobox({ el, options: ORDER_DIR, value: initial && initial.orderBy && initial.orderBy[0] && initial.orderBy[0].desc ? "desc" : "asc" });
     let filterPicker = null;
     let outerPicker = createPathPicker({ el, fetchTree: treeService.fetchTree, getModel: () => getState().model, placeholder: "current field", rootOptions: subqueryTargetOptions });
     let valuePicker = null;
     let orderPicker = null;
-    body.append(document.createTextNode("from "), modelCombo.node, document.createTextNode(" where "), filterSlot, document.createTextNode(" = current "), outerSlot, document.createTextNode(" take "), valueSlot, document.createTextNode(" order "), orderSlot, dirCombo.node);
+    let conditions = null;
+    body.append(document.createTextNode("from "), modelCombo.node, document.createTextNode(" where "), filterSlot, document.createTextNode(" = current "), outerSlot, document.createTextNode(" take "), valueSlot, document.createTextNode(" order "), orderSlot, dirCombo.node, conditionSlot);
     outerSlot.appendChild(outerPicker.node);
     fetchModelOptions().then((options) => {
       modelCombo.setOptions(options);
@@ -301,9 +325,11 @@ export function createColumnBuilder(deps) {
       filterSlot.innerHTML = "";
       valueSlot.innerHTML = "";
       orderSlot.innerHTML = "";
+      conditionSlot.innerHTML = "";
       filterPicker = null;
       valuePicker = null;
       orderPicker = null;
+      conditions = null;
       const targetModel = modelCombo.node.value;
       if (!targetModel) {
         filterSlot.appendChild(el("span", { className: "tag" }, "target field"));
@@ -314,9 +340,18 @@ export function createColumnBuilder(deps) {
       filterPicker = createPathPicker({ el, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "target field", rootOptions: subqueryTargetOptions });
       valuePicker = createPathPicker({ el, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "value field", rootOptions: subqueryTargetOptions });
       orderPicker = createPathPicker({ el, fetchTree: treeService.fetchTree, getModel: () => targetModel, placeholder: "order field", rootOptions: subqueryTargetOptions });
+      conditions = createColumnConditionBuilder({
+        allLookups: lookups,
+        el,
+        fetchTree: treeService.fetchTree,
+        getModel: () => targetModel,
+        outer: { getModel: () => getState().model, rootOptions: groupRootOptions },
+        rootOptions: subqueryTargetOptions
+      });
       filterSlot.appendChild(filterPicker.node);
       valueSlot.appendChild(valuePicker.node);
       orderSlot.appendChild(orderPicker.node);
+      conditionSlot.appendChild(conditions.node);
     }
 
     return () => {
@@ -326,7 +361,8 @@ export function createColumnBuilder(deps) {
         filterField: filterPicker ? filterPicker.getPath() : "",
         orderBy: orderField ? [{ desc: dirCombo.node.value === "desc", field: orderField }] : [],
         outerField: outerPicker ? outerPicker.getPath() : "",
-        target: modelCombo.node.value
+        target: modelCombo.node.value,
+        ...(conditions ? conditionSpec(conditions) : {})
       };
     };
   }
@@ -341,8 +377,9 @@ export function createColumnBuilder(deps) {
       type: "text",
       value: (initial && initial.expression != null ? String(initial.expression) : "")
     });
-    body.append(expression);
-    return () => ({ expression: expression.value.trim() });
+    const conditions = createColumnConditionBuilder({ allLookups: lookups, el, fetchTree: treeService.fetchTree, getModel: () => getState().model, rootOptions: groupRootOptions });
+    body.append(expression, conditions.node);
+    return () => ({ expression: expression.value.trim(), ...conditionSpec(conditions) });
   }
 
   /** Appends one column term row whose body switches on the selected kind. */
@@ -391,9 +428,14 @@ export function createColumnBuilder(deps) {
     }
     const terms = [];
     let droppedToMany = 0;
+    let invalidConditions = 0;
     for (const row of termsEl.querySelectorAll(".aggterm")) {
       const spec = row._read();
-      if (spec.kind === "aggregate" && spec.toMany) {
+      if (spec.invalidConditions) {
+        invalidConditions += 1;
+      }
+      const conditionToMany = Boolean(spec.conditions && spec.conditions.terms && spec.conditions.terms.some((term) => term.toMany));
+      if (spec.kind === "aggregate" && (spec.toMany || conditionToMany)) {
         if (spec.func === "count") {
           spec.distinct = true;
         } else {
@@ -401,11 +443,12 @@ export function createColumnBuilder(deps) {
           continue;
         }
       }
+      delete spec.invalidConditions;
       delete spec.toMany;
       if (!spec.alias) { spec.alias = defaultAlias(spec); }
       terms.push(spec);
     }
-    return { droppedToMany, groupBy, terms };
+    return { droppedToMany, groupBy, invalidConditions, terms };
   }
 
   /** Clears every term and group-by row. */

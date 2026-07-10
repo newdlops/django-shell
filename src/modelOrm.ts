@@ -3,7 +3,7 @@
 // Identifiers are restricted to a safe pattern and values are emitted as JSON/Python literals so
 // reconstructed expressions cannot inject code.
 
-import type { BackendModelColumn, BackendModelFilter, BackendModelOrder, BackendModelRelation, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange } from "./modelBackend";
+import type { BackendModelColumn, BackendModelFilter, BackendModelOrder, BackendModelRelation, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange, ModelConditionGroup } from "./modelBackend";
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PYTHON_KEYWORDS = new Set(["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"]);
@@ -121,6 +121,114 @@ function filterSpecs(columns: BackendModelColumn[] | undefined, relations: Backe
 function safeFilterPath(field: string): string | null {
   const parts = String(field ?? "").split("__");
   return parts.length && parts.every((part) => IDENTIFIER.test(part)) ? field : null;
+}
+
+interface ConditionBuildOptions {
+  allowOuter?: boolean;
+  fieldPrefix?: string;
+  outerRoots?: Set<string>;
+  roots?: Set<string>;
+}
+
+interface ConditionBuildResult {
+  expr: string;
+  toMany: boolean;
+  valid: boolean;
+}
+
+/** Returns a safe condition path, optionally restricted by its first segment and prefixed for a through-model query. */
+function conditionPath(value: unknown, roots?: Set<string>, prefix?: string): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const path = safeFilterPath(value);
+  if (!path || (roots && !roots.has(path.split("__")[0]) && path.split("__")[0] !== "pk")) {
+    return null;
+  }
+  return prefix ? `${prefix}__${path}` : path;
+}
+
+/** Returns one injection-safe Python literal for a structured condition value, or null when the lookup value is incomplete. */
+function conditionValue(lookup: string, value: unknown, fieldType?: string): string | null {
+  if (lookup === "isnull") {
+    if (typeof value === "boolean") { return value ? "True" : "False"; }
+    const text = String(value ?? "").trim();
+    if (TRUTHY.test(text)) { return "True"; }
+    return /^(false|0|f|no|off)$/i.test(text) ? "False" : null;
+  }
+  if (lookup === "in" || lookup === "range") {
+    const values = Array.isArray(value) ? value : String(value ?? "").split(",").map((part) => part.trim());
+    if (!values.length || (lookup === "range" && values.length !== 2)) {
+      return null;
+    }
+    const literals = values.map((part) => conditionValue("exact", part, fieldType));
+    return literals.some((part) => part === null) ? null : `[${literals.join(", ")}]`;
+  }
+  if (value === null) { return "None"; }
+  if (typeof value === "boolean") { return value ? "True" : "False"; }
+  if (typeof value === "number") { return Number.isFinite(value) ? String(value) : null; }
+  if (typeof value !== "string") { return null; }
+  const text = value.trim();
+  if (fieldType === "BooleanField") {
+    if (TRUTHY.test(text)) { return "True"; }
+    return /^(false|0|f|no|off)$/i.test(text) ? "False" : null;
+  }
+  const numeric = NUMERIC_FIELD.test(String(fieldType ?? "")) || lookup.startsWith("length") || ["year", "quarter", "month", "week_day", "day", "hour", "minute", "second"].includes(lookup);
+  if (numeric) {
+    return /^-?\d+(\.\d+)?$/.test(text) ? text : null;
+  }
+  return pyStr(value);
+}
+
+/** Compiles a bounded all/any condition group to a Django Q expression; any malformed term invalidates the whole group. */
+function conditionGroupExpr(group: ModelConditionGroup | undefined, options: ConditionBuildOptions = {}): ConditionBuildResult {
+  if (group === undefined) {
+    return { expr: "", toMany: false, valid: true };
+  }
+  if (!group || typeof group !== "object" || Array.isArray(group) || (group.join !== undefined && group.join !== "all" && group.join !== "any") || !Array.isArray(group.terms) || group.terms.length < 1 || group.terms.length > 8) {
+    return { expr: "", toMany: false, valid: false };
+  }
+  const clauses: string[] = [];
+  let toMany = false;
+  for (const term of group.terms as unknown[]) {
+    if (!term || typeof term !== "object" || Array.isArray(term)) {
+      return { expr: "", toMany: false, valid: false };
+    }
+    const item = term as Record<string, unknown>;
+    const field = conditionPath(item.field, options.roots, options.fieldPrefix);
+    const lookup = typeof item.lookup === "string" ? item.lookup : "";
+    if (!field || !LOOKUPS.has(lookup) || (item.negate !== undefined && typeof item.negate !== "boolean") || (item.toMany !== undefined && typeof item.toMany !== "boolean") || (item.fieldType !== undefined && typeof item.fieldType !== "string")) {
+      return { expr: "", toMany: false, valid: false };
+    }
+    const rhs = item.rhs;
+    if (!rhs || typeof rhs !== "object" || Array.isArray(rhs)) {
+      return { expr: "", toMany: false, valid: false };
+    }
+    const operand = rhs as Record<string, unknown>;
+    let value: string | null = null;
+    if (operand.kind === "value" && Object.prototype.hasOwnProperty.call(operand, "value")) {
+      value = conditionValue(lookup, operand.value, item.fieldType as string | undefined);
+    } else if ((operand.kind === "field" || operand.kind === "outer") && !["in", "isnull", "range"].includes(lookup)) {
+      const outer = operand.kind === "outer";
+      const path = conditionPath(operand.field, outer ? options.outerRoots : options.roots, outer ? undefined : options.fieldPrefix);
+      if (path && (!outer || options.allowOuter)) {
+        value = `models.${outer ? "OuterRef" : "F"}(${pyStr(path)})`;
+      }
+    }
+    if (value === null) {
+      return { expr: "", toMany: false, valid: false };
+    }
+    const clause = `models.Q(**{${pyStr(`${field}__${lookup}`)}: ${value}})`;
+    clauses.push(item.negate ? `~${clause}` : clause);
+    toMany = toMany || item.toMany === true;
+  }
+  const operator = group.join === "any" ? " | " : " & ";
+  return { expr: clauses.length > 1 ? `(${clauses.join(operator)})` : clauses[0], toMany, valid: true };
+}
+
+/** Returns the allowed first path segments for conditions rooted at the currently browsed model. */
+function conditionRoots(attnames: Set<string>, relationNames: Set<string>): Set<string> {
+  return new Set([...attnames, ...relationNames]);
 }
 
 /** Returns a safe annotation alias for a declared computed-property filter. */
@@ -301,28 +409,41 @@ const ANNOTATION_BLOCKED_MODULES = /\b(?:builtins|ctypes|importlib|os|pathlib|sh
 /** Returns a safe single-line annotation expression for one per-row column spec via the `models` namespace, or null. */
 function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relationNames: Set<string>, sourceModel: string): string | null {
   const kind = item ? String(item.kind) : "";
+  if (item?.conditions !== undefined && !["aggregate", "annotate", "subquery"].includes(kind)) {
+    return null;
+  }
   if (kind === "annotate") {
-    return normalizeAnnotationExpressionText(item.expression);
+    const expression = normalizeAnnotationExpressionText(item.expression);
+    const condition = conditionGroupExpr(item.conditions, { roots: conditionRoots(attnames, relationNames) });
+    if (!expression || !condition.valid) {
+      return null;
+    }
+    return condition.expr ? `models.Case(models.When(${condition.expr}, then=${expression}), default=models.Value(None))` : expression;
   }
   if (kind === "subquery") {
-    return subqueryAnnotationExpr(item, sourceModel);
+    return subqueryAnnotationExpr(item, sourceModel, attnames, relationNames);
   }
   if (kind === "aggregate") {
     const func = String(item.func);
+    const condition = conditionGroupExpr(item.conditions, { roots: conditionRoots(attnames, relationNames) });
+    if (!condition.valid) {
+      return null;
+    }
+    const filter = condition.expr ? `, filter=${condition.expr}` : "";
     if (func === "count") {
       const raw = item.field;
       const arg = raw === undefined || raw === null || raw === "" || raw === "*" || raw === "pk" ? "pk" : String(raw);
       if (arg !== "pk" && !attnames.has(arg) && !relationNames.has(arg) && !(arg.includes("__") && safeFilterPath(arg))) {
         return null;
       }
-      return `models.Count(${pyStr(arg)}${item.distinct ? ", distinct=True" : ""})`;
+      return `models.Count(${pyStr(arg)}${item.distinct || condition.toMany ? ", distinct=True" : ""}${filter})`;
     }
     if (AGG_FUNC_NAMES[func]) {
       const arg = item.field === "pk" ? "pk" : String(item.field ?? "");
-      if (arg !== "pk" && !attnames.has(arg) && !(arg.includes("__") && safeFilterPath(arg))) {
+      if (condition.toMany || (arg !== "pk" && !attnames.has(arg) && !(arg.includes("__") && safeFilterPath(arg)))) {
         return null;
       }
-      return `models.${AGG_FUNC_NAMES[func]}(${pyStr(arg)})`;
+      return `models.${AGG_FUNC_NAMES[func]}(${pyStr(arg)}${filter})`;
     }
     return null;
   }
@@ -371,7 +492,7 @@ function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relati
 }
 
 /** Returns a safe single-line Subquery expression for the structured Subquery column builder. */
-function subqueryAnnotationExpr(item: ModelAnnotationSpec, sourceModel: string): string | null {
+function subqueryAnnotationExpr(item: ModelAnnotationSpec, sourceModel: string, attnames: Set<string>, relationNames: Set<string>): string | null {
   const valuePath = safeFilterPath(String(item.field ?? ""));
   if (!valuePath) {
     return null;
@@ -384,9 +505,14 @@ function subqueryAnnotationExpr(item: ModelAnnotationSpec, sourceModel: string):
     if (!owner || !relation || !source || !target) {
       return null;
     }
+    const condition = conditionGroupExpr(item.conditions, { allowOuter: true, fieldPrefix: target, outerRoots: conditionRoots(attnames, relationNames) });
+    if (!condition.valid) {
+      return null;
+    }
     const selected = `${target}__${valuePath}`;
     const order = subqueryOrderArgs(item.orderBy, valuePath, target);
-    return `models.Subquery(${owner}.${relation}.through.objects.filter(**{${pyStr(`${source}_id`)}: models.OuterRef(${pyStr("pk")})}).order_by(${order}).values(${pyStr(selected)})[:1])`;
+    const filter = condition.expr ? `.filter(${condition.expr})` : "";
+    return `models.Subquery(${owner}.${relation}.through.objects.filter(**{${pyStr(`${source}_id`)}: models.OuterRef(${pyStr("pk")})})${filter}.order_by(${order}).values(${pyStr(selected)})[:1])`;
   }
   const targetModel = targetModelName(item.target);
   const filterField = safeFilterPath(String(item.filterField ?? ""));
@@ -394,8 +520,13 @@ function subqueryAnnotationExpr(item: ModelAnnotationSpec, sourceModel: string):
   if (!targetModel || !filterField || !outerField) {
     return null;
   }
+  const condition = conditionGroupExpr(item.conditions, { allowOuter: true, outerRoots: conditionRoots(attnames, relationNames) });
+  if (!condition.valid) {
+    return null;
+  }
   const order = subqueryOrderArgs(item.orderBy, valuePath);
-  return `models.Subquery(${targetModel}._base_manager.filter(**{${pyStr(filterField)}: models.OuterRef(${pyStr(outerField)})}).order_by(${order}).values(${pyStr(valuePath)})[:1])`;
+  const filter = condition.expr ? `.filter(${condition.expr})` : "";
+  return `models.Subquery(${targetModel}._base_manager.filter(**{${pyStr(filterField)}: models.OuterRef(${pyStr(outerField)})})${filter}.order_by(${order}).values(${pyStr(valuePath)})[:1])`;
 }
 
 /** Returns a safe model class name from an app-qualified label. */
@@ -604,6 +735,7 @@ export interface OrmAggregateParams {
 interface AggregateCellSpec {
   alias: string;
   arg: string;
+  condition?: string;
   expr: string;
   func: string;
 }
@@ -647,24 +779,29 @@ function aggregateSpecs(terms: ModelAggregateTerm[] | undefined, attnames: Set<s
   const used = new Set<string>();
   for (const term of terms ?? []) {
     const func = term ? String(term.func) : "";
+    const condition = conditionGroupExpr(term?.conditions, { roots: conditionRoots(attnames, relationNames) });
+    if (!condition.valid) {
+      continue;
+    }
+    const filter = condition.expr ? `, filter=${condition.expr}` : "";
     if (func === "exists") {
       if (grouped) {
         continue;
       }
-      specs.push({ alias: aggregateAlias(term.alias, func, "pk", used), arg: "pk", expr: "", func });
+      specs.push({ alias: aggregateAlias(term.alias, func, "pk", used), arg: "pk", condition: condition.expr || undefined, expr: "", func });
     } else if (func === "count") {
       const raw = term.field;
       const arg = raw === undefined || raw === null || raw === "" || raw === "*" || raw === "pk" ? "pk" : String(raw);
       if (arg !== "pk" && !attnames.has(arg) && !relationNames.has(arg) && !(arg.includes("__") && safeFilterPath(arg))) {
         continue;
       }
-      specs.push({ alias: aggregateAlias(term.alias, func, arg, used), arg, expr: `models.Count(${pyStr(arg)}${term.distinct ? ", distinct=True" : ""})`, func });
+      specs.push({ alias: aggregateAlias(term.alias, func, arg, used), arg, expr: `models.Count(${pyStr(arg)}${term.distinct || condition.toMany ? ", distinct=True" : ""}${filter})`, func });
     } else if (AGG_FUNC_NAMES[func]) {
       const arg = term.field === "pk" ? "pk" : String(term.field ?? "");
-      if (arg !== "pk" && !attnames.has(arg) && !(arg.includes("__") && safeFilterPath(arg))) {
+      if (condition.toMany || (arg !== "pk" && !attnames.has(arg) && !(arg.includes("__") && safeFilterPath(arg)))) {
         continue;
       }
-      specs.push({ alias: aggregateAlias(term.alias, func, arg, used), arg, expr: `models.${AGG_FUNC_NAMES[func]}(${pyStr(arg)})`, func });
+      specs.push({ alias: aggregateAlias(term.alias, func, arg, used), arg, expr: `models.${AGG_FUNC_NAMES[func]}(${pyStr(arg)}${filter})`, func });
     }
   }
   return specs;
@@ -699,7 +836,7 @@ export function buildAggregateOrm(params: OrmAggregateParams): string {
   if (!exists.length) {
     return `[${aggregateCall}]`;
   }
-  const existsEntries = exists.map((spec) => `${pyStr(spec.alias)}: ${base}.exists()`).join(", ");
+  const existsEntries = exists.map((spec) => `${pyStr(spec.alias)}: ${base}${spec.condition ? `.filter(${spec.condition})` : ""}.exists()`).join(", ");
   return aggregates.length ? `[dict(${aggregateCall}, **{${existsEntries}})]` : `[{${existsEntries}}]`;
 }
 

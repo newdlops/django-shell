@@ -3,7 +3,7 @@
 import { appendLogEntry } from "./sqlHighlight.js";
 import { repaintPins, togglePin } from "./gridPin.js";
 import { createEditor, stagedDisplay } from "./gridEdit.js";
-import { enterQueryMode } from "./gridQuery.js";
+import { enterQueryMode, measureQueryEditor, setQueryDraft } from "./gridQuery.js";
 import { makeResizable } from "./gridResize.js";
 import { buildEditableRelatedTable } from "./gridRelated.js";
 import { createVirtualRows } from "./gridVirtual.js";
@@ -18,7 +18,7 @@ for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more"
   els[id] = document.getElementById(id);
 }
 
-const LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "month", "day"];
+const LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "length", "length__gt", "length__gte", "length__lt", "length__lte", "trim"];
 const MAX_LOG_ENTRIES = 200;
 const ALL_PAGE_SIZE = 1000000000;
 
@@ -60,6 +60,7 @@ const columnBuilder = createColumnBuilder({
   groupEl: els.aggregateGroupBy,
   termsEl: els.aggregateTerms,
   getState: () => state,
+  lookups: LOOKUPS,
   postRaw: (message) => vscode.postMessage(message)
 });
 
@@ -134,7 +135,16 @@ function handleMessage(message) {
     els.transport.value = message.mode || "auto";
     els.transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">● ORM cell</span>' : message.active === "tcp" ? '<span class="on">● socket</span>' : message.active === "pty" ? '<span class="pty">● terminal</span>' : '<span class="off">○ not connected</span>';
   } else if (message.type === "queryMode") {
-    enterQueryMode((payload) => send(payload));
+    enterQueryMode((payload) => send(payload), message.code || "");
+  } else if (message.type === "measureQueryEditor") {
+    measureQueryEditor(Boolean(message.show));
+  } else if (message.type === "queryDraft") {
+    setQueryDraft(message.code);
+  } else if (message.type === "queryStarted") {
+    startProgress("Running query");
+  } else if (message.type === "overlayRunPython") {
+    const code = typeof message.text === "string" ? message.text : String(message.code || "");
+    send({ code, type: "runQuery", useOverlay: false });
   } else if (message.type === "busy") {
     renderBusy(message.message);
   } else if (message.type === "error") {
@@ -622,12 +632,16 @@ function removeFilter(next) {
 
 /** Applies the builder: with group-by fields it collapses rows into per-group summaries; without, it adds the terms as per-row annotation columns to the grid. An explicit `filtersOverride` (from a chip removal) is used instead of re-collecting the builder, avoiding a race with the async term-row sync. */
 function applyColumns(filtersOverride) {
-  const { droppedToMany, groupBy, terms } = columnBuilder.collect();
+  const { droppedToMany, groupBy, invalidConditions, terms } = columnBuilder.collect();
+  if (invalidConditions) {
+    els.status.textContent = "Complete or remove every column condition before applying.";
+    return;
+  }
   state.filters = filtersOverride !== undefined ? filtersOverride : filterBar.collect();
   filterBar.renderSummary(state.filters);
-  const drillNote = droppedToMany ? " · skipped Sum/Avg over a to-many relation (use Count, or group by the related model)" : "";
+  const drillNote = droppedToMany ? " · skipped Sum/Avg/Min/Max with a to-many path (use Count, or group by the related model)" : "";
   if (groupBy.length) {
-    const aggregates = terms.filter((term) => term.kind === "aggregate").map((term) => ({ alias: term.alias, distinct: term.distinct, field: term.field, func: term.func }));
+    const aggregates = terms.filter((term) => term.kind === "aggregate").map((term) => ({ alias: term.alias, conditions: term.conditions, distinct: term.distinct, field: term.field, func: term.func }));
     if (!aggregates.length) {
       els.status.textContent = "Add at least one Aggregate column to summarize per group (Annotate/Window/Expr are per-row only).";
       return;
