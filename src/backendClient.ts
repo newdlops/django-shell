@@ -2,6 +2,7 @@
 
 import * as net from "net";
 import { BackendEndpoint } from "./backendBootstrap";
+import { hotReloadTransportError, parseHotReloadResponse, type BackendHotReloadResult } from "./backendHotReloadProtocol";
 import { DiagnosticLogger } from "./diagnostics";
 import {
   BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder,
@@ -16,6 +17,7 @@ import { aggregatesNeedPython, buildAggregateOrm, buildCommitOrm, buildComputedO
 const TCP_CONNECT_TIMEOUT_MS = 1500;
 const TCP_RETRY_COOLDOWN_MS = 15000;
 const PARALLEL_READ_RESPONSE_TIMEOUT_MS = 6000;
+const HOT_RELOAD_RESPONSE_TIMEOUT_MS = 15000;
 // Max length of a reconstructed ORM cell we'll TYPE into the shell. A literal cell is written as one line, and a tty
 // input queue (MAX_INPUT, ~1KB on macOS) silently drops bytes past it → the cell arrives truncated, IPython sits at a
 // continuation prompt, and the serialized PTY queue hangs. Reads whose cell exceeds this fall back to the socket/`_djs_rpc`
@@ -80,6 +82,26 @@ export interface BackendStageDebugpyResult {
   path?: string | null;
   reused?: boolean;
 }
+
+export interface NativeDebuggerStartOptions {
+  expectedVersion: string;
+  host: string;
+  port: number;
+  tracerPath: string;
+}
+
+export interface BackendNativeDebuggerResult {
+  apiVersion: number;
+  engine: "experimental";
+  error?: string;
+  host: string;
+  ok: boolean;
+  port: number;
+  reused: boolean;
+  version: string;
+}
+
+export type { BackendHotReloadFileResult, BackendHotReloadResult } from "./backendHotReloadProtocol";
 
 export interface BackendLoadFeatureResult {
   error?: string;
@@ -172,10 +194,12 @@ export interface BackendRequestPayload {
   cursor?: unknown;
   data?: string;
   digest?: string;
+  expectedVersion?: string;
   exclude?: string[];
   filename?: string;
   filters?: BackendModelFilter[];
   groupBy?: string[];
+  host?: string;
   kind: string;
   lineOffset?: number;
   lightweight?: boolean;
@@ -185,11 +209,14 @@ export interface BackendRequestPayload {
   order?: BackendModelOrder[];
   partsKey?: string;
   path?: BackendRuntimePathSegment[];
+  paths?: string[];
   pk?: unknown;
+  port?: number;
   q?: string;
   relation?: string;
   reason?: string;
   sourceText?: string;
+  tracerPath?: string;
   value?: unknown;
 }
 
@@ -216,6 +243,11 @@ export class BackendClient {
     private readonly logger?: DiagnosticLogger,
     private readonly fallback?: BackendFallbackTransport
   ) {}
+
+  /** Returns the PID of the Python process hosting this backend when reported by the current protocol. */
+  get processId(): number | undefined {
+    return Number.isInteger(this.endpoint.pid) && Number(this.endpoint.pid) > 0 ? Number(this.endpoint.pid) : undefined;
+  }
 
   /** Returns the transport that most recently completed a backend request. */
   get transport(): BackendTransport {
@@ -286,6 +318,48 @@ export class BackendClient {
   /** Starts debugpy through a backend path that leaves process stderr untouched. */
   debugpy(code: string): Promise<BackendExecutionResult> {
     return this.request({ code, kind: "debugpy" }, parseBackendResponse);
+  }
+
+  /** Starts or reuses Django Shell's embedded experimental tracer over the authenticated local backend socket. */
+  async startNativeDebugger(options: NativeDebuggerStartOptions): Promise<BackendNativeDebuggerResult> {
+    const payload: BackendRequestPayload = { ...options, kind: "nativeDebugger" };
+    if (this.remoteSocketUnavailable) {
+      return nativeDebuggerTransportError("The built-in experimental debugger requires a backend socket on the current VS Code host.");
+    }
+    const started = Date.now();
+    try {
+      const buffer = await this.socketRequest(payload);
+      const parsed = parseNativeDebuggerResponse(buffer);
+      this.activeTransport = "tcp";
+      this.tcpFailedAt = 0;
+      this.logRequest(payload.kind, started, parsed, buffer.length, undefined, "tcp");
+      return parsed;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logRequest(payload.kind, started, undefined, 0, message, "tcp");
+      return nativeDebuggerTransportError(`The built-in experimental debugger could not reach the local backend socket: ${message}`);
+    }
+  }
+
+  /** Reloads loaded modules through the embedded engine over the backend socket; never types reload plumbing into the shell. */
+  async hotReload(paths: string[]): Promise<BackendHotReloadResult> {
+    const payload: BackendRequestPayload = { kind: "hotReload", paths };
+    if (this.remoteSocketUnavailable) {
+      return hotReloadTransportError("Built-in hot reload requires a backend socket on the current VS Code host.");
+    }
+    const started = Date.now();
+    try {
+      const buffer = await this.socketRequest(payload, HOT_RELOAD_RESPONSE_TIMEOUT_MS);
+      const parsed = parseHotReloadResponse(buffer);
+      this.activeTransport = "tcp";
+      this.tcpFailedAt = 0;
+      this.logRequest(payload.kind, started, parsed, buffer.length, undefined, "tcp");
+      return parsed;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logRequest(payload.kind, started, undefined, 0, message, "tcp");
+      return hotReloadTransportError(`Built-in hot reload could not reach the backend socket: ${message}`);
+    }
   }
 
   /** Probes for an already-staged debugpy bundle by digest; the tiny request may cross the socket or the one-line PTY RPC. */
@@ -595,7 +669,7 @@ export class BackendClient {
         clearTimeout(connectTimer);
         if (responseTimeoutMs) {
           responseTimer = setTimeout(() => {
-            fail(new Error(`Django shell backend did not answer within ${responseTimeoutMs}ms while Python is busy.`));
+            fail(new Error(`Django shell backend did not answer within ${responseTimeoutMs}ms while handling ${payload.kind}.`));
           }, responseTimeoutMs);
         }
         socket.write(`${JSON.stringify({ ...payload, token: this.endpoint.token })}\n`);
@@ -797,6 +871,26 @@ function parseProgressResponse(buffer: string): BackendProgressSnapshot {
 function parseStageDebugpyResponse(buffer: string): BackendStageDebugpyResult {
   const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendStageDebugpyResult>;
   return { error: parsed.error, ok: Boolean(parsed.ok), path: typeof parsed.path === "string" && parsed.path ? parsed.path : null, reused: Boolean(parsed.reused) };
+}
+
+/** Parses the stable endpoint contract returned by the embedded experimental tracer bootstrap. */
+function parseNativeDebuggerResponse(buffer: string): BackendNativeDebuggerResult {
+  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendNativeDebuggerResult>;
+  return {
+    apiVersion: typeof parsed.apiVersion === "number" ? parsed.apiVersion : 0,
+    engine: "experimental",
+    error: typeof parsed.error === "string" ? parsed.error : undefined,
+    host: typeof parsed.host === "string" ? parsed.host : "",
+    ok: Boolean(parsed.ok),
+    port: typeof parsed.port === "number" ? parsed.port : 0,
+    reused: Boolean(parsed.reused),
+    version: typeof parsed.version === "string" ? parsed.version : ""
+  };
+}
+
+/** Returns the stable native-engine result shape for a socket-only transport failure. */
+function nativeDebuggerTransportError(error: string): BackendNativeDebuggerResult {
+  return { apiVersion: 0, engine: "experimental", error, host: "", ok: false, port: 0, reused: false, version: "" };
 }
 
 /** Parses the JSON result of a "loadfeature" request (socket buffer or typed PTY response marker). */

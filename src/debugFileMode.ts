@@ -2,7 +2,8 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
-import { type DebugBreakpointLocation, normalizeOverlayBreakpointLine } from "./debugBreakpoints";
+import { normalizeOverlayBreakpointLine } from "./debugBreakpoints";
+import { debugBreakpointKey, type DebugBreakpointLocation } from "./debugBreakpointPayload";
 import { overlayEditorUri } from "./overlayBackingFiles";
 
 export type DjangoShellDebugMode = "file" | "overlay";
@@ -46,7 +47,8 @@ export function sourceBreakpointLocations(uri: vscode.Uri, lineOffset = 0): Debu
     if (!(breakpoint instanceof vscode.SourceBreakpoint) || !breakpoint.enabled || breakpoint.location.uri.toString() !== target) { continue; }
     const line = normalizeOverlayBreakpointLine(breakpoint.location.range.start.line + 1, lineOffset);
     const column = breakpoint.location.range.start.character > 0 ? breakpoint.location.range.start.character + 1 : 0;
-    locations.set(`${line}:${column}`, column ? { column, line } : { line });
+    const location: DebugBreakpointLocation = { column: column || undefined, condition: breakpoint.condition, hitCondition: breakpoint.hitCondition, line, logMessage: breakpoint.logMessage };
+    locations.set(debugBreakpointKey(location), location);
   }
   return [...locations.values()].sort((left, right) => left.line - right.line || (left.column ?? 0) - (right.column ?? 0));
 }
@@ -54,7 +56,7 @@ export function sourceBreakpointLocations(uri: vscode.Uri, lineOffset = 0): Debu
 /** Copies current overlay breakpoints onto the file debug target without removing file breakpoints. */
 export function mirrorOverlayBreakpointsToDebugFile(): void {
   const source = sourceBreakpointLocations(overlayEditorUri()), target = debugFileUri();
-  const existingKeys = new Set(sourceBreakpointLocations(target).map((breakpoint) => `${breakpoint.line}:${breakpoint.column ?? 0}`));
-  const additions = source.filter((breakpoint) => !existingKeys.has(`${breakpoint.line}:${breakpoint.column ?? 0}`));
-  if (additions.length) { vscode.debug.addBreakpoints(additions.map((breakpoint) => new vscode.SourceBreakpoint(new vscode.Location(target, new vscode.Position(breakpoint.line - 1, Math.max(0, (breakpoint.column ?? 0) - 1))), true))); }
+  const existingKeys = new Set(sourceBreakpointLocations(target).map(debugBreakpointKey));
+  const additions = source.filter((breakpoint) => !existingKeys.has(debugBreakpointKey(breakpoint)));
+  if (additions.length) { vscode.debug.addBreakpoints(additions.map((breakpoint) => new vscode.SourceBreakpoint(new vscode.Location(target, new vscode.Position(breakpoint.line - 1, Math.max(0, (breakpoint.column ?? 0) - 1))), true, breakpoint.condition, breakpoint.hitCondition, breakpoint.logMessage))); }
 }

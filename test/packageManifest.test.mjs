@@ -79,6 +79,27 @@ test("contributes remote debugpy attach settings", () => {
   assert.equal(properties["djangoShell.debug.remoteRoot"].default, "");
 });
 
+test("keeps debugpy default while contributing the built-in experimental engine", () => {
+  const engine = manifest.contributes.configuration.properties["djangoShell.debug.engine"];
+  assert.equal(engine.default, "debugpy");
+  assert.deepEqual(engine.enum, ["debugpy", "experimental"]);
+  assert.equal(manifest.extensionOptionalDependencies.includes("newdlops.django-process-debugger"), false);
+  assert.ok(manifest.activationEvents.includes("onDebug:django-shell-native"));
+  const native = manifest.contributes.debuggers.find((item) => item.type === "django-shell-native");
+  assert.equal(native?.label, "Django Shell Experimental");
+  assert.deepEqual(native?.languages, ["python"]);
+  assert.deepEqual(native?.configurationAttributes?.attach?.required, ["host", "port"]);
+  assert.equal(manifest.contributes.configuration.properties["djangoShell.debug.hotReload"].default, true);
+});
+
+test("ships the built-in tracer with its third-party license notice", () => {
+  const tracer = fs.readFileSync(new URL("../python/django_shell_native_tracer.py", import.meta.url), "utf8");
+  const notices = fs.readFileSync(new URL("../THIRD_PARTY_NOTICES.md", import.meta.url), "utf8");
+  assert.match(tracer, /TRACER_VERSION = "2026\.07\.11\.1"/);
+  assert.match(notices, /Django Process Debugger experimental tracer/);
+  assert.match(notices, /MIT License/);
+});
+
 test("contributes basic debugger control commands for the custom console", () => {
   const commands = manifest.contributes.commands.map((item) => item.command);
   const controls = ["continue", "pause", "stepOver", "stepInto", "stepOut", "restart", "stop"];

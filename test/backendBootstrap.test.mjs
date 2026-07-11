@@ -122,11 +122,11 @@ test("returns no inline bootstrap when the local runtime source cannot be read",
 
 test("parses backend ready and failed markers from terminal output", () => {
   const ready = parseBackendReadyMarker(
-    `noise\r\n${BACKEND_READY_PREFIX}{"host":"127.0.0.1","port":49152,"token":"abc"}\r\n>>> `
+    `noise\r\n${BACKEND_READY_PREFIX}{"host":"127.0.0.1","pid":321,"port":49152,"token":"abc"}\r\n>>> `
   );
   const failed = parseBackendFailedMarker(`${BACKEND_FAILED_PREFIX}{"error":"boom"}\n`);
 
-  assert.deepEqual(ready, { host: "127.0.0.1", port: 49152, token: "abc" });
+  assert.deepEqual(ready, { host: "127.0.0.1", pid: 321, port: 49152, token: "abc" });
   assert.equal(failed, "boom");
 });
 

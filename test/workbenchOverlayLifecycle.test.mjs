@@ -28,7 +28,9 @@ const generatedTabsSource = fs.readFileSync(new URL("../src/generatedOverlayTabs
 const notebookPtySessionSource = fs.readFileSync(new URL("../src/notebookPtySession.ts", import.meta.url), "utf8");
 const overlayMemorySource = fs.readFileSync(new URL("../src/overlayMemoryDocument.ts", import.meta.url), "utf8");
 const overlaySource = fs.readFileSync(new URL("../src/workbenchOverlay.ts", import.meta.url), "utf8");
+const captureRendererSource = fs.readFileSync(new URL("../src/workbenchOverlayCaptureRenderer.ts", import.meta.url), "utf8");
 const frameRendererSource = fs.readFileSync(new URL("../src/workbenchOverlayFrameRenderer.ts", import.meta.url), "utf8");
+const workbenchWindowEvalSource = fs.readFileSync(new URL("../src/workbenchWindowEval.ts", import.meta.url), "utf8");
 const customConsoleClientSource = fs.readFileSync(new URL("../media/customConsoleSource.js", import.meta.url), "utf8");
 
 test("console panel close releases the overlay instance instead of only hiding it", () => {
@@ -53,6 +55,23 @@ test("overlay hide parks Monaco while final shutdown disposes renderer resources
   assert.ok(publicLifecycle.includes("hide(): void { void this.parkRendererOverlay(); }"));
   assert.equal(publicLifecycle.includes("disposeRendererOverlay"), false, "ordinary tab visibility changes must preserve Monaco");
   assert.ok(shutdownBody.includes('await this.disposeRendererOverlay(true, "overlay.dispose.error")'));
+});
+
+test("host park and disposal clean owner-matched body widget portals", () => {
+  const cleanupSource = fs.readFileSync(new URL("../src/workbenchOverlayCleanupRenderer.ts", import.meta.url), "utf8");
+  const disposeStart = overlaySource.indexOf("function disposeExpression");
+  const parkStart = overlaySource.indexOf("function parkExpression", disposeStart);
+  const disposeBody = overlaySource.slice(disposeStart, parkStart);
+  const parkBody = overlaySource.slice(parkStart, overlaySource.indexOf("function resetExpression", parkStart));
+
+  assert.ok(disposeBody.includes("__dsoRemoveOverlayWidgetPortal(null"), "missing roots still remove their owner-matched orphan portal");
+  assert.ok(disposeBody.includes("__dsoStopOverlayCapture(owner)"), "missing roots still restore temporary capture hooks");
+  assert.ok(parkBody.includes("__dsoRemoveOverlayWidgetPortal(null"), "missing roots cannot leave a floating portal behind");
+  assert.match(parkBody, /root\.__dsoExplicitlyParked\s*=\s*true/);
+  assert.match(parkBody, /root\.style\.setProperty\("display",\s*"none",\s*"important"\)/);
+  assert.match(parkBody, /root\.style\.setProperty\("visibility",\s*"hidden",\s*"important"\)/);
+  assert.match(parkBody, /__dsoSetOverlayWidgetVisibility\(root,\s*false,\s*true\)/);
+  assert.ok(cleanupSource.includes("window.__dsoRemoveOverlayWidgetPortal(root"), "renderer cleanup uses the same owner-aware portal removal path");
 });
 
 test("overlay geometry coalesces scroll updates while keeping a settle pass", () => {
@@ -83,7 +102,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 92"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 97"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -132,7 +151,7 @@ test("overlay hover widgets use a constructor-time body portal outside the webvi
   assert.ok(widgetSource.includes("z-index:2147483647!important"));
   assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .overflowingContentWidgets{overflow:visible!important;z-index:2147483647!important}"));
   assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-editor-hover{background:var(--vscode-editorHoverWidget-background"));
-  assert.ok(widgetSource.includes("opacity:1!important;overflow:visible!important;z-index:2147483647!important"));
+  assert.equal(widgetSource.includes("opacity:1!important"), false, "stale hover nodes keep Monaco's native hidden opacity");
   assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .monaco-hover .monaco-sash,.django-shell-overlay-widget-layer .monaco-editor-hover .monaco-sash"));
   assert.ok(widgetSource.includes("function __dsoThemeSource()"));
   assert.ok(widgetSource.includes("function __dsoSyncThemeClasses(node, includeWorkbenchClass)"));
@@ -164,6 +183,40 @@ test("overlay hover widgets use a constructor-time body portal outside the webvi
   assert.equal(widgetSource.includes("document.body.appendChild(layerRoot)"), false);
   assert.equal(widgetSource.includes("overflowWidgetsDomNode: node"), false);
   assert.equal(widgetSource.includes("fixedOverflowWidgets: true"), false);
+});
+
+test("body widget portals become important-hidden and dismiss native popup state", () => {
+  const widgetSource = fs.readFileSync(new URL("../src/workbenchOverlayWidgetRenderer.ts", import.meta.url), "utf8");
+  const visibilityStart = widgetSource.indexOf("window.__dsoSetOverlayWidgetVisibility");
+  const visibilityEnd = widgetSource.indexOf("window.__dsoRemoveOverlayWidgetPortal", visibilityStart);
+  const visibilityBody = widgetSource.slice(visibilityStart, visibilityEnd);
+
+  for (const [name, value] of [["display", "none"], ["visibility", "hidden"], ["opacity", "0"], ["pointer-events", "none"]]) {
+    assert.ok(visibilityBody.includes(`layerRoot.style.setProperty("${name}", "${value}", "important")`), `${name} must override workbench widget styles while parked`);
+  }
+  assert.ok(visibilityBody.includes('layerRoot.setAttribute("aria-hidden", "true")'));
+  assert.ok(visibilityBody.includes("__dsoDismissOverlayWidgets(root)"));
+  assert.ok(widgetSource.includes('["hideSuggestWidget", "editor.action.hideHover", "closeParameterHints"]'));
+  assert.ok(widgetSource.includes("editor.blur && editor.blur()"));
+  assert.ok(widgetSource.includes("if (input && input.blur) { input.blur(); }"));
+  assert.ok(widgetSource.includes("function __dsoOwnedWidgetPortal(root, ownerToken)"));
+});
+
+test("overlay show restores widgets only after geometry and an active editor are ready", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+  const showStart = rendererSource.indexOf("window.__djangoShellOverlayShow = function");
+  const showEnd = rendererSource.indexOf("window.__djangoShellOverlaySetGeometry", showStart);
+  const showBody = rendererSource.slice(showStart, showEnd);
+  const geometryGuard = showBody.indexOf("if (!__dsoApplyGeometry(root, geometry))");
+  const editorReady = showBody.indexOf("const editor = __dsoEnsureEditor(root)");
+  const editorVisibility = showBody.indexOf("const editorVisible = !!editor && !root.__dsoGeometryParked");
+  const finalRestore = showBody.indexOf("__dsoSetOverlayWidgetVisibility(root, editorVisible && root.__dsoHasActiveConsoleGroup !== false, false)");
+  const pendingBody = showBody.slice(geometryGuard, editorReady);
+
+  assert.ok(geometryGuard >= 0 && editorReady > geometryGuard);
+  assert.ok(pendingBody.includes("__dsoSetOverlayWidgetVisibility(root, false, true)"), "pending geometry dismisses and hides stale floating widgets");
+  assert.ok(editorVisibility > editorReady && finalRestore > editorVisibility, "the portal is restored only after Monaco exists in the active console group");
+  assert.equal(showBody.slice(0, editorReady).includes("__dsoSetOverlayWidgetVisibility(root, true"), false);
 });
 
 test("overlay model stays user-only instead of hiding generated prelude DOM", () => {
@@ -204,6 +257,7 @@ test("overlay input keeps the cursor visible while typing grows the model", () =
 
 test("confirmed console overlays do not fall back to unrelated webview frames", () => {
   assert.ok(frameRendererSource.includes("root.__dsoHadConsoleFrame = true"));
+  assert.ok(frameRendererSource.includes("root.__dsoHasActiveConsoleGroup = entries.length > 0"));
   assert.ok(frameRendererSource.includes("const visibleCachedFrame = root.__dsoFrame"));
   assert.ok(frameRendererSource.includes("__dsoFrameArea(root.__dsoFrame) > 4000"), "only a still-visible owned frame survives transient tab metadata loss");
   assert.ok(frameRendererSource.includes("root.__dsoPortalHost && root.__dsoPortalHost.isConnected"));
@@ -220,24 +274,16 @@ test("confirmed console overlays do not fall back to unrelated webview frames", 
   assert.equal(frameRendererSource.includes("bestArea > 4000 ? best : null"), false);
 });
 
-test("overlay CDP evaluation stays bound to the owning VS Code window", () => {
-  assert.ok(overlaySource.includes("private workbenchWindowId"));
-  assert.ok(overlaySource.includes("BW.fromId(requestedId)"));
-  assert.ok(overlaySource.includes("no-focused-workbench-window"));
-  assert.ok(overlaySource.includes("root&&!root.__dsoOwnerToken"));
-  assert.equal(overlaySource.includes("wins.includes(focused) ? focused : wins[0]"), false);
-});
-
 test("orphan-window cleanup never blocks the owning renderer evaluation", () => {
-  const wrapperStart = overlaySource.indexOf("function mainProcessEvalExpression");
-  const wrapperEnd = overlaySource.indexOf("function patchExpression", wrapperStart);
-  const wrapperBody = overlaySource.slice(wrapperStart, wrapperEnd);
+  const orphanStart = workbenchWindowEvalSource.indexOf("const orphanCleanup");
+  const orphanEnd = workbenchWindowEvalSource.indexOf("let timeoutHandle", orphanStart);
+  const orphanBody = workbenchWindowEvalSource.slice(orphanStart, orphanEnd);
 
-  assert.ok(wrapperBody.includes("orphanCleanup"));
-  assert.ok(wrapperBody.includes("win.webContents.executeJavaScript(orphanCleanup"));
-  assert.equal(wrapperBody.includes("await Promise.all"), false, "an unresponsive orphan window must not delay the target window");
-  assert.ok(wrapperBody.includes("const outcome = await Promise.race"), "the owning renderer IPC call is bounded too");
-  assert.ok(wrapperBody.includes("renderer-execute-timeout:"));
+  assert.ok(orphanBody.includes("orphanCleanup"));
+  assert.ok(orphanBody.includes("win.webContents.executeJavaScript(orphanCleanup"));
+  assert.equal(orphanBody.includes("await"), false, "an unresponsive orphan window must not delay the target window");
+  assert.ok(workbenchWindowEvalSource.includes("const outcome = await Promise.race"), "the owning renderer IPC call is bounded too");
+  assert.ok(workbenchWindowEvalSource.includes("renderer-execute-timeout:"));
 });
 
 test("CDP evaluation timeouts retire the exact socket generation", () => {
@@ -361,7 +407,7 @@ test("overlay renderer caches expensive widget layout work", () => {
   const widgetSource = fs.readFileSync(new URL("../src/workbenchOverlayWidgetRenderer.ts", import.meta.url), "utf8");
 
   assert.ok(rendererSource.includes("window.__dsoWidgetCache"));
-  assert.ok(rendererSource.includes("if (__dsoIsWidget(cached))"));
+  assert.ok(rendererSource.includes("if (__dsoIsLiveWidget(cached))"));
   assert.ok(rendererSource.includes("cache && start && cache.set(start, widget)"));
   assert.ok(rendererSource.includes("root.__dsoLastEditorLayoutKey === layoutKey"));
   assert.ok(rendererSource.includes("style.__dsoPatchVersion === version"), "warm shows do not rewrite the overlay stylesheet");
@@ -371,23 +417,55 @@ test("overlay renderer caches expensive widget layout work", () => {
   assert.equal(rendererSource.includes("__dsoBreakpointLayer"), false);
 });
 
-test("overlay service capture uses bounded DOM scans without patching global prototypes", () => {
+test("overlay service capture keeps deep inspection outside its bounded temporary hooks", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
-  const captureStart = rendererSource.indexOf("function __dsoCaptureReady()");
-  const captureEnd = rendererSource.indexOf("function __dsoFactory()", captureStart);
-  const captureBody = rendererSource.slice(captureStart, captureEnd);
+  const hooksStart = captureRendererSource.indexOf("wrappers.mapSet =");
+  const hooksEnd = captureRendererSource.indexOf("window.__dsoCaptureOriginals = originals", hooksStart);
+  const hooksBody = captureRendererSource.slice(hooksStart, hooksEnd);
 
-  assert.ok(captureBody.includes("function __dsoStartCapture()"));
-  assert.ok(captureBody.includes("window.__dsoCaptureScanActive"));
-  assert.ok(captureBody.includes("window.__dsoCaptureScanTimer"));
-  assert.ok(captureBody.includes("attempts >= 12"), "capture must stop after a bounded number of scans");
-  assert.ok(captureBody.includes("window.setTimeout(scan, 100)"), "capture yields between DOM scans");
-  assert.ok(captureBody.includes("__dsoScanDom()"));
-  for (const mutation of ["Array.prototype.push =", "Map.prototype.set =", "WeakMap.prototype.set =", "Set.prototype.add =", "Reflect.construct ="]) {
-    assert.equal(rendererSource.includes(mutation), false, `capture must not replace ${mutation.slice(0, -2)}`);
-  }
-  assert.equal(rendererSource.includes("__dsoCaptureOriginals"), false);
-  assert.equal(rendererSource.includes("__dsoStopCapture"), false);
+  assert.ok(rendererSource.includes('import { overlayCaptureRendererSource } from "./workbenchOverlayCaptureRenderer"'));
+  assert.ok(rendererSource.includes("${overlayCaptureRendererSource()}"));
+  assert.ok(captureRendererSource.includes("const __dsoCaptureDeadlineMs = 1500"));
+  assert.ok(captureRendererSource.includes("const __dsoForcedCaptureDeadlineMs = 3000"));
+  assert.ok(captureRendererSource.includes("const __dsoBroadCaptureMs = 420"));
+  assert.ok(captureRendererSource.includes("const __dsoCaptureQueueLimit = 384"));
+  assert.ok(captureRendererSource.includes("function __dsoDrainCaptureQueue()"));
+  assert.ok(captureRendererSource.includes("__dsoStartBroadCapture(generation)"));
+  assert.ok(captureRendererSource.includes("generation !== window.__dsoCaptureGeneration"));
+  assert.ok(rendererSource.includes("now - window.__dsoLastDomCaptureScanAt < 1200"), "DOM fallback scans are throttled");
+  assert.ok(rendererSource.includes("window.__dsoDomCaptureFallbackAfter = Date.now() + 700"), "deep DOM discovery starts only after constructor capture gets a chance");
+  assert.ok(rendererSource.includes("if (window.__dsoDomCaptureFallbackAfter && Date.now() >= window.__dsoDomCaptureFallbackAfter) { __dsoScanDom(); }"));
+  assert.ok(rendererSource.includes("window.__dsoSniffedWidgets"), "captured widgets are deep-inspected only once");
+  assert.equal(captureRendererSource.slice(captureRendererSource.indexOf("function __dsoCaptureTick"), captureRendererSource.indexOf("function __dsoStartCapture")).includes("__dsoScanDom"), false, "capture ticks never rescan editor DOM");
+  assert.equal(hooksBody.includes("__dsoSniff"), false, "collection hot paths never deep-scan values");
+  assert.equal(hooksBody.includes("Object.getOwnPropertyNames"), false, "property enumeration stays in the deferred queue drain");
+});
+
+test("capture probes existing editors before a file-backed fallback and never opens Untitled", () => {
+  const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
+  const showStart = overlaySource.indexOf("private async showNow()");
+  const showEnd = overlaySource.indexOf("updateGeometry(geometry", showStart);
+  const showBody = overlaySource.slice(showStart, showEnd);
+  const fallbackStart = overlaySource.indexOf("private async openCaptureFallbackEditor()");
+  const closeStart = overlaySource.indexOf("private async closeCaptureFallbackEditor", fallbackStart);
+  const waitStart = overlaySource.indexOf("private async waitForOverlayCapture(");
+  const waitEnd = overlaySource.indexOf("async function readRequestBody", waitStart);
+  const fallbackBody = overlaySource.slice(fallbackStart, closeStart), closeBody = overlaySource.slice(closeStart, waitStart), waitBody = overlaySource.slice(waitStart, waitEnd);
+  const armIndex = showBody.indexOf("await this.evalInWorkbench(captureArmExpression");
+  const probeIndex = showBody.indexOf('executeCommand("vscode.getEditorLayout")', armIndex);
+  const fallbackIndex = showBody.indexOf("openCaptureFallbackEditor()", probeIndex);
+  const rearmIndex = showBody.indexOf("captureRearmExpression(this.token, generation)", fallbackIndex), secondProbe = showBody.indexOf('executeCommand("vscode.getEditorLayout")', probeIndex + 1), earlyClose = showBody.indexOf("await closeFallback()", secondProbe);
+  const restoredPoll = showBody.indexOf("waitForOverlayCapture(CAPTURE_FALLBACK_TIMEOUT_MS, 75, true)", earlyClose);
+  const stopIndex = showBody.indexOf("captureStopExpression(this.token, generation)", restoredPoll), finalClose = showBody.indexOf("await closeFallback()", stopIndex);
+  assert.ok(armIndex >= 0 && probeIndex > armIndex && fallbackIndex > probeIndex, "exact service lookup runs before the fallback editor");
+  assert.ok(rearmIndex > fallbackIndex && secondProbe > rearmIndex && earlyClose > secondProbe && restoredPoll > earlyClose, "fallback rearms exact lookup, settles, and closes before restored-host polling");
+  assert.ok(stopIndex > restoredPoll && finalClose > stopIndex, "generation stop precedes bounded final tab cleanup");
+  assert.equal(overlaySource.includes('openTextDocument({ content: ""'), false, "capture never creates an Untitled document");
+  assert.ok(fallbackBody.includes("Promise.race") && fallbackBody.includes("void shown.then(close, close)") && fallbackBody.includes("scheduleGeneratedOverlayTabCleanup"));
+  assert.ok(closeBody.includes("Promise.race") && closeBody.includes("CAPTURE_FALLBACK_CLOSE_TIMEOUT_MS") && closeBody.includes(".catch("));
+  assert.ok(waitBody.includes("isEvaluationTimeoutMessage(message)") && waitBody.includes("retryMissingHost"));
+  assert.equal(waitBody.includes("ctorMatch") || waitBody.includes('report.includes("factory=true")'), false);
+  assert.ok(rendererSource.includes("window.__dsoArmOverlayCapture") && rendererSource.includes('return "capture-armed:"') && rendererSource.includes("window.__dsoStopOverlayCapture"));
 });
 
 test("overlay status reporting never performs another editor factory scan", () => {
@@ -396,7 +474,8 @@ test("overlay status reporting never performs another editor factory scan", () =
   const statusEnd = rendererSource.indexOf("function __dsoUri()", statusStart);
   const statusBody = rendererSource.slice(statusStart, statusEnd);
 
-  assert.ok(statusBody.includes("root.__djangoShellEditor || __dsoCaptureReady()"));
+  assert.ok(statusBody.includes('" exactReady=" + __dsoCaptureReady()'));
+  assert.ok(statusBody.includes('" factory=" + !!(root && root.__djangoShellEditor)'));
   assert.equal(statusBody.includes("__dsoFactory()"), false, "diagnostic status must stay a constant-time read");
 });
 
@@ -408,8 +487,13 @@ test("transient owning-frame misses park the editor after a grace period instead
   const timerStart = rendererSource.indexOf("root.__dsoGeometryTimer = window.setInterval");
   const timerEnd = rendererSource.indexOf("const editor = __dsoEnsureEditor", timerStart);
   const timerBody = rendererSource.slice(timerStart, timerEnd);
+  const firstMissStart = missBody.indexOf("if (!root.__dsoGeometryMissingSince)");
+  const graceStart = missBody.indexOf("if (now - root.__dsoGeometryMissingSince < 700)", firstMissStart);
+  const firstMissBody = missBody.slice(firstMissStart, graceStart);
 
   assert.ok(missBody.includes("now - root.__dsoGeometryMissingSince < 700"));
+  assert.ok(firstMissBody.includes("root.__dsoGeometryWidgetParked = true"));
+  assert.ok(firstMissBody.includes("__dsoSetOverlayWidgetVisibility(root, false, true)"), "the first missing frame immediately hides body-level widgets");
   assert.ok(missBody.includes("root.__dsoGeometryParked = true"));
   assert.ok(missBody.includes('root.style.visibility = "hidden"'));
   assert.equal(missBody.includes("__dsoDisposeOverlay"), false, "a transient workbench layout gap never destroys the editor/model");
@@ -513,7 +597,7 @@ test("overlay debug uses a direct DAP session so the shell overlay stays focused
   assert.ok(customConsoleSource.includes("vscode.debug.startDebugging"));
   assert.ok(customConsoleSource.includes("runCurrentInput: () => this.runCurrentDebugInput()"));
   assert.ok(customConsoleSource.includes("await this.showOverlay(); try { await direct.attach"));
-  assert.ok(customConsoleSource.includes('direct), configuration)'));
+  assert.ok(customConsoleSource.includes('direct), { ...configuration, engine: requestedEngine })'));
   assert.ok(customConsoleSource.includes('if (this.debugMode === "overlay") { const direct = new DirectDebugAdapterSession'));
   assert.ok(customConsoleSource.includes('await this.runCurrentDebugInput(); return;'));
   assert.ok(customConsoleSource.includes("this.debugpyEndpoint = undefined"));

@@ -59,7 +59,7 @@ export function overlayWidgetRendererSource(): string {
       if (style && style.__dsoPatchVersion === version) { return; }
       if (!style) { style = document.createElement("style"); }
       style.id = "django-shell-overlay-widget-style";
-      style.textContent = ".django-shell-overlay-widget-root{position:fixed;left:0;top:0;width:0;height:0;min-width:0!important;min-height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer{position:absolute;left:0;top:0;width:100vw;height:100vh;min-width:100vw!important;min-height:100vh!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer .overflowingContentWidgets{overflow:visible!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-hover *,.django-shell-overlay-widget-layer .monaco-editor-hover,.django-shell-overlay-widget-layer .monaco-editor-hover *,.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .suggest-widget *,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .parameter-hints-widget *,.django-shell-overlay-widget-layer .context-view,.django-shell-overlay-widget-layer .context-view *{pointer-events:auto!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-editor-hover{background:var(--vscode-editorHoverWidget-background,var(--vscode-editorWidget-background,var(--vscode-editor-background)))!important;border-color:var(--vscode-editorHoverWidget-border,var(--vscode-widget-border,transparent))!important;box-sizing:border-box!important;color:var(--vscode-editorHoverWidget-foreground,var(--vscode-foreground))!important;opacity:1!important;overflow:visible!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .monaco-hover .monaco-sash,.django-shell-overlay-widget-layer .monaco-editor-hover .monaco-sash{overflow:visible!important;pointer-events:auto!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .context-view{box-sizing:border-box!important;z-index:2147483647!important}";
+      style.textContent = ".django-shell-overlay-widget-root{position:fixed;left:0;top:0;width:0;height:0;min-width:0!important;min-height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer{position:absolute;left:0;top:0;width:100vw;height:100vh;min-width:100vw!important;min-height:100vh!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none;background:transparent!important}.django-shell-overlay-widget-layer .overflowingContentWidgets{overflow:visible!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-hover *,.django-shell-overlay-widget-layer .monaco-editor-hover,.django-shell-overlay-widget-layer .monaco-editor-hover *,.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .suggest-widget *,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .parameter-hints-widget *,.django-shell-overlay-widget-layer .context-view,.django-shell-overlay-widget-layer .context-view *{pointer-events:auto!important}.django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-editor-hover{background:var(--vscode-editorHoverWidget-background,var(--vscode-editorWidget-background,var(--vscode-editor-background)))!important;border-color:var(--vscode-editorHoverWidget-border,var(--vscode-widget-border,transparent))!important;box-sizing:border-box!important;color:var(--vscode-editorHoverWidget-foreground,var(--vscode-foreground))!important;overflow:visible!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .monaco-hover .monaco-sash,.django-shell-overlay-widget-layer .monaco-editor-hover .monaco-sash{overflow:visible!important;pointer-events:auto!important;z-index:2147483647!important}.django-shell-overlay-widget-layer .suggest-widget,.django-shell-overlay-widget-layer .parameter-hints-widget,.django-shell-overlay-widget-layer .context-view{box-sizing:border-box!important;z-index:2147483647!important}";
       style.__dsoPatchVersion = version;
       if (!style.parentElement) { document.head.appendChild(style); }
     }
@@ -68,6 +68,76 @@ export function overlayWidgetRendererSource(): string {
     function __dsoWidgetPortalHost() {
       return document.body;
     }
+
+    /** Returns an owner token suitable for matching a detached body-level popup portal. */
+    function __dsoWidgetOwnerToken(root, ownerToken) {
+      return String(ownerToken || root && root.__dsoOwnerToken || window.__djangoShellOverlayOwnerToken || "");
+    }
+
+    /** Returns whether one body-level popup portal is live and belongs to the requested overlay. */
+    function __dsoWidgetPortalMatches(node, owner) {
+      if (!node || !node.isConnected) { return false; }
+      const actual = String(node.dataset && node.dataset.djangoShellOverlayOwner || "");
+      return !!owner && actual === owner;
+    }
+
+    /** Finds the live owner-matched body portal even when the overlay root keeps a stale node reference. */
+    function __dsoOwnedWidgetPortal(root, ownerToken) {
+      const owner = __dsoWidgetOwnerToken(root, ownerToken);
+      const direct = document.getElementById("django-shell-overlay-widget-root");
+      if (__dsoWidgetPortalMatches(direct, owner)) { return direct; }
+      const referenced = root && root.__dsoWidgetRoot;
+      return __dsoWidgetPortalMatches(referenced, owner) ? referenced : null;
+    }
+
+    /** Asks Monaco to close transient popups and releases text focus without deleting editor-owned DOM. */
+    function __dsoDismissOverlayWidgets(root) {
+      const editor = root && root.__djangoShellEditor;
+      if (!editor) { return; }
+      const actions = ["hideSuggestWidget", "editor.action.hideHover", "closeParameterHints"];
+      for (let index = 0; index < actions.length; index++) {
+        try { editor.trigger && editor.trigger("django-shell-overlay", actions[index], {}); } catch (eDismissAction) {}
+      }
+      try { editor.blur && editor.blur(); } catch (eDismissEditorBlur) {}
+      try {
+        const editorNode = editor.getDomNode && editor.getDomNode();
+        const input = editorNode && editorNode.querySelector && editorNode.querySelector("textarea.inputarea,textarea");
+        if (input && input.blur) { input.blur(); }
+      } catch (eDismissBlur) {}
+    }
+
+    /** Forces the owner-matched body portal hidden and inert, or explicitly restores native popup visibility. */
+    window.__dsoSetOverlayWidgetVisibility = function (root, visible, dismiss) {
+      if (visible && root && (root.__dsoExplicitlyParked || root.__dsoGeometryParked || root.__dsoGeometryWidgetParked || root.__dsoHasActiveConsoleGroup === false || root.style && (root.style.display === "none" || root.style.visibility === "hidden"))) { visible = false; }
+      if (!visible && dismiss) { __dsoDismissOverlayWidgets(root); }
+      const layerRoot = __dsoOwnedWidgetPortal(root);
+      if (!layerRoot) { return "no-widget-portal"; }
+      if (visible) {
+        layerRoot.style.removeProperty("display");
+        layerRoot.style.removeProperty("visibility");
+        layerRoot.style.removeProperty("opacity");
+        layerRoot.style.removeProperty("pointer-events");
+        layerRoot.removeAttribute("aria-hidden");
+        try { delete layerRoot.dataset.djangoShellOverlayParked; } catch (eRestoreParkedData) {}
+        return "visible";
+      }
+      layerRoot.style.setProperty("display", "none", "important");
+      layerRoot.style.setProperty("visibility", "hidden", "important");
+      layerRoot.style.setProperty("opacity", "0", "important");
+      layerRoot.style.setProperty("pointer-events", "none", "important");
+      layerRoot.setAttribute("aria-hidden", "true");
+      try { layerRoot.dataset.djangoShellOverlayParked = "true"; } catch (eHideParkedData) {}
+      return "hidden";
+    };
+
+    /** Removes a disposed overlay's owner-matched body portal without touching another overlay instance. */
+    window.__dsoRemoveOverlayWidgetPortal = function (root, ownerToken) {
+      const layerRoot = __dsoOwnedWidgetPortal(root, ownerToken);
+      if (!layerRoot) { return "no-widget-portal"; }
+      try { layerRoot.parentElement && layerRoot.parentElement.removeChild(layerRoot); } catch (eRemoveWidgetPortal) { return "remove-widget-portal-failed"; }
+      if (root && root.__dsoWidgetRoot === layerRoot) { root.__dsoWidgetRoot = null; root.__dsoWidgetLayer = null; }
+      return "removed";
+    };
 
     /** Keeps the body-level popup layer aligned to Monaco's editor-relative overflow-widget coordinates. */
     window.__dsoSyncOverlayWidgetLayer = function (root) {
@@ -123,6 +193,9 @@ export function overlayWidgetRendererSource(): string {
       root.__dsoWidgetRoot = layerRoot;
       root.__dsoWidgetLayer = layer;
       __dsoSyncWidgetTheme(layerRoot, true);
+      if ((root.style && (root.style.display === "none" || root.style.visibility === "hidden")) || root.__dsoExplicitlyParked || root.__dsoGeometryParked || root.__dsoGeometryWidgetParked) {
+        window.__dsoSetOverlayWidgetVisibility(root, false, false);
+      }
       __dsoInstallWidgetClamp(root);
       __dsoInstallWidgetLinkRouter(root);
       window.__dsoSyncOverlayWidgetLayer(root);

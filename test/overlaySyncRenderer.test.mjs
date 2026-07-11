@@ -45,6 +45,53 @@ test("routes popup file links through the bridge and leaves command links to the
   assert.equal(reinstalls, 0);
 });
 
+test("parks and restores only the owner-matched body widget portal", () => {
+  const source = overlayWidgetRendererSource();
+  const values = new Map();
+  const priorities = new Map();
+  const attributes = new Map();
+  const style = {
+    display: "",
+    visibility: "",
+    removeProperty(name) { values.delete(name); priorities.delete(name); },
+    setProperty(name, value, priority) { values.set(name, value); priorities.set(name, priority); }
+  };
+  const portal = {
+    dataset: { djangoShellOverlayOwner: "owner-a" },
+    isConnected: true,
+    parentElement: { removeChild(node) { node.isConnected = false; } },
+    removeAttribute(name) { attributes.delete(name); },
+    setAttribute(name, value) { attributes.set(name, value); },
+    style
+  };
+  const document = { getElementById: (id) => id === "django-shell-overlay-widget-root" ? portal : undefined };
+  const window = { __djangoShellOverlayOwnerToken: "owner-a" };
+  const actions = [];
+  let editorBlurs = 0;
+  let inputBlurs = 0;
+  const editor = { blur() { editorBlurs += 1; }, getDomNode: () => ({ querySelector: () => ({ blur() { inputBlurs += 1; } }) }), trigger(_source, action) { actions.push(action); } };
+  const root = { __djangoShellEditor: editor, __dsoHasActiveConsoleGroup: true, __dsoOwnerToken: "owner-a", __dsoWidgetRoot: portal, style: { display: "block", visibility: "visible" } };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { remove: window.__dsoRemoveOverlayWidgetPortal, setVisible: window.__dsoSetOverlayWidgetVisibility };`)(window, document, () => undefined);
+
+  assert.equal(api.setVisible(root, false, true), "hidden");
+  assert.deepEqual(Object.fromEntries(values), { display: "none", opacity: "0", "pointer-events": "none", visibility: "hidden" });
+  assert.ok([...priorities.values()].every((priority) => priority === "important"));
+  assert.equal(attributes.get("aria-hidden"), "true");
+  assert.deepEqual(actions, ["hideSuggestWidget", "editor.action.hideHover", "closeParameterHints"]);
+  assert.equal(editorBlurs, 1);
+  assert.equal(inputBlurs, 1);
+
+  assert.equal(api.setVisible(root, true, false), "visible");
+  assert.equal(values.size, 0);
+  assert.equal(attributes.has("aria-hidden"), false);
+  root.__dsoExplicitlyParked = true;
+  assert.equal(api.setVisible(root, true, false), "hidden", "an explicitly parked root cannot revive its portal");
+  assert.equal(api.remove(null, "owner-b"), "no-widget-portal", "an older overlay cannot remove a newer owner's portal");
+  assert.equal(portal.isConnected, true);
+  assert.equal(api.remove(null, "owner-a"), "removed");
+  assert.equal(portal.isConnected, false);
+});
+
 test("emits parseable workbench overlay renderer source", () => {
   assert.equal(typeof Function(overlayRendererSource("file:///tmp/console-cell.py")), "function");
 });

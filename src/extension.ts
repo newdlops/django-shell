@@ -11,6 +11,7 @@ import { type BackendCommitResult, type BackendFilterFieldTree, type BackendMode
 import { ModelBrowser } from "./modelBrowser";
 import { ModelQueryConsole } from "./modelQueryConsole";
 import { ModelCatalog } from "./modelCatalog";
+import { registerDjangoShellNativeDebugAdapter } from "./nativeDebugAdapter";
 import { NOTEBOOK_TYPE } from "./notebookConstants";
 import { DjangoConsoleSerializer } from "./notebookSerializer";
 import { RuntimeInspector } from "./runtimeInspector";
@@ -143,6 +144,7 @@ class LazyRuntimeSource implements vscode.Disposable {
 export function activate(context: vscode.ExtensionContext): void {
   const output = lazyOutputChannel(context);
   const diagnostics = new DiagnosticLogger(output);
+  registerDjangoShellNativeDebugAdapter(context);
   if (diagnostics.enabled()) {
     const channel = output();
     channel.appendLine(`[${new Date().toISOString()}] diagnostics.active — logging the shell session (shell.out), backend requests, and overlay activity. Set djangoShell.diagnosticLogging=false to disable.`);

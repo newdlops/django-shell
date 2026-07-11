@@ -13,6 +13,7 @@ Unlike tools that spawn their own Python or parse your code statically, every fe
 - [Quick start](#quick-start)
 - [Features](#features)
   - [Custom console (REPL)](#custom-console-repl)
+  - [Debugger engines](#debugger-engines)
   - [Workbench overlay editor](#workbench-overlay-editor)
   - [IntelliSense model](#intellisense-model)
   - [Runtime inspector](#runtime-inspector)
@@ -99,6 +100,15 @@ Code runs in the **same live namespace** as the attached shell. From there you c
 - After the backend attaches, provides a Python input editor and runs code in the live shell namespace, capturing **stdout, stderr, the repr of the last expression, and tracebacks**.
 - Multi-line input: leading statements execute, and the final expression's value is shown (and bound to `_`), mirroring an interactive REPL.
 - **Restart Kernel** clears stale editor input, generated preludes, and runtime caches.
+
+### Debugger engines
+
+`Django Shell: Debug Current Shell` supports two engines through `djangoShell.debug.engine`:
+
+- **debugpy** is the stable default and retains local plus SSH/kubectl workflows.
+- **experimental** is a dependency-free native tracer built directly into Django Shell. It starts on the first debug request with no additional extension, package installation, or Python-environment setup, and supports conditional breakpoints, hit conditions, logpoints, variable editing, lazy object inspection, exception breakpoints, and deep hot reload of loaded workspace modules.
+
+The built-in engine supports shells running on the same extension host/filesystem, including VS Code Remote workspaces. Keep debugpy selected when the terminal itself enters a separate SSH/kubectl target. Once either engine has started in a Python process, switching engines requires **Restart Kernel**; selecting experimental before its first debug run needs no restart.
 
 ### Workbench overlay editor
 
@@ -213,6 +223,8 @@ In the ORM query console: **Ctrl/Cmd+Enter** runs the query.
 
 | Setting | Default | Description |
 | --- | --- | --- |
+| `djangoShell.debug.engine` | `"debugpy"` | Debugger backend: stable `debugpy`, or the built-in dependency-free `experimental` tracer. Experimental starts on demand without modifying the Python environment. |
+| `djangoShell.debug.hotReload` | `true` | Reload changed workspace Python modules while the built-in experimental engine is active. Generated files, migrations, virtual environments, and third-party packages are excluded. |
 | `djangoShell.modelBrowser.transport` | `"orm"` | Default transport for the model data browser, console, and query console: `orm` (run reads as your own literal Django ORM cells so a live `pre_run_cell` audit logs ORM, not RPC plumbing — needs `shell_plus`/IPython), `pty`/Terminal (compact reconstructed cells, works over remote SSH/`kubectl`), `auto` (socket first, terminal fallback), or `tcp`/Socket. Switchable per-panel via the `Link:` selector. |
 | `djangoShell.autoImportModels` | `true` | Bind your workspace's model classes (and `django`/`apps`/`settings`/`models`) into the shell namespace at startup, like `shell_plus`, so names in the editor analysis prelude are importable. Base names and every registered model are bound regardless; this setting only controls the deeper module scan. Set `false` to skip it. |
 | `djangoShell.autoActivateWorkspaceVenv` | `true` | Prepend a workspace `.venv`/`venv` to the setup terminal environment when present. |

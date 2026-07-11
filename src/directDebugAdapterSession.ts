@@ -1,8 +1,8 @@
-// Direct debugpy Debug Adapter Protocol client for overlay-owned debugging.
+// Engine-neutral Debug Adapter Protocol client for overlay-owned debugging.
 
 import * as net from "net";
 import type { DebugRequestSession } from "./debugAdapterTypes";
-import type { DebugpyEndpoint } from "./debugShell";
+import { DJANGO_SHELL_NATIVE_DEBUG_TYPE, type DjangoShellDebugEngine } from "./debugEngine";
 import { buildDebugpySteppingRules } from "./debugSteppingRules";
 import type { DiagnosticLogger } from "./diagnostics";
 
@@ -11,6 +11,11 @@ interface PendingRequest { command: string; reject(error: Error): void; resolve(
 interface EventWaiter { reject(error: Error): void; resolve(body: unknown): void; timer: ReturnType<typeof setTimeout>; }
 export interface StoppedEventBody { reason?: string; threadId?: number; }
 export interface ContinuedEventBody { allThreadsContinued?: boolean; threadId?: number; }
+
+export interface DirectDebugAdapterEndpoint {
+  host: string;
+  port: number;
+}
 
 export interface DirectDebugAdapterHooks {
   onContinued?(body: ContinuedEventBody): void;
@@ -22,6 +27,7 @@ export interface DirectDebugAdapterHooks {
 export interface DirectDebugAdapterAttachOptions {
   cwd?: string;
   django?: boolean;
+  engine?: DjangoShellDebugEngine;
   justMyCode?: boolean;
   name?: string;
   pathMappings?: Array<{ localRoot: string; remoteRoot: string }>;
@@ -30,9 +36,9 @@ export interface DirectDebugAdapterAttachOptions {
 const REQUEST_TIMEOUT_MS = 20000;
 const INITIALIZE_TIMEOUT_MS = 5000;
 
-/** Maintains a direct DAP connection to debugpy without creating a VS Code DebugSession. */
+/** Maintains a direct DAP connection without creating a VS Code DebugSession. */
 export class DirectDebugAdapterSession implements DebugRequestSession {
-  readonly id = `direct-debugpy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  readonly id = `direct-debug-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   private attached = false;
   private buffer = Buffer.alloc(0);
   private nextSeq = 1;
@@ -44,8 +50,8 @@ export class DirectDebugAdapterSession implements DebugRequestSession {
   /** Stores event hooks used by the custom overlay debugger UI. */
   constructor(private readonly hooks: DirectDebugAdapterHooks = {}, private readonly logger?: DiagnosticLogger) {}
 
-  /** Connects to debugpy, attaches, lets callers set breakpoints, then completes configuration. */
-  async attach(endpoint: DebugpyEndpoint, beforeConfigurationDone?: () => Promise<void>, options: DirectDebugAdapterAttachOptions = {}): Promise<void> {
+  /** Connects to a DAP endpoint, lets callers set breakpoints, then completes configuration. */
+  async attach(endpoint: DirectDebugAdapterEndpoint, beforeConfigurationDone?: () => Promise<void>, options: DirectDebugAdapterAttachOptions = {}): Promise<void> {
     try {
       await this.attachOnce(endpoint, beforeConfigurationDone, options);
     } catch (error) {
@@ -57,11 +63,11 @@ export class DirectDebugAdapterSession implements DebugRequestSession {
     }
   }
 
-  /** Performs one direct debugpy attach handshake over a fresh DAP socket. */
-  private async attachOnce(endpoint: DebugpyEndpoint, beforeConfigurationDone?: () => Promise<void>, options: DirectDebugAdapterAttachOptions = {}): Promise<void> {
+  /** Performs one direct attach handshake over a fresh DAP socket. */
+  private async attachOnce(endpoint: DirectDebugAdapterEndpoint, beforeConfigurationDone?: () => Promise<void>, options: DirectDebugAdapterAttachOptions = {}): Promise<void> {
     await this.openSocket(endpoint);
-    await this.customRequest("initialize", { adapterID: "python", clientID: "django-shell-overlay", columnsStartAt1: true, linesStartAt1: true, pathFormat: "path", supportsVariablePaging: true, supportsVariableType: true });
-    const attach = this.customRequest("attach", attachArguments(options));
+    await this.customRequest("initialize", buildDirectDebugAdapterInitializeArguments(options));
+    const attach = this.customRequest("attach", buildDirectDebugAdapterAttachArguments(options));
     await this.waitForEvent("initialized", 5000).catch(() => undefined);
     await beforeConfigurationDone?.();
     await this.customRequest("configurationDone", {});
@@ -106,7 +112,7 @@ export class DirectDebugAdapterSession implements DebugRequestSession {
   dispose(): void { void this.disconnect(); }
 
   /** Opens the TCP socket and wires protocol parsing. */
-  private openSocket(endpoint: DebugpyEndpoint): Promise<void> {
+  private openSocket(endpoint: DirectDebugAdapterEndpoint): Promise<void> {
     if (this.socket && !this.socket.destroyed) { return Promise.resolve(); }
     return new Promise<void>((resolve, reject) => {
       const socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
@@ -230,15 +236,23 @@ function isInitializeTimeout(error: unknown): boolean {
   return error instanceof Error && error.message.includes("DAP request timed out: initialize");
 }
 
-/** Builds debugpy attach arguments for overlay-owned sessions. */
-function attachArguments(options: DirectDebugAdapterAttachOptions): Record<string, unknown> {
-  const args: Record<string, unknown> = { django: options.django ?? true, justMyCode: options.justMyCode ?? false, name: options.name ?? "Django Shell Overlay", request: "attach", rules: buildDebugpySteppingRules(), showReturnValue: true, steppingResumesAllThreads: false, subProcess: false, type: "python" };
+/** Builds initialize arguments appropriate for the selected direct debug adapter. */
+export function buildDirectDebugAdapterInitializeArguments(options: DirectDebugAdapterAttachOptions): Record<string, unknown> {
+  return { adapterID: options.engine === "experimental" ? DJANGO_SHELL_NATIVE_DEBUG_TYPE : "python", clientID: "django-shell-overlay", columnsStartAt1: true, linesStartAt1: true, pathFormat: "path", supportsVariablePaging: true, supportsVariableType: true };
+}
+
+/** Builds engine-specific attach arguments for an overlay-owned direct session. */
+export function buildDirectDebugAdapterAttachArguments(options: DirectDebugAdapterAttachOptions): Record<string, unknown> {
+  const args: Record<string, unknown> = { name: options.name ?? "Django Shell Overlay", request: "attach" };
+  if (options.engine !== "experimental") {
+    Object.assign(args, { django: options.django ?? true, justMyCode: options.justMyCode ?? false, rules: buildDebugpySteppingRules(), showReturnValue: true, steppingResumesAllThreads: false, subProcess: false, type: "python" });
+  }
   if (options.cwd) { args.cwd = options.cwd; }
   if (options.pathMappings?.length) { args.pathMappings = options.pathMappings; }
   return args;
 }
 
-/** Waits briefly before retrying a stale debugpy adapter connection. */
+/** Waits briefly before retrying a stale adapter connection. */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

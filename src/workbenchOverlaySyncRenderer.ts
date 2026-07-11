@@ -143,6 +143,7 @@ export function overlaySyncRendererSource(): string {
       root.__dsoMultilineMode = false;
       root.__dsoLastEnterRunAt = 0;
       root.style.visibility = "hidden";
+      try { if (window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, false, false); } } catch (eHideVisibleTextWidgets) {}
       root.__dsoSuppressModelSync = true;
       root.__dsoPreludeRepairing = true;
       try {
@@ -164,6 +165,7 @@ export function overlaySyncRendererSource(): string {
       root.__dsoHasAppliedInitialText = true;
       try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eVisibleTextBreakpoints) {}
       root.style.visibility = oldVisibility || "visible";
+      try { if (window.__dsoSetOverlayWidgetVisibility && root.style.display !== "none" && root.style.visibility !== "hidden") { window.__dsoSetOverlayWidgetVisibility(root, true, false); } } catch (eRestoreVisibleTextWidgets) {}
       return "ok";
     };
 

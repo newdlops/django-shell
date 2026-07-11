@@ -2,7 +2,7 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "0.0.907025",
+  "version": "0.1.0",
   "publisher": "newdlops",
   "license": "UNLICENSED",
   "icon": "media/icon.png",
@@ -45,6 +45,7 @@
     "vscode": "^1.92.0"
   },
   "activationEvents": [
+    "onDebug:django-shell-native",
     "onCommand:djangoShell.acceptInput",
     "onCommand:djangoShell.debugShell",
     "onCommand:djangoShell.debug.continue",
@@ -75,6 +76,40 @@
     "onRenderer:django-shell-terminal-renderer"
   ],
   "contributes": {
+    "debuggers": [
+      {
+        "type": "django-shell-native",
+        "label": "Django Shell Experimental",
+        "languages": [
+          "python"
+        ],
+        "configurationAttributes": {
+          "attach": {
+            "required": [
+              "host",
+              "port"
+            ],
+            "properties": {
+              "host": {
+                "type": "string",
+                "default": "127.0.0.1",
+                "description": "Loopback host of the embedded Django Shell tracer."
+              },
+              "port": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "Port of the embedded Django Shell tracer."
+              },
+              "__djangoShellSession": {
+                "type": "boolean",
+                "default": true
+              }
+            }
+          }
+        }
+      }
+    ],
     "commands": [
       {
         "command": "djangoShell.openConsole",
@@ -507,6 +542,24 @@
           "type": "boolean",
           "default": true,
           "description": "When true (default), Django Shell logs the shell session, backend requests, and overlay activity to its 'Django Shell' output channel for diagnosis. Set to false to disable."
+        },
+        "djangoShell.debug.engine": {
+          "type": "string",
+          "enum": [
+            "debugpy",
+            "experimental"
+          ],
+          "enumDescriptions": [
+            "Stable default using debugpy inside the live Django shell.",
+            "Built-in dependency-free tracer. Starts on demand with no extra extension or runtime setup."
+          ],
+          "default": "debugpy",
+          "markdownDescription": "Debugger engine for Django Shell. **debugpy** remains the stable default. **experimental** is built into this extension and starts on demand without installing another extension or modifying the Python environment. Switching engines still requires Restart Kernel because one Python process can own only one tracing engine."
+        },
+        "djangoShell.debug.hotReload": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When the built-in **experimental** engine is active, reload changed workspace Python modules in the live Django shell. This setting applies immediately. Generated `.django-shell` files, migrations, virtual environments, and third-party packages are excluded."
         },
         "djangoShell.debug.listenHost": {
           "type": "string",

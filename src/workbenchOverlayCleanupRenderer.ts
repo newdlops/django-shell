@@ -31,7 +31,10 @@ export function overlayCleanupRendererSource(): string {
     /** Drops overlay-owned widgets from global workbench capture lists. */
     function __dsoForgetOverlayCapture(editor) {
       const caps = window.__dsoCaptures || {};
-      __dsoForgetFromList(caps.widgets, editor);
+      if (editor) { __dsoForgetFromList(caps.widgets, editor); }
+      else if (caps.widgets) { caps.widgets.length = 0; }
+      const exact = window.__dsoExactCapture || {};
+      if (!editor || exact.widget === editor) { exact.widget = null; }
     }
 
     /** Saves the latest editor text before the overlay editor is destroyed. */
@@ -73,8 +76,12 @@ export function overlayCleanupRendererSource(): string {
     /** Disposes all listeners and models owned by the overlay root. */
     window.__dsoDisposeOverlay = function (root, force) {
       root = root || document.getElementById("django-shell-overlay");
-      if (!root) { return "no-overlay"; }
+      if (!root) {
+        try { if (window.__dsoStopOverlayCapture) { window.__dsoStopOverlayCapture(window.__djangoShellOverlayOwnerToken); } } catch (eStopOrphanCapture) {}
+        try { const report = window.__dsoRemoveOverlayWidgetPortal ? window.__dsoRemoveOverlayWidgetPortal(null, window.__djangoShellOverlayOwnerToken) : ""; return report === "removed" ? "orphan-widget-removed" : "no-overlay"; } catch (eRemoveOrphanWidgetRoot) { return "no-overlay"; }
+      }
       if (!force && root.__dsoOwnerToken && root.__dsoOwnerToken !== window.__djangoShellOverlayOwnerToken) { return "owner-mismatch"; }
+      try { if (window.__dsoStopOverlayCapture) { window.__dsoStopOverlayCapture(root.__dsoOwnerToken); } } catch (eStopCapture) {}
       const editor = root.__djangoShellEditor;
       const model = __dsoOverlayModel(editor);
       __dsoRememberOverlayText(root, editor);
@@ -88,7 +95,7 @@ export function overlayCleanupRendererSource(): string {
       __dsoForgetOverlayCapture(editor);
       __dsoDisposeValue(editor);
       if (__dsoIsOverlayModel(model)) { __dsoDisposeValue(model); }
-      try { root.__dsoWidgetRoot && root.__dsoWidgetRoot.parentElement && root.__dsoWidgetRoot.parentElement.removeChild(root.__dsoWidgetRoot); } catch (eRemoveWidgetRoot) {}
+      try { if (window.__dsoRemoveOverlayWidgetPortal) { window.__dsoRemoveOverlayWidgetPortal(root, root.__dsoOwnerToken); } else if (root.__dsoWidgetRoot && root.__dsoWidgetRoot.parentElement) { root.__dsoWidgetRoot.parentElement.removeChild(root.__dsoWidgetRoot); } } catch (eRemoveWidgetRoot) {}
       try { root.parentElement ? root.parentElement.removeChild(root) : (root.style.display = "none"); } catch (eRemoveRoot) {}
       try { __dsoPost({ type: "log", event: "dispose", hadEditor: !!editor, hadModel: !!model }); } catch (eLogDispose) {}
       return "ok";

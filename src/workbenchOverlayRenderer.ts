@@ -3,6 +3,7 @@ import { overlaySyncRendererSource } from "./workbenchOverlaySyncRenderer";
 import { overlayWidgetRendererSource } from "./workbenchOverlayWidgetRenderer";
 import { overlayCleanupRendererSource } from "./workbenchOverlayCleanupRenderer";
 import { overlayFrameRendererSource } from "./workbenchOverlayFrameRenderer";
+import { overlayCaptureRendererSource } from "./workbenchOverlayCaptureRenderer";
 
 export interface OverlayRendererOptions {
   executionMode?: "shell" | "submit";
@@ -18,8 +19,13 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     const __dsoOverlayBridge = Object.assign({}, window.__djangoShellOverlayBridge || {});
     window.__djangoShellOverlayModelUri = __dsoOverlayModelUri;
     window.__dsoCaptures = window.__dsoCaptures || { widgets: [], insts: [], modelSvcs: [], ctors: [] };
-    window.__dsoBadModelSvcs = window.__dsoBadModelSvcs || []; window.__dsoGoodModelSvcs = window.__dsoGoodModelSvcs || [];
+    window.__dsoBadInsts = []; window.__dsoGoodInsts = [];
+    window.__dsoBadModelSvcs = []; window.__dsoGoodModelSvcs = [];
+    window.__dsoLastFactoryError = ""; window.__dsoLastModelError = "";
     window.__dsoWidgetCache = window.__dsoWidgetCache || (typeof WeakMap !== "undefined" ? new WeakMap() : null);
+    window.__dsoRejectedWidgets = typeof WeakSet !== "undefined" ? new WeakSet() : null;
+    window.__dsoSniffedWidgets = window.__dsoSniffedWidgets || (typeof WeakSet !== "undefined" ? new WeakSet() : null);
+    window.__dsoDomCaptureFallbackAfter = 0;
     /** Posts one renderer event to the extension-host bridge. */
     function __dsoPost(payload) {
       const bridge = __dsoOverlayBridge;
@@ -29,27 +35,84 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       const fallback = function (error) { window.__dsoLastPostError = String(error && error.message || error); window.__dsoLastPostType = payload && payload.type; window.__djangoShellOverlayBridgeFailedAt = Date.now(); window.__djangoShellOverlayBridgeFailedPort = bridge.port; return request("no-cors"); };
       return payload && payload.type === "run" ? request("cors").catch(fallback) : request("cors").catch(function (error) { return fallback(error).catch(function () { return undefined; }); });
     }
-    /** Returns whether a value looks like VS Code's CodeEditorWidget. */
+    /** Returns whether named members exist as real own or prototype properties without duck-typing a dynamic proxy. */
+    function __dsoHasMembers(value, names) {
+      if (!value) { return false; }
+      const found = Object.create(null);
+      let cursor = value;
+      for (let depth = 0; cursor && depth < 12; depth++) {
+        let keys = [];
+        try { keys = Object.getOwnPropertyNames(cursor); } catch (eMemberKeys) { return false; }
+        for (let index = 0; index < names.length; index++) { if (keys.indexOf(names[index]) >= 0) { found[names[index]] = true; } }
+        try { cursor = Object.getPrototypeOf(cursor); } catch (eMemberPrototype) { break; }
+      }
+      for (let index = 0; index < names.length; index++) { if (!found[names[index]]) { return false; } }
+      return true;
+    }
+    /** Detects a promise-like RPC result and consumes its rejection before callers discard it. */
+    function __dsoIsAsyncResult(value) {
+      let asyncResult = false;
+      try { asyncResult = !!(value && typeof value.then === "function"); } catch (eAsyncProbe) { return true; }
+      if (!asyncResult) { return false; }
+      try {
+        if (typeof value.catch === "function") { void value.catch(function () { return undefined; }); }
+        else { void Promise.resolve(value).catch(function () { return undefined; }); }
+      } catch (eAsyncCatch) {}
+      return true;
+    }
+    /** Returns whether a value has the structural members of VS Code's CodeEditorWidget. */
     function __dsoIsWidget(value) {
-      return !!(value && typeof value.layout === "function" && typeof value.getModel === "function" && typeof value.getDomNode === "function");
+      return __dsoHasMembers(value, ["layout", "getModel", "getDomNode"]);
+    }
+    /** Returns whether a widget is a local live editor rather than an RPC proxy with synthetic methods. */
+    function __dsoIsLiveWidget(value) {
+      if (!__dsoIsWidget(value)) { return false; }
+      const rejected = window.__dsoRejectedWidgets;
+      try { if (rejected && rejected.has(value)) { return false; } } catch (eRejectedWidgetRead) {}
+      try { if (/^bound(?: |$)/.test(String(value.constructor && value.constructor.name || ""))) { return false; } } catch (eWidgetCtor) { return false; }
+      try {
+        const node = value.getDomNode();
+        if (__dsoIsAsyncResult(node)) { try { rejected && rejected.add(value); } catch (eRejectedWidgetAsync) {} return false; }
+        const live = !!(node && (node.nodeType === 1 || typeof node.tagName === "string"));
+        return live;
+      } catch (eLiveWidget) { try { rejected && rejected.add(value); } catch (eRejectedWidgetError) {} return false; }
     }
     /** Returns whether a value looks like VS Code's instantiation service. */
     function __dsoIsInst(value) {
-      return !!(value && typeof value.createInstance === "function" && typeof value.invokeFunction === "function" && typeof value.createModel !== "function" && typeof value.getModel !== "function");
+      return __dsoHasMembers(value, ["createInstance", "invokeFunction"]) && !__dsoHasMembers(value, ["createModel", "getModel"]);
     }
-    /** Returns whether an object owns one property without invoking proxy traps. */
-    function __dsoOwn(value, key) { return !!(value && Object.prototype.hasOwnProperty.call(value, key)); }
     /** Returns whether a value looks like VS Code's model service. */
     function __dsoIsModelSvc(value) {
-      return !!(value && typeof value.createModel === "function" && typeof value.getModel === "function" && typeof value.getModels === "function" && (__dsoOwn(value, "onModelAdded") || __dsoOwn(value, "onModelRemoved") || __dsoOwn(value, "destroyModel")));
+      return __dsoHasMembers(value, ["createModel", "getModel", "getModels"]) && (__dsoHasMembers(value, ["onModelAdded"]) || __dsoHasMembers(value, ["onModelRemoved"]) || __dsoHasMembers(value, ["destroyModel"]));
     }
     /** Returns whether a value looks like VS Code's text model. */
     function __dsoIsTextModel(value) { return !!(value && value.uri && typeof value.getLanguageId === "function" && typeof value.getValue === "function" && typeof value.onDidChangeContent === "function"); }
+    /** Reads a local widget model synchronously while rejecting RPC-like results. */
+    function __dsoReadWidgetModel(widget, source) {
+      if (!__dsoIsLiveWidget(widget)) { return null; }
+      try {
+        const model = widget.getModel();
+        if (__dsoIsAsyncResult(model)) {
+          window.__dsoLastModelError = String(source || "widget-model") + ":async";
+          try { window.__dsoRejectedWidgets && window.__dsoRejectedWidgets.add(widget); } catch (eRejectAsyncModelWidget) {}
+          return null;
+        }
+        return model || null;
+      } catch (error) {
+        window.__dsoLastModelError = String(source || "widget-model") + ":" + String(error && error.message || error).slice(0, 120);
+        try { window.__dsoRejectedWidgets && window.__dsoRejectedWidgets.add(widget); } catch (eRejectModelWidget) {}
+        return null;
+      }
+    }
     /** Stores one captured object in a bounded unique list. */
     function __dsoRemember(list, value, limit) {
       if (!value || list.indexOf(value) >= 0 || list.length >= limit) { return; }
       list[list.length] = value;
     }
+    /** Returns whether an instantiation service already failed a synchronous local probe. */ function __dsoBadInst(value) { return window.__dsoBadInsts && window.__dsoBadInsts.indexOf(value) >= 0; }
+    /** Marks an instantiation service so later factory passes avoid repeated RPC probes. */ function __dsoRememberBadInst(value) { if (value && !__dsoBadInst(value)) { window.__dsoBadInsts[window.__dsoBadInsts.length] = value; } }
+    /** Returns whether an instantiation service already passed a synchronous local probe. */ function __dsoGoodInst(value) { return window.__dsoGoodInsts && window.__dsoGoodInsts.indexOf(value) >= 0; }
+    /** Marks an instantiation service as locally usable. */ function __dsoRememberGoodInst(value) { if (value && !__dsoGoodInst(value)) { window.__dsoGoodInsts[window.__dsoGoodInsts.length] = value; } }
     /** Returns whether a captured model service already failed a safe probe. */ function __dsoBadModelSvc(value) { return window.__dsoBadModelSvcs && window.__dsoBadModelSvcs.indexOf(value) >= 0; }
     /** Marks a captured model service so later probes skip it. */ function __dsoRememberBadModelSvc(value) { if (value && !__dsoBadModelSvc(value)) { window.__dsoBadModelSvcs[window.__dsoBadModelSvcs.length] = value; } }
     /** Returns whether a captured model service already passed a safe probe. */ function __dsoGoodModelSvc(value) { return window.__dsoGoodModelSvcs && window.__dsoGoodModelSvcs.indexOf(value) >= 0; }
@@ -70,10 +133,16 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     /** Returns an error string when an instantiation service is not usable. */
     function __dsoValidateInst(inst) {
       if (!__dsoIsInst(inst)) { return "missing-inst"; }
+      if (__dsoBadInst(inst)) { return "bad-inst:cached"; }
+      if (__dsoGoodInst(inst)) { return ""; }
       try {
-        inst.invokeFunction(function () { return true; });
+        const result = inst.invokeFunction(function () { return true; });
+        if (__dsoIsAsyncResult(result)) { __dsoRememberBadInst(inst); return "bad-inst:async"; }
+        if (result !== true) { __dsoRememberBadInst(inst); return "bad-inst:result"; }
+        __dsoRememberGoodInst(inst);
         return "";
       } catch (e) {
+        __dsoRememberBadInst(inst);
         return "bad-inst:" + String(e && e.message || e).slice(0, 120);
       }
     }
@@ -81,17 +150,26 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     function __dsoValidateModelSvc(modelSvc) {
       if (!__dsoIsModelSvc(modelSvc)) { return "missing-modelSvc"; }
       if (__dsoBadModelSvc(modelSvc)) { return "bad-modelSvc:cached"; }
-      __dsoRememberGoodModelSvc(modelSvc);
-      return "";
+      if (__dsoGoodModelSvc(modelSvc)) { return ""; }
+      try {
+        const models = modelSvc.getModels();
+        if (__dsoIsAsyncResult(models)) { __dsoRememberBadModelSvc(modelSvc); return "bad-modelSvc:async"; }
+        if (!Array.isArray(models)) { __dsoRememberBadModelSvc(modelSvc); return "bad-modelSvc:models"; }
+        __dsoRememberGoodModelSvc(modelSvc);
+        return "";
+      } catch (eModelSvcProbe) {
+        __dsoRememberBadModelSvc(modelSvc);
+        return "bad-modelSvc:" + String(eModelSvcProbe && eModelSvcProbe.message || eModelSvcProbe).slice(0, 120);
+      }
     }
     /** Scans one object for editor widget, instantiation service, and model service references. */
     function __dsoSniff(value) {
       const caps = window.__dsoCaptures;
       if (!value || typeof value !== "object") { return; }
-      if (__dsoIsWidget(value)) {
+      if (__dsoIsLiveWidget(value)) {
         __dsoRemember(caps.widgets, value, 40);
         __dsoRemember(caps.ctors, __dsoRealCtor(value), 8);
-        try { const model = value.getModel && value.getModel(); const URI = model && model.uri && model.uri.constructor; if (URI && typeof URI.parse === "function") { window.__dsoUriCtor = URI; } } catch (eWidgetUri) {}
+        try { const model = __dsoReadWidgetModel(value, "sniff-widget"); const URI = model && model.uri && model.uri.constructor; if (URI && typeof URI.parse === "function") { window.__dsoUriCtor = URI; } } catch (eWidgetUri) {}
         try { __dsoSniff(value._instantiationService); } catch (eDirectInst) {}
       }
       if (__dsoIsInst(value)) { __dsoRemember(caps.insts, value, 24); }
@@ -112,7 +190,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     function __dsoFindWidgetOn(element) {
       if (!element) { return null; }
       const cache = window.__dsoWidgetCache;
-      try { const cached = cache && cache.get(element); if (__dsoIsWidget(cached)) { return cached; } } catch (eWidgetCacheRead) {}
+      try { const cached = cache && cache.get(element); if (__dsoIsLiveWidget(cached)) { return cached; } } catch (eWidgetCacheRead) {}
       const keys = [];
       const seen = Object.create(null);
       try {
@@ -127,10 +205,10 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       for (let i = 0; i < keys.length; i++) {
         let value;
         try { value = element[keys[i]]; } catch (eRead) { continue; }
-        if (__dsoIsWidget(value)) { try { cache && cache.set(element, value); } catch (eWidgetCacheWidget) {} return value; }
+        if (__dsoIsLiveWidget(value)) { try { cache && cache.set(element, value); } catch (eWidgetCacheWidget) {} return value; }
         try {
-          if (__dsoIsWidget(value && value.editor)) { try { cache && cache.set(element, value.editor); } catch (eWidgetCacheEditor) {} return value.editor; }
-          if (__dsoIsWidget(value && value._editor)) { try { cache && cache.set(element, value._editor); } catch (eWidgetCacheUnderscore) {} return value._editor; }
+          if (__dsoIsLiveWidget(value && value.editor)) { try { cache && cache.set(element, value.editor); } catch (eWidgetCacheEditor) {} return value.editor; }
+          if (__dsoIsLiveWidget(value && value._editor)) { try { cache && cache.set(element, value._editor); } catch (eWidgetCacheUnderscore) {} return value._editor; }
         } catch (eNested) {}
       }
       try {
@@ -138,7 +216,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
         for (let i = 0; i < symbols.length; i++) {
           let value;
           try { value = element[symbols[i]]; } catch (eSymbolRead) { continue; }
-          if (__dsoIsWidget(value)) { try { cache && cache.set(element, value); } catch (eWidgetCacheSymbol) {} return value; }
+          if (__dsoIsLiveWidget(value)) { try { cache && cache.set(element, value); } catch (eWidgetCacheSymbol) {} return value; }
         }
       } catch (eSymbols) {}
       return null;
@@ -147,7 +225,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     /** Searches an editor DOM subtree and nearby ancestors for an editor widget reference. */
     function __dsoFindWidget(start) {
       const cache = window.__dsoWidgetCache;
-      try { const cached = cache && start && cache.get(start); if (__dsoIsWidget(cached)) { return cached; } } catch (eFindWidgetCacheRead) {}
+      try { const cached = cache && start && cache.get(start); if (__dsoIsLiveWidget(cached)) { return cached; } } catch (eFindWidgetCacheRead) {}
       const candidates = [];
       if (start) { candidates.push(start); }
       let parent = start && start.parentElement;
@@ -168,6 +246,9 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
 
     /** Captures widgets and services from already-visible workbench editors. */
     function __dsoScanDom() {
+      const now = Date.now();
+      if (window.__dsoLastDomCaptureScanAt && now - window.__dsoLastDomCaptureScanAt < 1200) { return; }
+      window.__dsoLastDomCaptureScanAt = now;
       const editors = document.querySelectorAll(".editor-group-container .monaco-editor, .monaco-editor");
       for (let i = 0; i < editors.length; i++) {
         const root = editors[i];
@@ -176,51 +257,106 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
         if (widget) { __dsoSniff(widget); }
       }
     }
+    ${overlayCaptureRendererSource()}
 
-    /** Returns whether DOM discovery has collected enough workbench services to construct an editor. */
-    function __dsoCaptureReady() {
-      const caps = window.__dsoCaptures || {};
-      return !!((caps.ctors || []).length && (caps.insts || []).length && (caps.modelSvcs || []).length);
-    }
+    /** Restarts capture immediately before the host opens its temporary warmup editor. */
+    window.__dsoArmOverlayCapture = function (ownerToken) {
+      if (ownerToken && ownerToken !== String(__dsoOverlayBridge.token || "")) { return "owner-mismatch"; }
+      const root = document.getElementById("django-shell-overlay");
+      if (root && root.__djangoShellEditor) { return "capture-ready:" + Number(window.__dsoCaptureGeneration || 0); }
+      __dsoStartCapture(true);
+      window.__dsoDomCaptureFallbackAfter = Date.now() + 700;
+      return "capture-armed:" + Number(window.__dsoCaptureGeneration || 0);
+    };
 
-    /** Schedules a short bounded series of non-invasive DOM scans while a warmup editor opens. */
-    function __dsoStartCapture() {
-      if (window.__dsoCaptureScanActive || __dsoCaptureReady()) { return; }
-      window.__dsoCaptureScanActive = true;
-      let attempts = 0;
-      const scan = function () {
-        attempts += 1;
-        try { __dsoScanDom(); } catch (error) { window.__dsoCaptureStartError = String(error && error.message || error); }
-        if (__dsoCaptureReady() || attempts >= 12) {
-          window.__dsoCaptureScanActive = false;
-          window.__dsoCaptureScanTimer = 0;
-          return;
-        }
-        window.__dsoCaptureScanTimer = window.setTimeout(scan, 100);
-      };
-      window.__dsoCaptureScanTimer = window.setTimeout(scan, 0);
-    }
+    /** Rearms the short exact-service lookup lease for a matching fallback transaction. */
+    window.__dsoRearmOverlayServiceLookup = function (ownerToken, generation) {
+      if (ownerToken && ownerToken !== String(__dsoOverlayBridge.token || "")) { return "owner-mismatch"; }
+      const current = Number(window.__dsoCaptureGeneration || 0);
+      if (Number(generation) !== current) { return "capture-stale:" + current; }
+      return __dsoStartServiceLookup(current) ? "service-lookup-armed:" + current : "service-lookup-inactive:" + current;
+    };
+
+    /** Stops temporary capture hooks owned by this overlay renderer. */
+    window.__dsoStopOverlayCapture = function (ownerToken, generation) {
+      if (ownerToken && ownerToken !== String(__dsoOverlayBridge.token || "")) { return "owner-mismatch"; }
+      const current = Number(window.__dsoCaptureGeneration || 0);
+      if (generation !== undefined && generation !== null && Number(generation) !== current) { return "capture-stale:" + current; }
+      __dsoStopCapture(current);
+      return "capture-stopped:" + current;
+    };
 
     /** Returns a captured editor factory when enough workbench internals are available. */
     function __dsoFactory() {
-      __dsoScanDom();
+      window.__dsoLastFactoryError = "";
+      if (window.__dsoDomCaptureFallbackAfter && Date.now() >= window.__dsoDomCaptureFallbackAfter) { __dsoScanDom(); }
       const caps = window.__dsoCaptures;
+      const exact = window.__dsoExactCapture || (window.__dsoExactCapture = {});
+      let instError = "missing-inst", modelSvcError = "missing-modelSvc", registryError = "";
+      if (exact.widget && !__dsoIsLiveWidget(exact.widget)) { exact.widget = null; exact.ctor = null; }
+      if (exact.inst) {
+        instError = __dsoValidateInst(exact.inst);
+        if (instError) { if (window.__dsoPreferredInst === exact.inst) { window.__dsoPreferredInst = null; } exact.inst = null; }
+      }
+      if (exact.modelSvc) {
+        modelSvcError = __dsoValidateModelSvc(exact.modelSvc);
+        if (modelSvcError) { if (window.__dsoPreferredModelSvc === exact.modelSvc) { window.__dsoPreferredModelSvc = null; } exact.modelSvc = null; }
+      }
+      try { __dsoScanCapturedServiceMaps(); } catch (eRegistryFactory) { registryError = "registry:" + String(eRegistryFactory && eRegistryFactory.message || eRegistryFactory).slice(0, 120); }
       for (let i = 0; i < caps.widgets.length; i++) {
         const widget = caps.widgets[i];
+        if (!__dsoIsLiveWidget(widget)) { continue; }
         __dsoRemember(caps.ctors, __dsoRealCtor(widget), 8);
-        __dsoSniff(widget);
+        const sniffed = window.__dsoSniffedWidgets;
+        let alreadySniffed = false;
+        try { alreadySniffed = !!(sniffed && sniffed.has(widget)); } catch (eSniffedRead) {}
+        if (!alreadySniffed) { __dsoSniff(widget); try { sniffed && sniffed.add(widget); } catch (eSniffedWrite) {} }
       }
       let inst = null;
       let modelSvc = null;
+      const exactInst = exact.inst, exactModelSvc = exact.modelSvc;
+      const preferredInst = window.__dsoPreferredInst, preferredModelSvc = window.__dsoPreferredModelSvc;
+      if (exactInst) { instError = __dsoValidateInst(exactInst); if (!instError) { inst = exactInst; } }
+      if (!inst && preferredInst && preferredInst !== exactInst) {
+        instError = __dsoValidateInst(preferredInst);
+        if (!instError) { inst = preferredInst; }
+        else if (window.__dsoPreferredInst === preferredInst) { window.__dsoPreferredInst = null; }
+      }
+      if (exactModelSvc) { modelSvcError = __dsoValidateModelSvc(exactModelSvc); if (!modelSvcError) { modelSvc = exactModelSvc; } }
+      if (!modelSvc && preferredModelSvc && preferredModelSvc !== exactModelSvc) {
+        modelSvcError = __dsoValidateModelSvc(preferredModelSvc);
+        if (!modelSvcError) { modelSvc = preferredModelSvc; }
+        else if (window.__dsoPreferredModelSvc === preferredModelSvc) { window.__dsoPreferredModelSvc = null; }
+      }
       for (let i = 0; i < caps.insts.length; i++) {
-        if (!__dsoValidateInst(caps.insts[i])) { inst = caps.insts[i]; break; }
+        if (inst) { break; }
+        const error = __dsoValidateInst(caps.insts[i]);
+        if (!error) { inst = caps.insts[i]; break; }
+        if (error !== "bad-inst:cached") { instError = error; }
       }
       for (let i = 0; i < caps.modelSvcs.length; i++) {
-        if (!__dsoValidateModelSvc(caps.modelSvcs[i])) { modelSvc = caps.modelSvcs[i]; break; }
+        if (modelSvc) { break; }
+        const error = __dsoValidateModelSvc(caps.modelSvcs[i]);
+        if (!error) { modelSvc = caps.modelSvcs[i]; break; }
+        if (error !== "bad-modelSvc:cached") { modelSvcError = error; }
       }
       let model = null;
-      if (!modelSvc) { for (let i = 0; i < caps.widgets.length; i++) { try { const candidate = caps.widgets[i].getModel && caps.widgets[i].getModel(); if (candidate && String(candidate.uri) === __dsoOverlayModelUri) { model = candidate; break; } } catch (eModel) {} } }
-      return caps.ctors[0] && inst && (modelSvc || model) ? { ctor: caps.ctors[0], inst: inst, model: model, modelSvc: modelSvc } : null;
+      if (!modelSvc) {
+        for (let i = 0; i < caps.widgets.length; i++) {
+          const candidate = __dsoReadWidgetModel(caps.widgets[i], "factory-widget");
+          try { if (candidate && String(candidate.uri) === __dsoOverlayModelUri) { model = candidate; break; } } catch (eFactoryModelUri) { window.__dsoLastModelError = "factory-widget-uri:" + String(eFactoryModelUri && eFactoryModelUri.message || eFactoryModelUri).slice(0, 120); }
+        }
+      }
+      let ctor = exact.ctor || window.__dsoPreferredCtor || null;
+      if (typeof ctor !== "function") { ctor = null; }
+      for (let i = 0; !ctor && i < caps.ctors.length; i++) { if (typeof caps.ctors[i] === "function") { ctor = caps.ctors[i]; } }
+      if (ctor && inst && (modelSvc || model)) { window.__dsoLastFactoryError = ""; return { ctor: ctor, inst: inst, model: model, modelSvc: modelSvc }; }
+      const missing = [];
+      if (!ctor) { missing[missing.length] = "ctor"; }
+      if (!inst) { missing[missing.length] = "inst(" + instError + ")"; }
+      if (!modelSvc && !model) { missing[missing.length] = "model(" + modelSvcError + ")"; }
+      window.__dsoLastFactoryError = (registryError ? registryError + ";" : "") + "missing:" + missing.join(",");
+      return null;
     }
 
     /** Returns a lightweight capture state summary. */
@@ -230,13 +366,22 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
         const root = document.getElementById("django-shell-overlay");
         const consoleRects = __dsoConsoleGroups();
         const boundFrame = root && root.__dsoFrame;
+        const candidatesReady = !!((caps.ctors || []).length && (caps.insts || []).length && (caps.modelSvcs || []).length);
+        let uriCtorReady = false;
+        try { uriCtorReady = !!(window.__dsoUriCtor && typeof window.__dsoUriCtor.parse === "function"); } catch (eStatusUriCtor) {}
         return "widgets=" + ((caps.widgets || []).length) +
           " insts=" + ((caps.insts || []).length) +
           " modelSvcs=" + ((caps.modelSvcs || []).length) +
           " ctors=" + ((caps.ctors || []).length) +
-          " factory=" + !!(root && root.__djangoShellEditor || __dsoCaptureReady()) +
+          " candidatesReady=" + candidatesReady +
+          " exactReady=" + __dsoCaptureReady() +
+          " uriCtor=" + uriCtorReady +
+          " badModelSvcs=" + ((window.__dsoBadModelSvcs || []).length) +
+          " factory=" + !!(root && root.__djangoShellEditor) +
           " consoleGroups=" + consoleRects.length +
           " consoleFrame=" + (boundFrame && consoleRects.length && __dsoFrameIsConsole(boundFrame, consoleRects) ? 1 : 0) +
+          " factoryError=" + String(window.__dsoLastFactoryError || "").slice(0, 160) +
+          " modelError=" + String(window.__dsoLastModelError || "").slice(0, 160) +
           " editorError=" + String(root && root.__dsoLastEditorError || "").slice(0, 120) +
           " widgetError=" + String(root && root.__dsoLastWidgetError || "").slice(0, 120) +
           " captureError=" + String(window.__dsoCaptureStartError || "");
@@ -246,16 +391,42 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     }
     /** Builds a Monaco URI from an already captured editor model or global Monaco. */
     function __dsoUri() {
-      try { if (window.__dsoUriCtor && typeof window.__dsoUriCtor.parse === "function") { return window.__dsoUriCtor.parse(__dsoOverlayModelUri); } } catch (eCachedUri) {}
       try {
+        if (window.__dsoUriCtor && typeof window.__dsoUriCtor.parse === "function") {
+          const cachedCtor = window.__dsoUriCtor;
+          const cachedUri = cachedCtor.parse(__dsoOverlayModelUri);
+          if (!__dsoIsAsyncResult(cachedUri) && cachedUri) { return cachedUri; }
+          if (window.__dsoUriCtor === cachedCtor) { window.__dsoUriCtor = null; }
+          window.__dsoLastModelError = "cached-uri:async";
+        }
+      } catch (eCachedUri) { window.__dsoUriCtor = null; window.__dsoLastModelError = "cached-uri:" + String(eCachedUri && eCachedUri.message || eCachedUri).slice(0, 120); }
+      try {
+        const exact = window.__dsoExactCapture || {};
+        const exactModel = __dsoReadWidgetModel(exact.widget, "uri-exact-widget");
+        const exactURI = exactModel && exactModel.uri && exactModel.uri.constructor;
+        if (exactURI && typeof exactURI.parse === "function") {
+          const exactUri = exactURI.parse(__dsoOverlayModelUri);
+          if (!__dsoIsAsyncResult(exactUri) && exactUri) { window.__dsoUriCtor = exactURI; return exactUri; }
+        }
         const widgets = (window.__dsoCaptures && window.__dsoCaptures.widgets) || [];
         for (let i = 0; i < widgets.length; i++) {
-          const model = widgets[i] && widgets[i].getModel && widgets[i].getModel();
+          if (widgets[i] === exact.widget) { continue; }
+          const model = __dsoReadWidgetModel(widgets[i], "uri-widget");
           const URI = model && model.uri && model.uri.constructor;
-          if (URI && typeof URI.parse === "function") { return URI.parse(__dsoOverlayModelUri); }
+          if (URI && typeof URI.parse === "function") {
+            const uri = URI.parse(__dsoOverlayModelUri);
+            if (!__dsoIsAsyncResult(uri) && uri) { window.__dsoUriCtor = URI; return uri; }
+          }
         }
-      } catch (eUri) {}
-      try { const URI = globalThis.monaco && globalThis.monaco.Uri || window.monaco && window.monaco.Uri; if (URI && typeof URI.parse === "function") { return URI.parse(__dsoOverlayModelUri); } } catch (eGlobalUri) {}
+      } catch (eUri) { window.__dsoLastModelError = "widget-uri:" + String(eUri && eUri.message || eUri).slice(0, 120); }
+      try {
+        const URI = globalThis.monaco && globalThis.monaco.Uri || window.monaco && window.monaco.Uri;
+        if (URI && typeof URI.parse === "function") {
+          const uri = URI.parse(__dsoOverlayModelUri);
+          if (!__dsoIsAsyncResult(uri) && uri) { window.__dsoUriCtor = URI; return uri; }
+        }
+      } catch (eGlobalUri) { window.__dsoLastModelError = "global-uri:" + String(eGlobalUri && eGlobalUri.message || eGlobalUri).slice(0, 120); }
+      if (!window.__dsoLastModelError) { window.__dsoLastModelError = "missing-uri-constructor"; }
       return null;
     }
     /** Returns a workbench-compatible Python language selection. */
@@ -268,27 +439,82 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     function __dsoNeedsWidgetPortalRebuild(root) {
       return !!(root && root.__djangoShellEditor && root.__dsoWidgetPortalVersion !== "body-constructor-v1");
     }
+    /** Disposes partially-created editor resources after a failed construction transaction. */
+    function __dsoRollbackWorkbenchResources(editor, ownedModel) {
+      if (editor && !__dsoIsAsyncResult(editor)) {
+        try { if (__dsoHasMembers(editor, ["dispose"])) { const disposed = editor.dispose(); __dsoIsAsyncResult(disposed); } } catch (eRollbackEditor) {}
+      }
+      if (ownedModel && !__dsoIsAsyncResult(ownedModel)) {
+        try { if (__dsoHasMembers(ownedModel, ["dispose"])) { const disposed = ownedModel.dispose(); __dsoIsAsyncResult(disposed); } } catch (eRollbackModel) {}
+      }
+    }
     /** Creates a real workbench CodeEditorWidget using captured VS Code services. */
     function __dsoCreateWorkbenchEditor(root, host, overflowWidgetsNode) {
       const factory = __dsoFactory();
       if (!factory) { return null; }
+      window.__dsoLastModelError = "";
       const uri = __dsoUri();
       let model = factory.model || null;
+      let ownedModel = null;
+      let serviceAttempted = false, serviceUnsafe = false, serviceError = "";
+      if (model && __dsoIsAsyncResult(model)) { model = null; window.__dsoLastModelError = "factory-model:async"; }
+      if (model) {
+        try { if (!model.uri) { model = null; window.__dsoLastModelError = "factory-model:missing-uri"; } }
+        catch (eFactoryModel) { model = null; window.__dsoLastModelError = "factory-model:" + String(eFactoryModel && eFactoryModel.message || eFactoryModel).slice(0, 120); }
+      }
+      if (!model && factory.modelSvc && !uri) {
+        window.__dsoLastModelError = window.__dsoLastModelError || "missing-uri-constructor";
+        return null;
+      }
       if (!model && factory.modelSvc && uri) {
         const text = window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", language = __dsoPythonLanguage();
-        try { model = factory.modelSvc.createModel(text, language, uri, false); } catch (eCreateModel) {
-        try { model = factory.modelSvc.getModel(uri); if (model && model.isDisposed && model.isDisposed()) { model = null; } if (model && model.getValue) { try { model.getValue(); } catch (eDisposedValue) { model = null; } } } catch (eGetModel) {}
-          if (!model) { __dsoRememberBadModelSvc(factory.modelSvc); return null; }
+        serviceAttempted = true;
+        try {
+          model = factory.modelSvc.createModel(text, language, uri, false);
+          if (__dsoIsAsyncResult(model)) { model = null; serviceUnsafe = true; serviceError = "create-model:async"; }
+          else if (model) { ownedModel = model; }
+        } catch (eCreateModel) { serviceError = "create-model:" + String(eCreateModel && eCreateModel.message || eCreateModel).slice(0, 120); }
+        if (!model && !serviceUnsafe) {
+          try {
+            model = factory.modelSvc.getModel(uri);
+            if (__dsoIsAsyncResult(model)) { model = null; serviceUnsafe = true; serviceError = "get-model:async"; }
+          } catch (eGetModel) { serviceError += (serviceError ? ";" : "") + "get-model:" + String(eGetModel && eGetModel.message || eGetModel).slice(0, 120); }
         }
       }
-      if (!model || !model.uri) { __dsoRememberBadModelSvc(factory.modelSvc); return null; }
+      if (model) {
+        try {
+          if (model.isDisposed) { const disposed = model.isDisposed(); if (__dsoIsAsyncResult(disposed) || disposed) { model = null; serviceUnsafe = true; serviceError = serviceError || "model-disposed"; } }
+          if (model && model.getValue) { const value = model.getValue(); if (__dsoIsAsyncResult(value)) { model = null; serviceUnsafe = true; serviceError = serviceError || "model-value:async"; } }
+        } catch (eModelProbe) { model = null; serviceError = serviceError || "model-probe:" + String(eModelProbe && eModelProbe.message || eModelProbe).slice(0, 120); }
+      }
+      let modelUri = null;
+      try { modelUri = model && model.uri; } catch (eModelUri) { serviceError = serviceError || "model-uri:" + String(eModelUri && eModelUri.message || eModelUri).slice(0, 120); }
+      if (!model || !modelUri) {
+        if (serviceAttempted) { __dsoRememberBadModelSvc(factory.modelSvc); }
+        window.__dsoLastModelError = serviceError || (serviceUnsafe ? "unsafe-model-service" : "missing-model");
+        __dsoRollbackWorkbenchResources(null, ownedModel);
+        return null;
+      }
       try { if (model && model.setLanguage) { model.setLanguage(__dsoPythonLanguage()); } } catch (eSetLanguage) {}
       try { if (globalThis.monaco && globalThis.monaco.editor && globalThis.monaco.editor.setModelLanguage) { globalThis.monaco.editor.setModelLanguage(model, "python"); } } catch (eSetModelLanguage) {}
       const options = { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
       const widgetOptions = { isSimpleWidget: false };
-      const editor = factory.inst.createInstance(factory.ctor, host, options, widgetOptions);
-      if (editor && editor.setModel) { editor.setModel(model); }
-      if (editor && editor.layout) { editor.layout(__dsoLayoutSize(root, host)); }
+      let editor = null;
+      try { editor = factory.inst.createInstance(factory.ctor, host, options, widgetOptions); }
+      catch (eCreateEditor) { __dsoRememberBadInst(factory.inst); __dsoRollbackWorkbenchResources(null, ownedModel); window.__dsoLastFactoryError = "create-editor:" + String(eCreateEditor && eCreateEditor.message || eCreateEditor).slice(0, 120); throw eCreateEditor; }
+      if (__dsoIsAsyncResult(editor)) { __dsoRememberBadInst(factory.inst); __dsoRollbackWorkbenchResources(null, ownedModel); window.__dsoLastFactoryError = "create-editor:async"; return null; }
+      let localWidgetShape = __dsoIsWidget(editor);
+      try { if (/^bound(?: |$)/.test(String(editor && editor.constructor && editor.constructor.name || ""))) { localWidgetShape = false; } } catch (eCreatedWidgetCtor) { localWidgetShape = false; }
+      if (!localWidgetShape) { __dsoRollbackWorkbenchResources(editor, ownedModel); window.__dsoLastFactoryError = "create-editor:not-local-widget"; return null; }
+      if (!__dsoHasMembers(editor, ["setModel"])) { __dsoRollbackWorkbenchResources(editor, ownedModel); window.__dsoLastFactoryError = "set-model:missing"; return null; }
+      try { const setResult = editor.setModel(model); if (__dsoIsAsyncResult(setResult)) { __dsoRollbackWorkbenchResources(editor, ownedModel); window.__dsoLastFactoryError = "set-model:async"; return null; } }
+      catch (eSetEditorModel) { __dsoRollbackWorkbenchResources(editor, ownedModel); window.__dsoLastFactoryError = "set-model:" + String(eSetEditorModel && eSetEditorModel.message || eSetEditorModel).slice(0, 120); throw eSetEditorModel; }
+      if (!__dsoIsLiveWidget(editor)) { __dsoRollbackWorkbenchResources(editor, ownedModel); window.__dsoLastFactoryError = "set-model:not-live-widget"; return null; }
+      try { if (editor.layout) { const layoutResult = editor.layout(__dsoLayoutSize(root, host)); if (__dsoIsAsyncResult(layoutResult)) { __dsoRollbackWorkbenchResources(editor, ownedModel); window.__dsoLastFactoryError = "layout:async"; return null; } } }
+      catch (eEditorLayout) { __dsoRollbackWorkbenchResources(editor, ownedModel); window.__dsoLastFactoryError = "layout:" + String(eEditorLayout && eEditorLayout.message || eEditorLayout).slice(0, 120); throw eEditorLayout; }
+      const exact = window.__dsoExactCapture || (window.__dsoExactCapture = {}), caps = window.__dsoCaptures || { widgets: [] };
+      exact.widget = editor; exact.ctor = __dsoRealCtor(editor); if (caps.widgets) { caps.widgets.length = 0; __dsoRemember(caps.widgets, editor, 40); }
+      window.__dsoLastFactoryError = ""; window.__dsoLastModelError = "";
       return editor;
     }
     /** Creates a standalone Monaco editor only when the workbench exposes the public API. */
@@ -308,7 +534,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       const host = root.querySelector(".django-shell-overlay-editor");
       host.textContent = "";
       const overflowWidgetsNode = __dsoOverflowWidgetsNode(root);
-      if (!root.__djangoShellEditor && !window.__dsoSkipWorkbenchEditor) { try { root.__djangoShellEditor = __dsoCreateWorkbenchEditor(root, host, overflowWidgetsNode); } catch (eWorkbench) { const msg = String(eWorkbench && eWorkbench.message || eWorkbench); root.__dsoLastEditorError = msg; if (/UNKNOWN service|Maximum call stack/.test(msg)) { window.__dsoSkipWorkbenchEditor = true; } } }
+      if (!root.__djangoShellEditor) { try { root.__djangoShellEditor = __dsoCreateWorkbenchEditor(root, host, overflowWidgetsNode); } catch (eWorkbench) { root.__dsoLastEditorError = String(eWorkbench && eWorkbench.message || eWorkbench); } }
       if (!root.__djangoShellEditor) { try { root.__djangoShellEditor = __dsoCreateGlobalMonacoEditor(root, host, overflowWidgetsNode); } catch (eGlobal) { root.__dsoLastEditorError = String(eGlobal && eGlobal.message || eGlobal); } }
       if (!root.__djangoShellEditor) {
         host.textContent = "Editor widget is waiting for VS Code editor services.";
@@ -417,11 +643,18 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       window.__djangoShellOverlayGeometry = geometry || window.__djangoShellOverlayGeometry || null;
       const rect = __dsoResolvedGeometry(root, window.__djangoShellOverlayGeometry);
       if (!rect) { return false; }
-      root.__dsoGeometryMissingSince = 0;
-      if (root.__dsoGeometryParked) {
+      if (root.__dsoHasActiveConsoleGroup === false) {
+        __dsoHandleGeometryMiss(root);
+      } else {
+        root.__dsoGeometryMissingSince = 0;
+        const restoreRoot = !!root.__dsoGeometryParked;
+        const restoreWidgets = restoreRoot || !!root.__dsoGeometryWidgetParked;
         root.__dsoGeometryParked = false;
-        if (root.__djangoShellEditor) { root.style.visibility = "visible"; }
-        try { if (root.__dsoWidgetRoot) { root.__dsoWidgetRoot.style.display = ""; } } catch (eRestoreWidgets) {}
+        root.__dsoGeometryWidgetParked = false;
+        if (root.__djangoShellEditor && !root.__dsoExplicitlyParked && root.style.display !== "none") {
+          if (restoreWidgets) { root.style.visibility = "visible"; }
+          try { if (restoreWidgets && window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, true, false); } } catch (eRestoreWidgets) {}
+        }
       }
       const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);
       const sizeKey = width + ":" + height;
@@ -462,11 +695,16 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     function __dsoHandleGeometryMiss(root) {
       if (!root) { return; }
       const now = Date.now();
-      if (!root.__dsoGeometryMissingSince) { root.__dsoGeometryMissingSince = now; return; }
+      if (!root.__dsoGeometryMissingSince) {
+        root.__dsoGeometryMissingSince = now;
+        root.__dsoGeometryWidgetParked = true;
+        try { if (window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, false, true); } } catch (eParkTransientWidgets) {}
+        return;
+      }
       if (now - root.__dsoGeometryMissingSince < 700) { return; }
       root.__dsoGeometryParked = true;
       root.style.visibility = "hidden";
-      try { if (root.__dsoWidgetRoot) { root.__dsoWidgetRoot.style.display = "none"; } } catch (eParkWidgets) {}
+      try { if (window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, false, true); } } catch (eParkWidgets) {}
     }
     /** Installs the overlay CSS once per workbench window. */
     function __dsoEnsureStyle() {
@@ -527,14 +765,19 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       }
       root.__dsoOwnerToken = requestedOwner;
       root.__dsoExecutionMode = ${JSON.stringify(executionMode)};
+      root.__dsoExplicitlyParked = false;
       try { root.dataset.djangoShellOverlayOwner = requestedOwner; } catch (eOwnerDataset) {}
       try { if (__dsoSyncWidgetTheme) { __dsoSyncWidgetTheme(root, true); } } catch (eRootTheme) {}
       __dsoInstallGeometrySync(root);
       root.__dsoUseVisiblePrelude = !!window.__djangoShellOverlayUseVisiblePrelude;
-      root.style.display = "block";
-      try { if (root.__dsoWidgetRoot) { root.__dsoWidgetRoot.style.display = ""; } } catch (eShowWidgets) {}
+      root.style.removeProperty("display"); root.style.display = "block";
+      if (!wasShown) { root.style.removeProperty("visibility"); root.style.visibility = "hidden"; try { if (window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, false, false); } } catch (eHoldWidgets) {} }
       if (!root.__dsoGeometryTimer) { root.__dsoGeometryTimer = window.setInterval(function () { if (root.style.display !== "none" && !__dsoApplyGeometry(root, window.__djangoShellOverlayGeometry) && root.__dsoHadConsoleFrame) { __dsoHandleGeometryMiss(root); } }, 250); }
-      if (!__dsoApplyGeometry(root, geometry)) { return "django-shell-overlay-shown:pending:no-webview-host:" + __dsoStatus(); }
+      if (!__dsoApplyGeometry(root, geometry)) {
+        root.__dsoGeometryWidgetParked = true;
+        try { if (window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, false, true); } } catch (ePendingWidgets) {}
+        return "django-shell-overlay-shown:pending:no-webview-host:" + __dsoStatus();
+      }
       const previousEditor = root.__djangoShellEditor;
       const editor = __dsoEnsureEditor(root);
       if (editor && editor !== previousEditor) { __dsoApplyGeometry(root, geometry); }
@@ -544,8 +787,10 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       if (editor && window.__dsoSetOverlayVisibleText && ((window.__dsoPendingOverlayVisibleText !== undefined && pendingOwnerMatches) || !root.__dsoHasAppliedInitialText)) {
         window.__dsoSetOverlayVisibleText(window.__dsoPendingOverlayVisibleText !== undefined && pendingOwnerMatches ? window.__dsoPendingOverlayVisibleText : window.__djangoShellOverlayInitialText, requestedOwner);
       }
-      root.style.visibility = editor ? "visible" : "hidden";
-      if (editor && editor.focus && !wasShown) { editor.focus(); }
+      const editorVisible = !!editor && !root.__dsoGeometryParked;
+      root.style.visibility = editorVisible ? "visible" : "hidden";
+      try { if (window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, editorVisible && root.__dsoHasActiveConsoleGroup !== false, false); } } catch (eShowWidgets) {}
+      if (editorVisible && editor.focus && !wasShown) { editor.focus(); }
       return editor ? "django-shell-overlay-shown:editor:" + __dsoStatus() : "django-shell-overlay-shown:pending:" + __dsoStatus();
     };
     window.__djangoShellOverlaySetGeometry = function (geometry, ownerToken) {

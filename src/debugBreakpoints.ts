@@ -3,7 +3,10 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import type { DebugRequestSession } from "./debugAdapterTypes";
+import { debugBreakpointKey, debugBreakpointPayload, type DebugBreakpointLocation } from "./debugBreakpointPayload";
 import type { DiagnosticLogger } from "./diagnostics";
+
+export type { DebugBreakpointLocation } from "./debugBreakpointPayload";
 
 interface DapBreakpoint {
   column?: number;
@@ -28,11 +31,6 @@ export interface DebugBreakpointSyncRequest {
   uri: vscode.Uri;
 }
 
-export interface DebugBreakpointLocation {
-  column?: number;
-  line: number;
-}
-
 /** Converts stale relative overlay breakpoint lines into generated source lines. */
 export function normalizeOverlayBreakpointLine(line: number, lineOffset: number): number {
   return line > 0 && line <= lineOffset ? line + lineOffset : line;
@@ -48,7 +46,7 @@ export async function syncDebugBreakpoints(request: DebugBreakpointSyncRequest):
     request.logger?.log("debug.breakpoints.skip", { breakpoints: JSON.stringify(breakpoints), lines: JSON.stringify(lines), path: request.uri.fsPath, reason: request.reason, session: false });
     return;
   }
-  const payload = { breakpoints: breakpoints.map((breakpoint) => breakpoint.column ? { column: breakpoint.column, line: breakpoint.line } : { line: breakpoint.line }), lines, source: { name: path.basename(request.uri.fsPath), path: request.uri.fsPath }, sourceModified: true };
+  const payload = { breakpoints: breakpoints.map(debugBreakpointPayload), lines, source: { name: path.basename(request.uri.fsPath), path: request.uri.fsPath }, sourceModified: true };
   request.logger?.log("debug.breakpoints.request", { breakpoints: JSON.stringify(breakpoints), dropped: requestedBreakpoints.length - breakpoints.length, lineOffset: request.lineOffset, lines: JSON.stringify(lines), path: request.uri.fsPath, reason: request.reason, requested: JSON.stringify(requestedBreakpoints), sessionId: request.session.id, sourceChars: request.sourceText?.length ?? 0, sourceLines });
   try {
     const response = await request.session.customRequest("setBreakpoints", payload) as DapSetBreakpointsResponse;
@@ -57,6 +55,19 @@ export async function syncDebugBreakpoints(request: DebugBreakpointSyncRequest):
   } catch (error) {
     request.logger?.log("debug.breakpoints.error", { error: error instanceof Error ? error.message : String(error), reason: request.reason, sessionId: request.session.id });
   }
+}
+
+/** Clears adapter-owned source breakpoints while leaving the user's VS Code breakpoint objects intact. */
+export async function clearDebugBreakpoints(session: DebugRequestSession | undefined, sourceUris: Iterable<string>, logger?: DiagnosticLogger): Promise<void> {
+  if (!session) { return; }
+  await Promise.all([...sourceUris].map(async (value) => {
+    try {
+      const uri = vscode.Uri.parse(value);
+      await session.customRequest("setBreakpoints", { breakpoints: [], lines: [], source: { name: path.basename(uri.fsPath), path: uri.fsPath }, sourceModified: false });
+    } catch (error) {
+      logger?.log("debug.breakpoints.clear.error", { error: error instanceof Error ? error.message : String(error), sessionId: session.id, uri: value });
+    }
+  }));
 }
 
 /** Returns compact primitive fields for one adapter breakpoint response. */
@@ -71,12 +82,13 @@ function normalizeBreakpointLocations(items: DebugBreakpointLocation[]): DebugBr
   for (const item of items) {
     const line = Math.floor(Number(item.line));
     const column = Math.max(0, Math.floor(Number(item.column) || 0));
-    const key = `${line}:${column}`;
+    const normalized = { ...item, column: column || undefined, line };
+    const key = debugBreakpointKey(normalized);
     if (!Number.isFinite(line) || line <= 0 || seen.has(key)) {
       continue;
     }
     seen.add(key);
-    result.push(column ? { column, line } : { line });
+    result.push(normalized);
   }
   return result.sort((left, right) => left.line - right.line || (left.column ?? 0) - (right.column ?? 0));
 }

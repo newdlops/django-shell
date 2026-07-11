@@ -16,6 +16,7 @@ export interface BackendEndpoint {
   cellCapture?: boolean;
   host: string;
   ipython?: boolean;
+  pid?: number;
   port: number;
   token: string;
 }

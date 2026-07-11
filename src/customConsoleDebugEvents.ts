@@ -146,7 +146,7 @@ function shouldIgnoreOverlayThreadEvent(threadId: number | undefined, pausedThre
 
 /** Returns whether a debug session belongs to this extension's shell attach flow. */
 function isDjangoShellSession(session: vscode.DebugSession): boolean {
-  return session.type === "python" && session.configuration.name === "Django Shell";
+  return session.configuration.__djangoShellSession === true || (session.type === "python" && session.configuration.name === "Django Shell");
 }
 
 /** Synchronizes breakpoints, then runs the current overlay input under the attached debugger. */

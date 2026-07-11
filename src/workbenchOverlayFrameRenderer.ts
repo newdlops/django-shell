@@ -97,6 +97,7 @@ export function overlayFrameRendererSource(panelTitle = "Django Shell"): string 
     /** Binds the overlay to the console webview without letting a closed console fall through to an unrelated webview. */
     function __dsoAttachRoot(root) {
       const entries = __dsoConsoleGroupEntries();
+      root.__dsoHasActiveConsoleGroup = entries.length > 0;
       const rects = entries.map(function (entry) { return entry.rect; });
       const owned = __dsoConsoleFrame(rects);
       if (owned) { root.__dsoHadConsoleFrame = true; }
