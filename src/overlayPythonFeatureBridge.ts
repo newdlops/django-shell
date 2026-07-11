@@ -4,17 +4,23 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { DiagnosticLogger } from "./diagnostics";
 import { closeGeneratedOverlayTabs } from "./generatedOverlayTabs";
+import { withLatencyBudget } from "./latencyBudget";
 import { OverlayCompletionRequestCache } from "./overlayCompletionRequestCache";
 import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
 
 const SEMANTIC_TOKEN_TYPES = ["namespace", "class", "function", "variable"];
 const SEMANTIC_LEGEND = new vscode.SemanticTokensLegend(SEMANTIC_TOKEN_TYPES);
+const COMPLETION_DEBOUNCE_MS = 30;
+const SIGNATURE_BUDGET_MS = 200;
+const SIGNATURE_DEBOUNCE_MS = 40;
 
 /** Forwards overlay editor language requests to the raw hidden analysis document. */
 export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider, vscode.DefinitionProvider, vscode.DocumentHighlightProvider, vscode.Disposable, vscode.HoverProvider, vscode.ReferenceProvider, vscode.SignatureHelpProvider {
   private readonly disposables: vscode.Disposable[] = [];
   private readonly completionCache: OverlayCompletionRequestCache;
+  private analysisSuggestionBusy = false;
   private cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  private signatureVersion = 0;
 
   /** Stores memory documents used for visible and analysis text. */
   constructor(private readonly documents: OverlayMemoryDocument, private readonly logger?: DiagnosticLogger) { this.completionCache = new OverlayCompletionRequestCache(logger); }
@@ -36,38 +42,64 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   /** Releases provider registrations. */
   dispose(): void {
     clearTimeout(this.cleanupTimer);
+    this.signatureVersion += 1;
+    this.completionCache.clear();
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
   }
 
+  /** Invalidates completion results and pending work after hidden imports change. */
+  invalidateCompletions(): void { this.completionCache.clear(); }
+
   /** Provides completions through the hidden analysis document. */
-  async provideCompletionItems(document: vscode.TextDocument, position: vscode.Position, _token: vscode.CancellationToken, context: vscode.CompletionContext): Promise<vscode.CompletionList | vscode.CompletionItem[] | undefined> {
-    if (!this.isEditorDocument(document)) {
+  async provideCompletionItems(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken, context: vscode.CompletionContext): Promise<vscode.CompletionList | vscode.CompletionItem[] | undefined> {
+    if (!this.isEditorDocument(document) || token.isCancellationRequested) {
       return undefined;
     }
     const text = document.getText();
-    const result = await this.completionCache.provide(document, position, context.triggerCharacter, () => this.loadCompletionItems(document, position, context));
-    return withDjangoCompletions(result, text, position, this.preludeSource(text));
+    const prelude = this.preludeSource(text);
+    if (!prelude.trim()) {
+      return [];
+    }
+    const result = await this.completionCache.provide(document, position, context.triggerCharacter, (isCurrent) => this.loadCompletionItems(text, position, context, isCurrent));
+    return withDjangoCompletions(result, text, position, prelude);
   }
 
   /** Loads uncached completions through the hidden analysis document. */
-  private async loadCompletionItems(document: vscode.TextDocument, position: vscode.Position, context: vscode.CompletionContext): Promise<vscode.CompletionList | vscode.CompletionItem[] | undefined> {
+  private async loadCompletionItems(text: string, position: vscode.Position, context: vscode.CompletionContext, isCurrent: () => boolean): Promise<vscode.CompletionList | vscode.CompletionItem[] | undefined> {
     const started = Date.now();
-    const text = document.getText();
-    const offset = this.analysisOffset(document);
+    const offset = analysisOffsetForText(text, this.documents.inputStartLine(), this.documents.lineOffset());
     const protectedLineCount = protectedLineCountForText(text, offset);
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.syncAnalysis(text);
-    const result = await vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>(
-      "vscode.executeCompletionItemProvider",
-      this.documents.analysisUri,
-      analysisPosition,
-      context.triggerCharacter
-    );
-    this.cleanupGeneratedTabs();
-    this.logger?.log("overlay.feature", { feature: "completion", items: completionCount(result), ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
-    return withDjangoCompletions(mapCompletionResult(result, offset, protectedLineCount), text, position, this.preludeSource(text));
+    if (!context.triggerCharacter) {
+      await completionDebounce();
+    }
+    if (!isCurrent()) {
+      return [];
+    }
+    if (this.analysisSuggestionBusy) {
+      return [];
+    }
+    this.analysisSuggestionBusy = true;
+    try {
+      await this.documents.syncAnalysis(text);
+      if (!isCurrent()) {
+        return [];
+      }
+      const result = await vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>(
+        "vscode.executeCompletionItemProvider",
+        this.documents.analysisUri,
+        analysisPosition,
+        context.triggerCharacter
+      );
+      this.cleanupGeneratedTabs();
+      const current = isCurrent();
+      this.logger?.log("overlay.feature", { current, feature: "completion", items: current ? completionCount(result) : 0, ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
+      return current ? mapCompletionResult(result, offset, protectedLineCount) : [];
+    } finally {
+      this.analysisSuggestionBusy = false;
+    }
   }
 
   /** Provides hover through the hidden analysis document. */
@@ -150,23 +182,41 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   }
 
   /** Provides signature help through the hidden analysis document. */
-  async provideSignatureHelp(document: vscode.TextDocument, position: vscode.Position, _token: vscode.CancellationToken, context: vscode.SignatureHelpContext): Promise<vscode.SignatureHelp | undefined> {
+  async provideSignatureHelp(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken, context: vscode.SignatureHelpContext): Promise<vscode.SignatureHelp | undefined> {
     if (!this.isEditorDocument(document)) {
       return undefined;
     }
+    const text = document.getText();
+    if (!this.preludeSource(text).trim()) {
+      return undefined;
+    }
     const started = Date.now();
+    const requestVersion = ++this.signatureVersion;
     const offset = this.analysisOffset(document);
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.syncAnalysis(document.getText());
-    const result = await vscode.commands.executeCommand<vscode.SignatureHelp>(
-      "vscode.executeSignatureHelpProvider",
-      this.documents.analysisUri,
-      analysisPosition,
-      context.triggerCharacter
-    );
-    this.cleanupGeneratedTabs();
-    this.logger?.log("overlay.feature", { feature: "signature", items: result?.signatures.length ?? 0, ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
-    return result;
+    await suggestionDelay(SIGNATURE_DEBOUNCE_MS);
+    if (token.isCancellationRequested || requestVersion !== this.signatureVersion || this.analysisSuggestionBusy) {
+      return undefined;
+    }
+    this.analysisSuggestionBusy = true;
+    let providerStarted = false;
+    try {
+      await this.documents.syncAnalysis(text);
+      if (token.isCancellationRequested || requestVersion !== this.signatureVersion) {
+        return undefined;
+      }
+      const provider = Promise.resolve(vscode.commands.executeCommand<vscode.SignatureHelp>("vscode.executeSignatureHelpProvider", this.documents.analysisUri, analysisPosition, context.triggerCharacter));
+      providerStarted = true;
+      const tracked = provider.finally(() => { this.analysisSuggestionBusy = false; });
+      void tracked.then(() => this.cleanupGeneratedTabs(), () => undefined);
+      const ready = await withLatencyBudget(tracked, SIGNATURE_BUDGET_MS);
+      const current = !token.isCancellationRequested && requestVersion === this.signatureVersion;
+      const result = ready.completed && current ? ready.value : undefined;
+      this.logger?.log("overlay.feature", { completed: ready.completed, current, feature: "signature", items: result?.signatures.length ?? 0, ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
+      return result;
+    } finally {
+      if (!providerStarted) { this.analysisSuggestionBusy = false; }
+    }
   }
 
   /** Provides semantic tokens for prelude-imported names in the visible shell input. */
@@ -208,6 +258,12 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     this.cleanupTimer = setTimeout(() => void closeGeneratedOverlayTabs([this.documents.analysisUri]), 150);
   }
 }
+
+/** Waits briefly so ordinary typing bursts collapse before hidden-provider work starts. */
+function completionDebounce(): Promise<void> { return new Promise((resolve) => setTimeout(resolve, COMPLETION_DEBOUNCE_MS)); }
+
+/** Waits for a bounded language-feature debounce interval. */
+function suggestionDelay(milliseconds: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
 
 /** Returns the provider line offset after detecting the editor-only marker text. */
 function analysisOffsetForText(text: string, inputStartLine: number, lineOffset: number): number {

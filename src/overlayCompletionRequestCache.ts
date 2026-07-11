@@ -7,13 +7,38 @@ import { withLatencyBudget } from "./latencyBudget";
 
 const COMPLETION_CACHE_TTL_MS = 3000;
 const COMPLETION_BUDGET_MS = 150;
+const EMPTY_COMPLETION_CACHE_TTL_MS = 400;
+const MAX_COMPLETION_CACHE_ENTRIES = 16;
 
-type Loader = () => Promise<CompletionResult | undefined>;
+type Loader = (isCurrent: () => boolean) => Promise<CompletionResult | undefined>;
+
+interface ActiveRequest {
+  key: string;
+  promise: Promise<CompletionResult>;
+  requestKey: string;
+}
+
+interface PendingRequest {
+  key: string;
+  loader: Loader;
+  promise: Promise<CompletionResult>;
+  reject: (error: unknown) => void;
+  requestKey: string;
+  resolve: (result: CompletionResult) => void;
+}
+
+interface CompletionRequest {
+  mode: "join" | "load" | "queue";
+  promise: Promise<CompletionResult>;
+}
 
 /** Caches repeated overlay completion requests while the user extends one token. */
 export class OverlayCompletionRequestCache {
   private readonly completionCache = new Map<string, { expiresAt: number; result: CompletionResult }>();
-  private readonly completionInFlight = new Map<string, Promise<CompletionResult>>();
+  private activeRequest: ActiveRequest | undefined;
+  private generation = 0;
+  private latestRequestKey = "";
+  private pendingRequest: PendingRequest | undefined;
 
   /** Stores the optional diagnostic logger used for cache timing. */
   constructor(private readonly logger?: DiagnosticLogger) {}
@@ -22,31 +47,106 @@ export class OverlayCompletionRequestCache {
   async provide(document: vscode.TextDocument, position: vscode.Position, trigger: string | undefined, loader: Loader): Promise<CompletionResult> {
     const started = Date.now();
     const shape = completionRequestShape(document, position);
-    const cached = this.cachedCompletion(shape.key);
+    const key = `${this.generation}:${trigger ?? ""}:${shape.key}`;
+    const requestKey = this.requestKey(document, position, shape.replacementRange, key);
+    this.latestRequestKey = requestKey;
+    this.cancelSupersededPending(requestKey);
+    const cached = this.cachedCompletion(key);
     if (cached) {
+      if (this.pendingRequest?.key === key) {
+        this.pendingRequest.resolve([]);
+        this.pendingRequest = undefined;
+      }
       this.log(started, "hit", completionResultCount(cached), trigger);
       return cloneCompletionResult(cached, shape.replacementRange);
     }
-    const existing = this.completionInFlight.get(shape.key);
-    if (existing) {
-      const ready = await withLatencyBudget(existing, COMPLETION_BUDGET_MS);
-      this.log(started, ready.completed ? "join" : "budget", ready.value ? completionResultCount(ready.value) : 0, trigger);
-      return ready.completed && ready.value ? cloneCompletionResult(ready.value, shape.replacementRange) : [];
+    const request = this.request(key, requestKey, loader);
+    const ready = await withLatencyBudget(request.promise, COMPLETION_BUDGET_MS);
+    this.log(started, ready.completed ? request.mode : "budget", ready.value ? completionResultCount(ready.value) : 0, trigger);
+    return ready.completed && ready.value ? cloneCompletionResult(ready.value, shape.replacementRange) : [];
+  }
+
+  /** Clears cached and not-yet-started completion work. */
+  clear(): void {
+    this.generation += 1;
+    this.latestRequestKey = "";
+    this.completionCache.clear();
+    this.pendingRequest?.resolve([]);
+    this.pendingRequest = undefined;
+  }
+
+  /** Returns an active, queued, or newly started request for one stable shape. */
+  private request(key: string, requestKey: string, loader: Loader): CompletionRequest {
+    if (this.activeRequest?.requestKey === requestKey) {
+      return { mode: "join", promise: this.activeRequest.promise };
     }
-    const promise = loader().then((result) => result ?? []);
-    this.completionInFlight.set(shape.key, promise);
-    promise.then((result) => this.remember(shape.key, result)).finally(() => {
-      if (this.completionInFlight.get(shape.key) === promise) {
-        this.completionInFlight.delete(shape.key);
+    if (this.pendingRequest?.requestKey === requestKey) {
+      this.pendingRequest.loader = loader;
+      return { mode: "join", promise: this.pendingRequest.promise };
+    }
+    if (this.activeRequest) {
+      return { mode: "queue", promise: this.queue(key, requestKey, loader) };
+    }
+    return { mode: "load", promise: this.start(key, requestKey, loader) };
+  }
+
+  /** Starts one heavyweight provider load and launches only the latest pending request afterward. */
+  private start(key: string, requestKey: string, loader: Loader): Promise<CompletionResult> {
+    const isCurrent = () => this.latestRequestKey === requestKey;
+    const promise = Promise.resolve().then(() => loader(isCurrent)).then((result) => isCurrent() ? result ?? [] : []);
+    const active = { key, promise, requestKey };
+    this.activeRequest = active;
+    promise.then((result) => { if (isCurrent()) { this.remember(key, result); } }).finally(() => {
+      if (this.activeRequest === active) {
+        this.activeRequest = undefined;
+        this.startPending();
       }
     }).catch(() => undefined);
-    const ready = await withLatencyBudget(promise, COMPLETION_BUDGET_MS);
-    this.log(started, ready.completed ? "load" : "budget", ready.value ? completionResultCount(ready.value) : 0, trigger);
-    return ready.completed && ready.value ? cloneCompletionResult(ready.value, shape.replacementRange) : [];
+    return promise;
+  }
+
+  /** Stores one latest pending request while a provider load is already active. */
+  private queue(key: string, requestKey: string, loader: Loader): Promise<CompletionResult> {
+    this.pendingRequest?.resolve([]);
+    let resolve!: (result: CompletionResult) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<CompletionResult>((next, fail) => { resolve = next; reject = fail; });
+    this.pendingRequest = { key, loader, promise, reject, requestKey, resolve };
+    return promise;
+  }
+
+  /** Starts the retained pending request if it still describes the latest editor context. */
+  private startPending(): void {
+    const pending = this.pendingRequest;
+    this.pendingRequest = undefined;
+    if (!pending) {
+      return;
+    }
+    if (pending.requestKey !== this.latestRequestKey) {
+      pending.resolve([]);
+      return;
+    }
+    this.start(pending.key, pending.requestKey, pending.loader).then(pending.resolve, pending.reject);
+  }
+
+  /** Resolves a pending request that has been superseded by a newer completion shape. */
+  private cancelSupersededPending(requestKey: string): void {
+    if (this.pendingRequest && this.pendingRequest.requestKey !== requestKey) {
+      this.pendingRequest.resolve([]);
+      this.pendingRequest = undefined;
+    }
+  }
+
+  /** Builds an exact request identity while the cache key remains stable across token extension. */
+  private requestKey(document: vscode.TextDocument, position: vscode.Position, replacementRange: vscode.Range, key: string): string {
+    const start = document.offsetAt(replacementRange.start);
+    const end = document.offsetAt(position);
+    return `${key}:${start}:${end}:${document.getText().slice(start, end)}`;
   }
 
   /** Returns a still-valid completion cache entry for one request key. */
   private cachedCompletion(key: string): CompletionResult | undefined {
+    this.pruneCache();
     const cached = this.completionCache.get(key);
     if (!cached) {
       return undefined;
@@ -55,13 +155,29 @@ export class OverlayCompletionRequestCache {
       this.completionCache.delete(key);
       return undefined;
     }
+    this.completionCache.delete(key);
+    this.completionCache.set(key, cached);
     return cached.result;
   }
 
-  /** Stores a non-empty completion result for later token-extension requests. */
+  /** Stores one completion result with a short negative-cache lifetime and bounded LRU size. */
   private remember(key: string, result: CompletionResult): void {
-    if (completionResultCount(result) > 0) {
-      this.completionCache.set(key, { expiresAt: Date.now() + COMPLETION_CACHE_TTL_MS, result });
+    this.pruneCache();
+    this.completionCache.delete(key);
+    while (this.completionCache.size >= MAX_COMPLETION_CACHE_ENTRIES) {
+      const oldest = this.completionCache.keys().next().value as string | undefined;
+      if (oldest === undefined) { break; }
+      this.completionCache.delete(oldest);
+    }
+    const ttl = completionResultCount(result) > 0 ? COMPLETION_CACHE_TTL_MS : EMPTY_COMPLETION_CACHE_TTL_MS;
+    this.completionCache.set(key, { expiresAt: Date.now() + ttl, result });
+  }
+
+  /** Removes all expired cached completion results. */
+  private pruneCache(): void {
+    const now = Date.now();
+    for (const [key, cached] of this.completionCache) {
+      if (cached.expiresAt <= now) { this.completionCache.delete(key); }
     }
   }
 

@@ -8,7 +8,7 @@ import test from "node:test";
 
 const require = createRequire(import.meta.url);
 const NodeModule = require("node:module");
-const mockState = { tree: undefined, writes: [] };
+const mockState = { tree: undefined, writeHook: undefined, writes: [] };
 const vscodeMock = createVscodeMock();
 const originalLoad = NodeModule._load;
 let ModelCatalog;
@@ -162,6 +162,33 @@ test("overlay memory skips no-op writes and flushes volatile edits only once", a
   assert.equal(latest.get("warmup-analysis.py"), `${prelude}value = 2\n`);
 });
 
+test("overlay memory preserves a newer dirty analysis snapshot during an older write", async () => {
+  mockState.writes.length = 0;
+  const document = new OverlayMemoryDocument(undefined, "race-cell", "race-analysis");
+  await document.sync("value = 1\n");
+  await document.syncVolatile("value = 2\n");
+  const writeStarted = deferred();
+  const releaseWrite = deferred();
+  mockState.writeHook = async (uri) => {
+    if (path.basename(uri.fsPath) === "race-analysis.py") {
+      writeStarted.resolve();
+      await releaseWrite.promise;
+    }
+  };
+
+  const olderSync = document.syncAnalysis("value = 2\n");
+  await writeStarted.promise;
+  await document.syncVolatile("value = 3\n");
+  releaseWrite.resolve();
+  await olderSync;
+  mockState.writeHook = undefined;
+  await document.syncAnalysis("value = 3\n");
+
+  const analysisWrites = mockState.writes.filter((write) => path.basename(write.path) === "race-analysis.py");
+  assert.equal(analysisWrites.at(-1).text, "value = 3\n");
+  assert.equal(analysisWrites.length, 3, "initial, older, and latest analysis snapshots are each written once");
+});
+
 /** Minimal event emitter matching the VS Code event subscription contract. */
 function MockEventEmitter() {
   this.listeners = new Set();
@@ -203,11 +230,21 @@ function createVscodeMock() {
     workspace: {
       fs: {
         async createDirectory() {},
-        async writeFile(uriValue, bytes) { mockState.writes.push({ path: uriValue.fsPath, text: Buffer.from(bytes).toString("utf8") }); }
+        async writeFile(uriValue, bytes) {
+          await mockState.writeHook?.(uriValue, bytes);
+          mockState.writes.push({ path: uriValue.fsPath, text: Buffer.from(bytes).toString("utf8") });
+        }
       },
       workspaceFolders: [{ uri: uri(path.join("/tmp", "django-shell-initialization")) }]
     }
   };
+}
+
+/** Creates a deferred promise for deterministic file-write overlap. */
+function deferred() {
+  let resolve;
+  const promise = new Promise((next) => { resolve = next; });
+  return { promise, resolve };
 }
 
 /** Builds a sidebar view mock with controllable visibility. */

@@ -113,6 +113,7 @@ test("overlay Monaco layout clamps dimensions instead of trusting transient DOM 
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
   assert.ok(rendererSource.includes("automaticLayout: false"));
+  assert.ok(rendererSource.includes("quickSuggestionsDelay: 80"), "typing bursts wait briefly before starting heavyweight completion providers");
   assert.ok(rendererSource.includes("function __dsoLayoutSize(root, host)"));
   assert.ok(rendererSource.includes("function __dsoMaxEditorHeight(viewportHeight)"));
   assert.ok(rendererSource.includes("availableHeight"));
@@ -227,6 +228,7 @@ test("overlay model stays user-only instead of hiding generated prelude DOM", ()
   assert.ok(preludeViewSource.includes("editor.setHiddenAreas([], \"django-shell-prelude\")"));
   assert.ok(syncSource.includes("model.setValue(userText)"));
   assert.ok(syncSource.includes("prelude.guard.strip"));
+  assert.ok(overlaySource.includes("this.featureBridge.invalidateCompletions()"));
   assert.equal(syncSource.includes("overlayDiagnosticPrefixRendererSource"), false);
   assert.equal(syncSource.includes("__dsoDiagnosticPrefix"), false);
   const preludeUpdate = syncSource.slice(syncSource.indexOf("window.__djangoShellOverlaySetPrelude"), syncSource.indexOf("return \"ok\";", syncSource.indexOf("window.__djangoShellOverlaySetPrelude")));
@@ -802,7 +804,7 @@ test("analysis-only overlay sync keeps the executable console-cell file dirty", 
   assert.ok(overlayMemorySource.includes("private editorDirty"));
   assert.ok(overlayMemorySource.includes("this.editorDirty = true"));
   assert.ok(overlayMemorySource.includes("changed || this.editorDirty"));
-  assert.ok(overlayMemorySource.includes("this.editorDirty = false"));
+  assert.ok(overlayMemorySource.includes("this.editorDirty = this.editorText() !== text"));
 });
 
 test("generated overlay breakpoints are sent directly to the debug adapter", () => {

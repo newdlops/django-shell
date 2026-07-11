@@ -140,7 +140,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     const text = this.editorText();
     this.logger?.log("overlay.memory.write", { ...textFields(text), kind: "editor", offset: this.lineOffset() });
     await ensureBackingFile(this.editorUri, text);
-    this.editorDirty = false;
+    this.editorDirty = this.editorText() !== text;
   }
 
   /** Writes only user Python cell text into the hidden analysis file without opening a dirty editor document. */
@@ -148,7 +148,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     const text = this.analysisText();
     this.logger?.log("overlay.memory.write", { ...textFields(text), kind: "analysis", offset: this.lineOffset() });
     await ensureBackingFile(this.analysisUri, text);
-    this.analysisDirty = false;
+    this.analysisDirty = this.analysisText() !== text;
   }
 
   /** Releases provider event resources. */

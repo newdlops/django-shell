@@ -497,7 +497,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       }
       try { if (model && model.setLanguage) { model.setLanguage(__dsoPythonLanguage()); } } catch (eSetLanguage) {}
       try { if (globalThis.monaco && globalThis.monaco.editor && globalThis.monaco.editor.setModelLanguage) { globalThis.monaco.editor.setModelLanguage(model, "python"); } } catch (eSetModelLanguage) {}
-      const options = { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
+      const options = { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, quickSuggestionsDelay: 80, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
       const widgetOptions = { isSimpleWidget: false };
       let editor = null;
       try { editor = factory.inst.createInstance(factory.ctor, host, options, widgetOptions); }
@@ -523,7 +523,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       if (!monacoApi) { return null; }
       const uri = monacoApi.Uri.parse(__dsoOverlayModelUri);
       let model = monacoApi.editor.getModel(uri); if (model && model.isDisposed && model.isDisposed()) { model = null; } if (model && model.getValue) { try { model.getValue(); } catch (eDisposedValue) { model = null; } } model = model || monacoApi.editor.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python", uri);
-      const editor = monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, isSimpleWidget: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, model: model, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
+      const editor = monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, isSimpleWidget: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, model: model, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, quickSuggestionsDelay: 80, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
       try { editor.layout && editor.layout(__dsoLayoutSize(root, host)); } catch (eGlobalLayout) {}
       return editor;
     }
