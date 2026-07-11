@@ -56,6 +56,15 @@ test("external source inlays render at EOL and refresh enriched values without r
   assert.deepEqual(mockState.decorationWrites.at(-1).decorations, []);
 });
 
+test("realpath-expanded Python pseudo sources are never opened as workspace files", async () => {
+  const showCount = mockState.showCalls.length;
+  const pseudoFrame = pausedFrame("/workspace/<django-shell-backend>", 1700, "source", "backend");
+
+  assert.equal(await navigation.revealExternalDebugFrame(pseudoFrame), false);
+  assert.equal(navigation.refreshExternalDebugFrameDecoration(pseudoFrame), false);
+  assert.equal(mockState.showCalls.length, showCount);
+});
+
 test("same-location refresh runs before presentation dedupe and terminal states clear native inlays", () => {
   const body = customConsoleSource.slice(customConsoleSource.indexOf("private postDebugInfo(info"), customConsoleSource.indexOf("private async inspectDebugVariableChildren"));
   const refresh = body.indexOf("refreshExternalDebugFrameDecoration(info)");

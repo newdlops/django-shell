@@ -2,7 +2,7 @@
 
 import * as vscode from "vscode";
 import type { DebugRequestSession } from "./debugAdapterTypes";
-import { choosePreferredDebugSourceFrame, isUserDebugSourceFrame, sourcePathForDebugSourceFrame, type DebugSourceFrame } from "./debugSourceFrames";
+import { choosePreferredDebugSourceFrame, isPseudoDebugSourcePath, isUserDebugSourceFrame, sourcePathForDebugSourceFrame, type DebugSourceFrame } from "./debugSourceFrames";
 
 export type DebugPanelState = "attached" | "error" | "idle" | "paused" | "running";
 
@@ -162,7 +162,7 @@ async function firstThreadId(session: DebugRequestSession): Promise<number | und
 /** Reads the paused source line for compact debug display. */
 async function sourceLineFor(frame: DapStackFrame): Promise<string> {
   const sourcePath = sourcePathFor(frame);
-  if (!sourcePath || sourcePath.startsWith("<") || frame.line <= 0) {
+  if (!sourcePath || isPseudoDebugSourcePath(sourcePath) || frame.line <= 0) {
     return "";
   }
   try {
@@ -247,7 +247,7 @@ function uniqueScopes(scopes: DapScope[]): DapScope[] {
 /** Returns probable local names from user source up to the current paused line. */
 async function localCandidateNamesForFrame(frame: DapStackFrame | undefined): Promise<string[]> {
   const sourcePath = frame ? sourcePathFor(frame) : "";
-  if (!sourcePath || sourcePath.startsWith("<") || !frame || frame.line <= 0) {
+  if (!sourcePath || isPseudoDebugSourcePath(sourcePath) || !frame || frame.line <= 0) {
     return [];
   }
   try {

@@ -55,7 +55,8 @@ export function isOverlayDebugSourcePath(pathOrUri: string | undefined): boolean
 
 /** Returns a normalized filesystem path or source name for a debug frame. */
 export function sourcePathForDebugSourceFrame(frame: DebugSourceFrame): string {
-  return normalizeDebugSourcePath(frame.source?.path ?? frame.source?.name ?? "");
+  const name = normalizeDebugSourcePath(frame.source?.name ?? "");
+  return isPseudoDebugSourcePath(name) ? name : normalizeDebugSourcePath(frame.source?.path ?? name);
 }
 
 /** Converts file URIs to filesystem paths while preserving ordinary source names. */
@@ -71,6 +72,13 @@ export function normalizeDebugSourcePath(value: string | undefined): string {
   return value;
 }
 
+/** Returns whether a debug source is a Python pseudo filename, including realpath-expanded variants. */
+export function isPseudoDebugSourcePath(pathOrUri: string | undefined): boolean {
+  const normalized = normalizeDebugSourcePath(pathOrUri).replace(/\\/g, "/").replace(/\/+$/, "");
+  const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
+  return basename.startsWith("<") && basename.endsWith(">") && basename.length > 2;
+}
+
 /** Returns whether a frame belongs to a user source file outside generated overlays and libraries. */
 export function isUserDebugSourceFrame(frame: DebugSourceFrame): boolean {
   const path = sourcePathForDebugSourceFrame(frame);
@@ -80,7 +88,7 @@ export function isUserDebugSourceFrame(frame: DebugSourceFrame): boolean {
 /** Returns whether a path points at user source outside generated overlays, libraries, and the shell entry script. */
 export function isUserDebugSourcePath(pathOrUri: string | undefined): boolean {
   const path = normalizeDebugSourcePath(pathOrUri);
-  return !!path && !path.startsWith("<") && !isOverlayDebugSourcePath(path) && !isLibraryDebugSourcePath(path) && !isShellEntryDebugSourcePath(path);
+  return !!path && !isPseudoDebugSourcePath(path) && !isOverlayDebugSourcePath(path) && !isLibraryDebugSourcePath(path) && !isShellEntryDebugSourcePath(path);
 }
 
 /** Returns whether a path is the Django management entry script that hosts the interactive shell's ancestor frames. */
@@ -103,7 +111,7 @@ export function isWorkspaceDebugSourcePath(pathOrUri: string | undefined, worksp
 
 /** Returns whether a frame has a real source location. */
 function isConcreteDebugSourceFrame(frame: DebugSourceFrame, path = sourcePathForDebugSourceFrame(frame)): boolean {
-  return !!path && !path.startsWith("<") && Math.max(0, Number(frame.line) || 0) > 0;
+  return !!path && !isPseudoDebugSourcePath(path) && Math.max(0, Number(frame.line) || 0) > 0;
 }
 
 /** Returns whether a path is inside a package manager or Python runtime directory. */

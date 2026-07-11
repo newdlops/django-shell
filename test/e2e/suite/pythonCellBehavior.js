@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const vscode = require("vscode");
 const { assertGoldenPythonExecution } = require("./pythonCellGolden.js");
+const { assertOverlayHoverPointerHandoff } = require("./overlayHoverPointer.js");
 
 const INPUT_MARKER = "# --- django shell input ---";
 const PRELUDE = "# Django shell runtime imports for analysis.\n# ruff: noqa\nfrom orm_runtime.models import Company\n\n";
@@ -24,6 +25,11 @@ async function assertPythonCellBehavior(extension) {
   await assertGeneratedOverlayFilesHidden("overlay document install");
   await withStageTimeout("overlay editor show", vscode.commands.executeCommand("djangoShell.showOverlayEditor"), 20000);
   await assertGeneratedOverlayFilesHidden("overlay editor show");
+  if (process.env.DJANGO_SHELL_E2E_HOVER_ONLY === "1") {
+    await withStageTimeout("renderer hover pointer handoff", assertOverlayHoverPointerHandoff(extension), 30000);
+    await assertGeneratedOverlayFilesHidden("renderer hover pointer handoff");
+    return;
+  }
   await withStageTimeout("golden python execution", assertGoldenPythonExecution({ extension, generatedText, importLines: GOLDEN_PRELUDE_LINES, inputMarker: INPUT_MARKER, installOverlayDocument, prelude: GOLDEN_PRELUDE, restoreImportLines: ["from orm_runtime.models import Company"], waitForOpenDocumentText }), 90000);
   await assertGeneratedOverlayFilesHidden("golden python execution");
   await withStageTimeout("overlay input smoke", assertOverlayAcceptsPythonInput(extension), 20000);
@@ -38,6 +44,8 @@ async function assertPythonCellBehavior(extension) {
   await assertGeneratedOverlayFilesHidden("provider feature checks");
   await withStageTimeout("renderer theme checks", assertRendererTheme(extension), 30000);
   await assertGeneratedOverlayFilesHidden("renderer theme checks");
+  await withStageTimeout("renderer hover pointer handoff", assertOverlayHoverPointerHandoff(extension), 30000);
+  await assertGeneratedOverlayFilesHidden("renderer hover pointer handoff");
   await withStageTimeout("input latency checks", assertInputLatency(extension), 15000);
   await assertGeneratedOverlayFilesHidden("input latency checks");
 }

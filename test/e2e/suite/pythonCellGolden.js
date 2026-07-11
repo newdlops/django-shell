@@ -210,7 +210,7 @@ async function waitForGoldenHover(uri, position, pattern) {
   throw new Error(`golden prelude hover missing concrete signal: ${text}`);
 }
 
-/** Verifies console-cell.py and analysis.py receive the exact hidden-prelude/user-code split. */
+/** Verifies console-cell.py stays user-only while analysis.py receives hidden prelude plus code. */
 async function assertGoldenBackingFiles(prelude, inputMarker, code, watcher) {
   const uris = overlayUris();
   let snapshot = {};
@@ -220,7 +220,7 @@ async function assertGoldenBackingFiles(prelude, inputMarker, code, watcher) {
     const editorDisk = await readDiskTextFile(uris.editor);
     const analysisDisk = await readDiskTextFile(uris.analysis);
     const editorVisibleOk = editor.includes(code) && !editor.includes("__dso_large_prelude_");
-    const editorDiskOk = editorDisk.includes(`${inputMarker}\n`) && editorDisk.includes(code);
+    const editorDiskOk = editorDisk.includes(code) && !editorDisk.includes(inputMarker) && !editorDisk.includes("__dso_large_prelude_");
     const analysisOk = [analysis, analysisDisk].every((text) => text.includes(code) && !text.includes(inputMarker));
     snapshot = { analysisDiskLines: lineCount(analysisDisk), analysisHasCode: analysis.includes(code), analysisHasMarker: analysis.includes(inputMarker), analysisLines: lineCount(analysis), editorDiskLines: lineCount(editorDisk), editorDiskOk, editorHasCode: editor.includes(code), editorLines: lineCount(editor), editorVisibleOk, analysisOk };
     if (editorVisibleOk && editorDiskOk && analysisOk) { await watcher.waitFor(prelude, inputMarker, code); return; }
@@ -248,17 +248,17 @@ function diskSizes(snapshot) {
   return { analysisChars: snapshot.analysis.length, analysisLines: lineCount(snapshot.analysis), editorChars: snapshot.editor.length, editorLines: lineCount(snapshot.editor) };
 }
 
-/** Verifies the large prelude is really written to generated backing files before execution. */
+/** Verifies only analysis.py receives the large prelude before execution. */
 async function assertGoldenLargePreludeDisk(prelude, inputMarker) {
   const uris = overlayUris();
   let snapshot = {};
   for (let attempt = 0; attempt < 60; attempt++) {
     const editor = await readDiskTextFile(uris.editor);
     const analysis = await readDiskTextFile(uris.analysis);
-    const editorOk = editor.startsWith(`${prelude}${inputMarker}\n`);
+    const editorOk = !editor.includes(inputMarker) && !editor.includes("__dso_large_prelude_") && lineCount(editor) < 40;
     const analysisOk = analysis.startsWith(prelude) && !analysis.includes(inputMarker);
     snapshot = { analysisLines: lineCount(analysis), analysisOk, editorLines: lineCount(editor), editorOk };
-    if (editorOk && analysisOk && lineCount(editor) > 4000 && lineCount(analysis) > 4000) { return; }
+    if (editorOk && analysisOk && lineCount(analysis) > 4000) { return; }
     await delay(100);
   }
   assert.deepEqual(snapshot, { ...snapshot, editorOk: true, analysisOk: true }, `golden large prelude was not written to disk: ${JSON.stringify(snapshot)}`);
@@ -305,7 +305,7 @@ async function waitForGoldenWatcher(state, queueOf, prelude, inputMarker, code) 
   let snapshot = {};
   for (let attempt = 0; attempt < 120; attempt++) {
     await queueOf().catch(() => undefined);
-    const editorOk = state.editorText.includes(`${inputMarker}\n`) && state.editorText.includes(code);
+    const editorOk = state.editorText.includes(code) && !state.editorText.includes(inputMarker) && !state.editorText.includes("__dso_large_prelude_");
     const analysisOk = state.analysisText.includes(code) && !state.analysisText.includes(inputMarker);
     snapshot = { analysisEvents: state.analysisEvents, analysisReads: state.analysisReads, analysisOk, editorEvents: state.editorEvents, editorReads: state.editorReads, editorOk, loadEvents: state.loadEvents };
     if (editorOk && analysisOk && state.editorReads > 0 && state.analysisReads > 0 && state.loadEvents > 0) { return; }

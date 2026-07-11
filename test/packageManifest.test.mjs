@@ -103,7 +103,7 @@ test("keeps debugpy default while contributing the built-in experimental engine"
 test("ships the built-in tracer with its third-party license notice", () => {
   const tracer = fs.readFileSync(new URL("../python/django_shell_native_tracer.py", import.meta.url), "utf8");
   const notices = fs.readFileSync(new URL("../THIRD_PARTY_NOTICES.md", import.meta.url), "utf8");
-  assert.match(tracer, /TRACER_VERSION = "2026\.07\.11\.2"/);
+  assert.match(tracer, /TRACER_VERSION = "2026\.07\.11\.3"/);
   assert.match(notices, /Django Process Debugger experimental tracer/);
   assert.match(notices, /MIT License/);
 });

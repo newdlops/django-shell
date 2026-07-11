@@ -72,6 +72,7 @@ export function overlayCleanupRendererSource(): string {
       try { root.__dsoResizeObserver && root.__dsoResizeObserver.disconnect && root.__dsoResizeObserver.disconnect(); } catch (eResizeObserver) {}
       try { root.__dsoGeometrySyncCleanup && root.__dsoGeometrySyncCleanup(); } catch (eGeometrySyncCleanup) {}
       try { root.__dsoWidgetClampCleanup && root.__dsoWidgetClampCleanup(); } catch (eWidgetCleanup) {}
+      try { root.__dsoDetachedHoverKeeperCleanup && root.__dsoDetachedHoverKeeperCleanup(); } catch (eHoverKeeperCleanup) {}
     }
 
     /** Disposes all listeners and models owned by the overlay root. */

@@ -50,21 +50,31 @@ function fakeWindow(document) {
 
 /** Builds a document containing one visible custom-console webview frame. */
 function fakeDocument(state) {
+  const body = fakeElement("div", { bottom: 720, height: 720, left: 0, right: 900, top: 0, width: 900 });
+  const group = fakeElement("div", { bottom: 720, height: 720, left: 0, right: 900, top: 0, width: 900 });
+  const tab = fakeElement("div");
   const host = fakeElement("div", { bottom: 720, height: 720, left: 0, right: 900, top: 0, width: 900 });
   const frame = fakeElement("iframe", { bottom: 720, height: 720, left: 0, right: 900, top: 0, width: 900 });
-  host.className = "webview monaco-workbench";
+  body.className = "monaco-workbench";
+  group.className = "editor-group-container";
+  tab.className = "tab active";
+  tab.setAttribute("aria-label", "Django Shell");
+  host.className = "webview";
   frame.className = "webview";
+  group.appendChild(tab);
   host.appendChild(frame);
+  body.appendChild(group);
+  body.appendChild(host);
   state.host = host;
   state.frame = frame;
   return {
     addEventListener: () => undefined,
-    body: host,
+    body,
     createElement: (tag) => fakeElement(tag),
-    getElementById: (id) => findById(host, id) || findById(state.head, id),
+    getElementById: (id) => findById(body, id) || findById(state.head, id),
     head: state.head = fakeElement("head"),
-    querySelector: (selector) => selector === ".monaco-workbench" ? host : host.querySelector(selector),
-    querySelectorAll: (selector) => selector.includes("iframe") ? [frame] : host.querySelectorAll(selector),
+    querySelector: (selector) => selector === ".monaco-workbench" ? body : body.querySelector(selector),
+    querySelectorAll: (selector) => selector.includes("iframe") ? [frame] : body.querySelectorAll(selector),
     removeEventListener: () => undefined
   };
 }
@@ -75,6 +85,7 @@ function fakeElement(tag, rect = { bottom: 220, height: 180, left: 0, right: 640
   const node = {
     children: [],
     className: "",
+    dataset: {},
     id: "",
     isConnected: true,
     parentElement: null,
@@ -88,6 +99,7 @@ function fakeElement(tag, rect = { bottom: 220, height: 180, left: 0, right: 640
     getBoundingClientRect: () => rect,
     querySelector(selector) { return queryAll(node, selector)[0] || null; },
     querySelectorAll(selector) { return queryAll(node, selector); },
+    removeAttribute: (name) => attrs.delete(name),
     removeEventListener: () => undefined,
     setAttribute: (name, value) => attrs.set(name, String(value))
   };
@@ -171,7 +183,7 @@ function fakeUri(value) {
 /** Returns a minimal mutable style object. */
 function fakeStyle() {
   const values = Object.create(null);
-  return { getPropertyValue: (name) => values[name] || "", length: 0, setProperty(name, value) { values[name] = value; this[name] = value; } };
+  return { getPropertyValue: (name) => values[name] || "", length: 0, removeProperty(name) { delete values[name]; delete this[name]; }, setProperty(name, value) { values[name] = value; this[name] = value; } };
 }
 
 /** Returns computed style values used by geometry and theme code. */
@@ -216,7 +228,7 @@ function matchesAny(node, selector) {
 /** Returns whether a node matches the simple selectors used by the overlay. */
 function matchesSimple(node, selector) {
   if (selector === "[data-run]") { return node.getAttribute("data-run") !== null; }
-  if (selector.startsWith(".")) { return node.classList.contains(selector.slice(1)); }
+  if (selector.startsWith(".")) { return selector.slice(1).split(".").every((name) => node.classList.contains(name)); }
   if (selector === node.tagName.toLowerCase()) { return true; }
   const tagClass = selector.match(/^(\w+)\.(.+)$/);
   return Boolean(tagClass && node.tagName.toLowerCase() === tagClass[1] && node.classList.contains(tagClass[2]));

@@ -3,7 +3,7 @@
 import * as vscode from "vscode";
 import type { DisposableDebugRequestSession } from "./debugAdapterTypes";
 import type { DiagnosticLogger } from "./diagnostics";
-import { isUserDebugSourcePath, sourcePathForDebugSourceFrame, type DebugSourceFrame } from "./debugSourceFrames";
+import { isPseudoDebugSourcePath, isUserDebugSourcePath, sourcePathForDebugSourceFrame, type DebugSourceFrame } from "./debugSourceFrames";
 import { chooseStepInTarget, pythonDirectCallIdentifierSpans, pythonIdentifierSpans, pythonImportedOrDefinedNames, type DebugStepInTarget, type DebugSourceNameSpan } from "./debugStepTargetSelection";
 import { overlayAnalysisUri, overlayEditorUri } from "./overlayBackingFiles";
 
@@ -81,7 +81,7 @@ async function stepInTargetsForFrame(session: DisposableDebugRequestSession | vs
 /** Returns source-line symbol names that resolve to user source definitions. */
 async function userDefinitionTargetNamesForFrame(frame: DapStackFrame): Promise<StepTargetSource> {
   const sourcePath = sourcePathForDebugSourceFrame(frame);
-  if (!sourcePath || sourcePath.startsWith("<") || frame.line <= 0) { return emptyStepTargetSource(false); }
+  if (!sourcePath || isPseudoDebugSourcePath(sourcePath) || frame.line <= 0) { return emptyStepTargetSource(false); }
   try {
     const source = await providerSourceForFrame(sourcePath, frame.line);
     const document = source.document;

@@ -6,6 +6,7 @@ import { debugInlineRenderKey, debugInlineValueText } from "./debugInlineValues"
 import type { DebugFrameInfo } from "./debugInspector";
 import { DiagnosticLogger } from "./diagnostics";
 import { OverlayMemoryDocument } from "./overlayMemoryDocument";
+import { parseHoverLinkTarget, registerOverlayHoverHandshake, samePath } from "./overlayHoverHandshake";
 import { OverlayPythonFeatureBridge } from "./overlayPythonFeatureBridge";
 import { closeGeneratedOverlayTabs, scheduleGeneratedOverlayTabCleanup } from "./generatedOverlayTabs";
 import { OverlayShellCommandController, registerOverlayShellCommand } from "./overlayShellCommand";
@@ -14,6 +15,7 @@ import { logOverlayRendererPayload } from "./overlayRendererLog";
 import { findInspectorUrlForPid, findMainPid, waitForInspectorUrlForPid } from "./workbenchInspector";
 import { overlayRendererSource } from "./workbenchOverlayRenderer";
 import { mainProcessEvalExpression, parseFocusedWorkbenchCandidate } from "./workbenchWindowEval";
+import { mainProcessMouseInputExpression, type WorkbenchMousePoint } from "./workbenchMouseInput";
 interface CdpResponse { error?: { message?: string }; id?: number; result?: { exceptionDetails?: { exception?: { description?: string }; text?: string }; result?: { value?: unknown } }; }
 type PendingReply = (response: CdpResponse) => void; type RunHandler = (code: string, lineOffset?: number) => Promise<boolean>;
 /** Associates one CDP response callback with the socket generation that issued it. */
@@ -85,6 +87,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
     this.memoryDocument.activate();
     this.featureBridge.activate();
     this.disposables.push(this.memoryDocument, this.featureBridge);
+    this.disposables.push(registerOverlayHoverHandshake(context, { analysisUri: this.memoryDocument.analysisUri, editorUri: this.memoryDocument.editorUri, evaluate: (expression) => this.evalInWorkbench(expression), lineOffset: () => this.memoryDocument.lineOffset(), ownerToken: this.token }));
     this.disposables.push(vscode.window.onDidChangeWindowState(() => { this.workbenchFocusGeneration += 1; }));
     this.shellCommands = registerOverlayShellCommand(this.memoryDocument, runHandler, this.logger, { registerCommands: options.registerCommands !== false });
     this.disposables.push(this.shellCommands);
@@ -374,6 +377,18 @@ export class WorkbenchOverlay implements vscode.Disposable {
   /** Moves past the active file-backed overlay input command without running it. */ async skipInput(): Promise<void> { await this.shellCommands?.skipInput(); }
   /** Evaluates a renderer expression for extension host E2E tests. */
   async e2eEvaluate(expression: string): Promise<string> { await this.ensureInjected(); return this.evalInWorkbench(expression); }
+
+  /** Moves the real workbench renderer mouse for extension-host hover E2E tests. */
+  async e2eDispatchMouse(points: WorkbenchMousePoint[]): Promise<unknown> {
+    await this.ensureInjected();
+    if (!this.workbenchWindowId) { await this.evalInWorkbench("'mouse-input-target-ready'"); }
+    if (!this.workbenchWindowId) { return { ok: false, reason: "missing-workbench-window-id" }; }
+    await this.ensureCdpSocket();
+    const response = await this.send("Runtime.evaluate", { awaitPromise: true, expression: mainProcessMouseInputExpression(this.workbenchWindowId, points), returnByValue: true }, CDP_REQUEST_TIMEOUT_MS);
+    if (response.error?.message) { return { ok: false, reason: response.error.message }; }
+    if (response.result?.exceptionDetails) { return { ok: false, reason: response.result.exceptionDetails.exception?.description || response.result.exceptionDetails.text || "mouse-input-exception" }; }
+    return response.result?.result?.value;
+  }
 
   /** Disposes the bridge and renderer overlay asynchronously. */
   dispose(): void { void this.shutdown(); }
@@ -960,25 +975,6 @@ function outputExpression(text: string, ok: boolean, token: string): string { re
 function debugLineExpression(visibleLine: number, inlineText: string, token: string): string { return `window.__dsoSetOverlayDebugLine ? window.__dsoSetOverlayDebugLine(${JSON.stringify(visibleLine)}, ${JSON.stringify(inlineText)}, ${JSON.stringify(token)}) : 'overlay-debug-line-missing'`; }
 /** Builds the renderer call that renders overlay breakpoint glyphs for the given one-based lines. */
 function breakpointsExpression(lines: number[], token: string): string { return `window.__dsoSetOverlayBreakpoints ? window.__dsoSetOverlayBreakpoints(${JSON.stringify(lines)}, ${JSON.stringify(token)}) : 'overlay-breakpoints-missing'`; }
-
-/** Parses one hover markdown file link into a target file and one-based position (fragment forms: L10, L10,5, 10,5). */
-function parseHoverLinkTarget(href: string): { column: number; line: number; uri: vscode.Uri } | undefined {
-  try {
-    const uri = vscode.Uri.parse(href, true);
-    if (uri.scheme !== "file") {
-      return undefined;
-    }
-    const match = /^L?(\d+)(?:[,:](\d+))?/i.exec(decodeURIComponent(uri.fragment || ""));
-    return { column: match?.[2] ? Number(match[2]) : 1, line: match?.[1] ? Number(match[1]) : 1, uri: uri.with({ fragment: "" }) };
-  } catch {
-    return undefined;
-  }
-}
-
-/** Returns whether two filesystem paths are equal after platform-neutral normalization. */
-function samePath(left: string, right: string): boolean {
-  return left.replace(/\\/g, "/").toLowerCase() === right.replace(/\\/g, "/").toLowerCase();
-}
 
 /** Returns the expression that reads only user-visible overlay text. */
 function visibleTextReadExpression(token: string): string { return `(function(){const root=document.getElementById("django-shell-overlay");if(!root||root.__dsoOwnerToken!==${JSON.stringify(token)}){return JSON.stringify({ok:false});}return window.__dsoGetOverlayVisibleText ? JSON.stringify({ok:true,text:window.__dsoGetOverlayVisibleText(${JSON.stringify(token)})}) : JSON.stringify({ok:false});})()`; }

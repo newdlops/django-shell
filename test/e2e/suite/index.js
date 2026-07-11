@@ -20,7 +20,6 @@ async function run() {
   assert.equal(opened.hasCellResizers, true);
   assert.equal(opened.hasDebugButton, true);
   assert.equal(opened.hasDebugControls, true);
-  assert.equal(opened.hasDebugInfoPanel, true);
   assert.equal(opened.hasNotebookChrome, true);
   assert.equal(opened.hasPythonDisabledState, true);
   assert.equal(opened.hasPythonIcon, true);
@@ -345,7 +344,7 @@ async function exists(uri) {
   }
 }
 
-/** Verifies renderer guards that protect completion Enter and hidden preludes. */
+/** Verifies renderer guards that protect completion Enter and user-only prelude models. */
 function assertOverlayRendererGuards(extension) {
   const sync = require(path.join(extension.extensionPath, "out", "workbenchOverlaySyncRenderer.js"));
   const source = sync.overlaySyncRendererSource();
@@ -370,19 +369,19 @@ function assertOverlayRendererGuards(extension) {
   window.__djangoShellOverlayPrelude = prelude;
   api.applyPrelude(root, editor);
 
-  assert.equal(model.getValue(), `${prefix}objectsa = Company.objec`);
-  assert.equal(editor.hiddenAreas[0].startLineNumber, 1);
-  assert.equal(editor.hiddenAreas[0].endLineNumber, root.__dsoUserStartLine - 1);
-  assert.equal(editor.position.lineNumber, root.__dsoUserStartLine);
+  assert.equal(model.getValue(), "objectsa = Company.objec");
+  assert.deepEqual(editor.hiddenAreas, []);
+  assert.equal(root.__dsoUserStartLine, 1);
+  assert.deepEqual(editor.position, { column: 24, lineNumber: 1 });
 
   const duplicatedModel = fakeModel(`${prefix}${prefix}Company.objects`);
   api.applyPrelude({ __dsoPreludeText: prelude, __dsoUseVisiblePrelude: true }, fakeEditor(duplicatedModel, { column: 1, lineNumber: 7 }));
-  assert.equal(duplicatedModel.getValue(), `${prefix}Company.objects`);
+  assert.equal(duplicatedModel.getValue(), "Company.objects");
 
   editor.hiddenAreas = [];
   model.setValue(`${prefix}objectsa = Company.objects`);
-  assert.equal(editor.hiddenAreas[0].startLineNumber, 1);
-  assert.equal(editor.hiddenAreas[0].endLineNumber, root.__dsoUserStartLine - 1);
+  assert.equal(model.getValue(), "objectsa = Company.objects");
+  assert.deepEqual(editor.hiddenAreas, []);
 
   const listModel = fakeModel("a = [\n    1,\n    2,\n    3,\n]");
   const listPayload = api.enterPayload({ __dsoInputStartLine: 1, __dsoUserStartLine: 1 }, fakeEditor(listModel, { column: 2, lineNumber: 5 }));
@@ -404,11 +403,11 @@ function assertOverlayRendererGuards(extension) {
     posts.push(payload);
     return { json: async () => ({ executed: true }) };
   });
-  assert.equal(commands.size, 0);
+  assert.equal(commands.size, 1, "only explicit Shift Enter installs a Monaco command");
   assert.equal(posts.some((payload) => payload.type === "run"), false);
   rerunEditor.position = { column: 2, lineNumber: 1 };
   assert.equal(window.__dsoRunCurrentOverlayInput(), "requested");
-  assert.equal(posts.some((payload) => payload.type === "run" && payload.code === "x = 1"), true);
+  assert.equal(posts.some((payload) => payload.type === "run" && payload.code === "x = 1\nx + 1"), true);
 }
 
 /** Verifies the captured Monaco editor visually occupies the cell instead of a floating frame. */
@@ -419,7 +418,7 @@ function assertOverlayChromeIsEmbedded(extension) {
   assert.ok(source.includes("border:0"));
   assert.ok(source.includes("formatOnPaste: false"));
   assert.ok(source.includes("formatOnType: false"));
-  assert.ok(source.includes(".django-shell-overlay-editor{height:100%"));
+  assert.ok(source.includes(".django-shell-overlay-editor{width:100%;height:100%"));
   assert.ok(source.includes("__dsoGeometryTimer"));
   assert.ok(source.includes("__dsoDisposeOverlay"));
   assert.ok(source.includes("__djangoShellOverlayReset"));

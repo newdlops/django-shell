@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 
 const require = createRequire(import.meta.url);
-const { choosePreferredDebugSourceFrame, isOverlayDebugSourcePath, isUserDebugSourcePath } = require("../out/debugSourceFrames.js");
+const { choosePreferredDebugSourceFrame, isOverlayDebugSourcePath, isPseudoDebugSourcePath, isUserDebugSourcePath } = require("../out/debugSourceFrames.js");
 
 test("prefers workspace source frames over site-packages during step-in", () => {
   const frames = [
@@ -92,6 +92,22 @@ test("treats the manage.py shell entry script as plumbing rather than user sourc
   ];
   const selected = choosePreferredDebugSourceFrame(frames, { preferUserSource: true, workspaceRoots: ["/workspace"] });
   assert.equal(selected.source.path, "/workspace/app/services.py");
+});
+
+test("rejects realpath-expanded Python pseudo sources as workspace files", () => {
+  assert.equal(isPseudoDebugSourcePath("<django-shell-backend>"), true);
+  assert.equal(isPseudoDebugSourcePath("/workspace/<django-shell-backend>"), true);
+  assert.equal(isPseudoDebugSourcePath("file:///workspace/%3Cdjango-shell-backend%3E"), true);
+  assert.equal(isPseudoDebugSourcePath("C:\\workspace\\<frozen importlib._bootstrap>"), true);
+  assert.equal(isPseudoDebugSourcePath("/workspace/app/services.py"), false);
+  assert.equal(isUserDebugSourcePath("/workspace/<django-shell-backend>"), false);
+
+  const frames = [
+    { ...frame("/workspace/<django-shell-backend>", 1700), source: { name: "<django-shell-backend>", path: "/workspace/<django-shell-backend>" } },
+    frame("/workspace/.django-shell/console-cell.py", 6)
+  ];
+  const selected = choosePreferredDebugSourceFrame(frames, { preferOverlay: true, workspaceRoots: ["/workspace"] });
+  assert.equal(selected.source.path, "/workspace/.django-shell/console-cell.py");
 });
 
 function frame(path, line) {

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runTests } from "@vscode/test-electron";
+import { prepareDevelopmentExtension } from "./developmentExtension.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -12,7 +13,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 async function main() {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "django-shell-e2e-"));
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "django-shell-e2e-user-"));
-  const extensionPath = prepareDevelopmentExtension();
+  const extensionPath = prepareDevelopmentExtension(ROOT);
   const python = pythonExecutablePath();
   copyInstalledExtension("ms-python.python-");
   copyInstalledExtension("ms-python.vscode-pylance-");
@@ -34,26 +35,12 @@ async function main() {
   }, null, 2));
   await runTests({
     extensionDevelopmentPath: extensionPath,
-    extensionTestsEnv: { DJANGO_SHELL_E2E: "1", DJANGO_SHELL_E2E_EXTENSION_ID: `${manifest.publisher}.${manifest.name}`, ...(python ? { DJANGO_SHELL_E2E_PYTHON: python } : {}) },
+    extensionTestsEnv: { DJANGO_SHELL_E2E: "1", DJANGO_SHELL_E2E_EXTENSION_ID: `${manifest.publisher}.${manifest.name}`, ...(process.env.DJANGO_SHELL_E2E_HOVER_ONLY === "1" ? { DJANGO_SHELL_E2E_HOVER_ONLY: "1" } : {}), ...(python ? { DJANGO_SHELL_E2E_PYTHON: python } : {}) },
     extensionTestsPath: path.join(ROOT, "test", "e2e", "suite", "index.js"),
     launchArgs: ["--inspect=9239", `--user-data-dir=${userData}`, workspace],
     reuseMachineInstall: Boolean(process.env.VSCODE_E2E_EXECUTABLE),
     vscodeExecutablePath: vscodeExecutablePath()
   });
-}
-
-/** Creates a dependency-free development extension wrapper for UI E2E tests. */
-function prepareDevelopmentExtension() {
-  const directory = path.join(ROOT, ".vscode-test", "django-shell-dev");
-  fs.rmSync(directory, { force: true, recursive: true });
-  fs.mkdirSync(directory, { recursive: true });
-  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
-  delete manifest.extensionDependencies;
-  fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify(manifest, null, 2));
-  for (const name of ["media", "node_modules", "out", "python"]) {
-    fs.symlinkSync(path.join(ROOT, name), path.join(directory, name), "dir");
-  }
-  return directory;
 }
 
 /** Copies one installed extension into the VS Code E2E extension directory. */

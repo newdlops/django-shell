@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 
 TRACER_API_VERSION = 1
-TRACER_VERSION = "2026.07.11.2"
+TRACER_VERSION = "2026.07.11.3"
 OPT_IN_THREAD_ATTRIBUTE = "django_shell_debugger_trace_enabled"
 
 _CANONICAL_MODULE_NAME = "django_shell_native_tracer"
@@ -67,6 +67,14 @@ _MAX_SAFE_DECIMAL_INT_BITS = 2048
 _CO_OPTIMIZED = 0x0001
 _CO_VARARGS = 0x0004
 _CO_VARKEYWORDS = 0x0008
+_DEBUG_WRAPPER_FUNCTION_NAME = "__djs_overlay_cell__"
+_DEBUG_WRAPPER_RESULT_NAME = "__djs_overlay_cell_result__"
+_OS_MODULE_FILE = getattr(os, "__file__", None)
+_STDLIB_ROOT = (
+    os.path.normcase(os.path.realpath(os.path.dirname(_OS_MODULE_FILE)))
+    if isinstance(_OS_MODULE_FILE, str) and _OS_MODULE_FILE
+    else ""
+)
 _ACTIVE_TRACER = None
 _ACTIVE_LOCK = threading.Lock()
 _LOCALS_TO_FAST = None
@@ -102,8 +110,74 @@ if getattr(sys.implementation, "name", "") == "cpython":
         _LOCALS_TO_FAST = None
 
 
+def _is_pseudo_filename(value: str) -> bool:
+    """Return whether a code filename is an interpreter-style pseudo path."""
+    return len(value) >= 2 and value.startswith("<") and value.endswith(">")
+
+
+def _source_path(value: str) -> str:
+    """Resolve a source path while preserving non-filesystem pseudo names."""
+    return value if _is_pseudo_filename(value) else os.path.realpath(value)
+
+
 def _path(value: str) -> str:
-    return os.path.normcase(os.path.realpath(value))
+    """Normalize a breakpoint path without inventing paths for pseudo sources."""
+    return os.path.normcase(_source_path(value))
+
+
+def _is_step_target_frame(frame: types.FrameType) -> bool:
+    """Return whether stepping may stop in a user-visible source frame."""
+    filename = frame.f_code.co_filename
+    if (
+        _is_pseudo_filename(filename)
+        or os.path.basename(filename) == "django_shell_backend.py"
+    ):
+        return False
+    return not _is_standard_library_filename(filename)
+
+
+def _is_standard_library_filename(filename: str) -> bool:
+    """Return whether a file belongs to stdlib rather than installed packages."""
+    if not _STDLIB_ROOT:
+        return False
+    normalized = os.path.normcase(os.path.realpath(filename))
+    try:
+        if os.path.commonpath((_STDLIB_ROOT, normalized)) != _STDLIB_ROOT:
+            return False
+        relative_parts = os.path.relpath(normalized, _STDLIB_ROOT).split(os.sep)
+    except ValueError:
+        return False
+    package_roots = {
+        os.path.normcase("site-packages"),
+        os.path.normcase("dist-packages"),
+    }
+    return not any(part in package_roots for part in relative_parts)
+
+
+def _is_generated_wrapper_plumbing_frame(frame: types.FrameType) -> bool:
+    """Return whether a frame only defines and invokes the cell wrapper."""
+    code = frame.f_code
+    if (
+        code.co_name != "<module>"
+        or _DEBUG_WRAPPER_FUNCTION_NAME not in code.co_names
+        or _DEBUG_WRAPPER_RESULT_NAME not in code.co_names
+    ):
+        return False
+    wrapper = frame.f_globals.get(_DEBUG_WRAPPER_FUNCTION_NAME)
+    if (
+        type(wrapper) is types.FunctionType
+        and wrapper.__code__.co_filename == code.co_filename
+    ):
+        return True
+    # The module's call and first line events precede STORE_NAME, so the new
+    # wrapper is not in globals yet. Its nested code object is already an exact
+    # and collision-resistant description of the generated module instead.
+    return any(
+        type(value) is types.CodeType
+        and value.co_name == _DEBUG_WRAPPER_FUNCTION_NAME
+        and value.co_filename == code.co_filename
+        for value in code.co_consts
+    )
 
 
 def _depth(frame: types.FrameType) -> int:
@@ -1277,6 +1351,12 @@ class NativeDapTracer:
             self.normalized_paths[raw_filename] = filename
         if filename == _THIS_FILE:
             return None
+        if _is_generated_wrapper_plumbing_frame(frame):
+            self.call_breakpoint_locations.pop(native_id, None)
+            if event == "call" or native_id not in self.pause_requests:
+                # Keep this trace return active: the generated module calls
+                # the child wrapper containing the actual user statements.
+                return self.trace
         if event == "call":
             # ``dis.findlinestarts`` includes a function's definition line.
             # Python reports that location as a call event rather than a line
@@ -1332,7 +1412,7 @@ class NativeDapTracer:
                 )
                 if breakpoint_match.breakpoint_ids:
                     reason = "breakpoint"
-            if reason is None:
+            if reason is None and _is_step_target_frame(frame):
                 step = self.steps.get(native_id)
                 if step is not None:
                     mode, start_depth = step
@@ -1636,7 +1716,7 @@ class NativeDapTracer:
             return
         source = {
             "name": os.path.basename(frame.f_code.co_filename),
-            "path": os.path.realpath(frame.f_code.co_filename),
+            "path": _source_path(frame.f_code.co_filename),
         }
         for output in breakpoint_match.log_outputs:
             event = QueuedLogEvent(
@@ -1757,6 +1837,7 @@ class NativeDapTracer:
                 native_id in self.native_to_dap
                 or native_id in self.steps
                 or native_id in self.pause_requests
+                or native_id in self.call_breakpoint_locations
                 or native_id in self.stops
             )
             if previous is not thread and (previous is not None or has_stale_state):
@@ -1771,9 +1852,7 @@ class NativeDapTracer:
         if old_dap_id is not None:
             self.dap_to_native.pop(old_dap_id, None)
         self.native_threads.pop(native_id, None)
-        self.steps.pop(native_id, None)
-        self.call_breakpoint_locations.pop(native_id, None)
-        self.pause_requests.discard(native_id)
+        self._discard_thread_control_state_locked(native_id)
         self.last_exception_stops.pop(native_id, None)
         stale_stop = self.stops.pop(native_id, None)
         if stale_stop is not None:
@@ -1796,11 +1875,18 @@ class NativeDapTracer:
         }
         self.condition.notify_all()
 
+    def _discard_thread_control_state_locked(self, native_id: int) -> None:
+        """Discard pending controls whose lifetime is one thread opt-in."""
+        self.steps.pop(native_id, None)
+        self.call_breakpoint_locations.pop(native_id, None)
+        self.pause_requests.discard(native_id)
+
     def _prune_dead_thread_mappings_locked(self) -> None:
         tracked_ids = (
             set(self.native_to_dap)
             | set(self.steps)
             | self.pause_requests
+            | set(self.call_breakpoint_locations)
             | set(self.stops)
         )
         for native_id in tracked_ids:
@@ -3143,7 +3229,7 @@ class NativeDapTracer:
                     "column": 1,
                     "source": {
                         "name": os.path.basename(frame.f_code.co_filename),
-                        "path": os.path.realpath(frame.f_code.co_filename),
+                        "path": _source_path(frame.f_code.co_filename),
                     },
                 }
             )
@@ -4869,6 +4955,8 @@ def trace_this_thread(enabled: bool) -> None:
         if _is_tracer_trace_hook(frame.f_trace, tracer):
             frame.f_trace = None
         frame = frame.f_back
+    with tracer.condition:
+        tracer._discard_thread_control_state_locked(threading.get_ident())
 
 
 def _reset_after_fork_child() -> None:

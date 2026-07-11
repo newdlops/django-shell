@@ -14,7 +14,7 @@ const { DirectDebugAdapterSession } = require("../out/directDebugAdapterSession.
 const PYTHON = pythonExecutable();
 const BACKEND_PATH = path.resolve("python", "django_shell_backend.py");
 const TRACER_PATH = path.resolve("python", "django_shell_native_tracer.py");
-const TRACER_VERSION = "2026.07.11.2";
+const TRACER_VERSION = "2026.07.11.3";
 
 test("debugs and hot-reloads only opted-in backend work with the vendored experimental engine", { skip: !PYTHON, timeout: 25_000 }, async () => {
   assert.equal(fs.existsSync(BACKEND_PATH), true, `Missing backend: ${BACKEND_PATH}`);
@@ -25,7 +25,8 @@ test("debugs and hot-reloads only opted-in backend work with the vendored experi
   const hotSourcePath = path.join(directory, "hot_reload_target.py");
   const reloadEnteredPath = path.join(directory, "reload-entered");
   const reloadReleasePath = path.join(directory, "reload-release");
-  const source = "value = 1\nvalue = value + 1\nvalue\n";
+  const source = "first = 1\nfirst += 1\n\n\nvalue = 1\nvalue = value + 1\nvalue\n";
+  const secondUnit = "value = 1\nvalue = value + 1\nvalue\n";
   fs.writeFileSync(sourcePath, source);
   fs.writeFileSync(hotSourcePath, "def current():\n    return 'before'\n");
 
@@ -78,22 +79,22 @@ test("debugs and hot-reloads only opted-in backend work with the vendored experi
       { host: ready.native.host, port: ready.native.port, reused: ready.native.reused },
       async () => {
         const response = await session.customRequest("setBreakpoints", {
-          breakpoints: [{ condition: "value == 1", line: 2 }],
-          lines: [2],
+          breakpoints: [{ condition: "value == 1", line: 6 }],
+          lines: [6],
           source: { name: path.basename(sourcePath), path: sourcePath }
         });
         assert.equal(response.breakpoints?.[0]?.verified, true);
-        assert.equal(response.breakpoints?.[0]?.line, 2);
+        assert.equal(response.breakpoints?.[0]?.line, 6);
       },
       { cwd: directory, django: true, engine: "experimental", justMyCode: false, name: "Django Shell Experimental" }
     );
 
     const debugResponse = backendRequest(ready.backend, {
-      breakpointLines: [2],
-      code: source,
+      breakpointLines: [6],
+      code: secondUnit,
       filename: sourcePath,
       kind: "execute",
-      lineOffset: 0,
+      lineOffset: 4,
       sourceText: source,
       token: ready.token
     }, 10_000);
@@ -103,6 +104,7 @@ test("debugs and hot-reloads only opted-in backend work with the vendored experi
 
     const stack = await session.customRequest("stackTrace", { threadId: stopped.threadId });
     assert.equal(stack.stackFrames?.[0]?.source?.path, fs.realpathSync(sourcePath));
+    assert.equal(stack.stackFrames?.[0]?.line, 6);
     const scopes = await session.customRequest("scopes", { frameId: stack.stackFrames[0].id });
     const globals = scopes.scopes.find((scope) => scope.name === "Globals");
     assert.ok(globals?.variablesReference);
@@ -195,7 +197,7 @@ function pythonHarness(backendPath, tracerPath, hotSourcePath) {
     "backend.start(namespace,token)",
     "server=backend._STATE['server']",
     "initial_names=server.initial_names",
-    "native_request={'token':token,'kind':'nativeDebugger','tracerPath':tracer_path,'expectedVersion':'2026.07.11.2','host':'127.0.0.1','port':0}",
+    `native_request={'token':token,'kind':'nativeDebugger','tracerPath':tracer_path,'expectedVersion':${JSON.stringify(TRACER_VERSION)},'host':'127.0.0.1','port':0}`,
     "unauthorized=backend._run_request(namespace,token,dict(native_request,token='wrong-token'),initial_names)",
     "native=backend._run_request(namespace,token,native_request,initial_names)",
     "conflict=backend._run_request(namespace,token,{'token':token,'kind':'debugpy','code':'debugpy_ran = True'},initial_names)",

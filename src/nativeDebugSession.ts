@@ -4,7 +4,7 @@ import * as path from "path";
 import type { BackendClient, BackendNativeDebuggerResult } from "./backendClient";
 
 export const NATIVE_TRACER_API_VERSION = 1;
-export const NATIVE_TRACER_VERSION = "2026.07.11.2";
+export const NATIVE_TRACER_VERSION = "2026.07.11.3";
 
 /** Connectable endpoint returned by the in-process native tracer. */
 export interface NativeDebugEndpoint {

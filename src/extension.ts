@@ -168,6 +168,7 @@ export function activate(context: vscode.ExtensionContext): void {
   if (process.env.DJANGO_SHELL_E2E === "1") {
     context.subscriptions.push(
       vscode.commands.registerCommand("djangoShell.e2eEvaluateOverlay", async (expression: string) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).e2eEvaluateOverlay(expression)),
+      vscode.commands.registerCommand("djangoShell.e2eDispatchOverlayMouse", async (input: { points?: Array<{ action?: "down" | "move" | "up"; x: number; y: number }> }) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).e2eDispatchOverlayMouse(input?.points ?? [])),
       vscode.commands.registerCommand("djangoShell.e2eRestartKernel", async () => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).e2eRestartKernel()),
       vscode.commands.registerCommand("djangoShell.e2eSetPrelude", async (lines: string[]) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).e2eSetPrelude(lines)),
       vscode.commands.registerCommand("djangoShell.e2eWriteTerminal", async (data: string) => (await ensureCustomConsoleRuntime(context, diagnostics, runtimeSource, debugAnalysis)).e2eWriteTerminal(data)),

@@ -4,6 +4,7 @@ import { overlayWidgetRendererSource } from "./workbenchOverlayWidgetRenderer";
 import { overlayCleanupRendererSource } from "./workbenchOverlayCleanupRenderer";
 import { overlayFrameRendererSource } from "./workbenchOverlayFrameRenderer";
 import { overlayCaptureRendererSource } from "./workbenchOverlayCaptureRenderer";
+import { overlayHoverRendererSource } from "./workbenchOverlayHoverRenderer";
 
 export interface OverlayRendererOptions {
   executionMode?: "shell" | "submit";
@@ -741,6 +742,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       root.appendChild(output);
     }
 
+    ${overlayHoverRendererSource()}
     ${overlayWidgetRendererSource()}
     ${overlaySyncRendererSource()}
     ${overlayCleanupRendererSource()}

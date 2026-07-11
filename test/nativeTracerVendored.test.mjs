@@ -28,7 +28,7 @@ sys.modules["django_shell_native_tracer"] = module
 spec.loader.exec_module(module)
 
 assert module.TRACER_API_VERSION == 1
-assert module.TRACER_VERSION == "2026.07.11.2"
+assert module.TRACER_VERSION == "2026.07.11.3"
 assert module.OPT_IN_THREAD_ATTRIBUTE == "django_shell_debugger_trace_enabled"
 assert sys.modules["django_shell_native_tracer"] is module
 assert sys.modules["_django_shell_native_tracer"] is module
@@ -192,6 +192,16 @@ tracer._request({"seq": 2, "type": "request", "command": "threads", "arguments":
 assert [row["name"] for row in captured["threads"]] == [current.name]
 tracer._response = real_response
 
+native_id = threading.get_ident()
+tracer.steps[native_id] = ("next", 1)
+tracer.pause_requests.add(native_id)
+tracer.call_breakpoint_locations[native_id] = (sys._getframe(), 1, {})
+module.trace_this_thread(False)
+assert native_id not in tracer.steps
+assert native_id not in tracer.pause_requests
+assert native_id not in tracer.call_breakpoint_locations
+module.trace_this_thread(True)
+
 tracer.configured = True
 tracer.client = object()
 tracer.exception_filters = {"uncaught", "djangoRequestUnhandled"}
@@ -251,7 +261,7 @@ print(json.dumps({
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const payload = JSON.parse(result.stdout.trim());
-  assert.equal(payload.status.version, "2026.07.11.2");
+  assert.equal(payload.status.version, "2026.07.11.3");
   assert.equal(payload.status.pausedThreads, 0);
   assert.equal(payload.pauses.length, 2);
   assert.deepEqual(

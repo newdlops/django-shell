@@ -153,7 +153,8 @@ test("overlay hover widgets use a constructor-time body portal outside the webvi
   assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .overflowingContentWidgets{overflow:visible!important;z-index:2147483647!important}"));
   assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .monaco-hover,.django-shell-overlay-widget-layer .monaco-editor-hover{background:var(--vscode-editorHoverWidget-background"));
   assert.equal(widgetSource.includes("opacity:1!important"), false, "stale hover nodes keep Monaco's native hidden opacity");
-  assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .monaco-hover .monaco-sash,.django-shell-overlay-widget-layer .monaco-editor-hover .monaco-sash"));
+  assert.ok(widgetSource.includes(".django-shell-overlay-widget-layer .monaco-hover .monaco-sash:not(.disabled),.django-shell-overlay-widget-layer .monaco-editor-hover .monaco-sash:not(.disabled)"));
+  assert.ok(widgetSource.includes(".monaco-resizable-hover .monaco-sash.disabled"), "disabled native resize edges stay non-interactive");
   assert.ok(widgetSource.includes("function __dsoThemeSource()"));
   assert.ok(widgetSource.includes("function __dsoSyncThemeClasses(node, includeWorkbenchClass)"));
   assert.ok(widgetSource.includes('add("monaco-workbench")'));

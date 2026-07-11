@@ -261,7 +261,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
   /** Injects hidden overlay prelude lines for extension host E2E tests. */ async e2eSetPrelude(importLines: string[]): Promise<void> { this.overlayPrelude = importLines; await (await this.ensureOverlay()).updatePrelude(importLines); }
   /** Writes setup terminal input for extension host E2E tests. */ e2eWriteTerminal(data: string): void { this.ensureSession(); this.session?.write(data); }
   /** Evaluates an overlay renderer expression for extension host E2E tests. */ async e2eEvaluateOverlay(expression: string): Promise<string> { return (await this.ensureOverlay()).e2eEvaluate(expression); }
-
+  /** Dispatches real workbench renderer mouse steps for extension host E2E tests. */ async e2eDispatchOverlayMouse(points: Array<{ action?: "down" | "move" | "up"; x: number; y: number }>): Promise<unknown> { return (await this.ensureOverlay()).e2eDispatchMouse(points); }
   /** Releases the custom console session and webview resources. */
   dispose(): void {
     const panel = this.panel;

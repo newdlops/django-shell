@@ -3,6 +3,7 @@
 import * as vscode from "vscode";
 import { debugInlineValueText } from "./debugInlineValues";
 import type { DebugFrameInfo } from "./debugInspector";
+import { isPseudoDebugSourcePath } from "./debugSourceFrames";
 import type { DiagnosticLogger } from "./diagnostics";
 
 const OVERLAY_SOURCE_SUFFIX = "/.django-shell/console-cell.py";
@@ -20,11 +21,11 @@ export function isOverlayDebugFramePath(pathOrUri: string | undefined): boolean 
 
 /** Opens the paused non-overlay source frame in the active editor group. */
 export async function revealExternalDebugFrame(info: ExternalDebugFrameInfo, logger?: DiagnosticLogger): Promise<boolean> {
-  if (info.state !== "paused" || !info.frame?.path || isOverlayDebugFramePath(info.frame.path)) {
+  if (info.state !== "paused" || !info.frame?.path || isOverlayDebugFramePath(info.frame.path) || isPseudoDebugSourcePath(info.frame.path)) {
     return false;
   }
   const path = normalizeDebugFramePath(info.frame.path);
-  if (!path || path.startsWith("<")) {
+  if (!path || isPseudoDebugSourcePath(path)) {
     return false;
   }
   externalDebugFrameInfo = info;
@@ -45,7 +46,7 @@ export async function revealExternalDebugFrame(info: ExternalDebugFrameInfo, log
 
 /** Replaces inline values on an already-open external frame without reopening or refocusing its file. */
 export function refreshExternalDebugFrameDecoration(info: ExternalDebugFrameInfo): boolean {
-  if (info.state !== "paused" || !info.frame?.path || isOverlayDebugFramePath(info.frame.path)) {
+  if (info.state !== "paused" || !info.frame?.path || isOverlayDebugFramePath(info.frame.path) || isPseudoDebugSourcePath(info.frame.path)) {
     if (info.state === "paused") { externalDebugFrameInfo = undefined; }
     return false;
   }
