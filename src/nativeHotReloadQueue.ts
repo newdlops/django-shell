@@ -71,6 +71,7 @@ export class NativeHotReloadQueue {
     const results: BackendHotReloadResult["results"] = [];
     const errors: string[] = [];
     const attemptedPaths: string[] = [];
+    let inFlightChunk: string[] = [];
     let ok = true;
     this.options.onReloading?.(true);
     try {
@@ -82,19 +83,27 @@ export class NativeHotReloadQueue {
           break;
         }
         const chunk = paths.slice(index, index + maxBatchSize);
-        attemptedPaths.push(...chunk);
+        inFlightChunk = chunk;
         const result = await this.backend.hotReload(chunk);
         if (this.disposed || generation !== this.generation) { return; }
+        if (result.retryable === true) {
+          for (const path of paths.slice(index)) { this.pending.add(path); }
+          inFlightChunk = [];
+          this.schedule(this.options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS);
+          break;
+        }
+        attemptedPaths.push(...chunk);
+        inFlightChunk = [];
         results.push(...result.results);
         ok = ok && result.ok;
         if (result.error) { errors.push(result.error); }
       }
       if (attemptedPaths.length > 0) {
-        this.options.onResult?.({ engine: "experimental", error: errors.length ? errors.join("; ") : undefined, ok, results }, attemptedPaths);
+        this.options.onResult?.({ engine: "experimental", error: errors.length ? errors.join("; ") : undefined, ok, retryable: false, results }, attemptedPaths);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.options.onResult?.({ engine: "experimental", error: message, ok: false, results }, attemptedPaths);
+      this.options.onResult?.({ engine: "experimental", error: message, ok: false, retryable: false, results }, [...attemptedPaths, ...inFlightChunk]);
     } finally {
       if (!this.disposed && generation === this.generation) { this.options.onReloading?.(false); }
     }

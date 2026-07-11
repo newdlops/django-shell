@@ -102,7 +102,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 97"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 98"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -687,8 +687,14 @@ test("overlay step-in can reveal external source frames", () => {
   assert.ok(customConsoleSource.includes("revealExternalDebugFrame(info, this.logger)"));
   assert.ok(customConsoleSource.includes("isOverlayDebugFramePath(path)"));
   assert.ok(debugFrameNavigationSource.includes("vscode.window.showTextDocument"));
-  assert.ok(debugFrameNavigationSource.includes("decorateExternalDebugFrame(editor, position)"));
-  assert.equal(debugFrameNavigationSource.includes("contentText"), false);
+  assert.ok(customConsoleSource.includes("refreshExternalDebugFrameDecoration(info)"));
+  assert.match(debugFrameNavigationSource, /export function refreshExternalDebugFrameDecoration\(info:/);
+  assert.ok(debugFrameNavigationSource.includes("debugInlineValueText(latest.scopes)"));
+  assert.ok(debugFrameNavigationSource.includes("debugInlineValueText(info.scopes)"));
+  assert.ok(debugFrameNavigationSource.includes("contentText: `  ${inlineText}`"));
+  assert.ok(debugFrameNavigationSource.includes('new vscode.ThemeColor("editor.inlineValuesForeground")'));
+  assert.ok(debugFrameNavigationSource.includes('new vscode.ThemeColor("editor.inlineValuesBackground")'));
+  assert.ok(debugFrameNavigationSource.includes("new vscode.Range(end, end)"), "native inline values attach at the source line end");
   assert.equal(debugFrameNavigationSource.includes("before:"), false);
   assert.ok(debugFrameNavigationSource.includes("overviewRulerLane"));
   assert.ok(debugFrameNavigationSource.includes("console-cell.py"));
@@ -911,17 +917,19 @@ test("overlay show and debug-line renderer traffic are single-flight and latest-
   assert.equal(showBody.includes("await this.queueDebugLineFlush()"), false);
   assert.ok(showBody.includes("this.resumeHeldGeometry()"), "show completion releases the latest held geometry");
   assert.ok(debugBody.includes("this.debugLineTarget = visibleLine >= 1 ? visibleLine : 0"));
+  assert.ok(debugBody.includes("this.inlineValueText = visibleLine > 0 ? debugInlineValueText(info.scopes) : \"\""));
   assert.ok(debugBody.includes("if (this.debugLineFlushPromise)"));
-  assert.ok(debugBody.includes("while (this.ws?.readyState === WebSocket.OPEN && this.rendererInjected && this.debugLineApplied !== this.debugLineTarget)"));
-  assert.ok(debugBody.includes("const target = this.debugLineTarget"), "a queued update snapshots only the latest target before each CDP call");
+  assert.ok(debugBody.includes("while (this.ws?.readyState === WebSocket.OPEN && this.rendererInjected && this.debugLineApplied !== debugInlineRenderKey(this.debugLineTarget, this.inlineValueText))"));
+  assert.ok(debugBody.includes("const target = this.debugLineTarget, inline = this.inlineValueText, key = debugInlineRenderKey(target, inline)"), "a queued update atomically snapshots the latest line and values before each CDP call");
 });
 
-test("paused-frame presentation is location-deduped across fast and enriched inspection", () => {
+test("paused-frame navigation is location-deduped while enriched inline values still refresh", () => {
   const body = customConsoleSource.slice(customConsoleSource.indexOf("private postDebugInfo(info"), customConsoleSource.indexOf("private async inspectDebugVariableChildren"));
   const duplicateGuard = body.indexOf("presentationKey === this.lastDebugPresentationKey");
-  const markerUpdate = body.indexOf("this.overlay?.updateDebugInfo(info)", duplicateGuard);
+  const markerUpdate = body.indexOf("this.overlay?.updateDebugInfo(info)");
 
-  assert.ok(duplicateGuard >= 0 && markerUpdate > duplicateGuard, "duplicate locations stop before renderer presentation");
+  assert.ok(markerUpdate >= 0 && duplicateGuard > markerUpdate, "renderer values refresh before duplicate locations stop navigation");
+  assert.equal((body.match(/this\.overlay\?\.updateDebugInfo\(info\)/g) ?? []).length, 1, "one renderer update site handles every frame state");
   assert.equal((body.match(/revealExternalDebugFrame\(/g) ?? []).length, 1, "one external navigation site");
   assert.equal((body.match(/closeWorkspaceGeneratedOverlayTabs\(false\)/g) ?? []).length, 1, "one overlay-mode external tab cleanup site");
   assert.ok(body.includes("if (!wasOverlayFrame) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); }"), "overlay-to-overlay steps only update the marker");

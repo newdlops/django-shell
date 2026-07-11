@@ -2,7 +2,7 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "0.1.0",
+  "version": "1.1.1000004",
   "publisher": "newdlops",
   "license": "UNLICENSED",
   "icon": "media/icon.png",
@@ -468,13 +468,13 @@
         "command": "djangoShell.overlayAcceptInput",
         "key": "enter",
         "mac": "enter",
-        "when": "editorTextFocus && editorLangId == 'python' && resourceScheme == 'file' && resourceFilename == 'console-cell.py' && !editorReadonly && !suggestWidgetVisible && !parameterHintsVisible && !inlineSuggestionVisible"
+        "when": "editorTextFocus && editorLangId == 'python' && resourceScheme == 'file' && resourceFilename == 'console-cell.py' && !editorReadonly && !breakpointWidgetVisible && !suggestWidgetVisible && !parameterHintsVisible && !inlineSuggestionVisible"
       },
       {
         "command": "djangoShell.overlayInsertNewline",
         "key": "shift+enter",
         "mac": "shift+enter",
-        "when": "editorTextFocus && editorLangId == 'python' && resourceScheme == 'file' && resourceFilename == 'console-cell.py' && !editorReadonly"
+        "when": "editorTextFocus && editorLangId == 'python' && resourceScheme == 'file' && resourceFilename == 'console-cell.py' && !editorReadonly && !breakpointWidgetVisible"
       },
       {
         "command": "djangoShell.overlayRunCurrentInput",
@@ -521,7 +521,7 @@
         "djangoShell.autoImportModels": {
           "type": "boolean",
           "default": true,
-          "description": "When true (default), the Django shell binds your workspace's model classes (and django/apps/settings/models) into the shell namespace at startup, like shell_plus, so names visible in the editor analysis prelude are actually importable. Set to false to keep a plain `manage.py shell` namespace."
+          "description": "The shell always binds registered models plus django/apps/settings/models. When true (default), it also exposes classes from model modules Django has already loaded, without importing new application modules during startup."
         },
         "djangoShell.enableCodeActions": {
           "type": "boolean",

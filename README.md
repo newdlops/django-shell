@@ -96,7 +96,7 @@ Code runs in the **same live namespace** as the attached shell. From there you c
 
 - Opens an embedded **setup terminal** in the workspace root and detects when it enters an interactive Python/Django prompt (`python`, `ipython`, `shell_plus`).
 - Optionally prepends a workspace `.venv`/`venv` to the terminal environment (`djangoShell.autoActivateWorkspaceVenv`).
-- On attach, binds your installed model classes plus `django`/`apps`/`settings`/`models` into the live namespace (like `shell_plus`) so bare model names resolve immediately in the console and in ORM-mode grid reads; controlled by `djangoShell.autoImportModels` (see [Settings](#settings)).
+- On attach, binds installed model classes plus `django`/`apps`/`settings`/`models` into the live namespace (like `shell_plus`) so bare model names resolve immediately; `djangoShell.autoImportModels` additionally exposes classes from model modules Django already loaded without importing new application code.
 - After the backend attaches, provides a Python input editor and runs code in the live shell namespace, capturing **stdout, stderr, the repr of the last expression, and tracebacks**.
 - Multi-line input: leading statements execute, and the final expression's value is shown (and bound to `_`), mirroring an interactive REPL.
 - **Restart Kernel** clears stale editor input, generated preludes, and runtime caches.
@@ -107,6 +107,7 @@ Code runs in the **same live namespace** as the attached shell. From there you c
 
 - **debugpy** is the stable default and retains local plus SSH/kubectl workflows.
 - **experimental** is a dependency-free native tracer built directly into Django Shell. It starts on the first debug request with no additional extension, package installation, or Python-environment setup, and supports conditional breakpoints, hit conditions, logpoints, variable editing, lazy object inspection, exception breakpoints, and deep hot reload of loaded workspace modules.
+- In overlay debug mode, the paused line displays a compact inline summary of current Arguments and Locals in both the shell overlay and stepped-into source files. Step updates replace values in place without blinking or reopening the file, and stop/restart clears the decoration.
 
 The built-in engine supports shells running on the same extension host/filesystem, including VS Code Remote workspaces. Keep debugpy selected when the terminal itself enters a separate SSH/kubectl target. Once either engine has started in a Python process, switching engines requires **Restart Kernel**; selecting experimental before its first debug run needs no restart.
 
@@ -226,7 +227,7 @@ In the ORM query console: **Ctrl/Cmd+Enter** runs the query.
 | `djangoShell.debug.engine` | `"debugpy"` | Debugger backend: stable `debugpy`, or the built-in dependency-free `experimental` tracer. Experimental starts on demand without modifying the Python environment. |
 | `djangoShell.debug.hotReload` | `true` | Reload changed workspace Python modules while the built-in experimental engine is active. Generated files, migrations, virtual environments, and third-party packages are excluded. |
 | `djangoShell.modelBrowser.transport` | `"orm"` | Default transport for the model data browser, console, and query console: `orm` (run reads as your own literal Django ORM cells so a live `pre_run_cell` audit logs ORM, not RPC plumbing — needs `shell_plus`/IPython), `pty`/Terminal (compact reconstructed cells, works over remote SSH/`kubectl`), `auto` (socket first, terminal fallback), or `tcp`/Socket. Switchable per-panel via the `Link:` selector. |
-| `djangoShell.autoImportModels` | `true` | Bind your workspace's model classes (and `django`/`apps`/`settings`/`models`) into the shell namespace at startup, like `shell_plus`, so names in the editor analysis prelude are importable. Base names and every registered model are bound regardless; this setting only controls the deeper module scan. Set `false` to skip it. |
+| `djangoShell.autoImportModels` | `true` | Base names and every registered model are always bound. When enabled, also expose classes from model modules Django has already loaded; missing modules are never imported during backend startup. |
 | `djangoShell.autoActivateWorkspaceVenv` | `true` | Prepend a workspace `.venv`/`venv` to the setup terminal environment when present. |
 | `djangoShell.enableCodeActions` | `false` | Forward code actions through generated Python shadow documents. Expensive in large projects. |
 | `djangoShell.enableModelPreludeImports` | `false` | Scan workspace model files and import discovered model classes into editor preludes. Expensive in large projects. |
@@ -242,7 +243,7 @@ In the ORM query console: **Ctrl/Cmd+Enter** runs the query.
 
 When the shell prompt is detected, the extension injects a short **one-line `exec(...)`** command (`src/backendBootstrap.ts`) that loads the `zlib`+base64 `python/django_shell_backend.py` source from the spawn env payload (`DJANGO_SHELL_BACKEND_B64`), else from the on-disk runtime file, decompresses and `exec`s it into the shell's `globals()`, then calls `start(globals(), token)`. On a remote shell (SSH, `kubectl`/`docker exec`) where neither the env payload nor the local file crosses the boundary, the stub prints a clean `__DJANGO_SHELL_BACKEND_NEEDS_INLINE__` signal instead of raising, and the extension retries with an **inline** bootstrap that embeds the compressed source directly in the typed command (also retried when a traceback precedes the ready marker). The backend prints a `__DJANGO_SHELL_BACKEND_READY__` marker carrying `{host, port, token, …}` (or a `__..._FAILED__` marker with a traceback).
 
-At attach time `start()` also binds `django`/`apps`/`settings`/`models` and every registered model class (straight from `apps.get_models()`, no fresh import) into the shell namespace **before** snapshotting the initial names — so bare model names resolve in the console and in ORM-mode cells. With `djangoShell.autoImportModels` enabled (the default) it additionally module-scans each app for managers/enums; existing names are never overwritten.
+At attach time `start()` binds `django`/`apps`/`settings`/`models` and every registered model class (straight from `apps.get_models()`) into the shell namespace **before** snapshotting the initial names. With `djangoShell.autoImportModels` enabled, it also scans already-loaded model modules for managers/enums using their static dictionaries; missing modules and dynamic module hooks are never invoked during startup.
 
 ### Transports
 

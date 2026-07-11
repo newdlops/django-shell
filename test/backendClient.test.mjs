@@ -74,7 +74,7 @@ test("sends built-in hot reload over the authenticated backend socket", async ()
   client.setTransportMode("pty");
   try {
     const result = await client.hotReload(["/workspace/app/views.py"]);
-    assert.deepEqual(result, { engine: "experimental", error: undefined, ok: true, results: [{ message: "Reloaded app.views.", module: "app.views", patched: ["view"], path: "/workspace/app/views.py", status: "ok" }] });
+    assert.deepEqual(result, { engine: "experimental", error: undefined, ok: true, retryable: false, results: [{ message: "Reloaded app.views.", module: "app.views", patched: ["view"], path: "/workspace/app/views.py", status: "ok" }] });
     assert.deepEqual(request, { kind: "hotReload", paths: ["/workspace/app/views.py"], token: "secret" });
   } finally {
     server.close();

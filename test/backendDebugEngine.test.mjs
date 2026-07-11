@@ -45,6 +45,7 @@ test("loads and reuses the vendored tracer under Django Shell-private aliases", 
     "_active = False",
     "_endpoint = None",
     "trace_calls = []",
+    "gate_calls = []",
     "def status():",
     "    return {'active': _active, 'endpoint': _endpoint, 'apiVersion': TRACER_API_VERSION, 'version': TRACER_VERSION}",
     "def start(host='127.0.0.1', port=0):",
@@ -54,7 +55,9 @@ test("loads and reuses the vendored tracer under Django Shell-private aliases", 
     "        _endpoint = (host, port or 45678)",
     "    return _endpoint",
     "def trace_this_thread(enabled):",
-    "    trace_calls.append(bool(enabled))"
+    "    trace_calls.append(bool(enabled))",
+    "def set_hot_reload_gate(gate):",
+    "    gate_calls.append(gate is not None)"
   ].join("\n"));
   try {
     const script = [
@@ -71,7 +74,7 @@ test("loads and reuses the vendored tracer under Django Shell-private aliases", 
       "module=sys.modules['django_shell_native_tracer']",
       "same_alias=module is sys.modules['_django_shell_native_tracer']",
       "blocked=backend._run_request(namespace,'secret',{'token':'secret','kind':'debugpy','code':'debugpy_ran = True'},set())",
-      "print(json.dumps({'first':first,'second':second,'sameAlias':same_alias,'traceCalls':module.trace_calls,'owner':backend._STATE.get('debug_engine'),'blocked':blocked,'debugpyRan':namespace.get('debugpy_ran',False)}))"
+      "print(json.dumps({'first':first,'second':second,'sameAlias':same_alias,'traceCalls':module.trace_calls,'gateCalls':module.gate_calls,'owner':backend._STATE.get('debug_engine'),'blocked':blocked,'debugpyRan':namespace.get('debugpy_ran',False)}))"
     ].join("\n");
     const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -80,6 +83,7 @@ test("loads and reuses the vendored tracer under Django Shell-private aliases", 
     assert.deepEqual(payload.second, { apiVersion: 1, engine: "experimental", host: "127.0.0.1", ok: true, port: 45678, reused: true, version: "test-v1" });
     assert.equal(payload.sameAlias, true);
     assert.deepEqual(payload.traceCalls, [false, false]);
+    assert.deepEqual(payload.gateCalls, [true, true]);
     assert.equal(payload.owner, "native");
     assert.equal(payload.blocked.ok, false);
     assert.match(payload.blocked.error, /restart the Django shell/i);
@@ -87,6 +91,60 @@ test("loads and reuses the vendored tracer under Django Shell-private aliases", 
   } finally {
     fs.rmSync(directory, { force: true, recursive: true });
   }
+});
+
+test("validates fresh and reused tracer endpoints before exposing a debug socket", { skip: !PYTHON }, () => {
+  const cases = [
+    { active: false, endpoint: ["203.0.113.10", 45680], name: "fresh-external" },
+    { active: true, endpoint: ["0.0.0.0", 45681], name: "reused-wildcard" },
+    { active: false, endpoint: ["127.0.0.1", true], name: "fresh-bool-port" },
+    { active: true, endpoint: ["127.0.0.1", 0], name: "reused-zero-port" },
+    { active: false, endpoint: "127.0.0.1:45682", name: "fresh-malformed" },
+    { active: false, endpoint: ["localhost", 45683], name: "fresh-localhost" },
+    { active: true, endpoint: ["127.0.0.1", 45684], name: "reused-loopback" },
+    { active: false, endpoint: ["127.96.137.83", 45685], name: "fresh-routed-loopback" },
+    { active: true, endpoint: ["127.96.137.83", 45686], name: "reused-routed-loopback" }
+  ];
+  const script = [
+    "import importlib.util, json, sys, types",
+    `backend_path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', backend_path)",
+    "backend=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(backend)",
+    `cases=json.loads(${JSON.stringify(JSON.stringify(cases))})`,
+    "results={}",
+    "for case in cases:",
+    "    module=types.SimpleNamespace(",
+    "        TRACER_API_VERSION=1,",
+    "        TRACER_VERSION='test-v1',",
+    "        status=lambda case=case: {'active': case['active'], 'endpoint': case['endpoint'] if case['active'] else None},",
+    "        start=lambda host, port, case=case: case['endpoint'],",
+    "        trace_this_thread=lambda enabled: None,",
+    "        set_hot_reload_gate=lambda gate: None,",
+    "    )",
+    "    backend._STATE.pop('debug_engine', None)",
+    "    sys.modules['django_shell_native_tracer']=module",
+    "    sys.modules['_django_shell_native_tracer']=module",
+    "    request={'token':'secret','kind':'nativeDebugger','expectedVersion':'test-v1','host':'127.0.0.1','port':0,'tracerPath':'/unused/tracer.py'}",
+    "    results[case['name']]=backend._run_request({},'secret',request,set())",
+    "    sys.modules.pop('django_shell_native_tracer', None)",
+    "    sys.modules.pop('_django_shell_native_tracer', None)",
+    "print(json.dumps(results, sort_keys=True))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+
+  for (const name of ["fresh-external", "reused-wildcard", "fresh-bool-port", "reused-zero-port", "fresh-malformed"]) {
+    assert.equal(payload[name].ok, false, `${name} must not expose an attach endpoint`);
+    assert.match(payload[name].error, /invalid endpoint/i);
+    assert.equal(payload[name].host, "127.0.0.1");
+    assert.equal(payload[name].port, 0, `${name} must not echo the tracer's untrusted port`);
+  }
+  assert.deepEqual(payload["fresh-localhost"], { apiVersion: 1, engine: "experimental", host: "127.0.0.1", ok: true, port: 45683, reused: false, version: "test-v1" });
+  assert.deepEqual(payload["reused-loopback"], { apiVersion: 1, engine: "experimental", host: "127.0.0.1", ok: true, port: 45684, reused: true, version: "test-v1" });
+  assert.deepEqual(payload["fresh-routed-loopback"], { apiVersion: 1, engine: "experimental", host: "127.96.137.83", ok: true, port: 45685, reused: false, version: "test-v1" });
+  assert.deepEqual(payload["reused-routed-loopback"], { apiVersion: 1, engine: "experimental", host: "127.96.137.83", ok: true, port: 45686, reused: true, version: "test-v1" });
 });
 
 test("cleans failed native loads and blocks native activation after debugpy claims the process", { skip: !PYTHON }, () => {
@@ -97,7 +155,8 @@ test("cleans failed native loads and blocks native activation after debugpy clai
     "TRACER_VERSION = 'test-v1'",
     "def status(): return {'active': False, 'endpoint': None}",
     "def start(host='127.0.0.1', port=0): return (host, port or 45679)",
-    "def trace_this_thread(enabled): pass"
+    "def trace_this_thread(enabled): pass",
+    "def set_hot_reload_gate(gate): pass"
   ].join("\n"));
   try {
     const script = [

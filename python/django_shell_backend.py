@@ -7,6 +7,7 @@ import ctypes
 import dataclasses
 import io
 import inspect
+import ipaddress
 import json
 import keyword
 import linecache
@@ -178,28 +179,21 @@ def _autoimport_enabled():
 
 
 def _autoimport_django_namespace(namespace):
-    """Binds Django base names and workspace model classes into the live shell namespace at startup, so
-    names the editor resolves from its analysis prelude are actually importable in the shell. Best-effort:
-    every failure is swallowed and never blocks startup, and names already bound are left untouched."""
+    """Binds classes from already-loaded Django model modules without importing new application code at startup."""
     try:
-        import importlib
         import inspect
     except Exception:
         return 0
-    count = _autoimport_base_names(namespace)
     try:
         from django.apps import apps
         if not apps.ready:
-            return count
+            return 0
     except Exception:
-        return count
-    # Bind every registered model directly first (guaranteed, no import) so models the module scan would miss
-    # still resolve as bare names; the scan then adds managers/enums/etc. for editor-prelude parity.
-    count += _autoimport_bind_models(namespace, apps)
+        return 0
+    count = 0
     for module_name in _autoimport_model_modules(apps):
-        try:
-            module = importlib.import_module(module_name)
-        except Exception:
+        module = sys.modules.get(module_name)
+        if module is None:
             continue
         count += _autoimport_module_classes(namespace, module, inspect)
     return count
@@ -293,16 +287,15 @@ def _autoimport_model_modules(apps):
 
 
 def _autoimport_module_classes(namespace, module, inspect):
-    """Binds every public class defined in one module into the namespace, mirroring the editor prelude's
-    top-level-class scan; imported names and existing bindings are skipped."""
+    """Binds public classes from one loaded module without invoking dynamic module attribute hooks."""
     count = 0
-    module_name = getattr(module, "__name__", None)
-    for name in dir(module):
+    try:
+        module_vars = vars(module)
+    except Exception:
+        return 0
+    module_name = module_vars.get("__name__")
+    for name, value in module_vars.items():
         if name.startswith("_") or name in namespace:
-            continue
-        try:
-            value = getattr(module, name)
-        except Exception:
             continue
         if inspect.isclass(value) and getattr(value, "__module__", None) == module_name:
             namespace[name] = value
@@ -1223,9 +1216,16 @@ def _native_debugger_endpoint(value):
     if not isinstance(value, (tuple, list)) or len(value) != 2:
         raise RuntimeError("Experimental tracer returned an invalid endpoint; restart the Django shell.")
     host, port = value
-    if host not in ("127.0.0.1", "localhost") or not isinstance(port, int) or isinstance(port, bool) or not 0 < port <= 65535:
+    normalized_host = "127.0.0.1" if isinstance(host, str) and host.strip().lower() == "localhost" else host
+    address = None
+    if isinstance(normalized_host, str):
+        try:
+            address = ipaddress.ip_address(normalized_host)
+        except ValueError:
+            pass
+    if address is None or not address.is_loopback or not isinstance(port, int) or isinstance(port, bool) or not 0 < port <= 65535:
         raise RuntimeError("Experimental tracer returned a non-loopback or invalid endpoint; restart the Django shell.")
-    return "127.0.0.1", port
+    return str(address), port
 
 
 def _start_native_debugger(request):
@@ -1273,7 +1273,14 @@ def _start_native_debugger(request):
         start = getattr(module, "start", None)
         status = getattr(module, "status", None)
         trace_this_thread = getattr(module, "trace_this_thread", None)
-        if api_version != _NATIVE_DEBUGGER_API_VERSION or not callable(start) or not callable(status) or not callable(trace_this_thread):
+        set_hot_reload_gate = getattr(module, "set_hot_reload_gate", None)
+        if (
+            api_version != _NATIVE_DEBUGGER_API_VERSION
+            or not callable(start)
+            or not callable(status)
+            or not callable(trace_this_thread)
+            or not callable(set_hot_reload_gate)
+        ):
             raise RuntimeError("The embedded experimental tracer has an incompatible API; restart or update Django Shell.")
         if version != expected_version:
             raise RuntimeError("Experimental tracer version mismatch: loaded %s, expected %s. Restart the Django shell after updating." % (version or "unknown", expected_version))
@@ -1288,6 +1295,10 @@ def _start_native_debugger(request):
         else:
             endpoint_value = start("127.0.0.1", requested_port)
             activated = True
+        try:
+            set_hot_reload_gate(_HOT_RELOAD_LOCK)
+        except Exception as error:
+            raise RuntimeError("Experimental tracer could not install the hot-reload execution gate; restart the Django shell: %s" % error)
         host, port = _native_debugger_endpoint(endpoint_value)
         _STATE["debug_engine"] = _DEBUG_ENGINE_NATIVE
         try:
@@ -1340,6 +1351,31 @@ def _bounded_hot_reload_exception(error):
 def _hot_reload_error(error):
     """Returns the stable top-level result used when a hot-reload request cannot run."""
     return {"ok": False, "engine": "experimental", "error": str(error), "results": []}
+
+
+def _hot_reload_busy():
+    """Returns the retryable response used while ordinary user code owns the execution lock."""
+    return {
+        "ok": False,
+        "engine": "experimental",
+        "retryable": True,
+        "error": "Hot reload is busy because user code is still running; retry after execution pauses or finishes.",
+        "results": [],
+    }
+
+
+def _native_debugger_has_paused_threads():
+    """Returns whether the active native tracer reports at least one debugger-paused thread."""
+    try:
+        module = _native_debugger_loaded_module()
+        status = getattr(module, "status", None) if module is not None else None
+        snapshot = status() if callable(status) else None
+    except Exception:
+        return False
+    if not isinstance(snapshot, dict):
+        return False
+    paused_threads = snapshot.get("pausedThreads")
+    return type(paused_threads) is int and paused_threads > 0
 
 
 def _normalize_hot_reload_module_path(value):
@@ -1462,22 +1498,38 @@ def _hot_reload_generation_registry(module, source_path):
     return registry, remember
 
 
-def _remove_hot_reload_bytecode(source_path):
-    """Removes only the interpreter's canonical cache derived from the matched source path."""
-    try:
-        import importlib.util
+def _remove_hot_reload_bytecode(module, source_path):
+    """Removes canonical caches derived from both the raw module path and its normalized match path."""
+    import importlib.util
 
-        cached = importlib.util.cache_from_source(source_path)
-    except (NotImplementedError, ValueError):
-        return
-    try:
-        os.unlink(cached)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        # A read-only cache must not prevent a source reload; importlib will
-        # still validate it and may compile directly from source.
-        pass
+    module_path = getattr(module, "__file__", None)
+    if type(module_path) is str and module_path.lower().endswith(".pyc"):
+        try:
+            module_path = importlib.util.source_from_cache(module_path)
+        except (NotImplementedError, ValueError):
+            origin = getattr(getattr(module, "__spec__", None), "origin", None)
+            module_path = origin if type(origin) is str and origin.lower().endswith(".py") else None
+
+    cached_paths = []
+    for candidate in (module_path, source_path):
+        if type(candidate) is not str or not candidate.lower().endswith(".py"):
+            continue
+        try:
+            cached = importlib.util.cache_from_source(candidate)
+        except (NotImplementedError, ValueError):
+            continue
+        if cached not in cached_paths:
+            cached_paths.append(cached)
+
+    for cached in cached_paths:
+        try:
+            os.unlink(cached)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # A read-only cache must not prevent a source reload; importlib
+            # will still validate it and may compile directly from source.
+            pass
 
 
 def _invalidate_hot_reload_linecache(source_path):
@@ -1500,7 +1552,7 @@ def _deep_reload_module(module, source_path):
     generation_registry, remember_generation = _hot_reload_generation_registry(module, source_path)
     remember_generation(current_functions)
 
-    _remove_hot_reload_bytecode(source_path)
+    _remove_hot_reload_bytecode(module, source_path)
     importlib.invalidate_caches()
     _invalidate_hot_reload_linecache(source_path)
     module_snapshot = dict(module.__dict__)
@@ -1603,7 +1655,7 @@ def _hot_reload_one(source_path):
 
 
 def _hot_reload_request(request):
-    """Runs built-in experimental hot reload independently of the user-code execution lock."""
+    """Runs hot reload while excluding new executions, or while the native tracer has execution paused."""
     with _HOT_RELOAD_LOCK:
         if _debug_engine_owner() != _DEBUG_ENGINE_NATIVE:
             return _hot_reload_error("Built-in hot reload requires the experimental debugger; restart the Django shell after selecting that engine.")
@@ -1611,12 +1663,19 @@ def _hot_reload_request(request):
             paths = _validated_hot_reload_paths(request)
         except (TypeError, ValueError) as error:
             return _hot_reload_error(error)
-        results = [_hot_reload_one(source_path) for source_path in paths]
-        return {
-            "ok": not any(result.get("status") in ("error", "partial") for result in results),
-            "engine": "experimental",
-            "results": results,
-        }
+        owns_execution_lock = _EXECUTION_LOCK.acquire(blocking=False)
+        if not owns_execution_lock and not _native_debugger_has_paused_threads():
+            return _hot_reload_busy()
+        try:
+            results = [_hot_reload_one(source_path) for source_path in paths]
+            return {
+                "ok": not any(result.get("status") in ("error", "partial") for result in results),
+                "engine": "experimental",
+                "results": results,
+            }
+        finally:
+            if owns_execution_lock:
+                _EXECUTION_LOCK.release()
 
 
 def _load_feature(request, namespace=None):

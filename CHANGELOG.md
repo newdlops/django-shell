@@ -12,9 +12,16 @@ versioning; the `0.0.9xx` series is the current line (it follows `0.0.8`, with n
 ### Added
 - **Built-in experimental debugger engine** — `djangoShell.debug.engine` can start the bundled dependency-free tracer directly inside a live shell while keeping debugpy as the default. No companion extension, package install, or Python runtime Setup step is required. Its workspace watcher also deep-reloads changed loaded modules while retaining live function, decorator, class-method, property, and URL-conf references.
 - Conditional breakpoint expressions, hit conditions, and logpoint messages are now preserved when Django Shell mirrors generated-source breakpoints into DAP or file mode.
+- Overlay-owned debugging now shows bounded Arguments and Locals values inline both in the shell overlay and in stepped-into source files, with same-line updates that do not reopen the native editor.
 
 ### Changed
 - Debug runs clear adapter-side breakpoints when they finish, and the built-in tracer uses explicit per-cell thread opt-in so a warm experimental session cannot pause an ordinary shell execution or newly-created background thread.
+
+### Fixed
+- Hot reload now holds a server-side execution barrier: idle cells wait for reload, ordinary busy executions return an automatic retry signal, and Continue/Step cannot resume a paused thread until its reload finishes.
+- Deep reload now invalidates canonical bytecode for both raw and real paths, preventing stale code with symlinked temporary paths or `PYTHONPYCACHEPREFIX`.
+- The experimental debugger now accepts and preserves Port Manager's valid routed `127/8` listener addresses instead of rejecting them as non-loopback endpoints.
+- Console startup now spawns the setup terminal while overlay backing files reset, and backend attach no longer imports unloaded application modules or invokes dynamic module hooks during model auto-import.
 
 ## [0.0.903] — 2026-06-10
 

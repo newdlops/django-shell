@@ -12,6 +12,7 @@ export interface BackendHotReloadResult {
   engine: "experimental";
   error?: string;
   ok: boolean;
+  retryable: boolean;
   results: BackendHotReloadFileResult[];
 }
 
@@ -26,7 +27,13 @@ export function parseHotReloadResponse(buffer: string): BackendHotReloadResult {
     if (typeof row.path !== "string" || typeof row.message !== "string" || !["ok", "partial", "error", "skipped"].includes(row.status ?? "")) { return []; }
     return [{ message: row.message, module: typeof row.module === "string" ? row.module : undefined, patched: Array.isArray(row.patched) ? row.patched.filter((name): name is string => typeof name === "string") : [], path: row.path, status: row.status as BackendHotReloadFileResult["status"] }];
   }) : [];
-  return { engine: "experimental", error: typeof parsed.error === "string" ? parsed.error : undefined, ok: Boolean(parsed.ok), results };
+  return {
+    engine: "experimental",
+    error: typeof parsed.error === "string" ? parsed.error : undefined,
+    ok: Boolean(parsed.ok),
+    retryable: typeof parsed.retryable === "boolean" ? parsed.retryable : false,
+    results
+  };
 }
 
 /** Narrows untrusted JSON objects before reading protocol fields. */
@@ -36,5 +43,5 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** Returns the stable result shape for a socket-only transport failure. */
 export function hotReloadTransportError(error: string): BackendHotReloadResult {
-  return { engine: "experimental", error, ok: false, results: [] };
+  return { engine: "experimental", error, ok: false, retryable: false, results: [] };
 }

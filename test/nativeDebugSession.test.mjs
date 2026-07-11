@@ -32,6 +32,20 @@ test("normalizes backend failures and thrown startup errors", async () => {
   assert.deepEqual(result, { error: "socket closed", ok: false });
 });
 
+test("preserves a Port Manager rewritten 127/8 tracer host", () => {
+  const result = normalizeNativeDebuggerResult({
+    apiVersion: 1,
+    engine: "experimental",
+    host: "127.96.137.83",
+    ok: true,
+    port: 43124,
+    reused: true,
+    version: NATIVE_TRACER_VERSION
+  });
+
+  assert.deepEqual(result, { endpoint: { host: "127.96.137.83", inProcess: true, port: 43124, reused: true }, ok: true });
+});
+
 test("rejects stale tracers and malformed success endpoints", () => {
   const success = { apiVersion: 1, engine: "experimental", host: "127.0.0.1", ok: true, port: 43123, version: NATIVE_TRACER_VERSION };
   assert.match(normalizeNativeDebuggerResult({ ...success, apiVersion: 0 }).error, /API is incompatible/);

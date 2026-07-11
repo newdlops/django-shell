@@ -82,6 +82,74 @@ test("dispose drops pending paths and suppresses in-flight result callbacks", as
   assert.equal(results, 0);
 });
 
+test("retries a busy chunk with untouched paths while reporting earlier successes exactly once", async () => {
+  const calls = [];
+  const reports = [];
+  let busy = true;
+  const queue = new NativeHotReloadQueue({ hotReload: async (paths) => {
+    calls.push(paths);
+    if (paths[0] === "/b.py" && busy) {
+      busy = false;
+      return { engine: "experimental", error: "busy", ok: false, retryable: true, results: [] };
+    }
+    return { engine: "experimental", ok: true, retryable: false, results: paths.map((path) => ({ message: "ok", patched: [], path, status: "ok" })) };
+  } }, { debounceMs: 2, maxBatchSize: 1, onResult: (result, paths) => reports.push({ paths, result }), retryDelayMs: 3 });
+  for (const path of ["/c.py", "/a.py", "/b.py"]) { queue.enqueue(path); }
+
+  await waitFor(() => reports.length === 2);
+  assert.deepEqual(calls, [["/a.py"], ["/b.py"], ["/b.py"], ["/c.py"]]);
+  assert.deepEqual(reports.map((report) => report.paths), [["/a.py"], ["/b.py", "/c.py"]]);
+  assert.deepEqual(reports.flatMap((report) => report.result.results.map((row) => row.path)), ["/a.py", "/b.py", "/c.py"]);
+  assert.equal(reports.some((report) => report.result.error === "busy"), false);
+  queue.dispose();
+});
+
+test("serializes repeated busy retries without reporting transient failures", async () => {
+  let active = 0;
+  let attempts = 0;
+  let maxActive = 0;
+  const calls = [];
+  const reports = [];
+  const queue = new NativeHotReloadQueue({ hotReload: async (paths) => {
+    calls.push(paths);
+    attempts += 1;
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await delay(3);
+    active -= 1;
+    if (attempts < 3) { return { engine: "experimental", error: "busy", ok: false, retryable: true, results: [] }; }
+    return { engine: "experimental", ok: true, retryable: false, results: [{ message: "ok", patched: [], path: paths[0], status: "ok" }] };
+  } }, { debounceMs: 2, onResult: (result) => reports.push(result), retryDelayMs: 2 });
+  queue.enqueue("/busy.py");
+
+  await waitFor(() => reports.length === 1);
+  assert.deepEqual(calls, [["/busy.py"], ["/busy.py"], ["/busy.py"]]);
+  assert.equal(maxActive, 1);
+  assert.equal(reports[0].ok, true);
+  assert.equal(reports[0].retryable, false);
+  queue.dispose();
+});
+
+test("recovers after one non-retryable timeout result and flushes the next enqueue", async () => {
+  const calls = [];
+  const reports = [];
+  const reloading = [];
+  const queue = new NativeHotReloadQueue({ hotReload: async (paths) => {
+    calls.push(paths);
+    if (calls.length === 1) { return { engine: "experimental", error: "socket timed out", ok: false, retryable: false, results: [] }; }
+    return { engine: "experimental", ok: true, retryable: false, results: [{ message: "ok", patched: [], path: paths[0], status: "ok" }] };
+  } }, { debounceMs: 2, onReloading: (active) => reloading.push(active), onResult: (result) => reports.push(result) });
+  queue.enqueue("/timeout.py");
+  await waitFor(() => reports.length === 1 && reloading.length === 2);
+
+  queue.enqueue("/recovered.py");
+  await waitFor(() => reports.length === 2 && reloading.length === 4);
+  assert.deepEqual(calls, [["/timeout.py"], ["/recovered.py"]]);
+  assert.deepEqual(reports.map((result) => [result.ok, result.error]), [[false, "socket timed out"], [true, undefined]]);
+  assert.deepEqual(reloading, [true, false, true, false]);
+  queue.dispose();
+});
+
 /** Waits for an asynchronous condition with a short bounded timeout. */
 async function waitFor(predicate, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;

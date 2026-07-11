@@ -28,12 +28,19 @@ sys.modules["django_shell_native_tracer"] = module
 spec.loader.exec_module(module)
 
 assert module.TRACER_API_VERSION == 1
-assert module.TRACER_VERSION == "2026.07.11.1"
+assert module.TRACER_VERSION == "2026.07.11.2"
 assert module.OPT_IN_THREAD_ATTRIBUTE == "django_shell_debugger_trace_enabled"
 assert sys.modules["django_shell_native_tracer"] is module
 assert sys.modules["_django_shell_native_tracer"] is module
 assert sys.modules["django_process_debugger_tracer"] is dpd_canonical
 assert sys.modules["_django_debug_tracer"] is dpd_legacy
+
+try:
+    module.set_hot_reload_gate(threading.Lock())
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("a resume gate must not outlive an active tracer")
 
 trace_install_calls = []
 real_sys_settrace = sys.settrace
@@ -62,6 +69,94 @@ assert tracer is not None
 status = module.status()
 assert status["active"] is True
 assert tuple(status["endpoint"]) == endpoint
+assert status["pausedThreads"] == 0
+
+for invalid_gate in (object(), types.SimpleNamespace(acquire=None, release=lambda: None)):
+    try:
+        module.set_hot_reload_gate(invalid_gate)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("invalid resume gate was accepted")
+
+class ProbeGate:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.attempted = threading.Event()
+        self.acquisitions = []
+
+    def acquire(self, *args, **kwargs):
+        self.acquisitions.append(threading.current_thread().name)
+        self.attempted.set()
+        return self.lock.acquire(*args, **kwargs)
+
+    def release(self):
+        self.lock.release()
+
+gate = ProbeGate()
+module.set_hot_reload_gate(gate)
+assert tracer.hot_reload_gate is gate
+assert module.NativeDapTracer().hot_reload_gate is None
+
+resume_responses = []
+resume_events = []
+real_response = tracer._response
+real_event = tracer._event
+tracer._response = lambda request, body=None, **kwargs: resume_responses.append((request["command"], body)) or True
+tracer._event = lambda event, body=None, **kwargs: resume_events.append((event, body)) or True
+
+for offset, command in enumerate(("continue", "next", "stepIn", "stepOut"), start=1):
+    native_id = 910_000 + offset
+    dap_id = 920_000 + offset
+    context = module.StopContext(native_id, dap_id, sys._getframe(), "breakpoint")
+    with tracer.condition:
+        tracer.stops[native_id] = context
+        tracer.native_to_dap[native_id] = dap_id
+        tracer.dap_to_native[dap_id] = native_id
+
+    gate.acquire()
+    gate.attempted.clear()
+    worker = threading.Thread(
+        target=tracer._resume,
+        args=(
+            {"seq": offset, "type": "request", "command": command},
+            {"threadId": dap_id},
+            command,
+        ),
+        name="resume-" + command,
+    )
+    worker.start()
+    assert gate.attempted.wait(5), command
+    assert worker.is_alive(), command
+    assert context.paused is True, command
+    assert module.status()["pausedThreads"] == 1, command
+    gate.release()
+    worker.join(5)
+    assert not worker.is_alive(), command
+    assert context.paused is False, command
+    assert module.status()["pausedThreads"] == 0, command
+    with tracer.condition:
+        tracer.stops.pop(native_id, None)
+        tracer.native_to_dap.pop(native_id, None)
+        tracer.dap_to_native.pop(dap_id, None)
+        tracer.steps.pop(native_id, None)
+
+assert [name for name, _body in resume_responses] == [
+    "continue",
+    "next",
+    "stepIn",
+    "stepOut",
+]
+assert [event for event, _body in resume_events] == ["continued"] * 4
+module.set_hot_reload_gate(None)
+assert tracer.hot_reload_gate is None
+tracer._response = real_response
+tracer._event = real_event
+
+fork_tracer = module.NativeDapTracer()
+fork_tracer.hot_reload_gate = gate
+fork_tracer._after_fork_child()
+assert fork_tracer.hot_reload_gate is None
 
 background_ready = threading.Event()
 background_release = threading.Event()
@@ -137,9 +232,16 @@ tracer.configured = False
 background_release.set()
 background.join(5)
 assert not background.is_alive()
+module.set_hot_reload_gate(gate)
 tracer._shutdown()
+assert tracer.hot_reload_gate is None
 
-print(json.dumps({"endpoint": endpoint, "status": status, "pauses": pauses}))
+print(json.dumps({
+    "endpoint": endpoint,
+    "status": status,
+    "pauses": pauses,
+    "gateAcquisitions": gate.acquisitions,
+}))
 `;
 
   const result = childProcess.spawnSync(PYTHON, ["-u", "-c", script, TRACER_PATH], {
@@ -149,8 +251,13 @@ print(json.dumps({"endpoint": endpoint, "status": status, "pauses": pauses}))
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const payload = JSON.parse(result.stdout.trim());
-  assert.equal(payload.status.version, "2026.07.11.1");
+  assert.equal(payload.status.version, "2026.07.11.2");
+  assert.equal(payload.status.pausedThreads, 0);
   assert.equal(payload.pauses.length, 2);
+  assert.deepEqual(
+    payload.gateAcquisitions.filter((name) => name.startsWith("resume-")),
+    ["resume-continue", "resume-next", "resume-stepIn", "resume-stepOut"]
+  );
 });
 
 /** Returns a usable Python executable without requiring a project virtualenv. */

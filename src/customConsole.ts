@@ -5,7 +5,7 @@ import type { BackendClient, BackendExecutionResult, BackendProgressSnapshot, Ba
 import { registerCustomConsoleDebugEvents } from "./customConsoleDebugEvents";
 import { webviewHtml } from "./customConsoleHtml";
 import { clearDebugBreakpoints, type DebugBreakpointLocation, syncDebugBreakpoints } from "./debugBreakpoints";
-import { clearExternalDebugFrameDecoration, isOverlayDebugFramePath, revealExternalDebugFrame } from "./debugFrameNavigation";
+import { clearExternalDebugFrameDecoration, isOverlayDebugFramePath, refreshExternalDebugFrameDecoration, revealExternalDebugFrame } from "./debugFrameNavigation";
 import { DirectDebugAdapterSession } from "./directDebugAdapterSession";
 import { type DebugFrameInfo, type DebugVariableInfo, inspectDebugThread, inspectDebugVariables, invalidateDebugInspection } from "./debugInspector";
 import { DEBUG_CONTROL_ACTIONS, type DebugControlAction, debugControlDetail, debugControlState, isDebugControlAction, runDebugControl } from "./debugControls";
@@ -81,17 +81,15 @@ export class CustomDjangoConsole implements vscode.Disposable {
   }
   /** Opens or reveals the custom webview console and starts its backend session. */
   async openConsole(): Promise<void> {
-    if (!this.overlay) {
-      await this.ensureOverlayBackingFilesReset();
-      scheduleWorkspaceGeneratedOverlayTabCleanup();
-    }
+    const backingReset = !this.overlay ? this.ensureOverlayBackingFilesReset() : undefined;
+    if (!this.overlay) { scheduleWorkspaceGeneratedOverlayTabCleanup(); }
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.One);
       this.postStatus();
       this.postOverlayTabs();
       this.refreshBreakpointUi();
       this.post({ show: this.runtimeReady, type: "measureEditor" });
-      return;
+      await backingReset; return;
     }
     this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Django Shell", vscode.ViewColumn.One, {
       enableScripts: true,
@@ -104,6 +102,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.panel.onDidChangeViewState((event) => this.handleViewState(event.webviewPanel.visible, event.webviewPanel.active), undefined, this.disposables);
     this.panel.webview.onDidReceiveMessage((message) => void this.handleMessage(message), undefined, this.disposables);
     this.ensureSession();
+    await backingReset;
   }
 
   /** Opens the console and shows the overlay editor for command-driven access. */
@@ -276,6 +275,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     if (this.overlayShutdownPromise) {
       await this.overlayShutdownPromise;
     }
+    if (!this.overlay) { await this.ensureOverlayBackingFilesReset(); }
     if (this.overlay) {
       return this.overlay;
     }
@@ -867,11 +867,11 @@ export class CustomDjangoConsole implements vscode.Disposable {
 
   /** Posts paused debugger frame details and mirrors the current line into the overlay editor. */
   private postDebugInfo(info: DebugFrameInfo): void {
-    this.debugAnalysis?.setDebugAnalysisInfo(info);
-    if (info.state !== "paused") { void this.overlay?.updateDebugInfo(info); if (info.state === "running") { return; } this.lastDebugPresentationKey = ""; clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); return; }
-    const path = info.frame?.path?.replace(/\\/g, "/") ?? "", presentationKey = `${path}:${info.frame?.line ?? 0}`;
+    this.debugAnalysis?.setDebugAnalysisInfo(info); void this.overlay?.updateDebugInfo(info);
+    if (info.state !== "paused") { if (info.state === "running") { return; } this.lastDebugPresentationKey = ""; clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); return; }
+    const path = info.frame?.path?.replace(/\\/g, "/") ?? "", presentationKey = `${path}:${info.frame?.line ?? 0}`; if (this.debugMode === "overlay") { refreshExternalDebugFrameDecoration(info); }
     if (presentationKey === this.lastDebugPresentationKey) { return; }
-    const wasOverlayFrame = this.lastDebugFrameOverlay; this.lastDebugPresentationKey = presentationKey; this.lastDebugFrameOverlay = isOverlayDebugFramePath(path); void this.overlay?.updateDebugInfo(info);
+    const wasOverlayFrame = this.lastDebugFrameOverlay; this.lastDebugPresentationKey = presentationKey; this.lastDebugFrameOverlay = isOverlayDebugFramePath(path);
     if (this.debugMode !== "overlay") { clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); void closeWorkspaceGeneratedOverlayTabs().catch(() => undefined); return; }
     if (!this.lastDebugFrameOverlay) { void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", true); void revealExternalDebugFrame(info, this.logger).then((revealed) => { if (revealed && this.debugMode === "overlay" && !this.lastDebugFrameOverlay && this.lastDebugPresentationKey === presentationKey) { this.overlay?.park(); } }); void closeWorkspaceGeneratedOverlayTabs(false).catch(() => undefined); return; }
     clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); if (!wasOverlayFrame) { this.panel?.reveal(vscode.ViewColumn.One); void this.showOverlay(); }

@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 
 TRACER_API_VERSION = 1
-TRACER_VERSION = "2026.07.11.1"
+TRACER_VERSION = "2026.07.11.2"
 OPT_IN_THREAD_ATTRIBUTE = "django_shell_debugger_trace_enabled"
 
 _CANONICAL_MODULE_NAME = "django_shell_native_tracer"
@@ -518,6 +518,10 @@ class NativeDapTracer:
         self.pause_requests = set()  # type: Set[int]
         self.stops: Dict[int, StopContext] = {}
         self.condition = threading.Condition(threading.RLock())
+        # The backend owns this lock. Resume requests take it before the
+        # tracer condition so a hot reload can finish patching live objects
+        # before any paused application thread starts executing again.
+        self.hot_reload_gate: Optional[Any] = None
         self.breakpoint_lock = threading.RLock()
         self.send_lock = threading.Lock()
         self.client: Optional[socket.socket] = None
@@ -4431,6 +4435,23 @@ class NativeDapTracer:
         )
 
     def _resume(self, request: Dict[str, Any], args: Dict[str, Any], command: str) -> None:
+        gate = self.hot_reload_gate
+        if gate is None:
+            self._resume_locked(request, args, command)
+            return
+
+        gate.acquire()
+        try:
+            self._resume_locked(request, args, command)
+        finally:
+            gate.release()
+
+    def _resume_locked(
+        self,
+        request: Dict[str, Any],
+        args: Dict[str, Any],
+        command: str,
+    ) -> None:
         dap_id = int(args.get("threadId", 0))
         with self.condition:
             native_id = self.dap_to_native.get(dap_id)
@@ -4556,6 +4577,7 @@ class NativeDapTracer:
 
     def _shutdown(self) -> None:
         with self.condition:
+            self.hot_reload_gate = None
             if not self.enabled:
                 return
             self.enabled = False
@@ -4691,6 +4713,7 @@ class NativeDapTracer:
         self.sequence = 1
         self.disconnect_requested = False
         self.client_supports_variable_type = False
+        self.hot_reload_gate = None
 
         # Never reuse synchronization primitives that may have been owned by a
         # thread which no longer exists in the child.
@@ -4727,21 +4750,62 @@ def status() -> Dict[str, Any]:
     """Return a bounded, JSON-friendly snapshot of the process-wide tracer."""
     with _ACTIVE_LOCK:
         tracer = _ACTIVE_TRACER
-        active = bool(
-            tracer is not None
-            and tracer.enabled
-            and tracer.owner_pid == os.getpid()
-            and tracer.endpoint is not None
-        )
-        endpoint = tracer.endpoint if active and tracer is not None else None
+        if tracer is None:
+            active = False
+            endpoint = None
+            client_attached = False
+            paused_threads = 0
+        else:
+            with tracer.condition:
+                active = bool(
+                    tracer.enabled
+                    and tracer.owner_pid == os.getpid()
+                    and tracer.endpoint is not None
+                )
+                endpoint = tracer.endpoint if active else None
+                client_attached = bool(active and tracer.client)
+                # There can be at most one context per native thread, keeping
+                # this exact count naturally bounded by the process's threads.
+                paused_threads = sum(
+                    1 for context in tracer.stops.values() if context.paused
+                )
         return {
             "apiVersion": TRACER_API_VERSION,
             "version": TRACER_VERSION,
             "pid": os.getpid(),
             "active": active,
             "endpoint": tuple(endpoint) if endpoint is not None else None,
-            "clientAttached": bool(active and tracer is not None and tracer.client),
+            "clientAttached": client_attached,
+            "pausedThreads": paused_threads,
         }
+
+
+def set_hot_reload_gate(lock_or_none: Any) -> None:
+    """Set the active tracer's backend-owned resume gate, or clear it."""
+    if lock_or_none is not None:
+        try:
+            acquire = lock_or_none.acquire
+            release = lock_or_none.release
+        except BaseException as exc:
+            raise TypeError(
+                "lock_or_none must be None or expose callable acquire/release"
+            ) from exc
+        if not callable(acquire) or not callable(release):
+            raise TypeError(
+                "lock_or_none must be None or expose callable acquire/release"
+            )
+
+    with _ACTIVE_LOCK:
+        tracer = _ACTIVE_TRACER
+        if (
+            tracer is None
+            or not tracer.enabled
+            or tracer.owner_pid != os.getpid()
+            or tracer.endpoint is None
+        ):
+            raise RuntimeError("Experimental tracer is not active")
+        with tracer.condition:
+            tracer.hot_reload_gate = lock_or_none
 
 
 def _is_tracer_trace_hook(value: Any, tracer: NativeDapTracer) -> bool:

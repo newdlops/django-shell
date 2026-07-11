@@ -7,6 +7,83 @@ import test from "node:test";
 
 const PYTHON = pythonExecutable();
 
+test("bounds hidden prelude inspection without scanning loaded modules", { skip: !PYTHON }, () => {
+  const script = [
+    "import importlib.util, json",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "namespace={('symbol_%04d' % index): index for index in range(2505)}",
+    "namespace['_private']='skip'",
+    "namespace['_djs_internal']='skip'",
+    "initial=set(namespace)",
+    "module_scans=[]",
+    "mod._inspect_modules=lambda: module_scans.append(True) or []",
+    "prelude=mod._run_request(namespace,'tok',{'token':'tok','kind':'prelude'},initial)",
+    "prelude_scans=len(module_scans)",
+    "full=mod._run_request(namespace,'tok',{'token':'tok','kind':'inspect'},initial)",
+    "print(json.dumps({'fullCount':len(full['variables']),'fullScans':len(module_scans),'names':[prelude['variables'][0]['name'],prelude['variables'][-1]['name']],'ok':prelude['ok'],'preludeCount':len(prelude['variables']),'preludeModules':prelude['modules'],'preludeScans':prelude_scans}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+
+  assert.equal(payload.ok, true);
+  assert.equal(payload.preludeCount, 1400, "large shell namespaces have a fixed prelude summary budget");
+  assert.deepEqual(payload.names, ["symbol_0000", "symbol_1399"]);
+  assert.deepEqual(payload.preludeModules, []);
+  assert.equal(payload.preludeScans, 0, "hidden prelude requests never enumerate sys.modules");
+  assert.equal(payload.fullScans, 1, "only an explicitly visible runtime inspection scans modules");
+  assert.equal(payload.fullCount, 2507);
+});
+
+test("autoimport observes loaded model modules without importing or invoking dynamic module hooks", { skip: !PYTHON }, () => {
+  const script = [
+    "import builtins, importlib.util, json, sys, types",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "hooks={'dir':0,'getattr':0}",
+    "attempted=[]",
+    "class HookedModule(types.ModuleType):",
+    "    def __dir__(self): hooks['dir'] += 1; return super().__dir__()",
+    "    def __getattr__(self, name): hooks['getattr'] += 1; raise AttributeError(name)",
+    "loaded=types.ModuleType('loaded_app.models')",
+    "loaded.LoadedClass=type('LoadedClass',(),{'__module__':'loaded_app.models'})",
+    "hooked=HookedModule('hooked_app.models')",
+    "hooked.__dict__['HookedClass']=type('HookedClass',(),{'__module__':'hooked_app.models'})",
+    "apps=types.SimpleNamespace(ready=True,get_models=lambda: [],get_app_configs=lambda: [types.SimpleNamespace(name='loaded_app'),types.SimpleNamespace(name='hooked_app'),types.SimpleNamespace(name='missing_app')])",
+    "django=types.ModuleType('django'); django.__path__=[]",
+    "django_apps=types.ModuleType('django.apps'); django_apps.apps=apps",
+    "django_conf=types.ModuleType('django.conf'); django_conf.settings=object()",
+    "django_db=types.ModuleType('django.db'); django_db.__path__=[]",
+    "django_models=types.ModuleType('django.db.models'); django_db.models=django_models",
+    "sys.modules.update({'django':django,'django.apps':django_apps,'django.conf':django_conf,'django.db':django_db,'django.db.models':django_models,'loaded_app.models':loaded,'hooked_app.models':hooked})",
+    "original_import=builtins.__import__",
+    "def tracked_import(name, *args, **kwargs):",
+    "    if name.startswith(('loaded_app','hooked_app','missing_app')): attempted.append(name)",
+    "    return original_import(name, *args, **kwargs)",
+    "builtins.__import__=tracked_import",
+    "try:",
+    "    namespace={} ; count=mod._autoimport_django_namespace(namespace)",
+    "finally:",
+    "    builtins.__import__=original_import",
+    "print(json.dumps({'attempted':attempted,'count':count,'hooks':hooks,'hookedBound':namespace.get('HookedClass') is hooked.HookedClass,'loadedBound':namespace.get('LoadedClass') is loaded.LoadedClass,'missingLoaded':'missing_app.models' in sys.modules}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+
+  assert.deepEqual(payload.attempted, [], "autoimport never imports candidate application modules");
+  assert.deepEqual(payload.hooks, { dir: 0, getattr: 0 }, "module discovery uses vars(module), not dynamic enumeration");
+  assert.equal(payload.missingLoaded, false);
+  assert.equal(payload.loadedBound, true);
+  assert.equal(payload.hookedBound, true);
+  assert.ok(payload.count >= 2);
+});
+
 test("inspects dataclass fields and properties as explicit children only", { skip: !PYTHON }, () => {
   const script = [
     "import importlib.util, json",

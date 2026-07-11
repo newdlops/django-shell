@@ -14,7 +14,7 @@ const { DirectDebugAdapterSession } = require("../out/directDebugAdapterSession.
 const PYTHON = pythonExecutable();
 const BACKEND_PATH = path.resolve("python", "django_shell_backend.py");
 const TRACER_PATH = path.resolve("python", "django_shell_native_tracer.py");
-const TRACER_VERSION = "2026.07.11.1";
+const TRACER_VERSION = "2026.07.11.2";
 
 test("debugs and hot-reloads only opted-in backend work with the vendored experimental engine", { skip: !PYTHON, timeout: 25_000 }, async () => {
   assert.equal(fs.existsSync(BACKEND_PATH), true, `Missing backend: ${BACKEND_PATH}`);
@@ -23,12 +23,14 @@ test("debugs and hot-reloads only opted-in backend work with the vendored experi
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "django-shell-experimental-"));
   const sourcePath = path.join(directory, "console-cell.py");
   const hotSourcePath = path.join(directory, "hot_reload_target.py");
+  const reloadEnteredPath = path.join(directory, "reload-entered");
+  const reloadReleasePath = path.join(directory, "reload-release");
   const source = "value = 1\nvalue = value + 1\nvalue\n";
   fs.writeFileSync(sourcePath, source);
   fs.writeFileSync(hotSourcePath, "def current():\n    return 'before'\n");
 
   const script = pythonHarness(BACKEND_PATH, TRACER_PATH, hotSourcePath);
-  const child = childProcess.spawn(PYTHON, ["-u", "-c", script], { stdio: ["pipe", "pipe", "pipe"] });
+  const child = childProcess.spawn(PYTHON, ["-u", "-c", script], { env: { ...process.env, PORT_MANAGER_HOOK: "0", PORT_MANAGER_HOOK_DISABLED: "1" }, stdio: ["pipe", "pipe", "pipe"] });
   const lines = lineReader(child);
   let session;
 
@@ -114,14 +116,32 @@ test("debugs and hot-reloads only opted-in backend work with the vendored experi
     });
     assert.equal(changed.value, "40");
 
-    fs.writeFileSync(hotSourcePath, "def current():\n    return 'after!'\n");
-    const reloaded = await backendRequest(ready.backend, { kind: "hotReload", paths: [hotSourcePath], token: ready.token }, 5000);
+    fs.writeFileSync(hotSourcePath, [
+      "import os, time",
+      `open(${JSON.stringify(reloadEnteredPath)}, "w").close()`,
+      `while not os.path.exists(${JSON.stringify(reloadReleasePath)}):`,
+      "    time.sleep(0.01)",
+      "def current():",
+      "    return 'after!'",
+      ""
+    ].join("\n"));
+    const reloadResponse = backendRequest(ready.backend, { kind: "hotReload", paths: [hotSourcePath], token: ready.token }, 10_000);
+    await waitFor(() => fs.existsSync(reloadEnteredPath), 5000, "hot reload to enter module execution");
+    let continueSettled = false;
+    const continueResponse = session.customRequest("continue", { singleThread: true, threadId: stopped.threadId }).then((response) => {
+      continueSettled = true;
+      return response;
+    });
+    await delay(100);
+    assert.equal(continueSettled, false, "Continue must wait behind the server-side hot-reload gate");
+    fs.writeFileSync(reloadReleasePath, "release");
+    const reloaded = await reloadResponse;
     assert.equal(reloaded.ok, true, `hot reload failed while paused: ${JSON.stringify(reloaded)}`);
     assert.equal(reloaded.results?.[0]?.status, "ok");
     assert.equal(reloaded.results?.[0]?.module, "hot_reload_target");
     assert.ok(reloaded.results?.[0]?.patched?.includes("current"));
 
-    await session.customRequest("continue", { singleThread: true, threadId: stopped.threadId });
+    await continueResponse;
     const debugResult = await debugResponse;
     assert.equal(debugResult.ok, true);
     assert.equal(debugResult.result, "41");
@@ -143,6 +163,7 @@ test("debugs and hot-reloads only opted-in backend work with the vendored experi
     await delay(100);
     assert.equal(stopCount, 1, "a breakpoint-free ordinary cell must not opt into native tracing");
   } finally {
+    try { fs.writeFileSync(reloadReleasePath, "release"); } catch {}
     await session?.disconnect().catch(() => undefined);
     if (child.exitCode === null && !child.killed) {
       child.stdin.write("EXIT\n");
@@ -174,7 +195,7 @@ function pythonHarness(backendPath, tracerPath, hotSourcePath) {
     "backend.start(namespace,token)",
     "server=backend._STATE['server']",
     "initial_names=server.initial_names",
-    "native_request={'token':token,'kind':'nativeDebugger','tracerPath':tracer_path,'expectedVersion':'2026.07.11.1','host':'127.0.0.1','port':0}",
+    "native_request={'token':token,'kind':'nativeDebugger','tracerPath':tracer_path,'expectedVersion':'2026.07.11.2','host':'127.0.0.1','port':0}",
     "unauthorized=backend._run_request(namespace,token,dict(native_request,token='wrong-token'),initial_names)",
     "native=backend._run_request(namespace,token,native_request,initial_names)",
     "conflict=backend._run_request(namespace,token,{'token':token,'kind':'debugpy','code':'debugpy_ran = True'},initial_names)",
@@ -269,3 +290,12 @@ function pythonExecutable() {
 
 /** Waits long enough for an unexpected stopped event to reach the client. */
 function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+/** Waits for one asynchronous filesystem/runtime condition with a bounded diagnostic. */
+async function waitFor(predicate, timeoutMs, description) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) { throw new Error(`Timed out waiting for ${description}.`); }
+    await delay(10);
+  }
+}

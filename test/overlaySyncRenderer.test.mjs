@@ -382,6 +382,44 @@ test("coalesces repeated paused-line rendering without repainting the execution 
   assert.equal(lineReads, 2);
 });
 
+test("replaces same-line inline values atomically and clears them with the paused marker", () => {
+  const source = overlaySyncRendererSource();
+  const state = { overlayRoot: undefined };
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { setDebugLine: window.__dsoSetOverlayDebugLine, setVisibleText: window.__dsoSetOverlayVisibleText };`)(window, document, () => undefined);
+  const model = fakeModel("one\ntwo\nthree\n");
+  const editor = fakeEditor(model);
+  const root = { __djangoShellEditor: editor, __dsoInputStartLine: 1, style: { display: "block", visibility: "visible" } };
+  state.overlayRoot = root;
+
+  assert.equal(api.setDebugLine(2, "count = 1"), "debug-line:2");
+  assert.match(editor.decorations[0].options.after.content, /count = 1$/);
+  const firstDecorations = root.__dsoDebugLineDecorationIds;
+
+  assert.equal(api.setDebugLine(2, "count = 1"), "debug-line:2");
+  assert.equal(root.__dsoDebugLineDecorationIds, firstDecorations, "identical line and values do not repaint");
+
+  assert.equal(api.setDebugLine(2, "count = 2"), "debug-line:2");
+  assert.match(editor.decorations[0].options.after.content, /count = 2$/);
+  assert.notEqual(root.__dsoDebugLineDecorationIds, firstDecorations, "same-line value changes replace the decoration");
+
+  let reappliedInline = "";
+  const deltaDecorations = editor.deltaDecorations.bind(editor);
+  editor.deltaDecorations = (previous, decorations) => {
+    reappliedInline = decorations.find((decoration) => decoration.options.after)?.options.after.content || reappliedInline;
+    return deltaDecorations(previous, decorations);
+  };
+  const setValue = model.setValue;
+  model.setValue = (text) => { setValue(text); editor.decorations = []; };
+  assert.equal(api.setVisibleText("alpha\nbeta\ngamma\n"), "ok");
+  assert.match(reappliedInline, /count = 2$/, "model replacement reapplies the paused inline decoration");
+
+  assert.equal(api.setDebugLine(0, ""), "debug-line:0");
+  assert.deepEqual(editor.decorations, []);
+  assert.equal(root.__dsoDebugInlineText, "");
+});
+
 test("places debug idempotence before preview work and gives paused previews a stable key", () => {
   const source = overlaySyncRendererSource();
   const debugStart = source.indexOf("window.__dsoApplyOverlayDebugLine = function");
@@ -501,6 +539,40 @@ test("does not run Python while completion UI owns Enter", async () => {
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(posts.some((payload) => payload.type === "run"), false);
+});
+
+test("leaves Enter to the conditional breakpoint widget", async () => {
+  const source = overlaySyncRendererSource();
+  let windowKeyHandler;
+  const window = { addEventListener(type, callback) { if (type === "keydown") { windowKeyHandler = callback; } }, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };`)(window, document, () => undefined);
+  const editor = fakeEditor(fakeModel("if ready:\n"));
+  const breakpointWidget = { classList: { contains: (name) => name === "breakpoint-widget" } };
+  const conditionInput = { closest: (selector) => selector === ".breakpoint-widget" ? breakpointWidget : null };
+  const posts = [];
+  const edits = [];
+  const eventCalls = { prevented: 0, stopped: 0 };
+  editor.executeEdits = (_source, value) => edits.push(...value);
+
+  api.installEnterRunner({}, editor, (payload) => {
+    posts.push(payload);
+    return { json: async () => ({ executed: true }) };
+  });
+  assert.equal(typeof windowKeyHandler, "function");
+  windowKeyHandler({
+    code: "Enter",
+    key: "Enter",
+    preventDefault() { eventCalls.prevented += 1; },
+    stopImmediatePropagation() { eventCalls.stopped += 1; },
+    stopPropagation() { eventCalls.stopped += 1; },
+    target: conditionInput
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(posts.some((payload) => payload.type === "run"), false);
+  assert.deepEqual(edits, []);
+  assert.deepEqual(eventCalls, { prevented: 0, stopped: 0 });
 });
 
 test("runs Python when stale suggest DOM is not visible", async () => {

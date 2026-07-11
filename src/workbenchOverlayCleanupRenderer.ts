@@ -51,7 +51,8 @@ export function overlayCleanupRendererSource(): string {
       const nextText = String(text || "");
       window.__djangoShellOverlayInitialText = nextText;
       window.__djangoShellOverlayPrelude = "";
-      try { if (root) { root.__dsoPreludeText = ""; root.__dsoProtectedPrefix = nextText; } } catch (eRootPrelude) {}
+      window.__dsoOverlayDebugLine = 0; window.__dsoOverlayDebugInlineText = "";
+      try { if (root) { root.__dsoPreludeText = ""; root.__dsoProtectedPrefix = nextText; root.__dsoDebugLine = 0; root.__dsoDebugInlineText = ""; } } catch (eRootPrelude) {}
       try {
         const editor = root && root.__djangoShellEditor;
         const model = editor && editor.getModel && editor.getModel();
@@ -77,6 +78,7 @@ export function overlayCleanupRendererSource(): string {
     window.__dsoDisposeOverlay = function (root, force) {
       root = root || document.getElementById("django-shell-overlay");
       if (!root) {
+        window.__dsoOverlayDebugLine = 0; window.__dsoOverlayDebugInlineText = "";
         try { if (window.__dsoStopOverlayCapture) { window.__dsoStopOverlayCapture(window.__djangoShellOverlayOwnerToken); } } catch (eStopOrphanCapture) {}
         try { const report = window.__dsoRemoveOverlayWidgetPortal ? window.__dsoRemoveOverlayWidgetPortal(null, window.__djangoShellOverlayOwnerToken) : ""; return report === "removed" ? "orphan-widget-removed" : "no-overlay"; } catch (eRemoveOrphanWidgetRoot) { return "no-overlay"; }
       }
@@ -97,6 +99,7 @@ export function overlayCleanupRendererSource(): string {
       if (__dsoIsOverlayModel(model)) { __dsoDisposeValue(model); }
       try { if (window.__dsoRemoveOverlayWidgetPortal) { window.__dsoRemoveOverlayWidgetPortal(root, root.__dsoOwnerToken); } else if (root.__dsoWidgetRoot && root.__dsoWidgetRoot.parentElement) { root.__dsoWidgetRoot.parentElement.removeChild(root.__dsoWidgetRoot); } } catch (eRemoveWidgetRoot) {}
       try { root.parentElement ? root.parentElement.removeChild(root) : (root.style.display = "none"); } catch (eRemoveRoot) {}
+      window.__dsoOverlayDebugLine = 0; window.__dsoOverlayDebugInlineText = "";
       try { __dsoPost({ type: "log", event: "dispose", hadEditor: !!editor, hadModel: !!model }); } catch (eLogDispose) {}
       return "ok";
     };

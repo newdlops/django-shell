@@ -2,6 +2,7 @@
 import * as http from "http";
 import WebSocket from "ws";
 import * as vscode from "vscode";
+import { debugInlineRenderKey, debugInlineValueText } from "./debugInlineValues";
 import type { DebugFrameInfo } from "./debugInspector";
 import { DiagnosticLogger } from "./diagnostics";
 import { OverlayMemoryDocument } from "./overlayMemoryDocument";
@@ -37,7 +38,7 @@ const GEOMETRY_SETTLE_MS = 80;
 const INITIAL_WINDOW_FOCUS_RETRY_MS = 100;
 const RENDERER_EXECUTE_TIMEOUT_MS = 3200;
 const RENDERER_RECOVERY_DELAY_MS = 400;
-const RENDERER_PATCH_VERSION = 97;
+const RENDERER_PATCH_VERSION = 98;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -61,9 +62,10 @@ export class WorkbenchOverlay implements vscode.Disposable {
   private geometrySettleTimer: ReturnType<typeof setTimeout> | undefined;
   private geometryTimer: ReturnType<typeof setTimeout> | undefined;
   private lastEvaluationTimeoutAt = 0;
-  private debugLineApplied = -1;
+  private debugLineApplied = "";
   private debugLineFlushPromise: Promise<void> | undefined;
   private debugLineTarget = 0;
+  private inlineValueText = "";
   private readonly memoryDocument: OverlayMemoryDocument;
   private readonly featureBridge: OverlayPythonFeatureBridge;
   private readonly profile: Required<WorkbenchOverlayProfile>;
@@ -241,12 +243,13 @@ export class WorkbenchOverlay implements vscode.Disposable {
     }
     const visibleLine = info.state === "paused" && info.frame && this.isOverlayFrame(info.frame.path) ? info.frame.line : 0;
     this.debugLineTarget = visibleLine >= 1 ? visibleLine : 0;
+    this.inlineValueText = visibleLine > 0 ? debugInlineValueText(info.scopes) : "";
     await this.queueDebugLineFlush();
   }
 
   /** Coalesces debug-line updates so rapid stepping sends only the latest renderer target. */
   private queueDebugLineFlush(): Promise<void> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected || this.debugLineApplied === this.debugLineTarget) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.rendererInjected || this.debugLineApplied === debugInlineRenderKey(this.debugLineTarget, this.inlineValueText)) {
       return Promise.resolve();
     }
     if (this.debugLineFlushPromise) {
@@ -257,7 +260,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
       if (this.debugLineFlushPromise === pending) {
         this.debugLineFlushPromise = undefined;
       }
-      if (mayContinue && this.ws?.readyState === WebSocket.OPEN && this.rendererInjected && this.debugLineApplied !== this.debugLineTarget) {
+      if (mayContinue && this.ws?.readyState === WebSocket.OPEN && this.rendererInjected && this.debugLineApplied !== debugInlineRenderKey(this.debugLineTarget, this.inlineValueText)) {
         void this.queueDebugLineFlush();
       }
     });
@@ -267,20 +270,20 @@ export class WorkbenchOverlay implements vscode.Disposable {
 
   /** Applies coalesced debug-line targets serially, skipping intermediate lines superseded during a CDP round trip. */
   private async flushDebugLine(): Promise<boolean> {
-    while (this.ws?.readyState === WebSocket.OPEN && this.rendererInjected && this.debugLineApplied !== this.debugLineTarget) {
-      const target = this.debugLineTarget;
+    while (this.ws?.readyState === WebSocket.OPEN && this.rendererInjected && this.debugLineApplied !== debugInlineRenderKey(this.debugLineTarget, this.inlineValueText)) {
+      const target = this.debugLineTarget, inline = this.inlineValueText, key = debugInlineRenderKey(target, inline);
       try {
-        const report = await this.evalInWorkbench(debugLineExpression(target, this.token));
+        const report = await this.evalInWorkbench(debugLineExpression(target, inline, this.token));
         if (report === "owner-mismatch" || report.includes("missing")) {
           return false;
         }
-        this.debugLineApplied = target;
+        this.debugLineApplied = key;
       } catch (error) {
         this.logger?.log("overlay.debug.info.error", { error: error instanceof Error ? error.message : String(error) });
         return false;
       }
     }
-    return this.debugLineApplied === this.debugLineTarget;
+    return this.debugLineApplied === debugInlineRenderKey(this.debugLineTarget, this.inlineValueText);
   }
 
   /** Mirrors the one-based lines that have breakpoints into overlay glyph-margin dots so users can see where breakpoints are set. */
@@ -360,7 +363,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   hide(): void { void this.parkRendererOverlay(); }
 
   /** Clears overlay text and generated prelude for a fresh backend session. */
-  async reset(): Promise<void> { this.prelude = ""; this.debugLineTarget = 0; this.debugLineApplied = -1; await this.memoryDocument.reset(); void vscode.commands.executeCommand("setContext", this.profile.contextKey, false); if (this.ws?.readyState === WebSocket.OPEN) { await this.evalInWorkbench(resetExpression(this.memoryDocument.visibleText(), this.token)).catch((error: unknown) => { this.logger?.log("overlay.reset.error", { error: error instanceof Error ? error.message : String(error) }); }); } }
+  async reset(): Promise<void> { this.prelude = ""; this.debugLineTarget = 0; this.inlineValueText = ""; this.debugLineApplied = ""; await this.memoryDocument.reset(); void vscode.commands.executeCommand("setContext", this.profile.contextKey, false); if (this.ws?.readyState === WebSocket.OPEN) { await this.evalInWorkbench(resetExpression(this.memoryDocument.visibleText(), this.token)).catch((error: unknown) => { this.logger?.log("overlay.reset.error", { error: error instanceof Error ? error.message : String(error) }); }); } }
 
   /** Asks the renderer-owned overlay editor to run the current cursor execution unit. */
   async runCurrentInput(): Promise<string> { await this.ensureInjected(); const raw = await this.evalInWorkbench("(function(){const root=document.getElementById('django-shell-overlay');const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(!root||!editor||!model){return JSON.stringify({ok:false,reason:'missing-overlay'});}const payload=root.__dsoCurrentInputPayload?root.__dsoCurrentInputPayload():{code:''};const code=String(payload&&payload.code||'');const rawStart=payload&&payload.range?Number(payload.range.start)||1:1;const inputStart=Number(root.__dsoInputStartLine)||1;const start=Math.max(1,rawStart-inputStart+1);return JSON.stringify({code,ok:!!code.trim(),reason:code.trim()?undefined:'empty',start,text:String(model.getValue&&model.getValue()||'')});})()").catch((error: unknown) => JSON.stringify({ ok: false, reason: error instanceof Error ? error.message : String(error) })); const payload = JSON.parse(raw) as { code?: string; ok?: boolean; start?: number; text?: string }; if (payload.ok && typeof payload.code === "string") { if (typeof payload.text === "string") { await this.memoryDocument.sync(payload.text); } void this.runHandler?.(payload.code, this.relativeLineOffset(payload.start ?? 1)).catch((error: unknown) => this.logger?.log("overlay.command.rerun.error", { error: error instanceof Error ? error.message : String(error) })); this.logger?.log("overlay.command.rerun.host", { chars: payload.code.length, start: payload.start ?? 1 }); return "host-requested"; } const report = await this.evalInWorkbench("window.__dsoRunCurrentOverlayInput ? window.__dsoRunCurrentOverlayInput() : 'missing-runner'").catch((error: unknown) => `error:${error instanceof Error ? error.message : String(error)}`); this.logger?.log("overlay.command.rerun.eval", { report }); return report; }
@@ -412,7 +415,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
     } catch (error) {
       this.logger?.log(errorEvent, { error: error instanceof Error ? error.message : String(error) });
     } finally {
-      this.debugLineApplied = -1;
+      this.debugLineApplied = "";
     }
   }
 
@@ -465,7 +468,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
       throw new Error(`overlay patch failed: ${report}`);
     }
     this.rendererInjected = true;
-    this.debugLineApplied = -1;
+    this.debugLineApplied = "";
     this.logger?.log("overlay.inject", { key: this.profile.key, report });
   }
   /** Debounces generated tab cleanup after overlay input settles. */
@@ -921,7 +924,7 @@ function patchExpression(port: number, token: string, modelUri: string, initialT
         if (staleWidgets && String(staleWidgets.dataset && staleWidgets.dataset.djangoShellOverlayOwner || "") !== ${JSON.stringify(token)}) { staleWidgets.remove(); }
       } catch (eStaleOverlay) {}
       delete window.__dsoPendingOverlayVisibleText;
-      delete window.__dsoPendingOverlayOwnerToken;
+      delete window.__dsoPendingOverlayOwnerToken; window.__dsoOverlayDebugLine = 0; window.__dsoOverlayDebugInlineText = "";
       window.__djangoShellOverlayBridge = { port: ${JSON.stringify(port)}, token: ${JSON.stringify(token)} };
       window.__djangoShellOverlayModelUri = ${JSON.stringify(modelUri)};
       window.__djangoShellOverlayOwnerToken = ${JSON.stringify(token)};
@@ -954,7 +957,7 @@ function preludeExpression(prelude: string, token: string): string { return `win
 function outputExpression(text: string, ok: boolean, token: string): string { return `window.__djangoShellOverlaySetOutput ? window.__djangoShellOverlaySetOutput(${JSON.stringify(text)}, ${JSON.stringify(ok)}, ${JSON.stringify(token)}) : 'overlay-not-installed'`; }
 
 /** Returns the expression that refreshes the paused debugger line marker. */
-function debugLineExpression(visibleLine: number, token: string): string { return `window.__dsoSetOverlayDebugLine ? window.__dsoSetOverlayDebugLine(${JSON.stringify(visibleLine)}, ${JSON.stringify(token)}) : 'overlay-debug-line-missing'`; }
+function debugLineExpression(visibleLine: number, inlineText: string, token: string): string { return `window.__dsoSetOverlayDebugLine ? window.__dsoSetOverlayDebugLine(${JSON.stringify(visibleLine)}, ${JSON.stringify(inlineText)}, ${JSON.stringify(token)}) : 'overlay-debug-line-missing'`; }
 /** Builds the renderer call that renders overlay breakpoint glyphs for the given one-based lines. */
 function breakpointsExpression(lines: number[], token: string): string { return `window.__dsoSetOverlayBreakpoints ? window.__dsoSetOverlayBreakpoints(${JSON.stringify(lines)}, ${JSON.stringify(token)}) : 'overlay-breakpoints-missing'`; }
 

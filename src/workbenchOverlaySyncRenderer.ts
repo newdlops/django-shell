@@ -163,6 +163,7 @@ export function overlaySyncRendererSource(): string {
       delete window.__dsoPendingOverlayVisibleText;
       delete window.__dsoPendingOverlayOwnerToken;
       root.__dsoHasAppliedInitialText = true;
+      root.__dsoDebugRenderModelLine = -1; try { window.__dsoApplyOverlayDebugLine && window.__dsoApplyOverlayDebugLine(root, editor); } catch (eVisibleTextDebugLine) {}
       try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eVisibleTextBreakpoints) {}
       root.style.visibility = oldVisibility || "visible";
       try { if (window.__dsoSetOverlayWidgetVisibility && root.style.display !== "none" && root.style.visibility !== "hidden") { window.__dsoSetOverlayWidgetVisibility(root, true, false); } } catch (eRestoreVisibleTextWidgets) {}
@@ -591,13 +592,14 @@ export function overlaySyncRendererSource(): string {
       const visibleLine = root.__dsoExecutionMode === "submit" ? 0 : Math.floor(Number(root.__dsoDebugLine || window.__dsoOverlayDebugLine || 0));
       const modelLine = visibleLine > 0 ? (Number(root.__dsoInputStartLine) || 1) + visibleLine - 1 : 0;
       const renderedLine = modelLine >= 1 && modelLine <= model.getLineCount() ? visibleLine : 0;
-      if (root.__dsoDebugRenderEditor === editor && root.__dsoDebugRenderModel === model && root.__dsoDebugRenderModelLine === modelLine) {
+      const inlineText = renderedLine ? String(root.__dsoDebugInlineText || window.__dsoOverlayDebugInlineText || "").slice(0, 240) : "";
+      if (root.__dsoDebugRenderEditor === editor && root.__dsoDebugRenderModel === model && root.__dsoDebugRenderModelLine === modelLine && root.__dsoDebugRenderInlineText === inlineText) {
         return "debug-line:" + renderedLine;
       }
       // Refresh the Enter-preview band first so it hides while paused and the stopped line stays the only highlighted row.
       try { __dsoUpdateExecutionRangePreview(root, editor); } catch (eExecRangeRefresh) {}
       const decorations = renderedLine ? [{
-        options: { className: "dso-debug-line", glyphMarginClassName: "dso-debug-indicator", isWholeLine: true },
+        options: { after: { content: inlineText ? "\u00a0\u00a0" + inlineText : "", cursorStops: 3, inlineClassName: "dso-debug-inline-value", inlineClassNameAffectsLetterSpacing: true }, className: "dso-debug-line", glyphMarginClassName: "dso-debug-indicator", isWholeLine: true, showIfCollapsed: true },
         range: { endColumn: model.getLineMaxColumn ? model.getLineMaxColumn(modelLine) : 1, endLineNumber: modelLine, startColumn: 1, startLineNumber: modelLine }
       }] : [];
       try {
@@ -606,23 +608,27 @@ export function overlaySyncRendererSource(): string {
         root.__dsoDebugRenderEditor = editor;
         root.__dsoDebugRenderModel = model;
         root.__dsoDebugRenderModelLine = modelLine;
+        root.__dsoDebugRenderInlineText = inlineText;
       } catch (eDebugDecorations) {
         root.__dsoDebugLineDecorationIds = [];
         root.__dsoDebugRenderEditor = null;
         root.__dsoDebugRenderModel = null;
         root.__dsoDebugRenderModelLine = -1;
+        root.__dsoDebugRenderInlineText = "";
       }
       try { if (modelLine && editor.revealLineInCenterIfOutsideViewport) { editor.revealLineInCenterIfOutsideViewport(modelLine); } } catch (eRevealDebugLine) {}
       return "debug-line:" + (decorations.length ? visibleLine : 0);
     };
 
     /** Stores the current paused debugger line and applies it to the live editor. */
-    window.__dsoSetOverlayDebugLine = function (line, ownerToken) {
+    window.__dsoSetOverlayDebugLine = function (line, inline, ownerToken) {
       const root = document.getElementById("django-shell-overlay");
       if (ownerToken && (root ? root.__dsoOwnerToken !== ownerToken : window.__djangoShellOverlayOwnerToken !== ownerToken)) { return "owner-mismatch"; }
       window.__dsoOverlayDebugLine = Math.max(0, Math.floor(Number(line) || 0));
+      window.__dsoOverlayDebugInlineText = window.__dsoOverlayDebugLine ? String(inline || "").slice(0, 240) : "";
       if (!root) { return "debug-line:" + window.__dsoOverlayDebugLine; }
       root.__dsoDebugLine = window.__dsoOverlayDebugLine;
+      root.__dsoDebugInlineText = window.__dsoOverlayDebugInlineText;
       const editor = root.__djangoShellEditor;
       return editor ? window.__dsoApplyOverlayDebugLine(root, editor) : "debug-line:" + root.__dsoDebugLine;
     };
@@ -746,6 +752,20 @@ export function overlaySyncRendererSource(): string {
       return cls ? tag + "." + cls : tag;
     }
 
+    /** Returns whether a key event originated in VS Code's conditional-breakpoint editor. */
+    function __dsoBreakpointWidgetOwnsEvent(event) {
+      const raw = event && event.browserEvent ? event.browserEvent : event;
+      const target = raw && raw.target ? raw.target : (event && event.target);
+      try { if (target && target.closest && target.closest(".breakpoint-widget")) { return true; } } catch (eClosestBreakpointWidget) {}
+      try {
+        const path = raw && raw.composedPath ? raw.composedPath() : (event && event.composedPath ? event.composedPath() : []);
+        for (let index = 0; path && index < path.length; index++) {
+          if (path[index] && path[index].classList && path[index].classList.contains("breakpoint-widget")) { return true; }
+        }
+      } catch (eBreakpointWidgetPath) {}
+      return false;
+    }
+
     /** Returns whether a key event belongs to the overlay editor. */
     function __dsoTouchesEditor(node, event, editor) {
       const target = event && event.target;
@@ -835,6 +855,7 @@ export function overlaySyncRendererSource(): string {
       const run = function (event, source) {
         const raw = event.browserEvent || event;
         if (!__dsoIsEnter(event, raw)) { return; }
+        if (__dsoBreakpointWidgetOwnsEvent(event)) { __dsoLog(post, "key.enter.breakpointWidget", { source: source }); return; }
         const suggest = __dsoSuggestOpen();
         __dsoLog(post, "key.enter", { alt: !!raw.altKey, composing: !!raw.isComposing, ctrl: !!raw.ctrlKey, meta: !!raw.metaKey, shift: !!raw.shiftKey, source: source, suggest: suggest });
         if (root.__dsoExecutionMode === "submit") {

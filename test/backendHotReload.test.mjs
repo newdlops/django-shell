@@ -96,6 +96,65 @@ print(json.dumps({
   }
 });
 
+test("reload removes canonical bytecode for both raw symlink and normalized source paths", { skip: !PYTHON || process.platform === "win32" }, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "django-shell-hot-reload-symlink-"));
+  const realDirectory = path.join(directory, "real");
+  const aliasDirectory = path.join(directory, "alias");
+  const cacheDirectory = path.join(directory, "pycache");
+  fs.mkdirSync(realDirectory);
+  fs.symlinkSync(realDirectory, aliasDirectory, "dir");
+  const sourcePath = path.join(realDirectory, "symlink_target.py");
+  fs.writeFileSync(sourcePath, "def value():\n    return 'old!'\n");
+  try {
+    const script = String.raw`
+import importlib.util
+import json
+import os
+import sys
+
+backend_path, source_path, alias_directory = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("django_shell_backend", backend_path)
+backend = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(backend)
+sys.path.insert(0, alias_directory)
+import symlink_target as target
+
+backend._STATE["debug_engine"] = "native"
+held = target.value
+raw_module_path = target.__file__
+raw_cached_path = importlib.util.cache_from_source(raw_module_path)
+cache_existed_before = os.path.isfile(raw_cached_path)
+initial_stat = os.stat(source_path)
+with open(source_path, "w", encoding="utf-8") as handle:
+    handle.write("def value():\n    return 'new!'\n")
+os.utime(source_path, ns=(initial_stat.st_atime_ns, initial_stat.st_mtime_ns))
+result = backend._run_request({}, "secret", {"token": "secret", "kind": "hotReload", "paths": [source_path]}, set())
+print(json.dumps({
+    "result": result,
+    "rawWasAlias": os.path.abspath(raw_module_path).startswith(os.path.abspath(alias_directory) + os.sep),
+    "cacheExistedBefore": cache_existed_before,
+    "held": held(),
+    "current": target.value(),
+}))
+`;
+    const result = childProcess.spawnSync(PYTHON, ["-c", script, BACKEND_PATH, sourcePath, aliasDirectory], {
+      encoding: "utf8",
+      env: { ...process.env, PYTHONPYCACHEPREFIX: cacheDirectory },
+      timeout: 10_000
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.rawWasAlias, true);
+    assert.equal(payload.cacheExistedBefore, true);
+    assert.equal(payload.result.ok, true);
+    assert.equal(payload.result.results[0].status, "ok");
+    assert.equal(payload.held, "new!");
+    assert.equal(payload.current, "new!");
+  } finally {
+    fs.rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("runtime reload failure restores the module's shallow global snapshot", { skip: !PYTHON }, () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "django-shell-hot-reload-rollback-"));
   const sourcePath = path.join(directory, "rollback_target.py");
@@ -206,12 +265,13 @@ print(json.dumps({
   }
 });
 
-test("validates token, engine ownership, absolute Python paths, bounds, uniqueness, and execution-lock independence", { skip: !PYTHON }, () => {
+test("validates token, engine ownership, paths, bounds, uniqueness, and the execution barrier", { skip: !PYTHON }, () => {
   const script = String.raw`
 import importlib.util
 import json
 import os
 import sys
+import types
 
 spec = importlib.util.spec_from_file_location("django_shell_backend", sys.argv[1])
 backend = importlib.util.module_from_spec(spec)
@@ -228,9 +288,29 @@ backend._STATE["debug_engine"] = "native"
 relative = backend._run_request({}, "secret", {"token": "secret", "kind": "hotReload", "paths": ["relative.py"]}, set())
 suffix = backend._run_request({}, "secret", {"token": "secret", "kind": "hotReload", "paths": [os.path.abspath("module.txt")]}, set())
 bounded = backend._run_request({}, "secret", {"token": "secret", "kind": "hotReload", "paths": [os.path.abspath("module-%d.py" % index) for index in range(65)]}, set())
+lock_observations = []
+original_reload_one = backend._hot_reload_one
+def observe_execution_lock(source_path):
+    acquired = backend._EXECUTION_LOCK.acquire(blocking=False)
+    lock_observations.append(acquired)
+    if acquired:
+        backend._EXECUTION_LOCK.release()
+    return original_reload_one(source_path)
+backend._hot_reload_one = observe_execution_lock
+idle = backend._run_request({}, "secret", {"token": "secret", "kind": "hotReload", "paths": [absolute, absolute]}, set())
+idle_lock_observations = list(lock_observations)
+released_after_idle = backend._EXECUTION_LOCK.acquire(blocking=False)
+if released_after_idle:
+    backend._EXECUTION_LOCK.release()
+paused_threads = 0
+native = types.SimpleNamespace(status=lambda: {"pausedThreads": paused_threads})
+sys.modules["django_shell_native_tracer"] = native
+sys.modules["_django_shell_native_tracer"] = native
 with backend._EXECUTION_LOCK:
-    independent = backend._run_request({}, "secret", {"token": "secret", "kind": "hotReload", "paths": [absolute, absolute]}, set())
-print(json.dumps({"unauthorized": unauthorized, "unowned": unowned, "relative": relative, "suffix": suffix, "bounded": bounded, "independent": independent, "sharedRegistry": shared_registry, "sharedLock": shared_lock}))
+    busy = backend._run_request({}, "secret", {"token": "secret", "kind": "hotReload", "paths": [absolute]}, set())
+    paused_threads = 1
+    paused = backend._run_request({}, "secret", {"token": "secret", "kind": "hotReload", "paths": [absolute]}, set())
+print(json.dumps({"unauthorized": unauthorized, "unowned": unowned, "relative": relative, "suffix": suffix, "bounded": bounded, "idle": idle, "releasedAfterIdle": released_after_idle, "idleLockObservations": idle_lock_observations, "lockObservations": lock_observations, "busy": busy, "paused": paused, "sharedRegistry": shared_registry, "sharedLock": shared_lock}))
 `;
   const result = childProcess.spawnSync(PYTHON, ["-c", script, BACKEND_PATH], { encoding: "utf8", timeout: 10_000 });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -245,9 +325,19 @@ print(json.dumps({"unauthorized": unauthorized, "unowned": unowned, "relative": 
   assert.match(payload.suffix.error, /absolute \.py/);
   assert.equal(payload.bounded.ok, false);
   assert.match(payload.bounded.error, /at most 64/);
-  assert.equal(payload.independent.ok, true);
-  assert.equal(payload.independent.results.length, 1);
-  assert.equal(payload.independent.results[0].status, "skipped");
+  assert.equal(payload.idle.ok, true);
+  assert.equal(payload.idle.results.length, 1);
+  assert.equal(payload.idle.results[0].status, "skipped");
+  assert.deepEqual(payload.idleLockObservations, [false]);
+  assert.equal(payload.releasedAfterIdle, true);
+  assert.equal(payload.busy.ok, false);
+  assert.equal(payload.busy.retryable, true);
+  assert.match(payload.busy.error, /still running/i);
+  assert.deepEqual(payload.busy.results, []);
+  assert.equal(payload.paused.ok, true);
+  assert.equal(payload.paused.results.length, 1);
+  assert.equal(payload.paused.results[0].status, "skipped");
+  assert.deepEqual(payload.lockObservations, [false, false]);
   assert.equal(payload.sharedRegistry, true);
   assert.equal(payload.sharedLock, true);
 });
