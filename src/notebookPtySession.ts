@@ -554,7 +554,7 @@ export class NotebookPtySession implements vscode.Disposable {
       this.ptyRequests.set(id, { reject, resolve });
       this.options.diagnosticLogger?.log("backend.pty.request", { code: typeof payload.code === "string" ? payload.code.slice(0, 200) : undefined, id, kind: payload.kind, lightweight: payload.lightweight, queueMs: started - queuedAt, sessionId: this.options.sessionId });
       this.process.write(buildPtyBackendRequest(id, payload, this.token));
-    }));
+    }), payload.kind === "execute" ? "high" : "normal");
   }
 
   /** Writes a generated multi-line PTY command in paced chunks and resolves through the normal response marker path. */

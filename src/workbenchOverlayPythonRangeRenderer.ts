@@ -29,10 +29,6 @@ export function overlayPythonRangeRendererSource(): string {
         if (!model.getLineContent(index).trim()) {
           blankRun++;
           if (blankRun >= 2) {
-            if (__dsoPromptImportBlockGap(model, floor, index)) {
-              blankRun = 0;
-              continue;
-            }
             return index + 2;
           }
         } else {
@@ -45,7 +41,7 @@ export function overlayPythonRangeRendererSource(): string {
     /** Returns whether one blank line sits inside a pasted multiline input unit. */
     function __dsoPromptBlankInsideCell(model, lineNumber, floor) {
       let before = false;
-      let blankRun = 0;
+      let blankRun = 1;
       for (let index = lineNumber - 1; index >= floor; index--) {
         if (!model.getLineContent(index).trim()) {
           blankRun++;
@@ -56,7 +52,7 @@ export function overlayPythonRangeRendererSource(): string {
         }
       }
       let after = false;
-      blankRun = 0;
+      blankRun = 1;
       for (let index = lineNumber + 1; index <= model.getLineCount(); index++) {
         if (!model.getLineContent(index).trim()) {
           blankRun++;
@@ -67,57 +63,6 @@ export function overlayPythonRangeRendererSource(): string {
         }
       }
       return before && after;
-    }
-
-    /** Returns true when a two-blank gap follows the leading import block. */
-    function __dsoPromptImportBlockGap(model, floor, blankLine) {
-      const previous = __dsoPromptPreviousNonBlankLine(model, blankLine - 1, floor);
-      const blockFloor = __dsoPromptPreviousCellFloor(model, floor, previous);
-      return previous >= blockFloor && __dsoPromptImportBlockPrefix(model, blockFloor, previous);
-    }
-
-    /** Returns the nearest non-empty line at or above one line. */
-    function __dsoPromptPreviousNonBlankLine(model, lineNumber, floor) {
-      for (let index = lineNumber; index >= floor; index--) {
-        if (model.getLineContent(index).trim()) { return index; }
-      }
-      return floor - 1;
-    }
-
-    /** Returns the line after the nearest prior two-blank cell separator. */
-    function __dsoPromptPreviousCellFloor(model, floor, lineNumber) {
-      let blankRun = 0;
-      for (let index = lineNumber - 1; index >= floor; index--) {
-        if (!model.getLineContent(index).trim()) {
-          blankRun++;
-          if (blankRun >= 2) { return index + 2; }
-        } else {
-          blankRun = 0;
-        }
-      }
-      return floor;
-    }
-
-    /** Returns true when all leading non-comment code through one line is Python imports. */
-    function __dsoPromptImportBlockPrefix(model, floor, endLine) {
-      let sawImport = false;
-      let importContinuation = false;
-      let depth = 0;
-      for (let index = floor; index <= endLine; index++) {
-        const text = model.getLineContent(index);
-        const trimmed = text.trim();
-        if (!trimmed || trimmed.indexOf("#") === 0) { continue; }
-        if (!importContinuation && !__dsoPromptImportStart(trimmed)) { return false; }
-        sawImport = true;
-        depth = Math.max(0, depth + __dsoBracketDelta(text, depth));
-        importContinuation = depth > 0 || /\\\\\\s*$/.test(text.trimEnd());
-      }
-      return sawImport && depth === 0;
-    }
-
-    /** Returns true when a trimmed Python line starts an import statement. */
-    function __dsoPromptImportStart(line) {
-      return /^(?:import\\s+\\S|from\\s+\\S+\\s+import\\b)/.test(line);
     }
 
     /** Returns the first line of the current statement, scoped to the input region. */

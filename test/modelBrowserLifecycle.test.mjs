@@ -11,6 +11,7 @@ const modelBrowserSource = fs.readFileSync(new URL("../src/modelBrowser.ts", imp
 const modelBrowserClientSource = fs.readFileSync(new URL("../media/modelBrowserSource.js", import.meta.url), "utf8");
 const modelCatalogSource = fs.readFileSync(new URL("../src/modelCatalog.ts", import.meta.url), "utf8");
 const notebookPtySessionSource = fs.readFileSync(new URL("../src/notebookPtySession.ts", import.meta.url), "utf8");
+const overlaySource = fs.readFileSync(new URL("../src/workbenchOverlay.ts", import.meta.url), "utf8");
 const pythonBackendSource = fs.readFileSync(new URL("../python/django_shell_backend.py", import.meta.url), "utf8");
 
 test("debug session restart does not automatically rerun the current cell", () => {
@@ -18,6 +19,17 @@ test("debug session restart does not automatically rerun the current cell", () =
   assert.ok(customConsoleSource.includes("consumeRunOnDebugSessionStart"));
   assert.ok(debugEventsSource.includes("consumeRunOnSessionStart"));
   assert.ok(debugEventsSource.includes("debug.session.start.skipRun"));
+});
+
+test("debug execution does not publish or advance its expression before the run settles", () => {
+  const directRun = overlaySource.slice(overlaySource.indexOf("async runCurrentInput()"), overlaySource.indexOf("async skipCurrentInput()"));
+  const bridgeRun = overlaySource.slice(overlaySource.indexOf('if (payload?.type === "run"'), overlaySource.indexOf("res.writeHead(204", overlaySource.indexOf('if (payload?.type === "run"')));
+  assert.ok(customConsoleSource.includes('this.post({ code, debugRun, execution, type: "pythonStarted" })'));
+  assert.ok(customConsoleClientSource.includes("if (!message.debugRun)"), "a paused debug cell must not appear in Outputs as already executed");
+  assert.ok(directRun.includes("await this.runHandler?."), "Debug Current waits for the debug execution lifecycle");
+  assert.equal(directRun.includes("void this.runHandler?."), false);
+  assert.ok(bridgeRun.includes("const executed = await this.runHandler?."), "the renderer bridge keeps its response pending while the debugger is paused");
+  assert.ok(bridgeRun.includes("Boolean(executed)"));
 });
 
 test("model browser leaves loading state when the shell is busy or paused in debug", () => {

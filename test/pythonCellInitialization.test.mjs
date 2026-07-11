@@ -162,6 +162,70 @@ test("overlay memory skips no-op writes and flushes volatile edits only once", a
   assert.equal(latest.get("warmup-analysis.py"), `${prelude}value = 2\n`);
 });
 
+test("overlay memory keeps executable source whole while analysis sees only the focused shell unit", async () => {
+  mockState.writes.length = 0;
+  const document = new OverlayMemoryDocument(undefined, "ordered-cell", "ordered-analysis", true);
+  const source = "unexecuted_upper = 1\n\n\nlower_value = 2\nlower_value\n";
+  const prelude = "runtime_only: int\n";
+  await document.updatePrelude(prelude);
+
+  await document.syncAnalysis(source, 4);
+  await document.sync(source, 4);
+  let latest = new Map(mockState.writes.map((write) => [path.basename(write.path), write.text]));
+  assert.equal(document.fullText(), source);
+  assert.equal(latest.get("ordered-cell.py"), source);
+  assert.equal(latest.get("ordered-analysis.py"), prelude + "\n\n\nlower_value = 2\nlower_value\n");
+
+  await document.syncAnalysis(source, 0);
+  latest = new Map(mockState.writes.map((write) => [path.basename(write.path), write.text]));
+  assert.equal(document.fullText(), source, "changing analysis focus never mutates the executable debug source");
+  assert.equal(latest.get("ordered-analysis.py"), prelude + "unexecuted_upper = 1\n\n\n\n\n");
+});
+
+test("analysis snapshot lease blocks sync and prelude writes until its provider completes", async () => {
+  mockState.writes.length = 0;
+  const document = new OverlayMemoryDocument(undefined, "lease-cell", "lease-analysis", true);
+  const initialPrelude = "runtime_value: int\n";
+  const initialSource = "upper = runtime_value\n\n\nlower = 2\n";
+  await document.updatePrelude(initialPrelude);
+  const providerStarted = deferred();
+  const releaseProvider = deferred();
+  const provider = document.withAnalysisSnapshot(initialSource, 0, async () => {
+    providerStarted.resolve();
+    await releaseProvider.promise;
+  });
+  await providerStarted.promise;
+  const leasedWriteCount = mockState.writes.length;
+  let syncFinished = false;
+  let preludeFinished = false;
+  const sync = document.sync("new_upper = 3\n\n\nnew_lower = 4\n", 3).then(() => { syncFinished = true; });
+  const prelude = document.updatePrelude("new_runtime: str\n").then(() => { preludeFinished = true; });
+  await delay(10);
+
+  const analysisWrites = () => mockState.writes.filter((write) => path.basename(write.path) === "lease-analysis.py");
+  assert.equal(mockState.writes.length, leasedWriteCount, "queued state changes cannot write while the provider owns analysis.py");
+  assert.deepEqual([syncFinished, preludeFinished], [false, false], "queued writers do not resolve before the lease releases");
+  assert.equal(analysisWrites().at(-1).text, `${initialPrelude}upper = runtime_value\n\n\n\n`, "the exact focused snapshot remains installed");
+
+  releaseProvider.resolve();
+  await Promise.all([provider, sync, prelude]);
+  assert.deepEqual([syncFinished, preludeFinished], [true, true]);
+  assert.equal(analysisWrites().at(-1).text, "new_runtime: str\n\n\n\nnew_lower = 4\n");
+});
+
+test("analysis snapshot lease converts a legacy marker focus to user-relative lines", async () => {
+  mockState.writes.length = 0;
+  const document = new OverlayMemoryDocument(undefined, "legacy-cell", "legacy-analysis", true);
+  const prelude = "runtime_value: int\nhelper_value: str\n";
+  await document.updatePrelude(prelude);
+  const legacy = `${prelude}# --- django shell input ---\r\nupper = 1\r\n\r\n\r\nlower = runtime_value\r\n`;
+
+  await document.withAnalysisSnapshot(legacy, 6, async () => undefined);
+
+  const analysisWrites = mockState.writes.filter((write) => path.basename(write.path) === "legacy-analysis.py");
+  assert.equal(analysisWrites.at(-1).text, `${prelude}\r\n\r\n\r\nlower = runtime_value\r\n`);
+});
+
 test("overlay memory preserves a newer dirty analysis snapshot during an older write", async () => {
   mockState.writes.length = 0;
   const document = new OverlayMemoryDocument(undefined, "race-cell", "race-analysis");

@@ -232,6 +232,8 @@ export class BackendClient {
   private featureLoader: (() => Promise<void>) | undefined;
   private featureReady: Promise<void> | undefined;
   private forwardedEndpoint: { host: string; port: number } | undefined;
+  private modelList: BackendModelList | undefined; private modelListInFlight: Promise<BackendModelList> | undefined;
+  private modelListInFlightRefresh = false; private modelRefreshInFlight: Promise<BackendModelList> | undefined;
   private parallelModelReads = false;
   private remoteSocketUnavailable = false;
   private tcpFailedAt = 0;
@@ -501,11 +503,24 @@ export class BackendClient {
     return this.request({ kind: "children", path }, parseChildrenResponse);
   }
 
-  /** Returns the catalog of browsable Django models from the attached runtime. */
-  async models(): Promise<BackendModelList> {
+  /** Returns the catalog once per attached backend, coalescing concurrent loads; an explicit refresh bypasses a completed cache. */
+  async models(refresh = false): Promise<BackendModelList> {
     await this.ensureModelBrowserFeature();
-    if (this.reconstructsViaOrmCell) { return this.ormCell(buildModelsOrm(), parseOrmModelsResponse); }
-    return this.request({ kind: "models" }, parseModelListResponse);
+    if (this.modelListInFlight) {
+      if (!refresh || this.modelListInFlightRefresh) { return this.modelListInFlight; }
+      if (!this.modelRefreshInFlight) { const active = this.modelListInFlight; const queued = active.catch(() => undefined).then(() => this.loadModels(true)).finally(() => { if (this.modelRefreshInFlight === queued) { this.modelRefreshInFlight = undefined; } }); this.modelRefreshInFlight = queued; }
+      return this.modelRefreshInFlight;
+    }
+    if (!refresh && this.modelList) { return this.modelList; }
+    return this.loadModels(refresh);
+  }
+
+  /** Starts one model enumeration and records whether it already satisfies a forced refresh. */
+  private loadModels(refresh: boolean): Promise<BackendModelList> {
+    const pending = this.reconstructsViaOrmCell ? this.ormCell(buildModelsOrm(), parseOrmModelsResponse) : this.request({ kind: "models" }, parseModelListResponse);
+    this.modelListInFlightRefresh = refresh;
+    const result = pending.then((list) => { if (list.ok) { this.modelList = list; } return list; }).finally(() => { if (this.modelListInFlight === result) { this.modelListInFlight = undefined; this.modelListInFlightRefresh = false; } }); this.modelListInFlight = result;
+    return result;
   }
 
   /** Returns column and relation metadata for one model without querying rows. */

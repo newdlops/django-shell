@@ -340,6 +340,8 @@ test("renderer relative ranges map directly to visible console-cell.py lines", (
   assert.ok(offsetHelper.includes("Math.max(0, Math.floor(relativeLine) - 1)"));
   assert.ok(overlaySource.includes("this.relativeLineOffset(payload.start ?? 1)"));
   assert.ok(overlaySource.includes("this.relativeLineOffset(range?.start)"));
+  assert.ok(customConsoleSource.includes("syncVisibleText(typed.text, focusLine)"), "the webview fallback carries its relative cursor unit into analysis");
+  assert.ok(overlaySource.includes("this.memoryDocument.sync(text, focusLine)"));
 });
 
 test("overlay breakpoints use native VS Code breakpoint handling instead of custom renderer controls", () => {
@@ -872,10 +874,11 @@ test("stepInto target resolution is time-boxed and bounds language-server calls"
   assert.ok(stepTargetsSource.includes("new vscode.Position(lineIndex, span.start)"), "one definition probe per identifier");
 });
 
-test("two-phase inspection: fast frame first, enriched (live/expandable previews) only on settle", () => {
-  // Enrichment (candidates + previews) is split from the basic scope read and gated behind the enrich option.
-  assert.ok(debugInspectorSource.includes("enrich?: boolean"), "inspect options carry an enrich flag");
-  assert.ok(debugInspectorSource.includes("options.enrich !== false ? await enrichScopeVariables"), "basic scopes returned unless enrich requested");
+test("three-phase inspection: location first, then scopes and previews only after an idle stop", () => {
+  assert.ok(debugInspectorSource.includes("includeScopes?: boolean"), "inspect options can request a location-only pass");
+  assert.ok(debugInspectorSource.indexOf("options.includeScopes === false") < debugInspectorSource.indexOf("await scopeVariables(session, frameId)"), "the first frame can post before any scopes or variables request");
+  assert.ok(debugInspectorSource.includes("options.isCurrent?.() === false"), "scope and enrichment phases are generation guarded");
+  assert.ok(debugInspectorSource.includes("options.enrich !== false ? await enrichScopeVariables"), "basic scopes return without preview enrichment");
   assert.ok(debugInspectorSource.includes("async function enrichScopeVariables"));
   assert.ok(debugInspectorSource.includes("globalsVariables"), "Globals variables are reused for local candidates (no per-name evaluate)");
   assert.ok(debugInspectorSource.includes("MAX_EVALUATED_LOCAL_CANDIDATES = 10"), "bounded fallback evaluates");
@@ -883,10 +886,13 @@ test("two-phase inspection: fast frame first, enriched (live/expandable previews
   assert.ok(debugInspectorSource.includes("await evaluateQuerySetPreview(session, frameId, variable.name, expression)"));
   assert.ok(debugInspectorSource.includes("await evaluateDjangoModelPreview(session, frameId, variable.name, modelExpression)"));
   assert.ok(!debugInspectorSource.includes("cachedQuerySetPreview") && !debugInspectorSource.includes("cachedModelPreview"), "per-step preview caches removed in favour of settled live evaluation");
-  // Stepping posts a fast (enrich:false) frame then a debounced enrich:true pass in both overlay and file paths.
-  assert.ok(customConsoleSource.includes("enrich: false }).then(post)"), "overlay stop posts the fast frame first");
-  assert.ok(customConsoleSource.includes("DEBUG_ENRICH_DELAY_MS"));
-  assert.ok(debugEventsSource.includes("scheduleEnrich(current, () =>"), "file-mode stop/active-stack defer enrichment");
+  assert.ok(customConsoleSource.includes("enrich: false, includeScopes: false"), "direct overlay debugging posts its location-only frame first");
+  assert.ok(customConsoleSource.includes("this.debugEnrichTimer = setTimeout"), "direct scopes wait behind a cancellable idle timer");
+  assert.ok(customConsoleSource.indexOf("enrich: false, includeScopes: false") < customConsoleSource.indexOf("this.debugEnrichTimer = setTimeout"), "direct location posts before idle inspection is scheduled");
+  assert.ok(debugEventsSource.includes('void refreshStoppedThread(session, body, hooks, isCurrent, "frame")'), "file-mode location posts before basic scopes start");
+  assert.ok(debugEventsSource.includes('refreshStoppedThread(session, body, hooks, isCurrent, "scopes")'));
+  assert.ok(debugEventsSource.includes('refreshStoppedThread(session, body, hooks, isCurrent, "enriched")'), "the final idle stop restores live previews after rapid stepping");
+  assert.ok(debugEventsSource.includes("DEBUG_ENRICH_DELAY_MS = 1200"), "all variable inspection waits for an idle pause");
 });
 
 test("breakpoint lines are revealed with a whole-line marker (not a second gutter dot)", () => {
@@ -929,6 +935,8 @@ test("overlay show and debug-line renderer traffic are single-flight and latest-
   assert.ok(debugBody.includes("if (this.debugLineFlushPromise)"));
   assert.ok(debugBody.includes("while (this.ws?.readyState === WebSocket.OPEN && this.rendererInjected && this.debugLineApplied !== debugInlineRenderKey(this.debugLineTarget, this.inlineValueText))"));
   assert.ok(debugBody.includes("const target = this.debugLineTarget, inline = this.inlineValueText, key = debugInlineRenderKey(target, inline)"), "a queued update atomically snapshots the latest line and values before each CDP call");
+  assert.ok(debugBody.includes("const superseded = key !== debugInlineRenderKey(this.debugLineTarget, this.inlineValueText)"), "a failed renderer call retries a newer coalesced paused-line target");
+  assert.ok(debugBody.includes("await this.ensureCdpSocket().catch(() => undefined)"), "a retired timeout socket reconnects before retrying the latest line");
 });
 
 test("paused-frame navigation is location-deduped while enriched inline values still refresh", () => {

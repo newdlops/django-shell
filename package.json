@@ -2,7 +2,7 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "1.1.1000010",
+  "version": "1.1.1000014",
   "publisher": "newdlops",
   "license": "UNLICENSED",
   "icon": "media/icon.png",
@@ -76,12 +76,34 @@
     "onRenderer:django-shell-terminal-renderer"
   ],
   "contributes": {
+    "breakpoints": [
+      {
+        "language": "django-shell-python"
+      }
+    ],
+    "languages": [
+      {
+        "id": "django-shell-python",
+        "aliases": [
+          "Django Shell Python"
+        ],
+        "configuration": "./syntaxes/django-shell-python-language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "django-shell-python",
+        "scopeName": "source.django-shell-python",
+        "path": "./syntaxes/django-shell-python.tmLanguage.json"
+      }
+    ],
     "debuggers": [
       {
         "type": "django-shell-native",
         "label": "Django Shell Experimental",
         "languages": [
-          "python"
+          "python",
+          "django-shell-python"
         ],
         "configurationAttributes": {
           "attach": {
@@ -468,13 +490,13 @@
         "command": "djangoShell.overlayAcceptInput",
         "key": "enter",
         "mac": "enter",
-        "when": "editorTextFocus && editorLangId == 'python' && resourceScheme == 'file' && resourceFilename == 'console-cell.py' && !editorReadonly && !breakpointWidgetVisible && !suggestWidgetVisible && !parameterHintsVisible && !inlineSuggestionVisible"
+        "when": "editorTextFocus && (editorLangId == 'python' || editorLangId == 'django-shell-python') && resourceScheme == 'file' && resourceFilename == 'console-cell.py' && !editorReadonly && !breakpointWidgetVisible && !suggestWidgetVisible && !parameterHintsVisible && !inlineSuggestionVisible"
       },
       {
         "command": "djangoShell.overlayInsertNewline",
         "key": "shift+enter",
         "mac": "shift+enter",
-        "when": "editorTextFocus && editorLangId == 'python' && resourceScheme == 'file' && resourceFilename == 'console-cell.py' && !editorReadonly && !breakpointWidgetVisible"
+        "when": "editorTextFocus && (editorLangId == 'python' || editorLangId == 'django-shell-python') && resourceScheme == 'file' && resourceFilename == 'console-cell.py' && !editorReadonly && !breakpointWidgetVisible"
       },
       {
         "command": "djangoShell.overlayRunCurrentInput",

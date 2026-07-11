@@ -18,7 +18,7 @@ test("development extension copies its entrypoint while linking non-code runtime
       version: "0.0.0"
     };
     fs.writeFileSync(path.join(root, "package.json"), JSON.stringify(manifest));
-    for (const name of ["media", "node_modules", "out", "python"]) {
+    for (const name of ["media", "node_modules", "out", "python", "syntaxes"]) {
       fs.mkdirSync(path.join(root, name), { recursive: true });
     }
     fs.writeFileSync(path.join(root, "out", "extension.js"), "module.exports = {};\n");
@@ -30,7 +30,7 @@ test("development extension copies its entrypoint while linking non-code runtime
     assert.equal(preparedManifest.extensionDependencies, undefined);
     assert.equal(fs.lstatSync(path.join(extensionPath, "out")).isSymbolicLink(), false);
     assert.equal(fs.realpathSync(entrypoint).startsWith(`${fs.realpathSync(extensionPath)}${path.sep}`), true);
-    for (const name of ["media", "node_modules", "python"]) {
+    for (const name of ["media", "node_modules", "python", "syntaxes"]) {
       assert.equal(fs.lstatSync(path.join(extensionPath, name)).isSymbolicLink(), true);
     }
   } finally {

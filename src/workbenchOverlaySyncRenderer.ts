@@ -140,7 +140,7 @@ export function overlaySyncRendererSource(): string {
       window.__dsoPendingOverlayOwnerToken = ownerToken || window.__djangoShellOverlayOwnerToken || "";
       if (!root || !editor || !model) { return "queued"; }
       const oldVisibility = root.style.visibility;
-      root.__dsoMultilineMode = false;
+      __dsoSetMultilineMode(root, editor, false);
       root.__dsoLastEnterRunAt = 0;
       root.style.visibility = "hidden";
       try { if (window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, false, false); } } catch (eHideVisibleTextWidgets) {}
@@ -286,7 +286,13 @@ export function overlaySyncRendererSource(): string {
       const position = editor.getPosition && editor.getPosition();
       const cursorLine = position ? position.lineNumber : model.getLineCount();
       let probeLine = Math.min(Math.max(inputStartLine, cursorLine), model.getLineCount());
-      while (probeLine > inputStartLine && !model.getLineContent(probeLine).trim()) { probeLine--; }
+      if (__dsoCellBlankSeparatorAt(model, probeLine, inputStartLine)) { return { code: "", range: null }; }
+      let blankRun = 0;
+      while (probeLine > inputStartLine && !model.getLineContent(probeLine).trim()) {
+        blankRun++;
+        if (blankRun >= 2) { return { code: "", range: null }; }
+        probeLine--;
+      }
       if (probeLine < inputStartLine || !model.getLineContent(probeLine).trim()) { return { code: "", range: null }; }
       let startLine = __dsoCellStartLine(model, probeLine, inputStartLine);
       let endLine = __dsoCellEndLine(model, probeLine, inputStartLine);
@@ -298,6 +304,39 @@ export function overlaySyncRendererSource(): string {
       };
     }
 
+    /** Enables continuation only for the execution unit under the current cursor. */
+    function __dsoSetMultilineMode(root, editor, enabled, range) {
+      if (!root) { return; }
+      const model = editor && editor.getModel && editor.getModel();
+      const payload = enabled && !range ? __dsoMultilinePayload(root, editor) : null;
+      const unitRange = range || (payload && payload.range);
+      root.__dsoMultilineMode = !!(enabled && model && unitRange);
+      root.__dsoMultilineModel = root.__dsoMultilineMode ? model : null;
+      root.__dsoMultilineUnitStart = root.__dsoMultilineMode ? unitRange.start : 0;
+    }
+
+    /** Returns scoped continuation state, clearing it after the cursor enters another execution unit. */
+    function __dsoMultilineModeForCursor(root, editor) {
+      if (!root || !root.__dsoMultilineMode) { return false; }
+      const model = editor && editor.getModel && editor.getModel();
+      const payload = model ? __dsoMultilinePayload(root, editor) : null;
+      const start = payload && payload.range ? payload.range.start : 0;
+      if (!start || root.__dsoMultilineModel !== model || Number(root.__dsoMultilineUnitStart) !== start) {
+        __dsoSetMultilineMode(root, editor, false);
+        return false;
+      }
+      return true;
+    }
+
+    /** Returns whether one blank cursor line belongs to a strict two-line separator. */
+    function __dsoCellBlankSeparatorAt(model, lineNumber, floor) {
+      if (model.getLineContent(lineNumber).trim()) { return false; }
+      let count = 1;
+      for (let index = lineNumber - 1; index >= floor && !model.getLineContent(index).trim(); index--) { count++; }
+      for (let index = lineNumber + 1; index <= model.getLineCount() && !model.getLineContent(index).trim(); index++) { count++; }
+      return count >= 2;
+    }
+
     /** Returns the first line of the current shell input unit, preserving single blank lines inside pasted source. */
     function __dsoCellStartLine(model, lineNumber, floor) {
       let blankRun = 0;
@@ -305,10 +344,6 @@ export function overlaySyncRendererSource(): string {
         if (!model.getLineContent(index).trim()) {
           blankRun++;
           if (blankRun >= 2) {
-            if (__dsoCellImportBlockGap(model, floor, index)) {
-              blankRun = 0;
-              continue;
-            }
             return index + 2;
           }
         } else {
@@ -325,10 +360,6 @@ export function overlaySyncRendererSource(): string {
         if (!model.getLineContent(index).trim()) {
           blankRun++;
           if (blankRun >= 2) {
-            if (__dsoCellImportBlockGap(model, floor, index)) {
-              blankRun = 0;
-              continue;
-            }
             return index - 2;
           }
         } else {
@@ -338,61 +369,17 @@ export function overlaySyncRendererSource(): string {
       return model.getLineCount();
     }
 
-    /** Returns true when a two-blank gap follows the leading import block. */
-    function __dsoCellImportBlockGap(model, floor, blankLine) {
-      const previous = __dsoCellPreviousNonBlankLine(model, blankLine - 1, floor);
-      const blockFloor = __dsoCellPreviousCellFloor(model, floor, previous);
-      return previous >= blockFloor && __dsoCellImportBlockPrefix(model, blockFloor, previous);
-    }
-
-    /** Returns the nearest non-empty line at or above one line. */
-    function __dsoCellPreviousNonBlankLine(model, lineNumber, floor) {
-      for (let index = lineNumber; index >= floor; index--) {
-        if (model.getLineContent(index).trim()) { return index; }
-      }
-      return floor - 1;
-    }
-
-    /** Returns the line after the nearest prior two-blank cell separator. */
-    function __dsoCellPreviousCellFloor(model, floor, lineNumber) {
-      let blankRun = 0;
-      for (let index = lineNumber - 1; index >= floor; index--) {
-        if (!model.getLineContent(index).trim()) {
-          blankRun++;
-          if (blankRun >= 2) { return index + 2; }
-        } else {
-          blankRun = 0;
-        }
-      }
-      return floor;
-    }
-
-    /** Returns true when all leading non-comment code through one line is Python imports. */
-    function __dsoCellImportBlockPrefix(model, floor, endLine) {
-      let sawImport = false;
-      let importContinuation = false;
-      let depth = 0;
-      for (let index = floor; index <= endLine; index++) {
-        const text = model.getLineContent(index);
-        const trimmed = text.trim();
-        if (!trimmed || trimmed.indexOf("#") === 0) { continue; }
-        if (!importContinuation && !__dsoCellImportStart(trimmed)) { return false; }
-        sawImport = true;
-        depth = Math.max(0, depth + __dsoBracketDelta(text, depth));
-        importContinuation = depth > 0 || /\\\\\\s*$/.test(text.trimEnd());
-      }
-      return sawImport && depth === 0;
-    }
-
-    /** Returns true when a trimmed Python line starts an import statement. */
-    function __dsoCellImportStart(line) {
-      return /^(?:import\\s+\\S|from\\s+\\S+\\s+import\\b)/.test(line);
-    }
-
     /** Preserves the executed cell, then drops the cursor on a fresh prompt below it. */
     function __dsoAdvanceAfterRun(editor, range, post, source) {
       const model = editor.getModel && editor.getModel();
       if (!model || !range) { return; }
+      const nextLine = __dsoNextInputUnitLine(model, range.end);
+      if (nextLine) {
+        try { editor.setPosition({ column: __dsoFirstTextColumn(model, nextLine), lineNumber: nextLine }); } catch (eNextPosition) {}
+        try { editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(nextLine); } catch (eNextReveal) {}
+        __dsoLog(post, "cursor.advance", { cellEnd: range.end, end: range.end, source: source, start: range.start, targetLine: nextLine });
+        return;
+      }
       let last = model.getLineCount();
       while (last > 1 && !model.getLineContent(last).trim()) { last--; }
       if (!model.getLineContent(last).trim()) {
@@ -405,14 +392,14 @@ export function overlaySyncRendererSource(): string {
         editor.executeEdits("django-shell-enter", [{
           forceMoveMarkers: true,
           range: { endColumn: model.getLineMaxColumn(toLine), endLineNumber: toLine, startColumn: model.getLineMaxColumn(last), startLineNumber: last },
-          text: "\\n\\n"
+          text: "\\n\\n\\n"
         }]);
         edited = model.getLineCount() > toLine;
       } catch (eEdit) {}
       if (!edited && model.getValue && model.setValue) {
         try {
           const lines = String(model.getValue() || "").split(/\\r?\\n/);
-          model.setValue(lines.slice(0, last).join("\\n") + "\\n\\n");
+          model.setValue(lines.slice(0, last).join("\\n") + "\\n\\n\\n");
           edited = true;
           __dsoLog(post, "cursor.advance.fallback", { cellEnd: last, source: source });
         } catch (eFallbackEdit) {}
@@ -447,7 +434,7 @@ export function overlaySyncRendererSource(): string {
       if (nextLine) {
         try { editor.setPosition && editor.setPosition({ column: __dsoFirstTextColumn(model, nextLine), lineNumber: nextLine }); } catch (eNextPosition) {}
         try { editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(nextLine); } catch (eNextReveal) {}
-        root.__dsoMultilineMode = false;
+        __dsoSetMultilineMode(root, editor, false);
         __dsoUpdateExecutionRangePreview(root, editor);
         __dsoLog(post, "enter.skip", { end: end, source: source, targetLine: nextLine });
         return "skipped";
@@ -457,13 +444,13 @@ export function overlaySyncRendererSource(): string {
         editor.executeEdits("django-shell-skip", [{
           forceMoveMarkers: true,
           range: { endColumn: model.getLineMaxColumn(toLine), endLineNumber: toLine, startColumn: model.getLineMaxColumn(end), startLineNumber: end },
-          text: "\\n\\n"
+          text: "\\n\\n\\n"
         }]);
       } catch (eEdit) {}
-      const target = Math.min(model.getLineCount(), end + 2);
+      const target = Math.min(model.getLineCount(), end + 3);
       try { editor.setPosition && editor.setPosition({ column: 1, lineNumber: target }); } catch (eSetPosition) {}
       try { editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(target); } catch (eReveal) {}
-      root.__dsoMultilineMode = false;
+      __dsoSetMultilineMode(root, editor, false);
       __dsoUpdateExecutionRangePreview(root, editor);
       __dsoLog(post, "enter.skip", { end: end, source: source, targetLine: target });
       return "skipped";
@@ -582,7 +569,7 @@ export function overlaySyncRendererSource(): string {
     /** Returns the payload that Enter would run from the current editor state. */
     function __dsoPreviewPayload(root, editor) {
       if (root && root.__dsoExecutionMode === "submit") { return __dsoSubmitPayload(root, editor); }
-      return root && root.__dsoMultilineMode ? __dsoMultilinePayload(root, editor) : __dsoEnterPayload(root, editor);
+      return __dsoMultilineModeForCursor(root, editor) ? __dsoMultilinePayload(root, editor) : __dsoEnterPayload(root, editor);
     }
 
     /** Draws the current paused debugger line for a one-based user-input line. */
@@ -800,7 +787,7 @@ export function overlaySyncRendererSource(): string {
       const execute = function (event, source, allowContinuation) {
         const inputStartLine = root.__dsoInputStartLine || 1;
         const submitMode = root.__dsoExecutionMode === "submit";
-        const multilineMode = !!root.__dsoMultilineMode;
+        const multilineMode = __dsoMultilineModeForCursor(root, editor);
         const payload = submitMode ? __dsoSubmitPayload(root, editor) : (multilineMode ? __dsoMultilinePayload(root, editor) : __dsoEnterPayload(root, editor));
         if (!payload.code.trim()) {
           __dsoLog(post, "enter.empty", { multiline: multilineMode, source: source });
@@ -825,7 +812,7 @@ export function overlaySyncRendererSource(): string {
           const cursorLine = model && position ? model.getLineContent(position.lineNumber) : "";
           const buffering = multilineMode || __dsoIsBlockBuffering(payload.code);
           if (buffering && cursorLine.trim()) {
-            root.__dsoMultilineMode = true;
+            __dsoSetMultilineMode(root, editor, true, payload.range);
             __dsoLog(post, "enter.block.buffer", { chars: payload.code.length, cursor: position ? position.lineNumber : 0, inputStartLine: inputStartLine, multiline: multilineMode, source: source });
             __dsoInsertNewline(editor, post, source + "-block-buffer");
             return true;
@@ -834,7 +821,7 @@ export function overlaySyncRendererSource(): string {
         if (!submitMode && __dsoLikelyIncompletePython(payload.code)) {
           __dsoLog(post, "enter.incomplete.local", { chars: payload.code.length, inputStartLine: inputStartLine, multiline: multilineMode, source: source });
           if (allowContinuation !== false) {
-            root.__dsoMultilineMode = true;
+            __dsoSetMultilineMode(root, editor, true, payload.range);
             __dsoInsertNewline(editor, post, source + "-local-incomplete");
           }
           return true;
@@ -846,7 +833,7 @@ export function overlaySyncRendererSource(): string {
             if (allowContinuation !== false) { __dsoInsertNewline(editor, post, source + "-incomplete"); }
             return;
           }
-          root.__dsoMultilineMode = false;
+          __dsoSetMultilineMode(root, editor, false);
           __dsoLog(post, "enter.execute", { end: payload.range ? payload.range.end : 0, inputStartLine: inputStartLine, source: source, start: payload.range ? payload.range.start : 0 });
           if (!submitMode) { __dsoAdvanceAfterRun(editor, payload.range, post, source); }
         });
@@ -869,7 +856,7 @@ export function overlaySyncRendererSource(): string {
           if (raw.preventDefault) { raw.preventDefault(); }
           if (raw.stopPropagation) { raw.stopPropagation(); }
           if (raw.stopImmediatePropagation) { raw.stopImmediatePropagation(); }
-          root.__dsoMultilineMode = true;
+          __dsoSetMultilineMode(root, editor, true);
           __dsoInsertNewline(editor, post, source);
           return;
         }
@@ -902,7 +889,7 @@ export function overlaySyncRendererSource(): string {
           const shiftMask = monacoApi ? monacoApi.KeyMod.Shift : 1024;
           const enterKey = monacoApi ? monacoApi.KeyCode.Enter : 3;
           editor.addCommand(shiftMask | enterKey, function () {
-            root.__dsoMultilineMode = true;
+            __dsoSetMultilineMode(root, editor, true);
             __dsoInsertNewline(editor, post, "monaco-command");
           });
           __dsoLog(post, "enter.addCommand", { shiftMask: shiftMask, enterKey: enterKey, hasApi: !!monacoApi });

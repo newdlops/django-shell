@@ -35,7 +35,7 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
   activate(context: vscode.ExtensionContext): void {
     this.disposables.push(
       vscode.window.registerWebviewViewProvider(VIEW_ID, this, { webviewOptions: { retainContextWhenHidden: true } }),
-      vscode.commands.registerCommand("djangoShell.refreshModelCatalog", () => this.refresh()),
+      vscode.commands.registerCommand("djangoShell.refreshModelCatalog", () => this.refresh(true)),
       this.source.onDidChangeRuntime(() => this.handleRuntimeChange())
     );
     context.subscriptions.push(this);
@@ -81,21 +81,21 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
   }
 
   /** Reloads the catalog, superseding any in-flight load or pending retry. */
-  private refresh(): void {
+  private refresh(force = false): void {
     this.loadToken += 1;
     this.clearRetry();
-    void this.load(this.loadToken, 0);
+    void this.load(this.loadToken, 0, force);
   }
 
   /** Loads the catalog and posts it; a just-started shell may not serve the first introspection cleanly, so a failed load retries briefly until the runtime settles. */
-  private async load(token: number, attempt: number): Promise<void> {
+  private async load(token: number, attempt: number, force: boolean): Promise<void> {
     if (!this.view || token !== this.loadToken) {
       return;
     }
     const started = Date.now();
     let list: BackendModelList;
     try {
-      const pendingList = this.source.listModels();
+      const pendingList = this.source.listModels(force);
       let result = await Promise.race([pendingList, new Promise<typeof CATALOG_REQUEST_TIMEOUT>((resolve) => setTimeout(() => resolve(CATALOG_REQUEST_TIMEOUT), CATALOG_REQUEST_TIMEOUT_MS))]);
       if (result === CATALOG_REQUEST_TIMEOUT) {
         this.logger?.log("model.catalog.timeout", { attempt, ms: CATALOG_REQUEST_TIMEOUT_MS });
@@ -119,7 +119,7 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
     this.stale = true;
     // No shell attached is a deterministic idle state: the next runtime change reloads it, so retrying now only logs noise.
     if (list.error !== MODEL_IDLE_MESSAGE && this.view.visible && attempt < CATALOG_LOAD_RETRIES) {
-      this.retryTimer = setTimeout(() => { this.retryTimer = undefined; void this.load(token, attempt + 1); }, CATALOG_RETRY_BASE_MS * (attempt + 1));
+      this.retryTimer = setTimeout(() => { this.retryTimer = undefined; void this.load(token, attempt + 1, force); }, CATALOG_RETRY_BASE_MS * (attempt + 1));
     }
   }
 

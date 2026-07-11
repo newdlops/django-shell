@@ -9,7 +9,7 @@ import { DiagnosticLogger } from "./diagnostics";
 
 /** Backend access used by the catalog tree and the data browser panels. */
 export interface ModelDataSource {
-  listModels(): Promise<BackendModelList>;
+  listModels(refresh?: boolean): Promise<BackendModelList>;
   modelAggregate(query: ModelAggregateQuery): Promise<BackendModelAggregate>;
   modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult>;
   modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed>;

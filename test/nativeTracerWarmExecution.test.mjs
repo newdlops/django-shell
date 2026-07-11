@@ -15,6 +15,71 @@ const BACKEND_PATH = path.resolve("python", "django_shell_backend.py");
 const TRACER_PATH = path.resolve("python", "django_shell_native_tracer.py");
 const TRACER_VERSION = "2026.07.11.3";
 
+test("an expression-line breakpoint stops before evaluation and captured output", { skip: !PYTHON, timeout: 15_000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "django-shell-native-expression-"));
+  const sourcePath = path.join(directory, "console-cell.py");
+  const source = "marker = []\n(print('EXPRESSION_OUTPUT'), marker.append('evaluated'), 42)[-1]\n";
+  fs.writeFileSync(sourcePath, source);
+
+  const child = childProcess.spawn(PYTHON, ["-u", "-c", sameThreadHarness(BACKEND_PATH, TRACER_PATH)], {
+    env: cleanPythonEnv(),
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  const lines = lineReader(child);
+  const stops = eventQueue("stopped");
+  let session;
+
+  try {
+    const ready = JSON.parse((await lines.next("READY:", 5000)).slice(6));
+    assert.equal(ready.native.ok, true, JSON.stringify(ready.native));
+    session = new DirectDebugAdapterSession({ onStopped: (body) => stops.push(body) });
+    await session.attach(
+      { host: ready.native.host, port: ready.native.port, reused: ready.native.reused },
+      async () => {
+        const response = await session.customRequest("setBreakpoints", {
+          breakpoints: [{ line: 2 }],
+          lines: [2],
+          source: { name: path.basename(sourcePath), path: sourcePath }
+        });
+        assert.deepEqual(response.breakpoints?.map((breakpoint) => [breakpoint.verified, breakpoint.line]), [[true, 2]]);
+      },
+      { cwd: directory, django: true, engine: "experimental", justMyCode: false, name: "Django Shell Native Expression Ordering" }
+    );
+
+    let executionSettled = false;
+    const execution = executeOnHarnessThread(child, lines, "expression", {
+      breakpointLines: [2],
+      code: source,
+      filename: sourcePath,
+      kind: "execute",
+      lineOffset: 0,
+      sourceText: source
+    }).finally(() => { executionSettled = true; });
+    const stop = await stops.next(5000);
+    assert.equal(stop.reason, "breakpoint");
+    const frame = await topFrame(session, stop);
+    assert.equal(frame.line, 2);
+    const marker = await session.customRequest("evaluate", { context: "watch", expression: "marker", frameId: frame.id });
+    assert.equal(marker.result, "[]", "the expression must not mutate state before its line breakpoint");
+    assert.equal(executionSettled, false, "the backend result and captured output must remain pending while stopped");
+
+    await session.customRequest("continue", { singleThread: true, threadId: stop.threadId });
+    const result = await execution;
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.result, "42");
+    assert.equal(result.stdout, "EXPRESSION_OUTPUT\n");
+  } finally {
+    await session?.disconnect().catch(() => undefined);
+    if (child.exitCode === null && !child.killed) {
+      child.stdin.write("EXIT\n");
+      await lines.next("EXIT:", 1000).catch(() => undefined);
+    }
+    child.stdin.end();
+    if (child.exitCode === null && !child.killed) { child.kill("SIGTERM"); }
+    fs.rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("a final-line next does not leak into the next warm execution", { skip: !PYTHON, timeout: 15_000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "django-shell-native-warm-"));
   const sourcePath = path.join(directory, "console-cell.py");

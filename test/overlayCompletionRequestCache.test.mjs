@@ -9,7 +9,7 @@ const NodeModule = require("node:module");
 const originalLoad = NodeModule._load;
 let OverlayCompletionRequestCache;
 let OverlayPythonFeatureBridge;
-const vscodeState = { executeCalls: 0, executeHandler: undefined };
+const vscodeState = { executeCalls: 0, executeHandler: undefined, selectors: [] };
 
 /** Minimal position value used by completion range mapping. */
 class Position {
@@ -183,6 +183,40 @@ test("skips the duplicate analysis bridge without a hidden prelude", async () =>
   preludeBridge.dispose();
 });
 
+test("routes an isolated shell language through focused analysis without a runtime prelude", async () => {
+  vscodeState.executeCalls = 0;
+  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? [new CompletionItem("focused_name")] : [];
+  const documents = fakeOverlayDocuments("");
+  const bridge = new OverlayPythonFeatureBridge(documents);
+  const document = fakeDocument("focused_na", "django-shell-python");
+
+  const result = await bridge.provideCompletionItems(document, new Position(0, 10), { isCancellationRequested: false }, { triggerCharacter: "." });
+
+  assert.equal(documents.syncs, 1);
+  assert.equal(vscodeState.executeCalls, 1);
+  assert.deepEqual(result.map((item) => item.label), ["focused_name"]);
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
+test("registers only the isolated language for shell files and Python for query files", () => {
+  vscodeState.selectors.length = 0;
+  const shell = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
+  shell.activate();
+  assert.equal(vscodeState.selectors.length, 6);
+  assert.ok(vscodeState.selectors.every((selector) => selector.length === 1 && selector[0].language === "django-shell-python"));
+  shell.dispose();
+
+  vscodeState.selectors.length = 0;
+  const queryDocuments = fakeOverlayDocuments("");
+  queryDocuments.editorUri = { fsPath: "/workspace/.django-shell/query-cell.py", toString: () => "file:///workspace/.django-shell/query-cell.py" };
+  const query = new OverlayPythonFeatureBridge(queryDocuments);
+  query.activate();
+  assert.equal(vscodeState.selectors.length, 6);
+  assert.ok(vscodeState.selectors.every((selector) => selector.length === 1 && selector[0].language === "python"));
+  query.dispose();
+});
+
 test("keeps signature help from adding a second hidden-provider load", async () => {
   vscodeState.executeCalls = 0;
   const completionGate = deferred();
@@ -204,10 +238,50 @@ test("keeps signature help from adding a second hidden-provider load", async () 
   vscodeState.executeHandler = undefined;
 });
 
+test("serializes each focused analysis snapshot through the provider that reads it", async () => {
+  vscodeState.executeCalls = 0;
+  const firstGate = deferred();
+  const documents = fakeOverlayDocuments("");
+  const syncLines = [];
+  const observed = [];
+  let leaseQueue = Promise.resolve();
+  documents.withAnalysisSnapshot = (_text, line, request) => {
+    const pending = leaseQueue.then(async () => {
+      documents.activeLine = line;
+      syncLines.push(line);
+      return await request();
+    });
+    leaseQueue = pending.then(() => undefined, () => undefined);
+    return pending;
+  };
+  vscodeState.executeHandler = (command) => {
+    observed.push([command, documents.activeLine]);
+    return command === "vscode.executeHoverProvider" ? firstGate.promise : [];
+  };
+  const bridge = new OverlayPythonFeatureBridge(documents);
+  const document = fakeDocument("upper = 1\n\n\nlower = 2");
+
+  const upper = bridge.provideHover(document, new Position(0, 2));
+  await nextTurn();
+  const lower = bridge.provideDefinition(document, new Position(3, 2));
+  await nextTurn();
+
+  assert.deepEqual(syncLines, [0], "the second unit cannot replace analysis.py while the first provider is reading it");
+  assert.deepEqual(observed, [["vscode.executeHoverProvider", 0]]);
+  firstGate.resolve([]);
+  await upper;
+  await lower;
+  assert.deepEqual(syncLines, [0, 3]);
+  assert.deepEqual(observed, [["vscode.executeHoverProvider", 0], ["vscode.executeDefinitionProvider", 3]]);
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
 /** Creates a one-line text document with stable file identity. */
-function fakeDocument(text) {
+function fakeDocument(text, languageId = "python") {
   return {
     getText: () => text,
+    languageId,
     offsetAt: (position) => position.character,
     positionAt: (offset) => new Position(0, offset),
     uri: { toString: () => "file:///workspace/.django-shell/console-cell.py" }
@@ -217,13 +291,13 @@ function fakeDocument(text) {
 /** Creates the generated-document surface consumed by the overlay feature bridge. */
 function fakeOverlayDocuments(prelude) {
   return {
-    analysisUri: { toString: () => "file:///workspace/.django-shell/analysis.py" },
-    editorUri: { toString: () => "file:///workspace/.django-shell/console-cell.py" },
+    analysisUri: { fsPath: "/workspace/.django-shell/analysis.py", toString: () => "file:///workspace/.django-shell/analysis.py" },
+    editorUri: { fsPath: "/workspace/.django-shell/console-cell.py", toString: () => "file:///workspace/.django-shell/console-cell.py" },
     inputStartLine: () => 1,
     lineOffset: () => prelude ? 1 : 0,
     preludeText: () => prelude,
     syncs: 0,
-    async syncAnalysis() { this.syncs += 1; }
+    async withAnalysisSnapshot(_text, _line, request) { this.syncs += 1; return await request(); }
   };
 }
 
@@ -239,6 +313,7 @@ function nextTurn() { return new Promise((resolve) => setImmediate(resolve)); }
 
 /** Returns the VS Code constructors required by completion bridge modules. */
 function createVscodeMock() {
+  const register = (selector) => { vscodeState.selectors.push(selector); return { dispose() {} }; };
   return {
     commands: { async executeCommand(command) { vscodeState.executeCalls += 1; return await vscodeState.executeHandler?.(command) ?? []; } },
     CompletionItem,
@@ -247,6 +322,14 @@ function createVscodeMock() {
     Position,
     Range,
     SemanticTokensLegend,
-    TextEdit
+    TextEdit,
+    languages: {
+      registerCompletionItemProvider: register,
+      registerDefinitionProvider: register,
+      registerDocumentHighlightProvider: register,
+      registerHoverProvider: register,
+      registerReferenceProvider: register,
+      registerSignatureHelpProvider: register
+    }
   };
 }

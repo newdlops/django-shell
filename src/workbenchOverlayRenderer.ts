@@ -5,6 +5,7 @@ import { overlayCleanupRendererSource } from "./workbenchOverlayCleanupRenderer"
 import { overlayFrameRendererSource } from "./workbenchOverlayFrameRenderer";
 import { overlayCaptureRendererSource } from "./workbenchOverlayCaptureRenderer";
 import { overlayHoverRendererSource } from "./workbenchOverlayHoverRenderer";
+import { OVERLAY_SHELL_LANGUAGE_ID } from "./overlayLanguage";
 
 export interface OverlayRendererOptions {
   executionMode?: "shell" | "submit";
@@ -14,9 +15,11 @@ export interface OverlayRendererOptions {
 /** Builds the JavaScript injected into the focused VS Code workbench window. */
 export function overlayRendererSource(modelUri: string, options: OverlayRendererOptions = {}): string {
   const executionMode = options.executionMode ?? "shell";
+  const modelLanguageId = executionMode === "shell" ? OVERLAY_SHELL_LANGUAGE_ID : "python";
   const panelTitle = options.panelTitle ?? "Django Shell";
   return `
     const __dsoOverlayModelUri = ${JSON.stringify(modelUri)};
+    const __dsoOverlayLanguageId = ${JSON.stringify(modelLanguageId)};
     const __dsoOverlayBridge = Object.assign({}, window.__djangoShellOverlayBridge || {});
     window.__djangoShellOverlayModelUri = __dsoOverlayModelUri;
     window.__dsoCaptures = window.__dsoCaptures || { widgets: [], insts: [], modelSvcs: [], ctors: [] };
@@ -430,8 +433,8 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       if (!window.__dsoLastModelError) { window.__dsoLastModelError = "missing-uri-constructor"; }
       return null;
     }
-    /** Returns a workbench-compatible Python language selection. */
-    function __dsoPythonLanguage() { return { getLanguageId: function () { return "python"; }, languageId: "python", onDidChange: function () { return { dispose: function () {} }; } }; }
+    /** Returns a workbench-compatible language selection for this overlay profile. */
+    function __dsoOverlayLanguage() { return { getLanguageId: function () { return __dsoOverlayLanguageId; }, languageId: __dsoOverlayLanguageId, onDidChange: function () { return { dispose: function () {} }; } }; }
     /** Returns a body-level overflow widget portal before Monaco editor construction. */
     function __dsoOverflowWidgetsNode(root) {
       return window.__dsoPrepareOverlayWidgetNode ? window.__dsoPrepareOverlayWidgetNode(root) : undefined;
@@ -468,7 +471,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
         return null;
       }
       if (!model && factory.modelSvc && uri) {
-        const text = window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", language = __dsoPythonLanguage();
+        const text = window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", language = __dsoOverlayLanguage();
         serviceAttempted = true;
         try {
           model = factory.modelSvc.createModel(text, language, uri, false);
@@ -496,8 +499,8 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
         __dsoRollbackWorkbenchResources(null, ownedModel);
         return null;
       }
-      try { if (model && model.setLanguage) { model.setLanguage(__dsoPythonLanguage()); } } catch (eSetLanguage) {}
-      try { if (globalThis.monaco && globalThis.monaco.editor && globalThis.monaco.editor.setModelLanguage) { globalThis.monaco.editor.setModelLanguage(model, "python"); } } catch (eSetModelLanguage) {}
+      try { if (model && model.setLanguage) { model.setLanguage(__dsoOverlayLanguage()); } } catch (eSetLanguage) {}
+      try { if (globalThis.monaco && globalThis.monaco.editor && globalThis.monaco.editor.setModelLanguage) { globalThis.monaco.editor.setModelLanguage(model, __dsoOverlayLanguageId); } } catch (eSetModelLanguage) {}
       const options = { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, quickSuggestionsDelay: 80, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
       const widgetOptions = { isSimpleWidget: false };
       let editor = null;
@@ -523,7 +526,8 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       const monacoApi = (globalThis.monaco && globalThis.monaco.editor) ? globalThis.monaco : ((window.monaco && window.monaco.editor) ? window.monaco : null);
       if (!monacoApi) { return null; }
       const uri = monacoApi.Uri.parse(__dsoOverlayModelUri);
-      let model = monacoApi.editor.getModel(uri); if (model && model.isDisposed && model.isDisposed()) { model = null; } if (model && model.getValue) { try { model.getValue(); } catch (eDisposedValue) { model = null; } } model = model || monacoApi.editor.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", "python", uri);
+      let model = monacoApi.editor.getModel(uri); if (model && model.isDisposed && model.isDisposed()) { model = null; } if (model && model.getValue) { try { model.getValue(); } catch (eDisposedValue) { model = null; } } model = model || monacoApi.editor.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", __dsoOverlayLanguageId, uri);
+      try { monacoApi.editor.setModelLanguage && monacoApi.editor.setModelLanguage(model, __dsoOverlayLanguageId); } catch (eGlobalLanguage) {}
       const editor = monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, isSimpleWidget: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, model: model, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, quickSuggestionsDelay: 80, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
       try { editor.layout && editor.layout(__dsoLayoutSize(root, host)); } catch (eGlobalLayout) {}
       return editor;

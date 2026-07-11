@@ -4,12 +4,20 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { DiagnosticLogger } from "./diagnostics";
 import { ensureIgnoredShadowDirectory } from "./filePythonShadow";
+import { projectOverlayAnalysisText } from "./overlayAnalysisProjection";
 
 export const INPUT_MARKER = "# --- django shell input ---";
+
+/** Captures user-relative text and focus after removing a legacy generated prefix. */
+interface OverlayUserSnapshot {
+  focusLine: number | undefined;
+  text: string;
+}
 
 /** Maintains a Python TextDocument whose edits stay in memory after creation. */
 export class OverlayMemoryDocument implements vscode.Disposable {
   private analysisDirty = false;
+  private analysisFocusLine: number | undefined;
   private editorDirty = false;
   private prelude = "";
   private text = "";
@@ -18,7 +26,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   readonly editorUri: vscode.Uri;
 
   /** Stores the logger and resolves backing-file URIs (default base names match the console overlay). */
-  constructor(private readonly logger?: DiagnosticLogger, editorName = "console-cell", analysisName = "analysis") {
+  constructor(private readonly logger?: DiagnosticLogger, editorName = "console-cell", analysisName = "analysis", private readonly isolateAnalysisUnits = false) {
     this.editorUri = overlayFileUri(editorName);
     this.analysisUri = overlayFileUri(analysisName);
   }
@@ -53,9 +61,9 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     return this.text;
   }
 
-  /** Returns hidden imports plus Python cell text used by language analysis. */
+  /** Returns runtime declarations plus the focused shell unit used by language analysis. */
   analysisText(): string {
-    return analysisText(this.prelude, this.text);
+    return analysisText(this.prelude, this.analysisUserText());
   }
 
   /** Returns generated runtime import text kept out of the analysis file. */
@@ -64,17 +72,19 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   }
 
   /** Synchronizes editor text into the in-memory TextDocument. */
-  async sync(text: string): Promise<void> {
-    const userText = extractUserText(text, this.prelude);
+  async sync(text: string, focusLine?: number): Promise<void> {
+    const snapshot = extractUserSnapshot(text, this.prelude, focusLine);
+    const userText = snapshot.text;
+    const previousAnalysis = this.analysisText();
     const changed = userText !== this.text;
-    this.logger?.log("overlay.memory.sync", { ...textFields(userText), changed, fullLines: textFields(text).lines });
-    const needsAnalysis = changed || this.analysisDirty;
+    const nextFocus = snapshot.focusLine;
+    if (changed) { this.text = userText; }
+    if (this.isolateAnalysisUnits && nextFocus !== undefined) { this.analysisFocusLine = nextFocus; }
+    this.logger?.log("overlay.memory.sync", { ...textFields(userText), changed, focusLine: this.analysisFocusLine ?? -1, fullLines: textFields(text).lines });
+    const needsAnalysis = previousAnalysis !== this.analysisText() || this.analysisDirty;
     const needsEditor = changed || this.editorDirty;
     if (!needsAnalysis && !needsEditor) {
       return;
-    }
-    if (changed) {
-      this.text = userText;
     }
     await this.enqueueWrite(async () => { await Promise.all([needsEditor ? this.writeEditor() : undefined, needsAnalysis ? this.writeAnalysis() : undefined].filter((item): item is Promise<void> => !!item)); });
   }
@@ -93,19 +103,42 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   }
 
   /** Synchronizes only the hidden analysis document in memory for latency-sensitive providers. */
-  async syncAnalysis(text: string): Promise<void> {
-    const userText = extractUserText(text, this.prelude);
+  async syncAnalysis(text: string, focusLine?: number): Promise<void> {
+    const snapshot = extractUserSnapshot(text, this.prelude, focusLine);
+    const userText = snapshot.text;
+    const previousAnalysis = this.analysisText();
     const changed = userText !== this.text;
-    this.logger?.log("overlay.memory.syncAnalysis", { ...textFields(userText), changed, fullLines: textFields(text).lines });
-    const needsAnalysis = changed || this.analysisDirty;
-    if (!needsAnalysis) {
-      return;
-    }
     if (changed) {
       this.text = userText;
       this.editorDirty = true;
     }
+    const nextFocus = snapshot.focusLine;
+    if (this.isolateAnalysisUnits && nextFocus !== undefined) { this.analysisFocusLine = nextFocus; }
+    this.logger?.log("overlay.memory.syncAnalysis", { ...textFields(userText), changed, focusLine: this.analysisFocusLine ?? -1, fullLines: textFields(text).lines });
+    const needsAnalysis = previousAnalysis !== this.analysisText() || this.analysisDirty;
+    if (!needsAnalysis) { return; }
     await this.enqueueWrite(async () => { await this.writeAnalysis(); });
+  }
+
+  /** Keeps one exact analysis snapshot installed until its language provider completes. */
+  async withAnalysisSnapshot<T>(text: string, focusLine: number | undefined, request: () => PromiseLike<T>): Promise<T> {
+    const snapshotPrelude = this.prelude;
+    const snapshot = extractUserSnapshot(text, snapshotPrelude, focusLine);
+    const changed = snapshot.text !== this.text;
+    if (changed) {
+      this.text = snapshot.text;
+      this.editorDirty = true;
+    }
+    if (this.isolateAnalysisUnits && snapshot.focusLine !== undefined) {
+      this.analysisFocusLine = snapshot.focusLine;
+    }
+    const userText = this.isolateAnalysisUnits ? projectOverlayAnalysisText(snapshot.text, snapshot.focusLine) : snapshot.text;
+    const analysisSnapshot = analysisText(snapshotPrelude, userText);
+    this.logger?.log("overlay.memory.lease", { ...textFields(snapshot.text), changed, focusLine: snapshot.focusLine ?? -1, fullLines: textFields(text).lines });
+    return this.enqueueWrite(async () => {
+      await this.writeAnalysisText(analysisSnapshot);
+      return await request();
+    });
   }
 
   /** Updates editor-only hidden import text while analysis stays on user code. */
@@ -125,13 +158,19 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     this.logger?.log("overlay.memory.reset", { changed });
     this.text = "";
     this.prelude = "";
+    this.analysisFocusLine = undefined;
     await this.enqueueWrite(async () => { await Promise.all([this.writeEditor(), this.writeAnalysis()]); });
   }
 
+  /** Returns full visible text or a line-preserving projection of the focused shell unit. */
+  private analysisUserText(): string {
+    return this.isolateAnalysisUnits ? projectOverlayAnalysisText(this.text, this.analysisFocusLine) : this.text;
+  }
+
   /** Serializes generated file edits so reset, prelude, and sync updates cannot race. */
-  private enqueueWrite(action: () => Promise<void>): Promise<void> {
+  private enqueueWrite<T>(action: () => Promise<T>): Promise<T> {
     const next = this.writeQueue.catch(() => undefined).then(action);
-    this.writeQueue = next.catch((error: unknown) => this.logger?.log("overlay.memory.write.error", { error: error instanceof Error ? error.message : String(error) }));
+    this.writeQueue = next.then(() => undefined, (error: unknown) => this.logger?.log("overlay.memory.write.error", { error: error instanceof Error ? error.message : String(error) }));
     return next;
   }
 
@@ -146,6 +185,11 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   /** Writes only user Python cell text into the hidden analysis file without opening a dirty editor document. */
   private async writeAnalysis(): Promise<void> {
     const text = this.analysisText();
+    await this.writeAnalysisText(text);
+  }
+
+  /** Writes an immutable analysis snapshot and records whether canonical state changed meanwhile. */
+  private async writeAnalysisText(text: string): Promise<void> {
     this.logger?.log("overlay.memory.write", { ...textFields(text), kind: "analysis", offset: this.lineOffset() });
     await ensureBackingFile(this.analysisUri, text);
     this.analysisDirty = this.analysisText() !== text;
@@ -176,16 +220,44 @@ function preludeLineCount(prelude: string): number {
   return prelude ? prelude.split(/\r?\n/).length - 1 : 0;
 }
 
+/** Normalizes an optional zero-based analysis focus line. */
+function normalizedFocusLine(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : undefined;
+}
+
+/** Returns user text and converts a full legacy-document focus to its user-relative line. */
+function extractUserSnapshot(text: string, prelude = "", focusLine?: number): OverlayUserSnapshot {
+  const userStart = legacyUserStart(text, prelude);
+  const normalizedFocus = normalizedFocusLine(focusLine);
+  if (userStart <= 0) {
+    return { focusLine: normalizedFocus, text };
+  }
+  const removedLines = lineBreakCount(text.slice(0, userStart));
+  const relativeFocus = normalizedFocus === undefined || normalizedFocus < removedLines ? undefined : normalizedFocus - removedLines;
+  return { focusLine: relativeFocus, text: text.slice(userStart) };
+}
+
 /** Returns the user-editable text after the generated marker. */
 function extractUserText(text: string, prelude = ""): string {
-  const marker = `${INPUT_MARKER}\n`;
-  const index = text.lastIndexOf(marker);
-  let userText = index >= 0 ? text.slice(index + marker.length) : prelude && text.startsWith(prelude) ? text.slice(prelude.length) : text;
-  const prefix = `${prelude}${marker}`;
-  while (prelude && userText.startsWith(prefix)) {
-    userText = userText.slice(prefix.length);
+  return extractUserSnapshot(text, prelude).text;
+}
+
+/** Returns the first user byte after a legacy marker or generated prelude. */
+function legacyUserStart(text: string, prelude: string): number {
+  const pattern = /(^|\r\n|\n|\r)[ \t]*# --- django shell input ---[ \t]*(?:\r\n|\n|\r|$)/g;
+  let start = -1;
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    start = match.index + match[0].length;
   }
-  return userText;
+  if (start >= 0) {
+    return start;
+  }
+  return prelude && text.startsWith(prelude) ? prelude.length : 0;
+}
+
+/** Counts logical line breaks in one text prefix. */
+function lineBreakCount(text: string): number {
+  return text.match(/\r\n|\n|\r/g)?.length ?? 0;
 }
 
 /** Creates the backing file once so file-only extensions receive a file URI. */

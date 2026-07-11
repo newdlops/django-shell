@@ -52,9 +52,9 @@ class LazyRuntimeSource implements vscode.Disposable {
     return this.console?.inspectRuntimeChildren(pathSegments, kind) ?? Promise.resolve(runtimeUnavailableChildren());
   }
 
-  /** Returns the model catalog or an idle status without starting a shell. */
-  listModels(): Promise<BackendModelList> {
-    return this.withParallelModelReads((backend) => backend.models(), { error: MODEL_IDLE_MESSAGE, models: [], ok: false });
+  /** Returns the backend-lifetime model catalog cache, bypassing it only for an explicit refresh. */
+  listModels(refresh = false): Promise<BackendModelList> {
+    return this.withParallelModelReads((backend) => backend.models(refresh), { error: MODEL_IDLE_MESSAGE, models: [], ok: false });
   }
 
   /** Returns model schema or an idle status without starting a shell. */

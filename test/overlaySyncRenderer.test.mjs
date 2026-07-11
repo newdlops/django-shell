@@ -96,6 +96,16 @@ test("emits parseable workbench overlay renderer source", () => {
   assert.equal(typeof Function(overlayRendererSource("file:///tmp/console-cell.py")), "function");
 });
 
+test("isolates shell providers while retaining ordinary Python for submit overlays", () => {
+  const shell = overlayRendererSource("file:///tmp/console-cell.py");
+  const query = overlayRendererSource("file:///tmp/query-cell.py", { executionMode: "submit" });
+
+  assert.match(shell, /const __dsoOverlayLanguageId = "django-shell-python"/);
+  assert.match(query, /const __dsoOverlayLanguageId = "python"/);
+  assert.ok(shell.includes("setModelLanguage(model, __dsoOverlayLanguageId)"));
+  assert.ok(shell.includes("createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : \"\", __dsoOverlayLanguageId, uri)"));
+});
+
 test("runs Python from lightweight Monaco Enter handling", async () => {
   const source = overlaySyncRendererSource();
   const state = { overlayRoot: undefined };
@@ -121,7 +131,34 @@ test("runs Python from lightweight Monaco Enter handling", async () => {
   assert.ok(runPayload);
   assert.deepEqual(runPayload.range, { end: 1, start: 1 });
   assert.equal(runPayload.text, "x = 1\n");
-  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 3 });
+  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 4 });
+});
+
+test("keeps the current execution unit in place until the host run response settles", async () => {
+  const source = overlaySyncRendererSource();
+  const state = { overlayRoot: undefined };
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };`)(window, document, () => undefined);
+  let keyHandler;
+  let settleRun;
+  const hostResponse = new Promise((resolve) => { settleRun = resolve; });
+  const model = fakeModel("value\n");
+  const editor = fakeEditor(model);
+  editor.onKeyDown = (callback) => { keyHandler = callback; return { dispose() {} }; };
+  const root = {};
+  state.overlayRoot = root;
+  api.installEnterRunner(root, editor, () => hostResponse);
+
+  keyHandler(monacoEnterEvent());
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 1 });
+  assert.equal(model.getValue(), "value\n");
+
+  settleRun({ json: async () => ({ executed: true }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 4 });
 });
 
 test("query submit mode leaves plain Enter to Monaco and runs the whole document on Ctrl/Cmd Enter", async () => {
@@ -184,6 +221,110 @@ test("sends full overlay text while running only the selected source", async () 
   assert.equal(runPayload.text, text);
 });
 
+test("runs import-led execution units independently in arbitrary cursor order", async () => {
+  const source = overlaySyncRendererSource();
+  const state = { overlayRoot: undefined };
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };`)(window, document, () => undefined);
+  let keyHandler;
+  const upperCode = "import unexecuted_upper_side_effect";
+  const lowerCode = "execution_order = ['lower']\nexecution_order.append('done')";
+  const text = `${upperCode}\n\n\n${lowerCode}\n`;
+  const editor = fakeEditor(fakeModel(text), { column: 1, lineNumber: 5 });
+  editor.onKeyDown = (callback) => { keyHandler = callback; return { dispose() {} }; };
+  const posts = [];
+  const root = { __dsoInputStartLine: 1 };
+  state.overlayRoot = root;
+
+  api.installEnterRunner(root, editor, (payload) => {
+    posts.push(payload);
+    return { json: async () => ({ executed: true }) };
+  });
+
+  const lowerDebugPayload = root.__dsoCurrentInputPayload();
+  keyHandler(monacoEnterEvent());
+  await new Promise((resolve) => setImmediate(resolve));
+  editor.setPosition({ column: 1, lineNumber: 1 });
+  root.__dsoLastEnterRunAt = 0;
+  const upperDebugPayload = root.__dsoCurrentInputPayload();
+  keyHandler(monacoEnterEvent());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const runPayloads = posts.filter((payload) => payload.type === "run");
+  assert.deepEqual(runPayloads.map((payload) => payload.code), [lowerCode, upperCode], "ordinary execution follows cursor order without implicitly running an earlier unit");
+  assert.deepEqual(runPayloads.map((payload) => payload.range), [{ end: 5, start: 4 }, { end: 1, start: 1 }]);
+  assert.equal(lowerDebugPayload.code, lowerCode, "Debug Current excludes an unexecuted unit above the cursor");
+  assert.deepEqual(lowerDebugPayload.range, { end: 5, start: 4 });
+  assert.equal(upperDebugPayload.code, upperCode, "the upper unit remains independently runnable after the lower unit");
+  assert.deepEqual(upperDebugPayload.range, { end: 1, start: 1 });
+  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 4 }, "running an upper unit only moves to the existing lower unit without executing it");
+  assert.ok(runPayloads.every((payload) => payload.text === text || payload.text.startsWith(text)), "source mapping may carry the full document without executing it");
+});
+
+test("creates a hard separator after execution and never reruns from its empty prompt", async () => {
+  const source = overlaySyncRendererSource();
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", source + "\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };")(window, document, () => undefined);
+  let keyHandler;
+  const model = fakeModel("first = 1");
+  const editor = fakeEditor(model);
+  editor.onKeyDown = (callback) => { keyHandler = callback; return { dispose() {} }; };
+  const posts = [];
+  const root = {};
+
+  api.installEnterRunner(root, editor, (payload) => {
+    posts.push(payload);
+    return { json: async () => ({ executed: true }) };
+  });
+  keyHandler(monacoEnterEvent());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(model.getValue(), "first = 1\n\n\n");
+  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 4 });
+  keyHandler(monacoEnterEvent());
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(posts.filter((payload) => payload.type === "run").map((payload) => payload.code), ["first = 1"], "an empty separated prompt does not select the previous unit");
+
+  model.setValue("first = 1\n\n\nsecond = 2");
+  editor.setPosition({ column: 1, lineNumber: 4 });
+  root.__dsoLastEnterRunAt = 0;
+  keyHandler(monacoEnterEvent());
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(posts.filter((payload) => payload.type === "run").map((payload) => payload.code), ["first = 1", "second = 2"]);
+});
+
+test("does not leak upper multiline continuation state into a lower execution unit", async () => {
+  const source = overlaySyncRendererSource();
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };`)(window, document, () => undefined);
+  let keyHandler;
+  const upperCode = "if True:\n    upper_draft = 1";
+  const lowerCode = "lower_runs_independently = 2";
+  const editor = fakeEditor(fakeModel(`${upperCode}\n\n\n${lowerCode}`), { column: 1, lineNumber: 1 });
+  editor.onKeyDown = (callback) => { keyHandler = callback; return { dispose() {} }; };
+  const posts = [];
+  const root = {};
+
+  api.installEnterRunner(root, editor, (payload) => {
+    posts.push(payload);
+    return { json: async () => ({ executed: true }) };
+  });
+  keyHandler(monacoEnterEvent({ shiftKey: true }));
+  assert.equal(root.__dsoMultilineMode, true);
+
+  editor.setPosition({ column: 1, lineNumber: 5 });
+  assert.equal(root.__dsoMultilineMode, false, "moving across a hard separator clears upper continuation state");
+  keyHandler(monacoEnterEvent());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const runPayloads = posts.filter((payload) => payload.type === "run");
+  assert.deepEqual(runPayloads.map((payload) => payload.code), [lowerCode]);
+  assert.deepEqual(runPayloads[0].range, { end: 5, start: 5 });
+});
+
 test("preserves pasted multiline source with internal blank lines", async () => {
   const source = overlaySyncRendererSource();
   const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
@@ -205,7 +346,7 @@ test("preserves pasted multiline source with internal blank lines", async () => 
   assert.ok(posts.some((payload) => payload.type === "run" && payload.code === code.trimEnd()));
 });
 
-test("keeps leading import block with two blank lines in pasted source", async () => {
+test("treats a leading import block as an independent execution unit", async () => {
   const source = overlaySyncRendererSource();
   const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
   const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
@@ -223,10 +364,12 @@ test("keeps leading import block with two blank lines in pasted source", async (
   keyHandler(monacoEnterEvent());
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.ok(posts.some((payload) => payload.type === "run" && payload.code === code.trimEnd()));
+  const runPayload = posts.find((payload) => payload.type === "run");
+  assert.equal(runPayload.code, "def build():\n    return Path.cwd()");
+  assert.deepEqual(runPayload.range, { end: 7, start: 6 });
 });
 
-test("keeps import block continuation after an earlier cell separator", async () => {
+test("keeps every import-led unit independent after an earlier separator", async () => {
   const source = overlaySyncRendererSource();
   const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
   const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
@@ -244,9 +387,9 @@ test("keeps import block continuation after an earlier cell separator", async ()
   keyHandler(monacoEnterEvent());
   await new Promise((resolve) => setImmediate(resolve));
 
-  const runPayload = posts.find((payload) => payload.type === "run" && payload.code === "import os\n\n\nprint(os.name)");
-  assert.ok(runPayload);
-  assert.deepEqual(runPayload.range, { end: 7, start: 4 });
+  const runPayload = posts.find((payload) => payload.type === "run");
+  assert.equal(runPayload.code, "print(os.name)");
+  assert.deepEqual(runPayload.range, { end: 7, start: 7 });
 });
 
 test("previews the current Enter execution range with editor decorations", () => {
@@ -261,15 +404,15 @@ test("previews the current Enter execution range with editor decorations", () =>
   api.installEnterRunner(root, editor, () => ({ json: async () => ({ executed: true }) }));
 
   const rangeDecoration = editor.decorations.find((item) => item.options.className === "dso-exec-range");
-  assert.deepEqual(root.__dsoExecutionRangePreview, { end: 7, start: 4 });
+  assert.deepEqual(root.__dsoExecutionRangePreview, { end: 7, start: 7 });
   assert.equal(rangeDecoration.options.isWholeLine, true);
   assert.equal(rangeDecoration.options.linesDecorationsClassName, undefined);
   assert.equal(editor.decorations.some((item) => item.options.linesDecorationsClassName === "dso-exec-range-rail"), false);
-  assert.equal(rangeDecoration.range.startLineNumber, 4);
+  assert.equal(rangeDecoration.range.startLineNumber, 7);
   assert.equal(rangeDecoration.range.endLineNumber, 7);
   assert.equal(rangeDecoration.range.startColumn, 1);
   assert.equal(editor.options.lineNumbers(4), ">>>");
-  assert.equal(editor.options.lineNumbers(5), "...");
+  assert.equal(editor.options.lineNumbers(5), "");
 });
 
 test("reveals breakpoint lines as glyph-margin dots while leaving breakpoint SETTING native", () => {
@@ -279,9 +422,11 @@ test("reveals breakpoint lines as glyph-margin dots while leaving breakpoint SET
   const window = { addEventListener(type, _callback, capture) { events.push({ capture: !!capture, target: "window", type }); }, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
   const document = { activeElement: undefined, addEventListener(type, _callback, capture) { events.push({ capture: !!capture, target: "document", type }); }, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : undefined, querySelectorAll: () => [], removeEventListener() {} };
   const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installBreakpointToggle: window.__dsoInstallBreakpointToggle, setBreakpoints: window.__dsoSetOverlayBreakpoints };`)(window, document, () => undefined);
+  let contextMenuHandler;
   let mouseHandler;
   const node = { addEventListener(type, _callback, capture) { events.push({ capture: !!capture, target: "node", type }); }, classList: { contains: () => false }, contains: () => true, querySelectorAll: () => [], removeEventListener() {} };
   const editor = fakeEditor(fakeModel("one\ntwo\nthree\nfour\n"));
+  editor.onContextMenu = (callback) => { contextMenuHandler = callback; return { dispose() {} }; };
   editor.onMouseDown = (callback) => { mouseHandler = callback; return { dispose() {} }; };
   editor.getDomNode = () => node;
   const root = { __djangoShellEditor: editor, __dsoInputStartLine: 1 };
@@ -297,6 +442,7 @@ test("reveals breakpoint lines as glyph-margin dots while leaving breakpoint SET
   assert.equal(editor.decorations.some((item) => item.options.glyphMarginClassName === "dso-breakpoint"), false);
   // Setting stays native: no custom toggle API, no mouse/context handlers.
   assert.equal(api.installBreakpointToggle, undefined);
+  assert.equal(contextMenuHandler, undefined, "native conditional, hit-count, and logpoint menus are not replaced");
   assert.equal(mouseHandler, undefined);
   assert.equal(events.some((event) => event.type === "mousedown" || event.type === "contextmenu"), false);
 });
@@ -476,6 +622,26 @@ test("skips the current execution range on Alt Enter without running Python", ()
   assert.deepEqual(root.__dsoExecutionRangePreview, { end: 4, start: 4 });
 });
 
+test("creates a hard separator when Alt Enter skips the final execution unit", () => {
+  const source = overlaySyncRendererSource();
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };`)(window, document, () => undefined);
+  let keyHandler;
+  const model = fakeModel("draft = 1");
+  const editor = fakeEditor(model);
+  editor.executeEdits = (_source, edits) => { model.setValue(model.getValue() + edits[0].text); };
+  editor.onKeyDown = (callback) => { keyHandler = callback; return { dispose() {} }; };
+  const posts = [];
+
+  api.installEnterRunner({}, editor, (payload) => { posts.push(payload); return { json: async () => ({ executed: true }) }; });
+  keyHandler(monacoEnterEvent({ altKey: true }));
+
+  assert.equal(model.getValue(), "draft = 1\n\n\n");
+  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 4 });
+  assert.equal(posts.some((payload) => payload.type === "run"), false);
+});
+
 test("keeps continuation prompts across single blank lines inside pasted multiline input", () => {
   const source = overlayPythonRangeRendererSource();
   const api = Function(`${source}\nreturn { promptForLine: __dsoPromptForLine };`)();
@@ -488,15 +654,15 @@ test("keeps continuation prompts across single blank lines inside pasted multili
   assert.equal(api.promptForLine(model, 1, 6, {}), "...");
 });
 
-test("keeps continuation prompts after import blocks with two blank lines", () => {
+test("shows a fresh prompt after an import unit's hard separator", () => {
   const source = overlayPythonRangeRendererSource();
   const api = Function(`${source}\nreturn { promptForLine: __dsoPromptForLine };`)();
   const model = fakeModel("print('old')\n\n\nimport os\n\n\nprint(os.name)\n");
 
   assert.equal(api.promptForLine(model, 1, 4, {}), ">>>");
-  assert.equal(api.promptForLine(model, 1, 5, {}), "...");
-  assert.equal(api.promptForLine(model, 1, 6, {}), "...");
-  assert.equal(api.promptForLine(model, 1, 7, {}), "...");
+  assert.equal(api.promptForLine(model, 1, 5, {}), "");
+  assert.equal(api.promptForLine(model, 1, 6, {}), "");
+  assert.equal(api.promptForLine(model, 1, 7, {}), ">>>");
 });
 
 test("uses the live execution preview for prompt starts", () => {

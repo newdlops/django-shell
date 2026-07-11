@@ -33,7 +33,7 @@ export class OverlayShellCommandController implements vscode.Disposable {
       await vscode.commands.executeCommand("type", { text: "\n" });
       return;
     }
-    await this.documents.sync(editor.document.getText());
+    await this.documents.sync(editor.document.getText(), editor.selection.active.line);
     this.inputStartLine = documentInputStartLine(editor.document, this.documents.inputStartLine());
     let payload = executionPayload(editor.document, editor.selection, this.inputStartLine);
     if (!payload.code.trim()) {
@@ -42,7 +42,7 @@ export class OverlayShellCommandController implements vscode.Disposable {
       return;
     }
     if (await lintOverlayRange(editor.document, payload.range, this.logger)) {
-      await this.documents.sync(editor.document.getText());
+      await this.documents.sync(editor.document.getText(), editor.selection.active.line);
       this.inputStartLine = documentInputStartLine(editor.document, this.documents.inputStartLine());
       payload = executionPayload(editor.document, editor.selection, this.inputStartLine);
     }
@@ -52,7 +52,7 @@ export class OverlayShellCommandController implements vscode.Disposable {
       await vscode.commands.executeCommand("type", { text: `\n${nextIndent(editor.document, payload.end)}` });
       return;
     }
-    await advanceAfterRun(editor);
+    await advanceAfterRun(editor, payload.end);
   }
 
   /** Inserts an indented continuation line in the active file-backed overlay editor. */
@@ -71,7 +71,7 @@ export class OverlayShellCommandController implements vscode.Disposable {
       this.logger?.log("overlay.command.skip.miss", { active: editor?.document.uri.toString() ?? "" });
       return;
     }
-    await this.documents.sync(editor.document.getText());
+    await this.documents.sync(editor.document.getText(), editor.selection.active.line);
     this.inputStartLine = documentInputStartLine(editor.document, this.documents.inputStartLine());
     const payload = executionPayload(editor.document, editor.selection, this.inputStartLine);
     if (!payload.code.trim()) {
@@ -86,9 +86,9 @@ export class OverlayShellCommandController implements vscode.Disposable {
     }
     await editor.edit((edit) => {
       const last = editor.document.lineCount - 1;
-      edit.replace(new vscode.Range(payload.end, editor.document.lineAt(payload.end).text.length, last, editor.document.lineAt(last).text.length), "\n\n");
+      edit.replace(new vscode.Range(payload.end, editor.document.lineAt(payload.end).text.length, last, editor.document.lineAt(last).text.length), "\n\n\n");
     });
-    moveEditorToLine(editor, Math.min(editor.document.lineCount - 1, payload.end + 2));
+    moveEditorToLine(editor, Math.min(editor.document.lineCount - 1, payload.end + 3));
     this.logger?.log("overlay.command.skip", { end: payload.end + 1, inputStartLine: this.inputStartLine + 1, start: payload.start + 1, target: editor.selection.active.line + 1 });
   }
 
@@ -134,7 +134,16 @@ function documentInputStartLine(document: vscode.TextDocument, fallback: number)
 function executionRange(document: vscode.TextDocument, lineNumber: number, inputStartLine: number): { end: number; start: number } {
   const floor = Math.max(0, inputStartLine);
   let cursor = Math.min(document.lineCount - 1, Math.max(floor, lineNumber));
+  const requested = cursor;
+  if (blankSeparatorAt(document, cursor, floor)) {
+    return { end: requested, start: requested };
+  }
+  let blankRun = 0;
   while (cursor > floor && !document.lineAt(cursor).text.trim()) {
+    blankRun += 1;
+    if (blankRun >= 2) {
+      return { end: requested, start: requested };
+    }
     cursor -= 1;
   }
   if (!document.lineAt(cursor).text.trim()) {
@@ -151,6 +160,15 @@ function executionRange(document: vscode.TextDocument, lineNumber: number, input
   return { end, start };
 }
 
+/** Returns whether one blank cursor line belongs to a strict two-line separator. */
+function blankSeparatorAt(document: vscode.TextDocument, lineNumber: number, floor: number): boolean {
+  if (document.lineAt(lineNumber).text.trim()) { return false; }
+  let count = 1;
+  for (let index = lineNumber - 1; index >= floor && !document.lineAt(index).text.trim(); index -= 1) { count += 1; }
+  for (let index = lineNumber + 1; index < document.lineCount && !document.lineAt(index).text.trim(); index += 1) { count += 1; }
+  return count >= 2;
+}
+
 /** Returns the first line of the current shell input unit, preserving single blank lines inside pasted source. */
 function cellStartLine(document: vscode.TextDocument, lineNumber: number, floor: number): number {
   let blankRun = 0;
@@ -158,10 +176,6 @@ function cellStartLine(document: vscode.TextDocument, lineNumber: number, floor:
     if (!document.lineAt(index).text.trim()) {
       blankRun += 1;
       if (blankRun >= 2) {
-        if (isImportBlockGap(document, floor, index)) {
-          blankRun = 0;
-          continue;
-        }
         return index + 2;
       }
     } else {
@@ -178,10 +192,6 @@ function cellEndLine(document: vscode.TextDocument, lineNumber: number, floor: n
     if (!document.lineAt(index).text.trim()) {
       blankRun += 1;
       if (blankRun >= 2) {
-        if (isImportBlockGap(document, floor, index)) {
-          blankRun = 0;
-          continue;
-        }
         return index - 2;
       }
     } else {
@@ -208,65 +218,6 @@ export function moveEditorToLine(editor: vscode.TextEditor, line: number): void 
   const position = new vscode.Position(line, column);
   editor.selection = new vscode.Selection(position, position);
   editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-}
-
-/** Returns true when a two-blank gap follows the leading import block. */
-function isImportBlockGap(document: vscode.TextDocument, floor: number, blankLine: number): boolean {
-  const previous = previousNonBlankLine(document, blankLine - 1, floor);
-  const blockFloor = previousCellFloor(document, floor, previous);
-  return previous >= blockFloor && isImportBlockPrefix(document, blockFloor, previous);
-}
-
-/** Returns the nearest non-empty line at or above one line. */
-function previousNonBlankLine(document: vscode.TextDocument, lineNumber: number, floor: number): number {
-  for (let index = lineNumber; index >= floor; index -= 1) {
-    if (document.lineAt(index).text.trim()) {
-      return index;
-    }
-  }
-  return floor - 1;
-}
-
-/** Returns the line after the nearest prior two-blank cell separator. */
-function previousCellFloor(document: vscode.TextDocument, floor: number, lineNumber: number): number {
-  let blankRun = 0;
-  for (let index = lineNumber - 1; index >= floor; index -= 1) {
-    if (!document.lineAt(index).text.trim()) {
-      blankRun += 1;
-      if (blankRun >= 2) {
-        return index + 2;
-      }
-    } else {
-      blankRun = 0;
-    }
-  }
-  return floor;
-}
-
-/** Returns true when all leading non-comment code through one line is Python imports. */
-function isImportBlockPrefix(document: vscode.TextDocument, floor: number, endLine: number): boolean {
-  let sawImport = false;
-  let importContinuation = false;
-  let depth = 0;
-  for (let index = floor; index <= endLine; index += 1) {
-    const text = document.lineAt(index).text;
-    const trimmed = text.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-    if (!importContinuation && !isImportStart(trimmed)) {
-      return false;
-    }
-    sawImport = true;
-    depth = Math.max(0, depth + bracketDelta(text, depth));
-    importContinuation = depth > 0 || /\\\s*$/.test(text.trimEnd());
-  }
-  return sawImport && depth === 0;
-}
-
-/** Returns true when a trimmed Python line starts an import statement. */
-function isImportStart(line: string): boolean {
-  return /^(?:import\s+\S|from\s+\S+\s+import\b)/.test(line);
 }
 
 /** Returns the closest non-empty cursor line without crossing the prelude boundary. */
@@ -372,17 +323,16 @@ function indentation(line: string): number {
   return line.match(/^\s*/)?.[0].length ?? 0;
 }
 
-/** Moves the cursor to the next shell input line after execution. */
-export async function advanceAfterRun(editor: vscode.TextEditor): Promise<void> {
-  let target = editor.document.lineCount - 1;
-  const last = editor.document.lineAt(target);
-  if (last.text.trim()) {
-    await editor.edit((edit) => edit.insert(last.range.end, "\n"));
-    target = editor.document.lineCount - 1;
+/** Moves the cursor to the next existing unit or creates a strictly separated input line. */
+export async function advanceAfterRun(editor: vscode.TextEditor, endLine: number): Promise<void> {
+  const next = nextInputUnitLine(editor.document, endLine);
+  if (next !== undefined) {
+    moveEditorToLine(editor, next);
+    return;
   }
-  const position = new vscode.Position(target, 0);
-  editor.selection = new vscode.Selection(position, position);
-  editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  const last = editor.document.lineCount - 1;
+  await editor.edit((edit) => edit.replace(new vscode.Range(endLine, editor.document.lineAt(endLine).text.length, last, editor.document.lineAt(last).text.length), "\n\n\n"));
+  moveEditorToLine(editor, Math.min(editor.document.lineCount - 1, endLine + 3));
 }
 
 /** Returns the indentation that should be used after one Python line. */

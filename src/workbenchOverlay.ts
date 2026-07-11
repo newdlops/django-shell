@@ -77,7 +77,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   /** Stores diagnostics and resolves the backing files and owning panel for this overlay. */
   constructor(private readonly logger?: DiagnosticLogger, profile: WorkbenchOverlayProfile = {}) {
     this.profile = { analysisName: profile.analysisName ?? "analysis", contextKey: profile.contextKey ?? "djangoShell.overlayVisible", editorName: profile.editorName ?? "console-cell", executionMode: profile.executionMode ?? "shell", key: profile.key ?? "console", panelTitle: profile.panelTitle ?? "Django Shell" };
-    this.memoryDocument = new OverlayMemoryDocument(logger, this.profile.editorName, this.profile.analysisName);
+    this.memoryDocument = new OverlayMemoryDocument(logger, this.profile.editorName, this.profile.analysisName, this.profile.executionMode === "shell");
     this.featureBridge = new OverlayPythonFeatureBridge(this.memoryDocument, logger);
   }
 
@@ -283,7 +283,11 @@ export class WorkbenchOverlay implements vscode.Disposable {
         this.debugLineApplied = key;
       } catch (error) {
         this.logger?.log("overlay.debug.info.error", { error: error instanceof Error ? error.message : String(error) });
-        return false;
+        const superseded = key !== debugInlineRenderKey(this.debugLineTarget, this.inlineValueText);
+        if (superseded && (!this.ws || this.ws.readyState !== WebSocket.OPEN)) {
+          await this.ensureCdpSocket().catch(() => undefined);
+        }
+        return superseded;
       }
     }
     return this.debugLineApplied === debugInlineRenderKey(this.debugLineTarget, this.inlineValueText);
@@ -339,8 +343,8 @@ export class WorkbenchOverlay implements vscode.Disposable {
   }
 
   /** Synchronizes the full visible editor text into backing files without changing renderer contents. */
-  async syncVisibleText(text: string): Promise<void> {
-    await this.memoryDocument.sync(text);
+  async syncVisibleText(text: string, focusLine?: number): Promise<void> {
+    await this.memoryDocument.sync(text, focusLine);
   }
 
   /** Returns the full generated source file text used by debugpy breakpoint binding. */
@@ -369,7 +373,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   async reset(): Promise<void> { this.prelude = ""; this.debugLineTarget = 0; this.inlineValueText = ""; this.debugLineApplied = ""; await this.memoryDocument.reset(); void vscode.commands.executeCommand("setContext", this.profile.contextKey, false); if (this.ws?.readyState === WebSocket.OPEN) { await this.evalInWorkbench(resetExpression(this.memoryDocument.visibleText(), this.token)).catch((error: unknown) => { this.logger?.log("overlay.reset.error", { error: error instanceof Error ? error.message : String(error) }); }); } }
 
   /** Asks the renderer-owned overlay editor to run the current cursor execution unit. */
-  async runCurrentInput(): Promise<string> { await this.ensureInjected(); const raw = await this.evalInWorkbench("(function(){const root=document.getElementById('django-shell-overlay');const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(!root||!editor||!model){return JSON.stringify({ok:false,reason:'missing-overlay'});}const payload=root.__dsoCurrentInputPayload?root.__dsoCurrentInputPayload():{code:''};const code=String(payload&&payload.code||'');const rawStart=payload&&payload.range?Number(payload.range.start)||1:1;const inputStart=Number(root.__dsoInputStartLine)||1;const start=Math.max(1,rawStart-inputStart+1);return JSON.stringify({code,ok:!!code.trim(),reason:code.trim()?undefined:'empty',start,text:String(model.getValue&&model.getValue()||'')});})()").catch((error: unknown) => JSON.stringify({ ok: false, reason: error instanceof Error ? error.message : String(error) })); const payload = JSON.parse(raw) as { code?: string; ok?: boolean; start?: number; text?: string }; if (payload.ok && typeof payload.code === "string") { if (typeof payload.text === "string") { await this.memoryDocument.sync(payload.text); } void this.runHandler?.(payload.code, this.relativeLineOffset(payload.start ?? 1)).catch((error: unknown) => this.logger?.log("overlay.command.rerun.error", { error: error instanceof Error ? error.message : String(error) })); this.logger?.log("overlay.command.rerun.host", { chars: payload.code.length, start: payload.start ?? 1 }); return "host-requested"; } const report = await this.evalInWorkbench("window.__dsoRunCurrentOverlayInput ? window.__dsoRunCurrentOverlayInput() : 'missing-runner'").catch((error: unknown) => `error:${error instanceof Error ? error.message : String(error)}`); this.logger?.log("overlay.command.rerun.eval", { report }); return report; }
+  async runCurrentInput(): Promise<string> { await this.ensureInjected(); const raw = await this.evalInWorkbench("(function(){const root=document.getElementById('django-shell-overlay');const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(!root||!editor||!model){return JSON.stringify({ok:false,reason:'missing-overlay'});}const payload=root.__dsoCurrentInputPayload?root.__dsoCurrentInputPayload():{code:''};const code=String(payload&&payload.code||'');const rawStart=payload&&payload.range?Number(payload.range.start)||1:1;const inputStart=Number(root.__dsoInputStartLine)||1;const start=Math.max(1,rawStart-inputStart+1);return JSON.stringify({code,ok:!!code.trim(),reason:code.trim()?undefined:'empty',start,text:String(model.getValue&&model.getValue()||'')});})()").catch((error: unknown) => JSON.stringify({ ok: false, reason: error instanceof Error ? error.message : String(error) })); const payload = JSON.parse(raw) as { code?: string; ok?: boolean; start?: number; text?: string }; if (payload.ok && typeof payload.code === "string") { if (typeof payload.text === "string") { await this.memoryDocument.sync(payload.text, (payload.start ?? 1) - 1); } await this.runHandler?.(payload.code, this.relativeLineOffset(payload.start ?? 1)).catch((error: unknown) => { this.logger?.log("overlay.command.rerun.error", { error: error instanceof Error ? error.message : String(error) }); return false; }); this.logger?.log("overlay.command.rerun.host", { chars: payload.code.length, start: payload.start ?? 1 }); return "host-requested"; } const report = await this.evalInWorkbench("window.__dsoRunCurrentOverlayInput ? window.__dsoRunCurrentOverlayInput() : 'missing-runner'").catch((error: unknown) => `error:${error instanceof Error ? error.message : String(error)}`); this.logger?.log("overlay.command.rerun.eval", { report }); return report; }
   /** Asks the renderer-owned overlay editor to skip the current cursor execution unit. */
   async skipCurrentInput(): Promise<string> { await this.ensureInjected(); const raw = await this.evalInWorkbench("(function(){const root=document.getElementById('django-shell-overlay');const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(!root||!editor||!model){return JSON.stringify({ok:false,reason:'missing-overlay'});}const result=window.__dsoSkipCurrentOverlayInput?window.__dsoSkipCurrentOverlayInput():'missing-runner';return JSON.stringify({ok:result==='skipped',reason:result,text:String(model.getValue&&model.getValue()||'')});})()").catch((error: unknown) => JSON.stringify({ ok: false, reason: error instanceof Error ? error.message : String(error) })); const payload = JSON.parse(raw) as { ok?: boolean; reason?: string; text?: string }; if (typeof payload.text === "string") { await this.memoryDocument.sync(payload.text); } if (!payload.ok) { await this.skipInput(); } this.logger?.log("overlay.command.skip.host", { ok: !!payload.ok, reason: payload.reason ?? "" }); return payload.reason ?? (payload.ok ? "skipped" : "empty"); }
   /** Runs the active file-backed overlay input command. */ async acceptInput(): Promise<void> { await this.shellCommands?.acceptInput(); }
@@ -580,14 +584,14 @@ export class WorkbenchOverlay implements vscode.Disposable {
       }
       if (payload?.type === "run" && typeof payload.code === "string") {
         this.logger?.log("overlay.bridge.run", { ...textFields(payload.code), fullText: typeof payload.text === "string" ? textFields(payload.text).lines : 0 });
-        await this.memoryDocument.sync(typeof payload.text === "string" ? payload.text : payload.code); this.scheduleGeneratedCleanup();
         const range = payload.range as { start?: unknown } | undefined;
+        await this.memoryDocument.sync(typeof payload.text === "string" ? payload.text : payload.code, this.relativeLineOffset(range?.start)); this.scheduleGeneratedCleanup();
         const lineOffset = this.relativeLineOffset(range?.start);
-        const work = this.runHandler?.(payload.code, lineOffset);
-        void work?.catch((error: unknown) => {
+        const executed = await this.runHandler?.(payload.code, lineOffset).catch((error: unknown) => {
           this.logger?.log("overlay.bridge.run.error", { error: error instanceof Error ? error.message : String(error) });
+          return false;
         });
-        res.writeHead(200, { ...CORS_HEADERS, "content-type": "application/json" }).end(JSON.stringify({ executed: Boolean(work) }));
+        if (!res.destroyed) { res.writeHead(200, { ...CORS_HEADERS, "content-type": "application/json" }).end(JSON.stringify({ executed: Boolean(executed) })); }
         return;
       }
       res.writeHead(204, CORS_HEADERS).end();

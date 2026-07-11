@@ -6,12 +6,18 @@ const vscode = require("vscode");
 /** Verifies prelude-only runtime names are not reported as missing imports. */
 async function assertGoldenNoPreludeImportDiagnostics({ code, evalInWorkbench, extension, uri }) {
   const probeName = `__dso_missing_probe_${Date.now().toString(36)}`;
+  const document = vscode.workspace.textDocuments.find((item) => item.uri.toString() === uri.toString());
+  assert.ok(document, `missing visible overlay document: ${uri.toString()}`);
+  assert.equal(document.languageId, "django-shell-python");
+  assert.equal(vscode.languages.match({ language: "python", scheme: "file" }, document), 0, "direct Python providers must not analyze the full unordered shell source");
+  assert.ok(vscode.languages.match({ language: "django-shell-python", scheme: "file" }, document) > 0);
   assertNoCompanyDiagnostics(uri, "before probe");
   const started = JSON.parse(await evalInWorkbench(extension, goldenDiagnosticProbeStartExpression(code, probeName)));
   assert.equal(started.ok, true, `golden diagnostic probe failed to start: ${JSON.stringify(started)}`);
   try {
-    const probeDiagnostics = await waitForRelevantDiagnostics(uri, probeName);
-    assert.ok(probeDiagnostics.length > 0, `golden diagnostic pipeline did not report deliberate unresolved symbol: ${JSON.stringify({ probeDiagnostics })}`);
+    await delay(500);
+    const probeDiagnostics = vscodeDiagnosticSnapshot(uri, probeName).relevantDiagnostics;
+    assert.deepEqual(probeDiagnostics, [], `direct Python diagnostics leaked from the full unordered shell source: ${JSON.stringify({ probeDiagnostics })}`);
     assertNoCompanyDiagnostics(uri, "during probe");
   } finally {
     const restored = JSON.parse(await evalInWorkbench(extension, goldenDiagnosticProbeRestoreExpression()));
@@ -28,16 +34,6 @@ function goldenDiagnosticProbeStartExpression(code, probeName) {
 /** Builds a renderer expression that restores the Python cell after a probe. */
 function goldenDiagnosticProbeRestoreExpression() {
   return `(function(){const root=document.getElementById("django-shell-overlay");const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(!root||!model||typeof root.__dsoGoldenDiagnosticOriginal!=="string"){return JSON.stringify({ok:false,reason:"missing-original"});}model.setValue(root.__dsoGoldenDiagnosticOriginal);return JSON.stringify({ok:String(model.getValue&&model.getValue()||"")===root.__dsoGoldenDiagnosticOriginal,uri:model.uri&&String(model.uri)});})()`;
-}
-
-/** Waits until VS Code diagnostics report one deliberately unresolved symbol. */
-async function waitForRelevantDiagnostics(uri, name) {
-  for (let attempt = 0; attempt < 70; attempt++) {
-    const diagnostics = vscodeDiagnosticSnapshot(uri, name).relevantDiagnostics;
-    if (diagnostics.length) { return diagnostics; }
-    await delay(100);
-  }
-  return [];
 }
 
 /** Asserts that Company does not receive a prelude false-positive diagnostic. */

@@ -683,6 +683,32 @@ test("uses request filename and line offset as the compiled shell input location
   assert.ok(payload.response.traceback.includes(filename), payload.response.traceback);
 });
 
+test("executes only the requested unit while retaining full source text for debug mapping", { skip: !PYTHON }, () => {
+  const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
+  const script = [
+    "import importlib.util, json",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    `filename=${JSON.stringify(filename)}`,
+    "source='order.append(\"upper\")\\nupper_name = True\\n\\n\\norder.append(\"lower\")\\nlower_name = True\\n'",
+    "namespace={'order': []}",
+    "lower=mod._run_request(namespace, 'tok', {'token':'tok','kind':'execute','code':'order.append(\"lower\")\\nlower_name = True','filename':filename,'lineOffset':4,'sourceText':source,'breakpointLines':[]}, set())",
+    "after_lower={'order': list(namespace['order']), 'lower': namespace.get('lower_name'), 'upperPresent': 'upper_name' in namespace}",
+    "upper=mod._run_request(namespace, 'tok', {'token':'tok','kind':'execute','code':'order.append(\"upper\")\\nupper_name = True','filename':filename,'lineOffset':0,'sourceText':source,'breakpointLines':[]}, set())",
+    "print(json.dumps({'afterLower': after_lower, 'finalOrder': namespace['order'], 'lowerOk': lower['ok'], 'upperOk': upper['ok'], 'upper': namespace.get('upper_name')}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.lowerOk, true);
+  assert.deepEqual(payload.afterLower, { lower: true, order: ["lower"], upperPresent: false });
+  assert.equal(payload.upperOk, true);
+  assert.deepEqual(payload.finalOrder, ["lower", "upper"], "namespace mutations follow explicit execution order, not source order");
+  assert.equal(payload.upper, true);
+});
+
 test("injects debug breakpoints on active overlay source lines", { skip: !PYTHON }, () => {
   const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
   const script = [
@@ -708,6 +734,38 @@ test("injects debug breakpoints on active overlay source lines", { skip: !PYTHON
   assert.equal(payload.response.ok, true);
   assert.equal(payload.response.result, "2");
   assert.equal(payload.value, 2);
+});
+
+test("pauses before evaluating and formatting a final debug expression", { skip: !PYTHON }, () => {
+  const filename = path.join(process.cwd(), ".django-shell", "console-cell.py");
+  const script = [
+    "import importlib.util, json, sys, threading, types",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    `filename=${JSON.stringify(filename)}`,
+    "entered=threading.Event(); release=threading.Event(); timeline=[]; result={}",
+    "def pause(): timeline.append('breakpoint'); entered.set(); release.wait(2)",
+    "fake=types.SimpleNamespace(is_client_connected=lambda: True, breakpoint=pause, debug_this_thread=lambda: None)",
+    "sys.modules['debugpy']=fake",
+    "class Value:",
+    "    def __repr__(self): timeline.append('format'); return '<value>'",
+    "def expression(): timeline.append('evaluate'); return Value()",
+    "namespace={'expression': expression}",
+    "request={'token':'tok','kind':'execute','code':'expression()','filename':filename,'breakpointLines':[1]}",
+    "thread=threading.Thread(target=lambda: result.setdefault('value', mod._run_request(namespace, 'tok', request, set())), daemon=True)",
+    "thread.start(); paused=entered.wait(2); while_paused=list(timeline); release.set(); thread.join(2)",
+    "print(json.dumps({'alive':thread.is_alive(),'paused':paused,'response':result.get('value'),'timeline':timeline,'whilePaused':while_paused}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8", timeout: 10_000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.paused, true);
+  assert.equal(payload.alive, false);
+  assert.deepEqual(payload.whilePaused, ["breakpoint"]);
+  assert.deepEqual(payload.timeline, ["breakpoint", "evaluate", "format"]);
+  assert.equal(payload.response.result, "<value>");
 });
 
 test("honors debug breakpoints added while a cell is already running", { skip: !PYTHON }, () => {

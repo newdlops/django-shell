@@ -9618,7 +9618,9 @@ function handleHostMessage(message) {
   if (message.type === "pythonStarted" && Number.isFinite(message.execution)) {
     pendingExecution = message.execution;
     setInputPrompt(`In [${pendingExecution}]:`);
-    showRunningOutput(pendingExecution, String(message.code || ""));
+    if (!message.debugRun) {
+      showRunningOutput(pendingExecution, String(message.code || ""));
+    }
   }
   if (message.type === "pythonResult") {
     showOutput(message.execution || pendingExecution, cleanPythonResult(message.text), Boolean(message.ok), String(message.code || ""));

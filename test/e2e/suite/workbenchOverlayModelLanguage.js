@@ -6,13 +6,20 @@ const path = require("node:path");
 /** Verifies captured workbench model creation receives a language selection object. */
 function assertWorkbenchModelLanguageSelection(extension) {
   const renderer = require(path.join(extension.extensionPath, "out", "workbenchOverlayRenderer.js"));
-  const harness = createRendererHarness(renderer.overlayRendererSource("file:///workspace/.django-shell/console-cell.py"));
-  const report = harness.window.__djangoShellOverlayShow({ height: 180, left: 12, top: 24, width: 640 });
-  const root = harness.document.getElementById("django-shell-overlay");
-  assert.ok(report.includes(":editor:"), report);
-  assert.equal(harness.state.createdLanguageId, "python");
-  assert.equal(root.__dsoLastEditorError || "", "");
-  assert.equal(root.__djangoShellEditor.getModel().getLanguageId(), "python");
+  const shell = createRendererHarness(renderer.overlayRendererSource("file:///workspace/.django-shell/console-cell.py"));
+  const shellReport = shell.window.__djangoShellOverlayShow({ height: 180, left: 12, top: 24, width: 640 });
+  const shellRoot = shell.document.getElementById("django-shell-overlay");
+  assert.ok(shellReport.includes(":editor:"), shellReport);
+  assert.equal(shell.state.createdLanguageId, "django-shell-python");
+  assert.equal(shellRoot.__dsoLastEditorError || "", "");
+  assert.equal(shellRoot.__djangoShellEditor.getModel().getLanguageId(), "django-shell-python");
+
+  const query = createRendererHarness(renderer.overlayRendererSource("file:///workspace/.django-shell/query-cell.py", { executionMode: "submit" }));
+  const queryReport = query.window.__djangoShellOverlayShow({ height: 180, left: 12, top: 24, width: 640 });
+  const queryRoot = query.document.getElementById("django-shell-overlay");
+  assert.ok(queryReport.includes(":editor:"), queryReport);
+  assert.equal(query.state.createdLanguageId, "python");
+  assert.equal(queryRoot.__djangoShellEditor.getModel().getLanguageId(), "python");
 }
 
 /** Creates a minimal workbench renderer environment for the injected overlay source. */

@@ -12,7 +12,7 @@ export function prepareDevelopmentExtension(root) {
   delete manifest.extensionDependencies;
   fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify(manifest, null, 2));
   fs.cpSync(path.join(root, "out"), path.join(directory, "out"), { dereference: true, recursive: true });
-  for (const name of ["media", "node_modules", "python"]) {
+  for (const name of ["media", "node_modules", "python", "syntaxes"]) {
     fs.symlinkSync(path.join(root, name), path.join(directory, name), "dir");
   }
   return directory;

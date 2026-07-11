@@ -41,7 +41,7 @@ interface DapThread { id: number; name: string }
 interface DapVariable { evaluateName?: string; indexedVariables?: number; name: string; namedVariables?: number; type?: string; value: string; variablesReference?: number }
 interface DapEvaluateResponse { result?: string; type?: string; variablesReference?: number }
 interface DebugFrameRef { frameId?: number; threadId: number }
-export interface DebugInspectOptions { enrich?: boolean; preferOverlay?: boolean; preferUserSource?: boolean }
+export interface DebugInspectOptions { enrich?: boolean; includeScopes?: boolean; isCurrent?: () => boolean; preferOverlay?: boolean; preferUserSource?: boolean }
 
 const MAX_SCOPE_VARIABLES = 80;
 const MAX_EVALUATED_LOCAL_CANDIDATES = 10;
@@ -106,9 +106,16 @@ async function inspectDebugFrameRef(session: DebugRequestSession, item: DebugFra
   const frame = stackFrameFor(frames, item, options);
   const sourceLine = frame ? await sourceLineFor(frame) : "";
   const frameId = frame?.id ?? item.frameId;
+  const location: DebugFrameInfo = { frame: frame && { column: frame.column, line: frame.line, name: frame.name, path: sourcePathFor(frame), sourceLine }, frames: frames.slice(0, 8).map(stackFrameInfo), state: "paused" };
+  if (options.includeScopes === false || !frameId || !frame || options.isCurrent?.() === false) {
+    return location;
+  }
   const basic = frameId ? await scopeVariables(session, frameId) : [];
-  const scopes = frameId && frame && options.enrich !== false ? await enrichScopeVariables(session, frameId, frame, basic) : basic;
-  return { frame: frame && { column: frame.column, line: frame.line, name: frame.name, path: sourcePathFor(frame), sourceLine }, frames: frames.slice(0, 8).map(stackFrameInfo), scopes, state: "paused" };
+  if (options.isCurrent?.() === false) {
+    return location;
+  }
+  const scopes = options.enrich !== false ? await enrichScopeVariables(session, frameId, frame, basic) : basic;
+  return { ...location, scopes };
 }
 
 /** Reads child variables for one expandable DAP variablesReference. */
@@ -203,7 +210,7 @@ async function readScopeVariables(session: DebugRequestSession, frameId: number)
   return Promise.all(scopes.map(async (scope) => ({ name: scope.name, total: scope.namedVariables ?? scope.indexedVariables, variables: await variablesForReference(session, scope.variablesReference, MAX_SCOPE_VARIABLES) })));
 }
 
-/** Layers Locals enrichment onto plain scopes: shell-global cell bindings debugpy files under Globals, plus live (expandable) QuerySet/model previews. Only runs on the settled (non-stepping) inspection pass — see the two-phase stop handlers — so previews carry a current-pause variablesReference and step latency stays off the enrichment path. */
+/** Layers Locals enrichment onto plain scopes: shell-global cell bindings debugpy files under Globals, plus live (expandable) QuerySet/model previews. Runs only after the stop stays idle, so rapid stepping cancels it while the final pause still gets expandable live previews. */
 async function enrichScopeVariables(session: DebugRequestSession, frameId: number, frame: DapStackFrame, basicScopes: DebugScopeInfo[]): Promise<DebugScopeInfo[]> {
   const globalsVariables = basicScopes.find((scope) => GLOBAL_SCOPE.test(scope.name))?.variables ?? [];
   const localCandidates = await localCandidateNamesForFrame(frame);

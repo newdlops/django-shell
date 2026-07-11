@@ -6,6 +6,7 @@ const { assertGoldenPythonExecution } = require("./pythonCellGolden.js");
 const { assertOverlayHoverPointerHandoff } = require("./overlayHoverPointer.js");
 
 const INPUT_MARKER = "# --- django shell input ---";
+const SHELL_LANGUAGE_ID = "django-shell-python";
 const PRELUDE = "# Django shell runtime imports for analysis.\n# ruff: noqa\nfrom orm_runtime.models import Company\n\n";
 const GOLDEN_PRELUDE_LINES = ["from orm_runtime.models import Company", ...Array.from({ length: 4100 }, (_, index) => `__dso_large_prelude_${index} = ${index}`)];
 const GOLDEN_PRELUDE = `# Django shell runtime imports for analysis.\n# ruff: noqa\n${GOLDEN_PRELUDE_LINES.join("\n")}\n\n`;
@@ -238,7 +239,8 @@ async function replaceDocument(uri, text) {
     await vscode.workspace.fs.writeFile(uri, Buffer.from(text, "utf8"));
     opened = await vscode.workspace.openTextDocument(uri);
   }
-  const document = opened.languageId === "python" ? opened : await vscode.languages.setTextDocumentLanguage(opened, "python");
+  const languageId = uri.path.endsWith("/console-cell.py") ? SHELL_LANGUAGE_ID : "python";
+  const document = opened.languageId === languageId ? opened : await vscode.languages.setTextDocumentLanguage(opened, languageId);
   if (document.getText() !== text) {
     const edit = new vscode.WorkspaceEdit();
     edit.replace(uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), text);
@@ -346,7 +348,7 @@ async function readTextFile(uri) {
 /** Verifies rendered Monaco theme colors are applied to every expected symbol. */
 async function assertRendererTheme(extension) {
   const snapshot = await waitForRendererSnapshot(extension);
-  assert.equal(snapshot.language, "python");
+  assert.equal(snapshot.language, SHELL_LANGUAGE_ID);
   assert.ok(String(snapshot.uri).endsWith("/.django-shell/console-cell.py"), String(snapshot.uri));
   assert.ok(renderedText(snapshot).includes("name__icontains"), JSON.stringify(snapshot.tokens));
   assert.ok(themeColorCount(snapshot) >= 3, `expected multiple theme colors: ${JSON.stringify(snapshot.tokens)}`);

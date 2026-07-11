@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Django Shell Python",
+  "scopeName": "source.django-shell-python",
+  "patterns": [
+    {
+      "include": "source.python"
+    }
+  ]
+}

@@ -6,6 +6,7 @@ import { DiagnosticLogger } from "./diagnostics";
 import { closeGeneratedOverlayTabs } from "./generatedOverlayTabs";
 import { withLatencyBudget } from "./latencyBudget";
 import { OverlayCompletionRequestCache } from "./overlayCompletionRequestCache";
+import { OVERLAY_SHELL_LANGUAGE_ID } from "./overlayLanguage";
 import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
 
 const SEMANTIC_TOKEN_TYPES = ["namespace", "class", "function", "variable"];
@@ -28,7 +29,9 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   /** Registers Python providers for this instance's overlay editor file (console-cell.py or query-cell.py). */
   activate(): void {
     const file = path.basename(this.documents.editorUri.fsPath);
-    const selector: vscode.DocumentSelector = [{ language: "python", pattern: `**/.django-shell/${file}`, scheme: "file" }];
+    const pattern = `**/.django-shell/${file}`;
+    const language = file === "query-cell.py" ? "python" : OVERLAY_SHELL_LANGUAGE_ID;
+    const selector: vscode.DocumentSelector = [{ language, pattern, scheme: "file" }];
     this.disposables.push(
       vscode.languages.registerCompletionItemProvider(selector, this, ".", "'", "\""),
       vscode.languages.registerHoverProvider(selector, this),
@@ -59,7 +62,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     }
     const text = document.getText();
     const prelude = this.preludeSource(text);
-    if (!prelude.trim()) {
+    if (!prelude.trim() && document.languageId !== OVERLAY_SHELL_LANGUAGE_ID) {
       return [];
     }
     const result = await this.completionCache.provide(document, position, context.triggerCharacter, (isCurrent) => this.loadCompletionItems(text, position, context, isCurrent));
@@ -83,16 +86,9 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     }
     this.analysisSuggestionBusy = true;
     try {
-      await this.documents.syncAnalysis(text);
-      if (!isCurrent()) {
-        return [];
-      }
-      const result = await vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>(
-        "vscode.executeCompletionItemProvider",
-        this.documents.analysisUri,
-        analysisPosition,
-        context.triggerCharacter
-      );
+      const result = await this.enqueueAnalysisRequest(text, position.line, () => isCurrent()
+        ? vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>("vscode.executeCompletionItemProvider", this.documents.analysisUri, analysisPosition, context.triggerCharacter)
+        : Promise.resolve([]));
       this.cleanupGeneratedTabs();
       const current = isCurrent();
       this.logger?.log("overlay.feature", { current, feature: "completion", items: current ? completionCount(result) : 0, ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
@@ -110,12 +106,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const started = Date.now();
     const offset = this.analysisOffset(document);
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.syncAnalysis(document.getText());
-    const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
-      "vscode.executeHoverProvider",
-      this.documents.analysisUri,
-      analysisPosition
-    );
+    const hovers = await this.enqueueAnalysisRequest(document.getText(), position.line, () => vscode.commands.executeCommand<vscode.Hover[]>("vscode.executeHoverProvider", this.documents.analysisUri, analysisPosition));
     this.cleanupGeneratedTabs();
     this.logger?.log("overlay.feature", { feature: "hover", items: hovers?.length ?? 0, ms: Date.now() - started, offset, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
     const hover = hovers?.[0] ? mapHover(hovers[0], offset) : undefined;
@@ -130,12 +121,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const started = Date.now();
     const offset = this.analysisOffset(document);
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.syncAnalysis(document.getText());
-    const result = await vscode.commands.executeCommand<Array<vscode.Location | vscode.DefinitionLink>>(
-      "vscode.executeDefinitionProvider",
-      this.documents.analysisUri,
-      analysisPosition
-    );
+    const result = await this.enqueueAnalysisRequest(document.getText(), position.line, () => vscode.commands.executeCommand<Array<vscode.Location | vscode.DefinitionLink>>("vscode.executeDefinitionProvider", this.documents.analysisUri, analysisPosition));
     this.cleanupGeneratedTabs();
     this.logger?.log("overlay.feature", { feature: "definition", items: result?.length ?? 0, ms: Date.now() - started, offset, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
     return result as vscode.Definition | vscode.DefinitionLink[];
@@ -149,12 +135,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const started = Date.now();
     const offset = this.analysisOffset(document);
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.syncAnalysis(document.getText());
-    const result = await vscode.commands.executeCommand<vscode.Location[]>(
-      "vscode.executeReferenceProvider",
-      this.documents.analysisUri,
-      analysisPosition
-    );
+    const result = await this.enqueueAnalysisRequest(document.getText(), position.line, () => vscode.commands.executeCommand<vscode.Location[]>("vscode.executeReferenceProvider", this.documents.analysisUri, analysisPosition));
     this.cleanupGeneratedTabs();
     const mapped = mapLocations(result ?? [], this.documents.analysisUri, this.documents.editorUri, offset);
     this.logger?.log("overlay.feature", { feature: "references", items: mapped.length, ms: Date.now() - started, offset, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
@@ -169,12 +150,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const started = Date.now();
     const offset = this.analysisOffset(document);
     const analysisPosition = this.analysisPosition(position, offset);
-    await this.documents.syncAnalysis(document.getText());
-    const result = await vscode.commands.executeCommand<vscode.DocumentHighlight[]>(
-      "vscode.executeDocumentHighlights",
-      this.documents.analysisUri,
-      analysisPosition
-    );
+    const result = await this.enqueueAnalysisRequest(document.getText(), position.line, () => vscode.commands.executeCommand<vscode.DocumentHighlight[]>("vscode.executeDocumentHighlights", this.documents.analysisUri, analysisPosition));
     this.cleanupGeneratedTabs();
     const mapped = (result ?? []).map((item) => new vscode.DocumentHighlight(mapRange(item.range, offset), item.kind));
     this.logger?.log("overlay.feature", { feature: "highlights", items: mapped.length, ms: Date.now() - started, offset, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
@@ -187,7 +163,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       return undefined;
     }
     const text = document.getText();
-    if (!this.preludeSource(text).trim()) {
+    if (!this.preludeSource(text).trim() && document.languageId !== OVERLAY_SHELL_LANGUAGE_ID) {
       return undefined;
     }
     const started = Date.now();
@@ -201,11 +177,9 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     this.analysisSuggestionBusy = true;
     let providerStarted = false;
     try {
-      await this.documents.syncAnalysis(text);
-      if (token.isCancellationRequested || requestVersion !== this.signatureVersion) {
-        return undefined;
-      }
-      const provider = Promise.resolve(vscode.commands.executeCommand<vscode.SignatureHelp>("vscode.executeSignatureHelpProvider", this.documents.analysisUri, analysisPosition, context.triggerCharacter));
+      const provider = this.enqueueAnalysisRequest(text, position.line, () => token.isCancellationRequested || requestVersion !== this.signatureVersion
+        ? Promise.resolve(undefined)
+        : Promise.resolve(vscode.commands.executeCommand<vscode.SignatureHelp>("vscode.executeSignatureHelpProvider", this.documents.analysisUri, analysisPosition, context.triggerCharacter)));
       providerStarted = true;
       const tracked = provider.finally(() => { this.analysisSuggestionBusy = false; });
       void tracked.then(() => this.cleanupGeneratedTabs(), () => undefined);
@@ -233,6 +207,11 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   /** Returns whether a document is the visible overlay editor document. */
   private isEditorDocument(document: vscode.TextDocument): boolean {
     return document.uri.toString() === this.documents.editorUri.toString();
+  }
+
+  /** Serializes one focused analysis snapshot through the provider that reads it. */
+  private enqueueAnalysisRequest<T>(text: string, focusLine: number, request: () => PromiseLike<T>): Promise<T> {
+    return this.documents.withAnalysisSnapshot(text, focusLine, request);
   }
 
   /** Returns the line delta needed for the current editor document shape. */
