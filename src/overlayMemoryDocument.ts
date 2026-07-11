@@ -4,7 +4,6 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { DiagnosticLogger } from "./diagnostics";
 import { ensureIgnoredShadowDirectory } from "./filePythonShadow";
-import { projectOverlayAnalysisText } from "./overlayAnalysisProjection";
 
 export const INPUT_MARKER = "# --- django shell input ---";
 
@@ -17,8 +16,8 @@ interface OverlayUserSnapshot {
 /** Maintains a Python TextDocument whose edits stay in memory after creation. */
 export class OverlayMemoryDocument implements vscode.Disposable {
   private analysisDirty = false;
-  private analysisFocusLine: number | undefined;
   private editorDirty = false;
+  private installedAnalysisText: string | undefined;
   private prelude = "";
   private text = "";
   private writeQueue: Promise<void> = Promise.resolve();
@@ -26,7 +25,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   readonly editorUri: vscode.Uri;
 
   /** Stores the logger and resolves backing-file URIs (default base names match the console overlay). */
-  constructor(private readonly logger?: DiagnosticLogger, editorName = "console-cell", analysisName = "analysis", private readonly isolateAnalysisUnits = false) {
+  constructor(private readonly logger?: DiagnosticLogger, editorName = "console-cell", analysisName = "analysis") {
     this.editorUri = overlayFileUri(editorName);
     this.analysisUri = overlayFileUri(analysisName);
   }
@@ -61,9 +60,9 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     return this.text;
   }
 
-  /** Returns runtime declarations plus the focused shell unit used by language analysis. */
+  /** Returns runtime declarations plus the complete visible source used by workspace language analysis. */
   analysisText(): string {
-    return analysisText(this.prelude, this.analysisUserText());
+    return analysisText(this.prelude, this.text);
   }
 
   /** Returns generated runtime import text kept out of the analysis file. */
@@ -79,8 +78,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     const changed = userText !== this.text;
     const nextFocus = snapshot.focusLine;
     if (changed) { this.text = userText; }
-    if (this.isolateAnalysisUnits && nextFocus !== undefined) { this.analysisFocusLine = nextFocus; }
-    this.logger?.log("overlay.memory.sync", { ...textFields(userText), changed, focusLine: this.analysisFocusLine ?? -1, fullLines: textFields(text).lines });
+    this.logger?.log("overlay.memory.sync", { ...textFields(userText), changed, focusLine: nextFocus ?? -1, fullLines: textFields(text).lines });
     const needsAnalysis = previousAnalysis !== this.analysisText() || this.analysisDirty;
     const needsEditor = changed || this.editorDirty;
     if (!needsAnalysis && !needsEditor) {
@@ -113,8 +111,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
       this.editorDirty = true;
     }
     const nextFocus = snapshot.focusLine;
-    if (this.isolateAnalysisUnits && nextFocus !== undefined) { this.analysisFocusLine = nextFocus; }
-    this.logger?.log("overlay.memory.syncAnalysis", { ...textFields(userText), changed, focusLine: this.analysisFocusLine ?? -1, fullLines: textFields(text).lines });
+    this.logger?.log("overlay.memory.syncAnalysis", { ...textFields(userText), changed, focusLine: nextFocus ?? -1, fullLines: textFields(text).lines });
     const needsAnalysis = previousAnalysis !== this.analysisText() || this.analysisDirty;
     if (!needsAnalysis) { return; }
     await this.enqueueWrite(async () => { await this.writeAnalysis(); });
@@ -129,11 +126,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
       this.text = snapshot.text;
       this.editorDirty = true;
     }
-    if (this.isolateAnalysisUnits && snapshot.focusLine !== undefined) {
-      this.analysisFocusLine = snapshot.focusLine;
-    }
-    const userText = this.isolateAnalysisUnits ? projectOverlayAnalysisText(snapshot.text, snapshot.focusLine) : snapshot.text;
-    const analysisSnapshot = analysisText(snapshotPrelude, userText);
+    const analysisSnapshot = analysisText(snapshotPrelude, snapshot.text);
     this.logger?.log("overlay.memory.lease", { ...textFields(snapshot.text), changed, focusLine: snapshot.focusLine ?? -1, fullLines: textFields(text).lines });
     return this.enqueueWrite(async () => {
       await this.writeAnalysisText(analysisSnapshot);
@@ -158,13 +151,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     this.logger?.log("overlay.memory.reset", { changed });
     this.text = "";
     this.prelude = "";
-    this.analysisFocusLine = undefined;
     await this.enqueueWrite(async () => { await Promise.all([this.writeEditor(), this.writeAnalysis()]); });
-  }
-
-  /** Returns full visible text or a line-preserving projection of the focused shell unit. */
-  private analysisUserText(): string {
-    return this.isolateAnalysisUnits ? projectOverlayAnalysisText(this.text, this.analysisFocusLine) : this.text;
   }
 
   /** Serializes generated file edits so reset, prelude, and sync updates cannot race. */
@@ -190,8 +177,10 @@ export class OverlayMemoryDocument implements vscode.Disposable {
 
   /** Writes an immutable analysis snapshot and records whether canonical state changed meanwhile. */
   private async writeAnalysisText(text: string): Promise<void> {
+    if (text === this.installedAnalysisText) { this.analysisDirty = this.analysisText() !== text; return; }
     this.logger?.log("overlay.memory.write", { ...textFields(text), kind: "analysis", offset: this.lineOffset() });
     await ensureBackingFile(this.analysisUri, text);
+    this.installedAnalysisText = text;
     this.analysisDirty = this.analysisText() !== text;
   }
 

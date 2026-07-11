@@ -77,7 +77,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   /** Stores diagnostics and resolves the backing files and owning panel for this overlay. */
   constructor(private readonly logger?: DiagnosticLogger, profile: WorkbenchOverlayProfile = {}) {
     this.profile = { analysisName: profile.analysisName ?? "analysis", contextKey: profile.contextKey ?? "djangoShell.overlayVisible", editorName: profile.editorName ?? "console-cell", executionMode: profile.executionMode ?? "shell", key: profile.key ?? "console", panelTitle: profile.panelTitle ?? "Django Shell" };
-    this.memoryDocument = new OverlayMemoryDocument(logger, this.profile.editorName, this.profile.analysisName, this.profile.executionMode === "shell");
+    this.memoryDocument = new OverlayMemoryDocument(logger, this.profile.editorName, this.profile.analysisName);
     this.featureBridge = new OverlayPythonFeatureBridge(this.memoryDocument, logger);
   }
 

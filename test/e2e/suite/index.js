@@ -254,7 +254,8 @@ function assertRestartResetGuards(extension) {
   const overlaySource = fs.readFileSync(path.join(extension.extensionPath, "out", "workbenchOverlay.js"), "utf8");
   assert.ok(consoleSource.includes("runtimeGeneration"));
   assert.ok(consoleSource.includes("resetPythonCell"));
-  assert.ok(consoleSource.includes("inspectionInFlight = undefined"));
+  assert.ok(consoleSource.includes("this.runtimeInspection.invalidate()"));
+  assert.ok(consoleSource.includes("this.runtimePrelude.invalidate()"));
   assert.ok(overlaySource.includes("resetExpression")); assert.ok((consoleSource.match(/show: this\.runtimeReady/g) ?? []).length >= 2);
 }
 

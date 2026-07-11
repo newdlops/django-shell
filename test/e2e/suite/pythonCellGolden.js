@@ -38,7 +38,7 @@ async function assertGoldenPythonExecution({ extension, generatedText, importLin
     await waitForOpenDocumentText((value) => value.includes(code));
     await assertGoldenPreludeLanguageFeatures(extension, code);
     await assertGoldenHiddenPreludeVisualStability({ code, evalInWorkbench, extension });
-    await assertNoPreRunGeneratedSideEffects(extension, preRunDisk);
+    await assertNoPreRunGeneratedSideEffects(extension, preRunDisk, prelude, code);
     const before = await e2eExecutionCount();
     assert.equal(await vscode.commands.executeCommand("djangoShell.overlayRunCurrentInput"), "host-requested", "golden command did not request host execution");
     await assertGoldenBackingFiles(prelude, inputMarker, code, watcher);
@@ -229,11 +229,12 @@ async function assertGoldenBackingFiles(prelude, inputMarker, code, watcher) {
   assert.deepEqual(snapshot, { ...snapshot, editorVisibleOk: true, editorDiskOk: true, analysisOk: true }, `golden backing files did not sync: ${JSON.stringify(snapshot)}`);
 }
 
-/** Verifies live typing did not save generated files or expose generated tabs before execution. */
-async function assertNoPreRunGeneratedSideEffects(extension, baseline) {
+/** Verifies live typing updates only the hidden full-context analysis file before execution. */
+async function assertNoPreRunGeneratedSideEffects(extension, baseline, prelude, code) {
   const current = await generatedDiskSnapshot();
   const visual = JSON.parse(await evalInWorkbench(extension, generatedOverlayVisualExposureExpression()));
-  assert.deepEqual(current, baseline, `generated files changed before execution: ${JSON.stringify({ before: diskSizes(baseline), after: diskSizes(current), exposure: generatedOverlayExposureDetails(), visual })}`);
+  assert.equal(current.editor, baseline.editor, `executable source changed before execution: ${JSON.stringify({ before: diskSizes(baseline), after: diskSizes(current) })}`);
+  assert.ok(current.analysis.startsWith(prelude) && current.analysis.includes(code) && !current.analysis.includes(INPUT_MARKER), `analysis file lost the typed full source: ${JSON.stringify({ before: diskSizes(baseline), after: diskSizes(current) })}`);
   assert.deepEqual(visual.visible, [], `generated files became visible tabs before execution: ${JSON.stringify({ api: generatedOverlayExposureDetails(), visual })}`);
 }
 

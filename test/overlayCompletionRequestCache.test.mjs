@@ -183,7 +183,7 @@ test("skips the duplicate analysis bridge without a hidden prelude", async () =>
   preludeBridge.dispose();
 });
 
-test("routes an isolated shell language through focused analysis without a runtime prelude", async () => {
+test("routes an isolated shell language through full-source analysis without a runtime prelude", async () => {
   vscodeState.executeCalls = 0;
   vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? [new CompletionItem("focused_name")] : [];
   const documents = fakeOverlayDocuments("");
@@ -238,7 +238,7 @@ test("keeps signature help from adding a second hidden-provider load", async () 
   vscodeState.executeHandler = undefined;
 });
 
-test("serializes each focused analysis snapshot through the provider that reads it", async () => {
+test("serializes each full-source analysis snapshot through the provider that reads it", async () => {
   vscodeState.executeCalls = 0;
   const firstGate = deferred();
   const documents = fakeOverlayDocuments("");

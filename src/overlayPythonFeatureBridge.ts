@@ -15,7 +15,7 @@ const COMPLETION_DEBOUNCE_MS = 30;
 const SIGNATURE_BUDGET_MS = 200;
 const SIGNATURE_DEBOUNCE_MS = 40;
 
-/** Forwards overlay editor language requests to the raw hidden analysis document. */
+/** Forwards overlay language requests to the complete workspace-backed Python analysis document. */
 export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider, vscode.DefinitionProvider, vscode.DocumentHighlightProvider, vscode.Disposable, vscode.HoverProvider, vscode.ReferenceProvider, vscode.SignatureHelpProvider {
   private readonly disposables: vscode.Disposable[] = [];
   private readonly completionCache: OverlayCompletionRequestCache;
@@ -209,7 +209,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     return document.uri.toString() === this.documents.editorUri.toString();
   }
 
-  /** Serializes one focused analysis snapshot through the provider that reads it. */
+  /** Serializes one complete analysis snapshot through the provider that reads it. */
   private enqueueAnalysisRequest<T>(text: string, focusLine: number, request: () => PromiseLike<T>): Promise<T> {
     return this.documents.withAnalysisSnapshot(text, focusLine, request);
   }

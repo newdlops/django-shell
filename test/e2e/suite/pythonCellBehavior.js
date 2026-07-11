@@ -43,6 +43,8 @@ async function assertPythonCellBehavior(extension) {
   await assertGeneratedOverlayFilesHidden("overlay document open");
   await withStageTimeout("provider feature checks", assertProviderFeatures(overlayUris().editor, text), 45000);
   await assertGeneratedOverlayFilesHidden("provider feature checks");
+  await withStageTimeout("cross-unit workspace context", assertCrossUnitWorkspaceContext(generatedText), 45000);
+  await assertGeneratedOverlayFilesHidden("cross-unit workspace context");
   await withStageTimeout("renderer theme checks", assertRendererTheme(extension), 30000);
   await assertGeneratedOverlayFilesHidden("renderer theme checks");
   await withStageTimeout("renderer hover pointer handoff", assertOverlayHoverPointerHandoff(extension), 30000);
@@ -194,6 +196,7 @@ async function writeDjangoOrmRuntimeFixture(root) {
     "    objects: models.Manager[Company]",
     ""
   ].join("\n"));
+  await writeFile(root, "workspace_context.py", "class WorkspaceClient:\n    def workspace_method(self) -> str:\n        return 'workspace'\n\ndef make_workspace_client() -> WorkspaceClient:\n    return WorkspaceClient()\n");
 }
 
 /** Writes one UTF-8 fixture file under the E2E workspace root. */
@@ -228,7 +231,7 @@ async function installOverlayDocument(text) {
   await replaceDocument(uris.analysis, text);
   const marker = `${INPUT_MARKER}\n`;
   const visibleText = text.includes(marker) ? text.slice(text.lastIndexOf(marker) + marker.length) : text;
-  await waitForOpenDocumentText((value) => value === text || value === visibleText || (value.includes(marker) && value.slice(value.lastIndexOf(marker) + marker.length) === visibleText));
+  return await waitForOpenDocumentText((value) => value === text || value === visibleText || (value.includes(marker) && value.slice(value.lastIndexOf(marker) + marker.length) === visibleText));
 }
 
 /** Replaces one workspace text document. */
@@ -310,6 +313,28 @@ async function assertProviderFeatures(uri, text) {
   assert.match(ormHover, /Base model:\s*`?(?:orm_runtime\.)?Company`?/, `missing Django ORM extension hover: ${ormHover}`);
   const definitions = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", uri, positionOfText(text, "Company()").translate(0, 1));
   assert.ok(definitionUris(definitions).some((uri) => uri.includes("/orm_runtime/models")), `definition failed for Company: ${JSON.stringify(definitionUris(definitions))}`);
+}
+
+/** Verifies a lower execution unit keeps completion, hover, and definition context from an upper workspace import. */
+async function assertCrossUnitWorkspaceContext(originalText) {
+  const source = "from workspace_context import make_workspace_client\n\n\nclient = make_workspace_client()\nclient.";
+  const installed = await installOverlayDocument(`${PRELUDE}${INPUT_MARKER}\n${source}`);
+  const uri = overlayUris().editor;
+  try {
+    const completionPosition = positionOfText(installed, "client.").translate(0, "client.".length);
+    let labels = [];
+    for (let attempt = 0; attempt < 60 && !labels.includes("workspace_method"); attempt++) {
+      labels = completionLabels(await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", uri, completionPosition, "."));
+      if (!labels.includes("workspace_method")) { await delay(150); }
+    }
+    assert.ok(labels.includes("workspace_method"), `lower-unit completion lost the upper workspace import: ${labels.slice(0, 60).join(",")}`);
+    const hover = await waitForHoverText(uri, positionOfText(installed, "client =").translate(0, 1), /WorkspaceClient/);
+    assert.match(hover, /WorkspaceClient/, `lower-unit hover lost workspace type context: ${hover}`);
+    const definitions = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", uri, positionOfText(installed, "make_workspace_client()").translate(0, 2));
+    assert.ok(definitionUris(definitions).some((value) => value.includes("/workspace_context.py")), `lower-unit definition lost workspace context: ${JSON.stringify(definitionUris(definitions))}`);
+  } finally {
+    await installOverlayDocument(originalText);
+  }
 }
 
 /** Verifies a hover contains a concrete signal even when lower-priority providers add noise. */
