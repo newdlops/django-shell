@@ -784,7 +784,7 @@ test("PTY fallback preserves debug metadata instead of typing overlay debug cell
   assert.ok(notebookPtySessionSource.includes("function wantsPtyDebugWrapper"));
 });
 
-test("full debug teardown (restart/close) interrupts the backend and disconnects", () => {
+test("full debug teardown (stop/restart/close) interrupts the backend and disconnects", () => {
   assert.ok(customConsoleSource.includes("backend?.interrupt(\"debugWebview.stop\")"));
   assert.ok(customConsoleSource.includes("interruptExecution: (reason) => this.session?.backend?.interrupt(reason)"));
   assert.ok(debugControlsSource.includes("await interruptExecution?.();"));
@@ -841,7 +841,7 @@ test("a finished debug run ends warm and keeps the debugpy connection for reuse"
   assert.ok(customConsoleSource.includes("clearExternalDebugFrameDecoration();"));
 });
 
-test("debug reuses a warm connection instead of reconnecting; full teardown only on restart/close", () => {
+test("debug reuses a warm connection after natural completion; explicit stop/restart/close tears it down", () => {
   assert.ok(customConsoleSource.includes("return this.reuseWarmDebugRun(this.overlayDebugSession)"));
   assert.ok(customConsoleSource.includes("return this.reuseWarmDebugRun(this.debugSession)"));
   assert.ok(customConsoleSource.includes("private async reuseWarmDebugRun("));
@@ -851,10 +851,15 @@ test("debug reuses a warm connection instead of reconnecting; full teardown only
   assert.ok(customConsoleSource.includes("await session.disconnect();"));
 });
 
-test("stop keeps the debug connection warm and resumes a paused cell", () => {
-  assert.ok(customConsoleSource.includes('if (action === "stop") { await this.stopDebugRun(activeSession); return; }'));
-  assert.ok(customConsoleSource.includes("private async stopDebugRun("));
-  assert.ok(customConsoleSource.includes('runDebugControl("continue", session, this.debugThreadId'));
+test("stop interrupts the active cell and tears down debugging without continuing user code", () => {
+  assert.ok(customConsoleSource.includes('if (action === "stop") { await this.stopDebugRun(); return; }'));
+  const stopStart = customConsoleSource.indexOf("private async stopDebugRun("), stopEnd = customConsoleSource.indexOf("private async teardownDebug(", stopStart), stopBody = customConsoleSource.slice(stopStart, stopEnd);
+  assert.ok(stopBody.includes('this.lastDebugControlAction = "stop"'));
+  assert.ok(stopBody.includes("await this.teardownDebug()"));
+  assert.equal(stopBody.includes('runDebugControl("continue"'), false, "Stop must never resume the remaining user code");
+  assert.ok(customConsoleSource.includes('backend?.interrupt("debugWebview.stop"); await session.disconnect()'), "direct debugging interrupts before disconnect");
+  assert.ok(customConsoleSource.includes('backend?.interrupt("debugWebview.stop");\n    await vscode.debug.stopDebugging'), "file debugging interrupts before stopDebugging");
+  assert.ok(debugEventsSource.includes('if (hooks.lastControlAction() === "stop")'), "a disconnect-time continued event cannot restore running UI state");
 });
 
 test("stepInto target resolution is time-boxed and bounds language-server calls", () => {

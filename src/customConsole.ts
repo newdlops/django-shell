@@ -117,7 +117,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       return;
     }
     this.lastDebugControlAction = action; this.debugControlOriginOverlay = this.debugMode === "overlay" || this.lastDebugFrameOverlay; this.postDebugStatus(debugControlState(action), debugControlDetail(action));
-    if (action === "stop") { await this.stopDebugRun(activeSession); return; }
+    if (action === "stop") { await this.stopDebugRun(); return; }
     try {
       const result = await runDebugControl(action, activeSession, this.debugThreadId, undefined, this.logger);
       if (result.threadId) { this.debugThreadId = result.threadId; }
@@ -526,7 +526,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
     if (typed.type === "stopDebugShell") {
       this.logger?.log("debug.webview.stop", { attached: Boolean(typed.debugAttached), busy: Boolean(typed.debugBusy), runtimeReady: Boolean(typed.runtimeReady), state: String(typed.debugState || "") });
       const session = this.overlayDebugSession ?? this.debugSession;
-      if (session) { await this.stopDebugRun(session); } else { this.postDebugStatus("idle"); }
+      if (session) { await this.stopDebugRun(); } else { this.postDebugStatus("idle"); }
       return;
     }
     if (typed.type === "debugControl" && isDebugControlAction(typed.action)) {
@@ -652,13 +652,13 @@ export class CustomDjangoConsole implements vscode.Disposable {
   /** Returns whether one URI is a Python source debugpy can bind. */
   private isPythonDebugSourceUri(uri: vscode.Uri): boolean { const fsPath = uri.fsPath.replace(/\\/g, "/").toLowerCase(); return uri.scheme === "file" && (fsPath.endsWith(".py") || fsPath.includes("/.django-shell/")); }
 
-  /** Ends the active debug run once it has nothing left to stop at (failed cell, continue to the end, or no breakpoint hit) but keeps debugpy warm for instant reuse: resets the panel to idle and clears breakpoint state so later normal runs never pause. Full teardown happens only on restart, console close, or a terminated session. */
+  /** Ends a naturally completed debug run while keeping debugpy warm; explicit Stop, restart, close, and terminated sessions use full teardown. */
   private async endDebugRun(detail = ""): Promise<void> { if (!this.debugRunActive && this.debugThreadId === undefined) { return; } this.debugRunActive = false; this.debugThreadId = undefined; this.lastDebugControlAction = undefined; this.debugControlOriginOverlay = false; this.lastDebugFrameOverlay = false; clearExternalDebugFrameDecoration(); void vscode.commands.executeCommand("setContext", "djangoShell.externalDebugFrame", false); this.postDebugStatus("idle", detail); this.postDebugInfo({ state: "idle" }); await clearDebugBreakpoints(this.overlayDebugSession ?? this.debugSession, this.syncedDebugBreakpointUris, this.logger); await (this.session?.backend?.debugBreakpoints([]).catch(() => undefined) ?? Promise.resolve()); this.logger?.log("debug.run.end", { detail, warm: Boolean(this.overlayDebugSession || this.debugSession) }); }
 
-  /** Ends a debug run from the Stop control while keeping the connection warm; a cell paused at a breakpoint is resumed to completion after breakpoints are cleared. */
-  private async stopDebugRun(session: DirectDebugAdapterSession | vscode.DebugSession): Promise<void> { if (this.debugThreadId !== undefined) { await clearDebugBreakpoints(session, this.syncedDebugBreakpointUris, this.logger); await (this.session?.backend?.debugBreakpoints([]).catch(() => undefined) ?? Promise.resolve()); try { await runDebugControl("continue", session, this.debugThreadId, undefined, this.logger); this.logger?.log("debug.stop.resume", {}); return; } catch (error) { this.logger?.log("debug.stop.resume.error", { error: error instanceof Error ? error.message : String(error) }); } } await this.endDebugRun("stopped"); }
+  /** Immediately interrupts the active Python cell and ends its debugger connection when Stop is requested. */
+  private async stopDebugRun(): Promise<void> { this.lastDebugControlAction = "stop"; await this.teardownDebug(); }
 
-  /** Fully tears down the debugpy connection (restart/close only — per-run "stop" keeps it warm via stopDebugRun). */
+  /** Fully tears down the debugger after first arming an immediate backend execution interrupt. */
   private async teardownDebug(): Promise<void> {
     this.debugRunActive = false;
     if (this.overlayDebugSession) { const session = this.overlayDebugSession; this.overlayDebugSession = undefined; this.debugpyEndpoint = undefined; this.syncedDebugBreakpointUris.clear(); await this.session?.backend?.interrupt("debugWebview.stop"); await session.disconnect(); this.debugThreadId = undefined; this.postDebugStatus("idle", "stopped"); this.postDebugInfo({ state: "idle" }); return; }

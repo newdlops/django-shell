@@ -72,6 +72,7 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
     generation += 1;
     invalidateDebugInspection(hooks.getSession());
     hooks.logger?.log("debug.dap.continued", { threadId: body?.threadId ?? 0 });
+    if (hooks.lastControlAction() === "stop") { hooks.logger?.log("debug.dap.continued.stop", { threadId: body?.threadId ?? 0 }); return; }
     hooks.postStatus("running", "continued");
     clearInfo("running");
   };

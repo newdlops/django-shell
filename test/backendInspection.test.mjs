@@ -435,6 +435,45 @@ test("interrupt request stops the active Python execution thread", { skip: !PYTH
   assert.equal(payload.threadId, null);
 });
 
+test("interrupt armed while paused prevents the remaining debug cell from running", { skip: !PYTHON }, () => {
+  const script = [
+    "import importlib.util, json, sys, threading, types",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "entered=threading.Event()",
+    "release=threading.Event()",
+    "def pause():",
+    "    entered.set()",
+    "    release.wait(2)",
+    "fake_debugpy=types.SimpleNamespace(debug_this_thread=lambda: None, is_client_connected=lambda: True, breakpoint=pause)",
+    "sys.modules['debugpy']=fake_debugpy",
+    "namespace={'flag': []}",
+    "result={}",
+    "request={'token':'tok','kind':'execute','code':'flag.append(\"before\")\\nflag.append(\"after\")','filename':'<stop-probe>','breakpointLines':[2]}",
+    "thread=threading.Thread(target=lambda: result.setdefault('value', mod._run_request(namespace, 'tok', request, set())), daemon=True)",
+    "thread.start()",
+    "paused=entered.wait(2)",
+    "interrupted=mod._run_request(namespace, 'tok', {'token':'tok','kind':'interrupt','reason':'debug-stop'}, set()) if paused else {'ok':False,'interrupted':False}",
+    "release.set()",
+    "thread.join(2)",
+    "response=result.get('value') or {}",
+    "print(json.dumps({'alive':thread.is_alive(),'flag':namespace['flag'],'interrupted':interrupted,'paused':paused,'response':response,'threadId':mod._STATE.get('execution_thread_id')}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8", timeout: 10_000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.paused, true);
+  assert.equal(payload.alive, false);
+  assert.deepEqual(payload.flag, ["before"]);
+  assert.equal(payload.interrupted.ok, true);
+  assert.equal(payload.interrupted.interrupted, true);
+  assert.equal(payload.response.ok, false);
+  assert.match(payload.response.traceback, /_ExecutionInterrupted|KeyboardInterrupt/);
+  assert.equal(payload.threadId, null);
+});
+
 test("core backend defers the model browser until loadfeature installs it", { skip: !PYTHON }, () => {
   const script = [
     "import json, zlib, base64",
