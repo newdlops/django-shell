@@ -969,7 +969,8 @@ test("backend only traces the request thread for debug runs so warm connections 
   assert.ok(backendSource.includes("def _debug_current_thread(active):"));
   assert.ok(backendSource.includes("debugpy.trace_this_thread(False)"), "normal runs disable leftover tracing");
   // Progress emission is suppressed during a debug run so pause-time inspection reprs (QuerySet repr) don't flood.
-  assert.ok(backendSource.includes("bool(_STATE.get(\"progress_emit\")) and breakpoint_lines is None"));
+  assert.ok(backendSource.includes("output_emit = bool(_STATE.get(\"progress_emit\"))"));
+  assert.ok(backendSource.includes("progress_emit = output_emit and breakpoint_lines is None"), "debug runs suppress structured progress without suppressing stdout/stderr");
 });
 
 test("a warm run ignores and resumes a trailing stopped event after it has ended without re-activating debug", () => {

@@ -1224,11 +1224,12 @@ def _execute_code(namespace, code, filename=None, line_offset=0, source_text=Non
     compile_filename = filename or "<django-shell-input>"
     _install_debug_source_cache(compile_filename, source_text, code, line_offset)
     # A debug run steps line-by-line, and each pause's inspection reprs (e.g. Django QuerySet repr, which iterates) would
-    # otherwise flood the progress stream through the QuerySet-progress hook. Suppress progress while breakpoints are active.
-    progress_emit = bool(_STATE.get("progress_emit")) and breakpoint_lines is None
+    # otherwise flood structured progress through the QuerySet hook. Keep stdout/stderr live, but suppress iterable progress.
+    output_emit = bool(_STATE.get("progress_emit"))
+    progress_emit = output_emit and breakpoint_lines is None
     _progress_begin(code, emit=progress_emit)
-    stdout = _StreamingCapture("stdout", progress_emit)
-    stderr = _StreamingCapture("stderr", progress_emit)
+    stdout = _StreamingCapture("stdout", output_emit)
+    stderr = _StreamingCapture("stderr", output_emit)
     namespace["_djs_debug_should_break"] = _debug_should_break
     namespace["_djs_progress_iter"] = _progress_iter
     _debug_set_breakpoint_lines(breakpoint_lines)
@@ -2548,8 +2549,6 @@ def _progress_emit():
 
 def _progress_output(stream_name, text):
     """Writes one live stdout/stderr chunk as a progress marker."""
-    if not _STATE.get("progress_emit"):
-        return
     _progress_write_marker({"active": True, "kind": "output", "output": text, "stream": stream_name})
 
 

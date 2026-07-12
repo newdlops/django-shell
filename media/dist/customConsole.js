@@ -9481,6 +9481,7 @@ var fitAddon;
 var geometryFrame = 0;
 var lastGeometryKey = "";
 var pendingExecution = 0;
+var pendingExecutionCodes = /* @__PURE__ */ new Map();
 var runningOutputs = /* @__PURE__ */ new Map();
 var LIVE_OUTPUT_LIMIT = 2e4;
 var terminalReplay = createTerminalReplayState();
@@ -9651,13 +9652,16 @@ function handleHostMessage(message) {
   }
   if (message.type === "pythonStarted" && Number.isFinite(message.execution)) {
     pendingExecution = message.execution;
+    pendingExecutionCodes.set(pendingExecution, String(message.code || ""));
     setInputPrompt(`In [${pendingExecution}]:`);
     if (!message.debugRun) {
-      showRunningOutput(pendingExecution, String(message.code || ""));
+      showRunningOutput(pendingExecution, pendingExecutionCodes.get(pendingExecution) || "");
     }
   }
   if (message.type === "pythonResult") {
-    showOutput(message.execution || pendingExecution, cleanPythonResult(message.text), Boolean(message.ok), String(message.code || ""));
+    const execution = message.execution || pendingExecution;
+    showOutput(execution, cleanPythonResult(message.text), Boolean(message.ok), String(message.code || pendingExecutionCodes.get(execution) || ""));
+    pendingExecutionCodes.delete(execution);
   }
   if (message.type === "pythonProgress" && Number.isFinite(message.execution)) {
     showProgress(message.execution, message.progress || {});
@@ -9921,7 +9925,11 @@ function showOutput(count, result, ok, code) {
   vscode.postMessage({ ...e2eCellState("output"), execution: count || 0, ok: Boolean(ok), text: result, type: "e2eOutputRendered" });
 }
 function showProgress(count, progress) {
-  const item = outputItemFor(count);
+  let item = outputItemFor(count);
+  if (!item && typeof progress.output === "string" && progress.output) {
+    showRunningOutput(count, pendingExecutionCodes.get(count) || "");
+    item = outputItemFor(count);
+  }
   if (!item || !item.classList.contains("running")) {
     return;
   }
@@ -10065,6 +10073,7 @@ function clearOutput() {
 }
 function resetPythonCell() {
   pendingExecution = 0;
+  pendingExecutionCodes.clear();
   setInputPrompt("In\xA0[\xA0]:");
   clearOutput();
 }

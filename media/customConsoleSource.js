@@ -31,6 +31,7 @@ let fitAddon;
 let geometryFrame = 0;
 let lastGeometryKey = "";
 let pendingExecution = 0;
+const pendingExecutionCodes = new Map();
 const runningOutputs = new Map();
 const LIVE_OUTPUT_LIMIT = 20000;
 const terminalReplay = createTerminalReplayState();
@@ -221,13 +222,16 @@ function handleHostMessage(message) {
   }
   if (message.type === "pythonStarted" && Number.isFinite(message.execution)) {
     pendingExecution = message.execution;
+    pendingExecutionCodes.set(pendingExecution, String(message.code || ""));
     setInputPrompt(`In [${pendingExecution}]:`);
     if (!message.debugRun) {
-      showRunningOutput(pendingExecution, String(message.code || ""));
+      showRunningOutput(pendingExecution, pendingExecutionCodes.get(pendingExecution) || "");
     }
   }
   if (message.type === "pythonResult") {
-    showOutput(message.execution || pendingExecution, cleanPythonResult(message.text), Boolean(message.ok), String(message.code || ""));
+    const execution = message.execution || pendingExecution;
+    showOutput(execution, cleanPythonResult(message.text), Boolean(message.ok), String(message.code || pendingExecutionCodes.get(execution) || ""));
+    pendingExecutionCodes.delete(execution);
   }
   if (message.type === "pythonProgress" && Number.isFinite(message.execution)) {
     showProgress(message.execution, message.progress || {});
@@ -536,7 +540,11 @@ function showOutput(count, result, ok, code) {
 
 /** Updates one running output item with backend-reported row/item progress. */
 function showProgress(count, progress) {
-  const item = outputItemFor(count);
+  let item = outputItemFor(count);
+  if (!item && typeof progress.output === "string" && progress.output) {
+    showRunningOutput(count, pendingExecutionCodes.get(count) || "");
+    item = outputItemFor(count);
+  }
   if (!item || !item.classList.contains("running")) {
     return;
   }
@@ -703,6 +711,7 @@ function clearOutput() {
 /** Clears Python prompt and output state after a backend restart. */
 function resetPythonCell() {
   pendingExecution = 0;
+  pendingExecutionCodes.clear();
   setInputPrompt("In\u00a0[\u00a0]:");
   clearOutput();
 }

@@ -125,4 +125,6 @@ test("remote PTY stdout and stderr progress chunks stay visible in running outpu
   assert.ok(pythonBackendSource.includes('{"active": True, "kind": "output"'));
   assert.ok(customConsoleClientSource.includes("function appendLiveOutput"));
   assert.ok(customConsoleClientSource.includes('typeof progress.output === "string"'));
+  assert.ok(customConsoleClientSource.includes("pendingExecutionCodes.set"), "debug source is retained without rendering an output before execution reaches print");
+  assert.ok(customConsoleClientSource.includes("showRunningOutput(count, pendingExecutionCodes.get(count)"), "the first live debug output lazily creates its output item");
 });
