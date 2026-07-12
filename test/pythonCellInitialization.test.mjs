@@ -237,6 +237,21 @@ test("transient analysis snapshot restores the complete canonical source after a
   assert.equal(document.analysisText(), prelude + source);
 });
 
+test("cancellable analysis snapshot skips stale writes and provider work", async () => {
+  mockState.writes.length = 0;
+  const document = new OverlayMemoryDocument(undefined, "cancel-cell", "cancel-analysis");
+  await document.sync("current_value = 1\n", 0);
+  const writesBefore = mockState.writes.length;
+  let providerCalls = 0;
+
+  const result = await document.withCancellableAnalysisSnapshot("stale_value = 2\n", 0, () => true, async () => { providerCalls += 1; return "stale"; });
+
+  assert.equal(result, undefined);
+  assert.equal(providerCalls, 0);
+  assert.equal(mockState.writes.length, writesBefore);
+  assert.equal(document.visibleText(), "current_value = 1\n");
+});
+
 test("analysis snapshot lease converts a legacy marker focus to user-relative lines", async () => {
   mockState.writes.length = 0;
   const document = new OverlayMemoryDocument(undefined, "legacy-cell", "legacy-analysis");

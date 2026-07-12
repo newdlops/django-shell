@@ -11,9 +11,9 @@ import { OVERLAY_SHELL_LANGUAGE_ID } from "./overlayLanguage";
 import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
 import { mapOverlaySemanticTokenData } from "./overlaySemanticTokens";
 
-const COMPLETION_DEBOUNCE_MS = 30;
 const SEMANTIC_REGISTRATION_ATTEMPTS = 300;
 const SEMANTIC_REGISTRATION_DELAY_MS = 100;
+const SEMANTIC_TOKEN_DEBOUNCE_MS = 250;
 const SIGNATURE_BUDGET_MS = 200;
 const SIGNATURE_DEBOUNCE_MS = 40;
 const COMPLETION_QUERY_SNAPSHOT = Symbol("overlayCompletionQuerySnapshot");
@@ -63,9 +63,10 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   private readonly completionCache: OverlayCompletionRequestCache;
   private readonly completionResolutions = new WeakMap<vscode.CompletionItem, CompletionResolveContext>();
   private readonly semanticTokensChanged = new vscode.EventEmitter<void>();
-  private analysisSuggestionBusy = false;
+  private completionSuggestionBusy = false;
   private cleanupTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
+  private semanticVersion = 0;
   private signatureVersion = 0;
   readonly onDidChangeSemanticTokens = this.semanticTokensChanged.event;
 
@@ -94,6 +95,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   dispose(): void {
     this.disposed = true;
     clearTimeout(this.cleanupTimer);
+    this.semanticVersion += 1;
     this.signatureVersion += 1;
     this.completionCache.clear();
     for (const disposable of this.disposables) {
@@ -118,7 +120,8 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     if (!prelude.trim() && document.languageId !== OVERLAY_SHELL_LANGUAGE_ID) {
       return [];
     }
-    const result = await this.completionCache.provide(document, position, context.triggerCharacter, (isCurrent) => this.loadCompletionItems(text, position, context, isCurrent));
+    const result = await this.completionCache.provide(document, position, context.triggerCharacter, (isCurrent) => this.loadCompletionItems(text, position, context, isCurrent), () => token.isCancellationRequested);
+    if (token.isCancellationRequested) { return undefined; }
     this.rememberCompletionResolutions(result, text, position, context.triggerCharacter);
     return withDjangoCompletions(result, text, position, prelude);
   }
@@ -126,7 +129,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   /** Resolves Pylance's lazy auto-import edit and remaps it into the selected execution unit. */
   async resolveCompletionItem(item: vscode.CompletionItem, token: vscode.CancellationToken): Promise<vscode.CompletionItem> {
     const context = this.completionResolutions.get(item);
-    if (!context || token.isCancellationRequested || item.additionalTextEdits?.length) {
+    if (!context || token.isCancellationRequested || item.additionalTextEdits?.length || !completionMayNeedLazyImportResolution(item, context) || !this.completionContextStillCurrent(context)) {
       return item;
     }
     const analysisPosition = context.position.translate(context.offset, 0);
@@ -166,21 +169,11 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const offset = analysisOffsetForText(text, this.documents.inputStartLine(), this.documents.lineOffset());
     const protectedLineCount = protectedLineCountForText(text, offset);
     const analysisPosition = this.analysisPosition(position, offset);
-    if (!context.triggerCharacter) {
-      await completionDebounce();
-    }
-    if (!isCurrent()) {
-      return [];
-    }
-    if (this.analysisSuggestionBusy) {
-      return [];
-    }
-    this.analysisSuggestionBusy = true;
+    this.completionSuggestionBusy = true;
     try {
-      let result = await this.enqueueAnalysisRequest(text, position.line, () => isCurrent()
-        ? vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>("vscode.executeCompletionItemProvider", this.documents.analysisUri, analysisPosition, context.triggerCharacter)
-        : Promise.resolve([]));
+      let result = await this.documents.withCancellableAnalysisSnapshot(text, position.line, () => !isCurrent(), () => vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>("vscode.executeCompletionItemProvider", this.documents.analysisUri, analysisPosition, context.triggerCharacter));
       const fallback = completionEndFallback(text, position, context.triggerCharacter, result);
+      let querySnapshot: CompletionQuerySnapshot = { position, text };
       let usedEndFallback = false;
       if (fallback && isCurrent()) {
         const fallbackAnalysisPosition = this.analysisPosition(fallback.position, offset);
@@ -190,16 +183,19 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
             : [];
         });
         if (fallbackResult && completionItems(fallbackResult).some((item) => completionLabel(item) === fallback.identifier)) {
-          result = rememberCompletionQuerySnapshot(fallbackResult, fallback);
+          result = fallbackResult;
+          querySnapshot = fallback;
           usedEndFallback = true;
         }
       }
+      if (result) { result = rememberCompletionQuerySnapshot(result, querySnapshot); }
       this.cleanupGeneratedTabs();
       const current = isCurrent();
-      this.logger?.log("overlay.feature", { current, feature: "completion", items: current ? completionCount(result) : 0, ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1, endFallback: usedEndFallback });
-      return current ? mapCompletionResult(result, offset, protectedLineCount, { focusCharacter: position.character, focusLine: position.line, text }) : [];
+      this.logger?.log("overlay.feature", { current, feature: "completion", items: completionCount(result), ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1, endFallback: usedEndFallback });
+      return mapCompletionResult(result, offset, protectedLineCount, { focusCharacter: position.character, focusLine: position.line, text });
     } finally {
-      this.analysisSuggestionBusy = false;
+      this.completionSuggestionBusy = false;
+      if (!this.disposed) { this.semanticTokensChanged.fire(); }
     }
   }
 
@@ -276,26 +272,17 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     const offset = this.analysisOffset(document);
     const analysisPosition = this.analysisPosition(position, offset);
     await suggestionDelay(SIGNATURE_DEBOUNCE_MS);
-    if (token.isCancellationRequested || requestVersion !== this.signatureVersion || this.analysisSuggestionBusy) {
+    if (token.isCancellationRequested || requestVersion !== this.signatureVersion || this.completionSuggestionBusy) {
       return undefined;
     }
-    this.analysisSuggestionBusy = true;
-    let providerStarted = false;
-    try {
-      const provider = this.enqueueAnalysisRequest(text, position.line, () => token.isCancellationRequested || requestVersion !== this.signatureVersion
-        ? Promise.resolve(undefined)
-        : Promise.resolve(vscode.commands.executeCommand<vscode.SignatureHelp>("vscode.executeSignatureHelpProvider", this.documents.analysisUri, analysisPosition, context.triggerCharacter)));
-      providerStarted = true;
-      const tracked = provider.finally(() => { this.analysisSuggestionBusy = false; });
-      void tracked.then(() => this.cleanupGeneratedTabs(), () => undefined);
-      const ready = await withLatencyBudget(tracked, SIGNATURE_BUDGET_MS);
-      const current = !token.isCancellationRequested && requestVersion === this.signatureVersion;
-      const result = ready.completed && current ? ready.value : undefined;
-      this.logger?.log("overlay.feature", { completed: ready.completed, current, feature: "signature", items: result?.signatures.length ?? 0, ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
-      return result;
-    } finally {
-      if (!providerStarted) { this.analysisSuggestionBusy = false; }
-    }
+    const cancelled = () => token.isCancellationRequested || requestVersion !== this.signatureVersion || this.completionSuggestionBusy;
+    const provider = this.documents.withCancellableAnalysisSnapshot(text, position.line, cancelled, () => vscode.commands.executeCommand<vscode.SignatureHelp>("vscode.executeSignatureHelpProvider", this.documents.analysisUri, analysisPosition, context.triggerCharacter));
+    void provider.then(() => this.cleanupGeneratedTabs(), () => undefined);
+    const ready = await withLatencyBudget(provider, SIGNATURE_BUDGET_MS);
+    const current = !cancelled();
+    const result = ready.completed && current ? ready.value : undefined;
+    this.logger?.log("overlay.feature", { completed: ready.completed, current, feature: "signature", items: result?.signatures.length ?? 0, ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
+    return result;
   }
 
   /** Forwards complete Pylance semantic tokens while removing the hidden analysis prelude. */
@@ -304,13 +291,15 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       return undefined;
     }
     const started = Date.now();
+    const requestVersion = ++this.semanticVersion;
     const text = document.getText();
     const analysisUserStartLine = this.documents.lineOffset();
     const visibleUserStartLine = semanticVisibleUserStartLine(text, this.documents.preludeText(), analysisUserStartLine);
-    const result = await this.enqueueAnalysisRequest(text, visibleUserStartLine, () => token.isCancellationRequested
-      ? Promise.resolve(undefined)
-      : vscode.commands.executeCommand<vscode.SemanticTokens | undefined>("vscode.provideDocumentSemanticTokens", this.documents.analysisUri));
-    if (!result || token.isCancellationRequested) { return undefined; }
+    await suggestionDelay(SEMANTIC_TOKEN_DEBOUNCE_MS);
+    const cancelled = () => token.isCancellationRequested || requestVersion !== this.semanticVersion || this.completionSuggestionBusy;
+    if (cancelled()) { return undefined; }
+    const result = await this.documents.withCancellableAnalysisSnapshot(text, visibleUserStartLine, cancelled, () => vscode.commands.executeCommand<vscode.SemanticTokens | undefined>("vscode.provideDocumentSemanticTokens", this.documents.analysisUri));
+    if (!result || cancelled()) { return undefined; }
     const data = mapOverlaySemanticTokenData(result.data, analysisUserStartLine, visibleUserStartLine, document.lineCount);
     this.logger?.log("overlay.feature", { feature: "semanticTokens", items: data.length / 5, ms: Date.now() - started });
     return new vscode.SemanticTokens(data, result.resultId);
@@ -319,6 +308,12 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   /** Returns whether a document is the visible overlay editor document. */
   private isEditorDocument(document: vscode.TextDocument): boolean {
     return document.uri.toString() === this.documents.editorUri.toString();
+  }
+
+  /** Returns whether a completion clone still describes the current visible editor text. */
+  private completionContextStillCurrent(context: CompletionResolveContext): boolean {
+    const document = vscode.workspace.textDocuments.find((item) => item.uri.toString() === this.documents.editorUri.toString());
+    return !document || document.getText() === context.text;
   }
 
   /** Serializes one complete analysis snapshot through the provider that reads it. */
@@ -391,9 +386,6 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
   }
 }
 
-/** Waits briefly so ordinary typing bursts collapse before hidden-provider work starts. */
-function completionDebounce(): Promise<void> { return new Promise((resolve) => setTimeout(resolve, COMPLETION_DEBOUNCE_MS)); }
-
 /** Waits for a bounded language-feature debounce interval. */
 function suggestionDelay(milliseconds: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
 
@@ -451,6 +443,13 @@ function withDjangoCompletions(result: vscode.CompletionList | vscode.Completion
 /** Returns a completion label as plain text. */
 function completionLabel(item: vscode.CompletionItem): string {
   return typeof item.label === "string" ? item.label : item.label.label;
+}
+
+/** Returns whether an unresolved item carries the module metadata used by lazy auto-imports. */
+function completionMayNeedLazyImportResolution(item: vscode.CompletionItem, context: CompletionEditContext): boolean {
+  if (!bareCompletionContext(context)) { return false; }
+  const description = typeof item.label === "string" ? "" : item.label.description?.trim() ?? "";
+  return !!description || /\b(?:auto[ -]?import|import\s+from)\b/iu.test(item.detail ?? "");
 }
 
 /** Builds a high-priority Django manager completion for model classes. */

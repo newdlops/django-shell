@@ -113,7 +113,7 @@ test("overlay Monaco layout clamps dimensions instead of trusting transient DOM 
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
   assert.ok(rendererSource.includes("automaticLayout: false"));
-  assert.ok(rendererSource.includes("quickSuggestionsDelay: 80"), "typing bursts wait briefly before starting heavyweight completion providers");
+  assert.ok(rendererSource.includes("quickSuggestionsDelay: 25"), "typing pauses start completion providers without an extra visible delay");
   assert.ok(rendererSource.includes("function __dsoLayoutSize(root, host)"));
   assert.ok(rendererSource.includes("function __dsoMaxEditorHeight(viewportHeight)"));
   assert.ok(rendererSource.includes("availableHeight"));

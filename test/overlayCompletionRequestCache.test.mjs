@@ -10,7 +10,7 @@ const originalLoad = NodeModule._load;
 let OverlayCompletionRequestCache;
 let OverlayPythonFeatureBridge;
 let overlayPythonFeatureBridgeTest;
-const vscodeState = { executeCalls: 0, executeHandler: undefined, selectors: [] };
+const vscodeState = { executeCalls: 0, executeHandler: undefined, selectors: [], textDocuments: [] };
 
 /** Minimal position value used by completion range mapping. */
 class Position {
@@ -73,21 +73,33 @@ try {
   NodeModule._load = originalLoad;
 }
 
-test("reloads token extensions and only caches an exact empty request", async () => {
+test("caches only exact non-empty completion requests", async () => {
   const cache = new OverlayCompletionRequestCache();
   let loads = 0;
   const first = await cache.provide(fakeDocument("Co"), new Position(0, 2), undefined, async () => {
     loads += 1;
-    return [new CompletionItem("Company")];
+    return [new CompletionItem("Company"), new CompletionItem("Other")];
   });
   const extended = await cache.provide(fakeDocument("Company"), new Position(0, 7), undefined, async () => {
     loads += 1;
     return [new CompletionItem("Company")];
   });
+  const repeated = await cache.provide(fakeDocument("Company"), new Position(0, 7), undefined, async () => {
+    loads += 1;
+    return [new CompletionItem("unexpected")];
+  });
 
   assert.equal(loads, 2);
   assert.equal(first[0].range.end.character, 2);
   assert.equal(extended[0].range.end.character, 7);
+  assert.equal(repeated[0].label, "Company");
+
+  const unrelated = await cache.provide(fakeDocument("Other"), new Position(0, 5), undefined, async () => {
+    loads += 1;
+    return [new CompletionItem("Other")];
+  });
+  assert.equal(loads, 3, "a broad cached prefix list cannot hide a later token's candidates");
+  assert.equal(unrelated[0].label, "Other");
 
   const emptyCache = new OverlayCompletionRequestCache();
   let emptyLoads = 0;
@@ -101,6 +113,58 @@ test("reloads token extensions and only caches an exact empty request", async ()
     await boundedCache.provide(fakeDocument(text), new Position(0, text.length), undefined, async () => [new CompletionItem(String(index))]);
   }
   assert.equal(boundedCache.completionCache.size, 16, "large completion arrays remain bounded across a long session");
+});
+
+test("keeps a recent complete candidate visible only after an extended-prefix provider returns empty", async () => {
+  const cache = new OverlayCompletionRequestCache();
+  let loads = 0;
+  await cache.provide(fakeDocument("WidgetImp"), new Position(0, 9), undefined, async () => {
+    loads += 1;
+    return new CompletionList([new CompletionItem("WidgetImportedClient")]);
+  });
+  const extended = await cache.provide(fakeDocument("WidgetImportedCli"), new Position(0, 17), undefined, async () => {
+    loads += 1;
+    return [];
+  });
+
+  assert.equal(loads, 2, "a compatible fallback must not skip the latest provider request");
+  assert.equal(extended.items[0].label, "WidgetImportedClient");
+  assert.equal(extended.items[0].range.end.character, 17);
+  assert.equal(extended.isIncomplete, true);
+});
+
+test("retains an incomplete list for fallback without treating it as an exact cache hit", async () => {
+  const cache = new OverlayCompletionRequestCache();
+  let loads = 0;
+  await cache.provide(fakeDocument("WidgetImp"), new Position(0, 9), undefined, async () => {
+    loads += 1;
+    return new CompletionList([new CompletionItem("WidgetImportedClient")], true);
+  });
+  await cache.provide(fakeDocument("WidgetImp"), new Position(0, 9), undefined, async () => {
+    loads += 1;
+    return [];
+  });
+  const extended = await cache.provide(fakeDocument("WidgetImportedCli"), new Position(0, 17), undefined, async () => {
+    loads += 1;
+    return [];
+  });
+
+  assert.equal(loads, 3);
+  assert.equal(extended.items[0].label, "WidgetImportedClient");
+  assert.equal(extended.isIncomplete, true);
+});
+
+test("uses a matching array only as an incomplete empty-result fallback", async () => {
+  const cache = new OverlayCompletionRequestCache();
+  await cache.provide(fakeDocument("WidgetImp"), new Position(0, 9), undefined, async () => [
+    new CompletionItem("OtherName"),
+    new CompletionItem("WidgetImportedClient")
+  ]);
+
+  const extended = await cache.provide(fakeDocument("WidgetImportedCli"), new Position(0, 17), undefined, async () => []);
+
+  assert.deepEqual(extended.items.map((item) => item.label), ["WidgetImportedClient"]);
+  assert.equal(extended.isIncomplete, true);
 });
 
 test("does not cache incomplete completion lists at an exact token", async () => {
@@ -132,7 +196,46 @@ test("waits for the latest slow completion instead of losing the result at the f
   assert.equal(result[0].label, "AutoImportedClient");
 });
 
-test("runs one completion load at a time and retains only the latest pending context", async () => {
+test("drops a completion canceled before it enters the analysis lane", async () => {
+  vscodeState.executeCalls = 0;
+  vscodeState.executeHandler = () => { throw new Error("canceled completion reached a provider"); };
+  const documents = fakeOverlayDocuments("");
+  const bridge = new OverlayPythonFeatureBridge(documents);
+  const token = { isCancellationRequested: false };
+
+  const pending = bridge.provideCompletionItems(fakeDocument("Company", "django-shell-python"), new Position(0, 7), token, {});
+  token.isCancellationRequested = true;
+
+  assert.equal(await pending, undefined);
+  assert.equal(vscodeState.executeCalls, 0);
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
+test("keeps an exact active completion alive when a fresh caller replaces its canceled token", async () => {
+  vscodeState.executeCalls = 0;
+  const gate = deferred();
+  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? gate.promise : [];
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
+  const document = fakeDocument("WidgetImported", "django-shell-python");
+  const firstToken = { isCancellationRequested: false };
+  const secondToken = { isCancellationRequested: false };
+
+  const first = bridge.provideCompletionItems(document, new Position(0, 14), firstToken, {});
+  await nextTurn();
+  assert.equal(vscodeState.executeCalls, 1);
+  firstToken.isCancellationRequested = true;
+  const second = bridge.provideCompletionItems(document, new Position(0, 14), secondToken, {});
+  gate.resolve(new CompletionList([new CompletionItem("WidgetImportedClient")]));
+
+  assert.equal(await first, undefined);
+  assert.equal((await second).items[0].label, "WidgetImportedClient");
+  assert.equal(vscodeState.executeCalls, 1);
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
+test("runs one completion load at a time and transfers pending callers to the latest context", async () => {
   const cache = new OverlayCompletionRequestCache();
   const activeGate = deferred();
   const latestGate = deferred();
@@ -150,22 +253,25 @@ test("runs one completion load at a time and retains only the latest pending con
     calls.latest += 1;
     return latestGate.promise;
   });
+  let middleSettled = false;
+  void middle.then(() => { middleSettled = true; });
   await nextTurn();
 
   assert.deepEqual(calls, { active: 1, middle: 0, latest: 0 });
-  assert.deepEqual(await middle, [], "a superseded pending request resolves without starting its loader");
+  assert.equal(middleSettled, false, "a superseded pending request must not emit a false empty result");
 
   activeGate.resolve([new CompletionItem("active")]);
-  await active;
+  assert.equal((await active)[0].label, "active");
   await nextTurn();
   assert.deepEqual(calls, { active: 1, middle: 0, latest: 1 });
 
   latestGate.resolve([new CompletionItem("latest")]);
-  const latestResult = await latest;
+  const [middleResult, latestResult] = await Promise.all([middle, latest]);
+  assert.equal(middleResult[0].label, "latest");
   assert.equal(latestResult[0].label, "latest");
 });
 
-test("replaces an active token-extension snapshot before it can sync stale text", async () => {
+test("shares an active compatible prefix snapshot across token extensions", async () => {
   const cache = new OverlayCompletionRequestCache();
   const activeGate = deferred();
   const calls = { latest: 0 };
@@ -173,7 +279,7 @@ test("replaces an active token-extension snapshot before it can sync stale text"
   const active = cache.provide(fakeDocument("Co"), new Position(0, 2), undefined, async (isCurrent) => {
     await activeGate.promise;
     assert.equal(isCurrent(), false, "a longer token supersedes the captured short snapshot");
-    return [new CompletionItem("Company")];
+    return new CompletionList([new CompletionItem("Company")]);
   });
   const latest = cache.provide(fakeDocument("Company"), new Position(0, 7), undefined, async (isCurrent) => {
     calls.latest += 1;
@@ -184,10 +290,60 @@ test("replaces an active token-extension snapshot before it can sync stale text"
   assert.equal(calls.latest, 0, "the latest snapshot waits behind the single active provider lane");
 
   activeGate.resolve();
-  assert.deepEqual(await active, []);
+  assert.equal((await active).items[0].label, "Company");
   const result = await latest;
-  assert.equal(calls.latest, 1);
-  assert.equal(result[0].range.end.character, 7);
+  assert.equal(calls.latest, 0);
+  assert.equal(result.items[0].range.end.character, 7);
+});
+
+test("loads the latest token once when an active prefix result is empty", async () => {
+  const cache = new OverlayCompletionRequestCache();
+  const activeGate = deferred();
+  let latestLoads = 0;
+
+  const active = cache.provide(fakeDocument("Au"), new Position(0, 2), undefined, async () => activeGate.promise);
+  const latest = cache.provide(fakeDocument("AutoImportedClient"), new Position(0, 18), undefined, async () => {
+    latestLoads += 1;
+    return [new CompletionItem("AutoImportedClient")];
+  });
+  activeGate.resolve([]);
+
+  assert.deepEqual(await active, []);
+  assert.equal((await latest)[0].label, "AutoImportedClient");
+  assert.equal(latestLoads, 1);
+});
+
+test("keeps same-position trigger and quick-suggest results distinct without settling pending empty", async () => {
+  const cache = new OverlayCompletionRequestCache();
+  const gate = deferred();
+  let quickLoads = 0;
+  const document = fakeDocument("Company");
+  const position = new Position(0, 7);
+
+  const triggered = cache.provide(document, position, ".", async () => gate.promise);
+  const quick = cache.provide(document, position, undefined, async () => { quickLoads += 1; return [new CompletionItem("QuickCompany")]; });
+  gate.resolve([new CompletionItem("Company")]);
+
+  assert.equal((await triggered)[0].label, "Company");
+  assert.equal((await quick)[0].label, "QuickCompany");
+  assert.equal(quickLoads, 1);
+});
+
+test("does not reuse an unbounded array as a complete prefix result", async () => {
+  const cache = new OverlayCompletionRequestCache();
+  const activeGate = deferred();
+  let latestLoads = 0;
+
+  const active = cache.provide(fakeDocument("Co"), new Position(0, 2), undefined, async () => activeGate.promise);
+  const latest = cache.provide(fakeDocument("Company"), new Position(0, 7), undefined, async () => {
+    latestLoads += 1;
+    return [new CompletionItem("Company")];
+  });
+  activeGate.resolve([new CompletionItem("Company")]);
+
+  await active;
+  assert.equal((await latest)[0].label, "Company");
+  assert.equal(latestLoads, 1);
 });
 
 test("starts a fresh same-shape load after completion state is invalidated", async () => {
@@ -303,6 +459,63 @@ test("forwards hidden Pylance semantic tokens onto visible user lines", async ()
 
   assert.deepEqual([...result.data], [0, 0, 5, 2, 8]);
   assert.equal(result.resultId, "semantic-result");
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
+test("drops a canceled semantic request before it reaches the shared analysis lane", async () => {
+  vscodeState.executeCalls = 0;
+  vscodeState.executeHandler = () => { throw new Error("canceled semantic work reached a provider"); };
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Name\n"));
+  const token = { isCancellationRequested: false };
+
+  const pending = bridge.provideDocumentSemanticTokens(fakeDocument("value = 1", "django-shell-python"), token);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  token.isCancellationRequested = true;
+
+  assert.equal(await pending, undefined);
+  assert.equal(vscodeState.executeCalls, 0);
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
+test("drops an older semantic result after a newer version starts", async () => {
+  vscodeState.executeCalls = 0;
+  const firstGate = deferred();
+  const semantic = new SemanticTokens(Uint32Array.from([0, 0, 5, 1, 0]), "semantic-result");
+  vscodeState.executeHandler = (command) => command === "vscode.provideDocumentSemanticTokens"
+    ? vscodeState.executeCalls === 1 ? firstGate.promise : semantic
+    : [];
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Name\n"));
+  const document = fakeDocument("value = 1", "django-shell-python");
+
+  const older = bridge.provideDocumentSemanticTokens(document, { isCancellationRequested: false });
+  await new Promise((resolve) => setTimeout(resolve, 270));
+  assert.equal(vscodeState.executeCalls, 1);
+  const newer = bridge.provideDocumentSemanticTokens(document, { isCancellationRequested: false });
+  firstGate.resolve(semantic);
+
+  assert.equal(await older, undefined);
+  assert.equal((await newer).resultId, "semantic-result");
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
+test("keeps semantic refresh work behind an active completion", async () => {
+  vscodeState.executeCalls = 0;
+  const completionGate = deferred();
+  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? completionGate.promise : new SemanticTokens(Uint32Array.from([]));
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Name\n"));
+  const document = fakeDocument("Name", "django-shell-python");
+
+  const completion = bridge.provideCompletionItems(document, new Position(0, 4), { isCancellationRequested: false }, { triggerCharacter: "." });
+  await nextTurn();
+  const semantic = await bridge.provideDocumentSemanticTokens(document, { isCancellationRequested: false });
+
+  assert.equal(semantic, undefined);
+  assert.equal(vscodeState.executeCalls, 1);
+  completionGate.resolve([new CompletionItem("Name")]);
+  await completion;
   bridge.dispose();
   vscodeState.executeHandler = undefined;
 });
@@ -543,7 +756,7 @@ test("resolves a lazy hidden completion edit and maps it through the public prov
   vscodeState.executeHandler = (command, _uri, _position, _trigger, resolveCount) => {
     if (command !== "vscode.executeCompletionItemProvider") { return []; }
     completionCalls += 1;
-    const item = new CompletionItem("WorkspaceClient");
+    const item = new CompletionItem({ description: "workspace_context", label: "WorkspaceClient" });
     item.textEdit = new TextEdit(new Range(4, 9, 4, 21), "WorkspaceClient");
     if (resolveCount === 1) {
       item.additionalTextEdits = [new TextEdit(new Range(0, 0, 0, 0), "from workspace_context import WorkspaceClient\n")];
@@ -572,7 +785,7 @@ test("retries inside a completed import name and preserves that position for laz
     if (command !== "vscode.executeCompletionItemProvider") { return []; }
     observed.push({ character: position.character, resolveCount });
     if (position.character === 27) { return [new CompletionItem("generic_name")]; }
-    const item = new CompletionItem("AutoImportedClient");
+    const item = new CompletionItem({ description: "workspace_context", label: "AutoImportedClient" });
     item.textEdit = new TextEdit(new Range(4, 9, 4, 27), "AutoImportedClient");
     if (resolveCount === 1) {
       item.additionalTextEdits = [new TextEdit(new Range(0, 0, 0, 0), "from workspace_context import AutoImportedClient\n")];
@@ -584,7 +797,7 @@ test("retries inside a completed import name and preserves that position for laz
   const document = fakeDocument(source, "django-shell-python");
 
   const completions = await bridge.provideCompletionItems(document, new Position(3, 27), { isCancellationRequested: false }, {});
-  assert.equal(completions[0].label, "AutoImportedClient");
+  assert.equal(completions[0].label.label, "AutoImportedClient");
   const resolved = await bridge.resolveCompletionItem(completions[0], { isCancellationRequested: false });
 
   assert.deepEqual(observed, [
@@ -594,6 +807,38 @@ test("retries inside a completed import name and preserves that position for laz
   ]);
   assert.deepEqual(resolved.additionalTextEdits[0].range, new Range(3, 0, 3, 0));
   assert.equal(resolved.additionalTextEdits[0].newText, "from workspace_context import AutoImportedClient\n\n");
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
+test("does not resolve ordinary completion documentation through another global provider pass", async () => {
+  vscodeState.executeCalls = 0;
+  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? [new CompletionItem("ordinary_name")] : [];
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
+  const document = fakeDocument("ordinary_na", "django-shell-python");
+
+  const completions = await bridge.provideCompletionItems(document, new Position(0, 11), { isCancellationRequested: false }, { triggerCharacter: "." });
+  await bridge.resolveCompletionItem(completions[0], { isCancellationRequested: false });
+
+  assert.equal(vscodeState.executeCalls, 1);
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
+test("skips a lazy auto-import resolve after visible typing advances", async () => {
+  vscodeState.executeCalls = 0;
+  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider"
+    ? [new CompletionItem({ description: "workspace_context", label: "WorkspaceClient" })]
+    : [];
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
+  const document = fakeDocument("WorkspaceCli", "django-shell-python");
+  const completions = await bridge.provideCompletionItems(document, new Position(0, 12), { isCancellationRequested: false }, { triggerCharacter: "." });
+  vscodeState.textDocuments = [fakeDocument("WorkspaceClient", "django-shell-python")];
+
+  await bridge.resolveCompletionItem(completions[0], { isCancellationRequested: false });
+
+  assert.equal(vscodeState.executeCalls, 1);
+  vscodeState.textDocuments = [];
   bridge.dispose();
   vscodeState.executeHandler = undefined;
 });
@@ -651,6 +896,7 @@ function fakeOverlayDocuments(prelude) {
     preludeText: () => prelude,
     syncs: 0,
     async withAnalysisSnapshot(_text, _line, request) { this.syncs += 1; return await request(); },
+    async withCancellableAnalysisSnapshot(_text, _line, isCancelled, request) { this.syncs += 1; return isCancelled() ? undefined : await request(); },
     async withTransientAnalysisSnapshot(_text, _line, request) { this.syncs += 1; return await request(); }
   };
 }
@@ -688,6 +934,6 @@ function createVscodeMock() {
       registerReferenceProvider: register,
       registerSignatureHelpProvider: register
     },
-    workspace: { async openTextDocument() { return {}; } }
+    workspace: { async openTextDocument() { return {}; }, get textDocuments() { return vscodeState.textDocuments; } }
   };
 }

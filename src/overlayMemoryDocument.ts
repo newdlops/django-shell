@@ -134,6 +134,21 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     });
   }
 
+  /** Skips a queued analysis snapshot entirely when its language request is no longer current. */
+  async withCancellableAnalysisSnapshot<T>(text: string, focusLine: number | undefined, isCancelled: () => boolean, request: () => PromiseLike<T>): Promise<T | undefined> {
+    const snapshotPrelude = this.prelude;
+    return this.enqueueWrite(async () => {
+      if (isCancelled()) { return undefined; }
+      const snapshot = extractUserSnapshot(text, snapshotPrelude, focusLine);
+      const changed = snapshot.text !== this.text;
+      if (changed) { this.text = snapshot.text; this.editorDirty = true; }
+      const analysisSnapshot = analysisText(snapshotPrelude, snapshot.text);
+      this.logger?.log("overlay.memory.cancellableLease", { ...textFields(snapshot.text), changed, focusLine: snapshot.focusLine ?? -1, fullLines: textFields(text).lines });
+      await this.writeAnalysisText(analysisSnapshot);
+      return isCancelled() ? undefined : await request();
+    });
+  }
+
   /** Installs a provider-only analysis snapshot and restores the latest canonical source afterward. */
   async withTransientAnalysisSnapshot<T>(text: string, focusLine: number | undefined, request: () => PromiseLike<T>): Promise<T> {
     const snapshotPrelude = this.prelude;
