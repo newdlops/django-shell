@@ -94,6 +94,7 @@ export function overlayCleanupRendererSource(): string {
       __dsoDisposeValue(root.__dsoPreludeModelDisposable);
       __dsoDisposeValue(root.__dsoPreludeKeyDisposable);
       __dsoDisposeValue(root.__dsoSemanticDisposable);
+      __dsoDisposeValue(root.__dsoQueryResultDisposable);
       __dsoDisposeValue(root.__dsoNativeCompletionDisposable);
       root.__dsoNativeCompletionDisposable = null; root.__dsoNativeCompletionEditor = null; root.__dsoNativeCompletionVersion = "";
       __dsoStopOverlayObservers(root);

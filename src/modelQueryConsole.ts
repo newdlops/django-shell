@@ -3,7 +3,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import type { BackendTransportMode } from "./backendClient";
-import type { BackendModelColumn, ModelCommitChange, ModelRelatedQuery } from "./modelBackend";
+import type { BackendModelColumn, BackendModelQueryResult, ModelCommitChange, ModelRelatedQuery } from "./modelBackend";
 import type { ModelDataSource } from "./modelBrowser";
 import { modelBrowserHtml } from "./modelBrowserHtml";
 import { DiagnosticLogger } from "./diagnostics";
@@ -48,6 +48,7 @@ export class ModelQueryConsole implements vscode.Disposable {
   private lastEditorGeometry: WorkbenchOverlayGeometry | undefined;
   private draftCode = "";
   private lastCode: string | undefined;
+  private lastQueryResult: { result?: BackendModelQueryResult; source: string } | undefined;
   private queryRequestId = 0;
   private nextOffset: number | null = null;
   private pageSize = PAGE_SIZE;
@@ -176,6 +177,7 @@ export class ModelQueryConsole implements vscode.Disposable {
     const requestId = ++this.queryRequestId;
     if (recordExecution) { this.draftCode = code; this.lastCode = code; }
     this.post({ type: "queryStarted" });
+    if (reset) { this.lastQueryResult = { source: code }; this.overlay?.setQueryResult(undefined, code); }
     const offset = reset ? 0 : this.nextOffset ?? 0;
     this.nextOffset = null;
     const result = await this.source.modelQuery({ code, limit: this.pageSize, offset });
@@ -193,8 +195,10 @@ export class ModelQueryConsole implements vscode.Disposable {
     this.nextOffset = result.hasMore ? offset + this.pageSize : null;
     this.current = result.app && result.model ? { app: result.app, model: result.model } : undefined;
     this.columns = Array.isArray(result.columns) ? result.columns : [];
+    if (reset) { this.lastQueryResult = { result: result.result, source: code }; this.overlay?.setQueryResult(result.result, code); }
     if (reset) {
-      this.post({ schema: { app: result.app ?? "", columns: result.columns, label: "ORM Query", model: result.model ?? "query", ok: true, pk: result.pk ?? "", relations: result.relations, table: "" }, type: "schema" });
+      const resultLabel = result.result ? `${result.result.label} result${result.result.expression ? ` · ${result.result.expression}` : ""}` : "ORM Query";
+      this.post({ schema: { app: result.app ?? "", columns: result.columns, label: resultLabel, model: result.model ?? "query", ok: true, pk: result.pk ?? "", relations: result.relations, table: "" }, type: "schema" });
     }
     this.post({ append: !reset, rows: result, type: "rows" });
   }
@@ -282,6 +286,7 @@ export class ModelQueryConsole implements vscode.Disposable {
         await this.activateFallback(overlay, panel, generation);
         return;
       }
+      if (this.lastQueryResult) { overlay.setQueryResult(this.lastQueryResult.result, this.lastQueryResult.source); }
       this.inputAuthority = "overlay";
       void this.updateOverlayPrelude(overlay);
     } catch (error) {

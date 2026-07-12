@@ -93,7 +93,31 @@ test("parks and restores only the owner-matched body widget portal", () => {
 });
 
 test("emits parseable workbench overlay renderer source", () => {
-  assert.equal(typeof Function(overlayRendererSource("file:///tmp/console-cell.py")), "function");
+  const source = overlayRendererSource("file:///tmp/console-cell.py");
+  assert.equal(typeof Function(source), "function");
+  assert.equal(source.match(/function __dsoExecutionUnitRange/g)?.length, 1, "the full renderer includes the shared boundary parser once");
+});
+
+test("uses matching import-aware execution boundaries in the renderer", () => {
+  const source = overlayPythonRangeRendererSource();
+  const unit = Function(`${source}\nreturn __dsoExecutionUnitRange;`)();
+  const ordinaryImport = fakeModel("import os\n\n\nprint(os.name)");
+  const parenthesized = fakeModel("from pathlib import (\n    Path,\n)\n\n\nPath.cwd()");
+  const backslash = fakeModel("from package import First, \\\n    Second\n\n\nuse(First, Second)");
+  const commented = fakeModel("import os\n# Used below.\n\n\nprint(os.name)");
+  const hardSeparator = fakeModel("from pathlib import Path\n\n\n\nPath.cwd()");
+  const laterCode = fakeModel("import os\n\n\nname = os.name\n\n\nprint(name)");
+  const semicolon = fakeModel("import os; name = os.name\n\n\nprint(name)");
+
+  assert.deepEqual(unit(ordinaryImport, 4, 1), { end: 4, start: 1 });
+  assert.deepEqual(unit(ordinaryImport, 2, 1), { end: 4, start: 1 });
+  assert.deepEqual(unit(parenthesized, 6, 1), { end: 6, start: 1 });
+  assert.deepEqual(unit(backslash, 5, 1), { end: 5, start: 1 });
+  assert.deepEqual(unit(commented, 5, 1), { end: 5, start: 1 });
+  assert.equal(unit(hardSeparator, 2, 1), null);
+  assert.deepEqual(unit(hardSeparator, 5, 1), { end: 5, start: 5 });
+  assert.deepEqual(unit(laterCode, 7, 1), { end: 7, start: 7 });
+  assert.deepEqual(unit(semicolon, 4, 1), { end: 4, start: 4 });
 });
 
 test("uses native Python language features for shell and submit overlays", () => {
@@ -231,7 +255,7 @@ test("runs import-led execution units independently in arbitrary cursor order", 
   let keyHandler;
   const upperCode = "import unexecuted_upper_side_effect";
   const lowerCode = "from workspace_context import WorkspaceClient\nclient = WorkspaceClient()";
-  const text = `${upperCode}\n\n\n${lowerCode}\n`;
+  const text = `${upperCode}\n\n\n\n${lowerCode}\n`;
   const editor = fakeEditor(fakeModel(text), { column: 1, lineNumber: 5 });
   editor.onKeyDown = (callback) => { keyHandler = callback; return { dispose() {} }; };
   const posts = [];
@@ -254,12 +278,12 @@ test("runs import-led execution units independently in arbitrary cursor order", 
 
   const runPayloads = posts.filter((payload) => payload.type === "run");
   assert.deepEqual(runPayloads.map((payload) => payload.code), [lowerCode, upperCode], "ordinary execution follows cursor order without implicitly running an earlier unit");
-  assert.deepEqual(runPayloads.map((payload) => payload.range), [{ end: 5, start: 4 }, { end: 1, start: 1 }]);
+  assert.deepEqual(runPayloads.map((payload) => payload.range), [{ end: 6, start: 5 }, { end: 1, start: 1 }]);
   assert.equal(lowerDebugPayload.code, lowerCode, "Debug Current excludes an unexecuted unit above the cursor");
-  assert.deepEqual(lowerDebugPayload.range, { end: 5, start: 4 });
+  assert.deepEqual(lowerDebugPayload.range, { end: 6, start: 5 });
   assert.equal(upperDebugPayload.code, upperCode, "the upper unit remains independently runnable after the lower unit");
   assert.deepEqual(upperDebugPayload.range, { end: 1, start: 1 });
-  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 4 }, "running an upper unit only moves to the existing lower unit without executing it");
+  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 5 }, "running an upper unit only moves to the existing lower unit without executing it");
   assert.ok(runPayloads.every((payload) => payload.text === text || payload.text.startsWith(text)), "source mapping may carry the full document without executing it");
 });
 
@@ -294,6 +318,24 @@ test("creates a hard separator after execution and never reruns from its empty p
   keyHandler(monacoEnterEvent());
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(posts.filter((payload) => payload.type === "run").map((payload) => payload.code), ["first = 1", "second = 2"]);
+});
+
+test("creates a three-blank separator after an import-only execution", async () => {
+  const source = overlaySyncRendererSource();
+  const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };`)(window, document, () => undefined);
+  let keyHandler;
+  const model = fakeModel("from pathlib import Path");
+  const editor = fakeEditor(model);
+  editor.onKeyDown = (callback) => { keyHandler = callback; return { dispose() {} }; };
+
+  api.installEnterRunner({}, editor, () => ({ json: async () => ({ executed: true }) }));
+  keyHandler(monacoEnterEvent());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(model.getValue(), "from pathlib import Path\n\n\n\n");
+  assert.deepEqual(editor.getPosition(), { column: 1, lineNumber: 5 });
 });
 
 test("does not leak upper multiline continuation state into a lower execution unit", async () => {
@@ -347,7 +389,7 @@ test("preserves pasted multiline source with internal blank lines", async () => 
   assert.ok(posts.some((payload) => payload.type === "run" && payload.code === code.trimEnd()));
 });
 
-test("treats a leading import block as an independent execution unit", async () => {
+test("keeps a leading parenthesized import with code after its conventional gap", async () => {
   const source = overlaySyncRendererSource();
   const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
   const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
@@ -366,11 +408,11 @@ test("treats a leading import block as an independent execution unit", async () 
   await new Promise((resolve) => setImmediate(resolve));
 
   const runPayload = posts.find((payload) => payload.type === "run");
-  assert.equal(runPayload.code, "def build():\n    return Path.cwd()");
-  assert.deepEqual(runPayload.range, { end: 7, start: 6 });
+  assert.equal(runPayload.code, code.trimEnd());
+  assert.deepEqual(runPayload.range, { end: 7, start: 1 });
 });
 
-test("keeps every import-led unit independent after an earlier separator", async () => {
+test("keeps code after an import's conventional gap in the import-led unit", async () => {
   const source = overlaySyncRendererSource();
   const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
   const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
@@ -389,8 +431,8 @@ test("keeps every import-led unit independent after an earlier separator", async
   await new Promise((resolve) => setImmediate(resolve));
 
   const runPayload = posts.find((payload) => payload.type === "run");
-  assert.equal(runPayload.code, "print(os.name)");
-  assert.deepEqual(runPayload.range, { end: 7, start: 7 });
+  assert.equal(runPayload.code, "import os\n\n\nprint(os.name)");
+  assert.deepEqual(runPayload.range, { end: 7, start: 4 });
 });
 
 test("previews the current Enter execution range with editor decorations", () => {
@@ -405,15 +447,15 @@ test("previews the current Enter execution range with editor decorations", () =>
   api.installEnterRunner(root, editor, () => ({ json: async () => ({ executed: true }) }));
 
   const rangeDecoration = editor.decorations.find((item) => item.options.className === "dso-exec-range");
-  assert.deepEqual(root.__dsoExecutionRangePreview, { end: 7, start: 7 });
+  assert.deepEqual(root.__dsoExecutionRangePreview, { end: 7, start: 4 });
   assert.equal(rangeDecoration.options.isWholeLine, true);
   assert.equal(rangeDecoration.options.linesDecorationsClassName, undefined);
   assert.equal(editor.decorations.some((item) => item.options.linesDecorationsClassName === "dso-exec-range-rail"), false);
-  assert.equal(rangeDecoration.range.startLineNumber, 7);
+  assert.equal(rangeDecoration.range.startLineNumber, 4);
   assert.equal(rangeDecoration.range.endLineNumber, 7);
   assert.equal(rangeDecoration.range.startColumn, 1);
   assert.equal(editor.options.lineNumbers(4), ">>>");
-  assert.equal(editor.options.lineNumbers(5), "");
+  assert.equal(editor.options.lineNumbers(5), "...");
 });
 
 test("reveals breakpoint lines as glyph-margin dots while leaving breakpoint SETTING native", () => {
@@ -655,15 +697,27 @@ test("keeps continuation prompts across single blank lines inside pasted multili
   assert.equal(api.promptForLine(model, 1, 6, {}), "...");
 });
 
-test("shows a fresh prompt after an import unit's hard separator", () => {
+test("keeps continuation prompts across an import's conventional gap", () => {
   const source = overlayPythonRangeRendererSource();
   const api = Function(`${source}\nreturn { promptForLine: __dsoPromptForLine };`)();
   const model = fakeModel("print('old')\n\n\nimport os\n\n\nprint(os.name)\n");
 
   assert.equal(api.promptForLine(model, 1, 4, {}), ">>>");
-  assert.equal(api.promptForLine(model, 1, 5, {}), "");
-  assert.equal(api.promptForLine(model, 1, 6, {}), "");
-  assert.equal(api.promptForLine(model, 1, 7, {}), ">>>");
+  assert.equal(api.promptForLine(model, 1, 5, {}), "...");
+  assert.equal(api.promptForLine(model, 1, 6, {}), "...");
+  assert.equal(api.promptForLine(model, 1, 7, {}), "...");
+});
+
+test("shows a fresh prompt after three blank lines following an import", () => {
+  const source = overlayPythonRangeRendererSource();
+  const api = Function(`${source}\nreturn { promptForLine: __dsoPromptForLine };`)();
+  const model = fakeModel("import os\n\n\n\nprint(os.name)\n");
+
+  assert.equal(api.promptForLine(model, 1, 1, {}), ">>>");
+  assert.equal(api.promptForLine(model, 1, 2, {}), "");
+  assert.equal(api.promptForLine(model, 1, 3, {}), "");
+  assert.equal(api.promptForLine(model, 1, 4, {}), "");
+  assert.equal(api.promptForLine(model, 1, 5, {}), ">>>");
 });
 
 test("uses the live execution preview for prompt starts", () => {

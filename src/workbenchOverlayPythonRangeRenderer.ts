@@ -1,8 +1,11 @@
 // Renderer-side Python statement range helpers for the Django shell overlay.
+import { overlayExecutionUnitRendererSource } from "./workbenchOverlayExecutionUnitRenderer";
 
 /** Builds JavaScript helpers that find shell-style Python execution ranges. */
 export function overlayPythonRangeRendererSource(): string {
   return `
+    ${overlayExecutionUnitRendererSource()}
+
     /** Returns a shell-style prompt label for one visible input line. */
     function __dsoPromptForLine(model, startLine, line, root) {
       if (line < startLine) { return ""; }
@@ -22,47 +25,16 @@ export function overlayPythonRangeRendererSource(): string {
       return line > cellStart ? "..." : ">>>";
     }
 
-    /** Returns the first prompt line for the current input unit, treating two blank lines as the separator. */
+    /** Returns the first prompt line for the current import-aware execution unit. */
     function __dsoPromptCellStartLine(model, lineNumber, floor) {
-      let blankRun = 0;
-      for (let index = lineNumber - 1; index >= floor; index--) {
-        if (!model.getLineContent(index).trim()) {
-          blankRun++;
-          if (blankRun >= 2) {
-            return index + 2;
-          }
-        } else {
-          blankRun = 0;
-        }
-      }
-      return floor;
+      const unit = __dsoExecutionUnitRange(model, lineNumber, floor);
+      return unit ? unit.start : lineNumber;
     }
 
     /** Returns whether one blank line sits inside a pasted multiline input unit. */
     function __dsoPromptBlankInsideCell(model, lineNumber, floor) {
-      let before = false;
-      let blankRun = 1;
-      for (let index = lineNumber - 1; index >= floor; index--) {
-        if (!model.getLineContent(index).trim()) {
-          blankRun++;
-          if (blankRun >= 2) { break; }
-        } else {
-          before = true;
-          break;
-        }
-      }
-      let after = false;
-      blankRun = 1;
-      for (let index = lineNumber + 1; index <= model.getLineCount(); index++) {
-        if (!model.getLineContent(index).trim()) {
-          blankRun++;
-          if (blankRun >= 2) { break; }
-        } else {
-          after = true;
-          break;
-        }
-      }
-      return before && after;
+      const unit = __dsoExecutionUnitRange(model, lineNumber, floor);
+      return !!(unit && lineNumber > unit.start && lineNumber < unit.end);
     }
 
     /** Returns the first line of the current statement, scoped to the input region. */

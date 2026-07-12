@@ -278,29 +278,18 @@ export function overlaySyncRendererSource(): string {
       };
     }
 
-    /** Returns the contiguous non-blank block at the cursor as one execution unit. */
+    /** Returns the import-aware execution unit at the cursor. */
     function __dsoMultilinePayload(root, editor) {
       const model = editor.getModel && editor.getModel();
       if (!model) { return { code: "", range: null }; }
       const inputStartLine = (root && root.__dsoInputStartLine) || 1;
       const position = editor.getPosition && editor.getPosition();
       const cursorLine = position ? position.lineNumber : model.getLineCount();
-      let probeLine = Math.min(Math.max(inputStartLine, cursorLine), model.getLineCount());
-      if (__dsoCellBlankSeparatorAt(model, probeLine, inputStartLine)) { return { code: "", range: null }; }
-      let blankRun = 0;
-      while (probeLine > inputStartLine && !model.getLineContent(probeLine).trim()) {
-        blankRun++;
-        if (blankRun >= 2) { return { code: "", range: null }; }
-        probeLine--;
-      }
-      if (probeLine < inputStartLine || !model.getLineContent(probeLine).trim()) { return { code: "", range: null }; }
-      let startLine = __dsoCellStartLine(model, probeLine, inputStartLine);
-      let endLine = __dsoCellEndLine(model, probeLine, inputStartLine);
-      while (startLine <= endLine && !model.getLineContent(startLine).trim()) { startLine++; }
-      while (endLine > startLine && !model.getLineContent(endLine).trim()) { endLine--; }
+      const unit = __dsoExecutionUnitRange(model, cursorLine, inputStartLine);
+      if (!unit) { return { code: "", range: null }; }
       return {
-        code: model.getValueInRange({ startLineNumber: startLine, startColumn: 1, endLineNumber: endLine, endColumn: model.getLineMaxColumn(endLine) }).trimEnd(),
-        range: { end: endLine, start: startLine }
+        code: model.getValueInRange({ startLineNumber: unit.start, startColumn: 1, endLineNumber: unit.end, endColumn: model.getLineMaxColumn(unit.end) }).trimEnd(),
+        range: { end: unit.end, start: unit.start }
       };
     }
 
@@ -328,47 +317,6 @@ export function overlaySyncRendererSource(): string {
       return true;
     }
 
-    /** Returns whether one blank cursor line belongs to a strict two-line separator. */
-    function __dsoCellBlankSeparatorAt(model, lineNumber, floor) {
-      if (model.getLineContent(lineNumber).trim()) { return false; }
-      let count = 1;
-      for (let index = lineNumber - 1; index >= floor && !model.getLineContent(index).trim(); index--) { count++; }
-      for (let index = lineNumber + 1; index <= model.getLineCount() && !model.getLineContent(index).trim(); index++) { count++; }
-      return count >= 2;
-    }
-
-    /** Returns the first line of the current shell input unit, preserving single blank lines inside pasted source. */
-    function __dsoCellStartLine(model, lineNumber, floor) {
-      let blankRun = 0;
-      for (let index = lineNumber - 1; index >= floor; index--) {
-        if (!model.getLineContent(index).trim()) {
-          blankRun++;
-          if (blankRun >= 2) {
-            return index + 2;
-          }
-        } else {
-          blankRun = 0;
-        }
-      }
-      return floor;
-    }
-
-    /** Returns the last line of the current shell input unit, preserving single blank lines inside pasted source. */
-    function __dsoCellEndLine(model, lineNumber, floor) {
-      let blankRun = 0;
-      for (let index = lineNumber + 1; index <= model.getLineCount(); index++) {
-        if (!model.getLineContent(index).trim()) {
-          blankRun++;
-          if (blankRun >= 2) {
-            return index - 2;
-          }
-        } else {
-          blankRun = 0;
-        }
-      }
-      return model.getLineCount();
-    }
-
     /** Preserves the executed cell, then drops the cursor on a fresh prompt below it. */
     function __dsoAdvanceAfterRun(editor, range, post, source) {
       const model = editor.getModel && editor.getModel();
@@ -387,19 +335,20 @@ export function overlaySyncRendererSource(): string {
         return;
       }
       const toLine = model.getLineCount();
+      const separator = "\\n".repeat(__dsoExecutionUnitSeparatorBlankLines(model, last, 1) + 1);
       let edited = false;
       try {
         editor.executeEdits("django-shell-enter", [{
           forceMoveMarkers: true,
           range: { endColumn: model.getLineMaxColumn(toLine), endLineNumber: toLine, startColumn: model.getLineMaxColumn(last), startLineNumber: last },
-          text: "\\n\\n\\n"
+          text: separator
         }]);
         edited = model.getLineCount() > toLine;
       } catch (eEdit) {}
       if (!edited && model.getValue && model.setValue) {
         try {
           const lines = String(model.getValue() || "").split(/\\r?\\n/);
-          model.setValue(lines.slice(0, last).join("\\n") + "\\n\\n\\n");
+          model.setValue(lines.slice(0, last).join("\\n") + separator);
           edited = true;
           __dsoLog(post, "cursor.advance.fallback", { cellEnd: last, source: source });
         } catch (eFallbackEdit) {}
@@ -441,13 +390,14 @@ export function overlaySyncRendererSource(): string {
       }
       try {
         const toLine = model.getLineCount();
+        const separator = "\\n".repeat(__dsoExecutionUnitSeparatorBlankLines(model, end, 1) + 1);
         editor.executeEdits("django-shell-skip", [{
           forceMoveMarkers: true,
           range: { endColumn: model.getLineMaxColumn(toLine), endLineNumber: toLine, startColumn: model.getLineMaxColumn(end), startLineNumber: end },
-          text: "\\n\\n\\n"
+          text: separator
         }]);
       } catch (eEdit) {}
-      const target = Math.min(model.getLineCount(), end + 3);
+      const target = model.getLineCount();
       try { editor.setPosition && editor.setPosition({ column: 1, lineNumber: target }); } catch (eSetPosition) {}
       try { editor.revealLineInCenterIfOutsideViewport && editor.revealLineInCenterIfOutsideViewport(target); } catch (eReveal) {}
       __dsoSetMultilineMode(root, editor, false);

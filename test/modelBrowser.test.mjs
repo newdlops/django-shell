@@ -855,20 +855,23 @@ test("tabulates custom ORM query results, editable only for single-model instanc
     "vals = call(\"User.objects.values('id', 'username')\")",
     "flat = call(\"User.objects.values_list('username', flat=True)\")",
     "multi = call('staff = User.objects.filter(is_staff=True)\\nstaff')",
+    "outer = call('(\\n User.objects.all()\\n)')",
+    "semi = call('named = User.objects.all(); named')",
     "reuse = call('staff.count()')",
     "boom = call('1/0')",
     "scalar = call('User.objects.count()')",
     "print(json.dumps({",
-    "  'qs_ok': qs['ok'], 'qs_editable': qs['editable'], 'qs_model': qs.get('model'), 'qs_app': qs.get('app'), 'qs_pk': qs.get('pk'),",
+    "  'qs_ok': qs['ok'], 'qs_editable': qs['editable'], 'qs_model': qs.get('model'), 'qs_app': qs.get('app'), 'qs_pk': qs.get('pk'), 'qs_result': qs.get('result'),",
     "  'qs_relations': [r['name'] for r in qs.get('relations', [])],",
     "  'paged_rows': len(paged['rows']), 'paged_more': paged['hasMore'],",
     "  'qs_cols': 'username' in [c['attname'] for c in qs['columns']], 'qs_rows': len(qs['rows']), 'qs_queries': qs_queries,",
-    "  'vals_ok': vals['ok'], 'vals_editable': vals['editable'], 'vals_cols': [c['attname'] for c in vals['columns']],",
-    "  'flat_cols': [c['attname'] for c in flat['columns']], 'flat_rows': len(flat['rows']),",
-    "  'multi_ok': multi['ok'], 'multi_rows': len(multi['rows']), 'multi_editable': multi['editable'],",
+    "  'vals_ok': vals['ok'], 'vals_editable': vals['editable'], 'vals_cols': [c['attname'] for c in vals['columns']], 'vals_result': vals.get('result'),",
+    "  'flat_cols': [c['attname'] for c in flat['columns']], 'flat_rows': len(flat['rows']), 'flat_result': flat.get('result'),",
+    "  'multi_ok': multi['ok'], 'multi_rows': len(multi['rows']), 'multi_editable': multi['editable'], 'multi_result': multi.get('result'),",
+    "  'outer_result': outer.get('result'), 'semi_result': semi.get('result'),",
     "  'reuse_ok': reuse['ok'], 'reuse_value': reuse['rows'][0]['value'] if reuse['rows'] else None,",
     "  'boom_ok': boom['ok'], 'boom_err': bool(boom.get('error')),",
-    "  'scalar_cols': [c['attname'] for c in scalar['columns']], 'scalar_value': scalar['rows'][0]['value'],",
+    "  'scalar_cols': [c['attname'] for c in scalar['columns']], 'scalar_value': scalar['rows'][0]['value'], 'scalar_result': scalar.get('result'),",
     "}))"
   ]);
   assert.equal(payload.qs_ok, true);
@@ -879,21 +882,28 @@ test("tabulates custom ORM query results, editable only for single-model instanc
   assert.equal(payload.qs_cols, true);
   assert.equal(payload.qs_rows, 4);
   assert.equal(payload.qs_queries, 1, "instance queryset tabulation is a single SELECT");
+  assert.deepEqual(payload.qs_result, { endLine: 1, expression: "User.objects.all()", kind: "queryset", label: "QuerySet[auth.User]", startLine: 1 });
   assert.ok(payload.qs_relations.includes("groups"), "instance queryset results expose reverse/M2M relations like the model browser");
   assert.equal(payload.paged_rows, 2, "the requested page size is honored");
   assert.equal(payload.paged_more, true, "hasMore signals additional rows beyond the page");
   assert.equal(payload.vals_ok, true);
   assert.equal(payload.vals_editable, false, ".values() result is read-only");
   assert.deepEqual(payload.vals_cols, ["id", "username"]);
+  assert.equal(payload.vals_result.label, "Values QuerySet[auth.User]");
   assert.deepEqual(payload.flat_cols, ["username"], "values_list(flat=True) becomes one column");
   assert.equal(payload.flat_rows, 4);
+  assert.equal(payload.flat_result.label, "Values-list QuerySet[auth.User]");
   assert.equal(payload.multi_ok, true);
   assert.equal(payload.multi_rows, 2, "multi-line code tabulates the final expression");
   assert.equal(payload.multi_editable, true);
+  assert.deepEqual(payload.multi_result, { endLine: 2, expression: "staff", kind: "queryset", label: "QuerySet[auth.User]", startLine: 2 }, "the backend identifies the exact final expression without evaluating it twice");
+  assert.deepEqual(payload.outer_result, { endLine: 3, expression: "User.objects.all()", kind: "queryset", label: "QuerySet[auth.User]", startLine: 1 }, "outer parentheses remain inside the confirmed result range");
+  assert.deepEqual(payload.semi_result, { endLine: 1, expression: "named", kind: "queryset", label: "QuerySet[auth.User]", startLine: 1 }, "a semicolon-delimited final expression stays on its physical source line");
   assert.equal(payload.reuse_ok, true, "assignments from earlier queries persist in the namespace");
   assert.equal(payload.reuse_value, 2);
   assert.equal(payload.boom_ok, false);
   assert.equal(payload.boom_err, true, "a failing expression returns an error, not a crash");
   assert.deepEqual(payload.scalar_cols, ["value"]);
   assert.equal(payload.scalar_value, 4, "a scalar result becomes a single value cell");
+  assert.deepEqual(payload.scalar_result, { endLine: 1, expression: "User.objects.count()", kind: "scalar", label: "int", startLine: 1 });
 });

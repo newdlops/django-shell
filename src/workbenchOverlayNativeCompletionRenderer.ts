@@ -1,8 +1,11 @@
 // Renderer-side adaptation of native Python completion imports to independent shell units.
+import { overlayExecutionUnitRendererSource } from "./workbenchOverlayExecutionUnitRenderer";
 
 /** Builds JavaScript that keeps native provider auto-imports inside the focused execution unit. */
-export function overlayNativeCompletionRendererSource(): string {
+export function overlayNativeCompletionRendererSource(includeExecutionUnitHelpers = true): string {
   return `
+    ${includeExecutionUnitHelpers ? overlayExecutionUnitRendererSource() : ""}
+
     /** Returns one completion item's visible label. */
     function __dsoNativeCompletionLabel(item) {
       const label = item && item.completion && item.completion.label;
@@ -26,26 +29,6 @@ export function overlayNativeCompletionRendererSource(): string {
       const endColumn = Number(range.endColumn !== undefined ? range.endColumn : end.column !== undefined ? end.column : Number(end.character) + 1);
       if (![startLineNumber, startColumn, endLineNumber, endColumn].every(Number.isFinite)) { return null; }
       return { startLineNumber: startLineNumber, startColumn: startColumn, endLineNumber: endLineNumber, endColumn: endColumn };
-    }
-
-    /** Returns the strict two-blank-delimited execution unit at one model line. */
-    function __dsoNativeExecutionUnit(model, focusLine, floorLine) {
-      const floor = Math.max(1, Math.min(model.getLineCount(), Number(floorLine) || 1));
-      const focus = Math.max(floor, Math.min(model.getLineCount(), Number(focusLine) || floor));
-      if (!String(model.getLineContent(focus) || "").trim()) { return null; }
-      let start = floor, blanks = 0;
-      for (let line = focus - 1; line >= floor; line--) {
-        if (!String(model.getLineContent(line) || "").trim()) { blanks++; if (blanks >= 2) { start = line + 2; break; } }
-        else { blanks = 0; }
-      }
-      let end = model.getLineCount(); blanks = 0;
-      for (let line = focus + 1; line <= model.getLineCount(); line++) {
-        if (!String(model.getLineContent(line) || "").trim()) { blanks++; if (blanks >= 2) { end = line - 2; break; } }
-        else { blanks = 0; }
-      }
-      while (start <= end && !String(model.getLineContent(start) || "").trim()) { start++; }
-      while (end > start && !String(model.getLineContent(end) || "").trim()) { end--; }
-      return start <= end ? { start: start, end: end } : null;
     }
 
     /** Splits a conservative Python import statement into imported specifications. */
@@ -138,7 +121,7 @@ export function overlayNativeCompletionRendererSource(): string {
       const label = __dsoNativeCompletionLabel(item);
       if (!model || !position || !completion || !label) { return { changed: false, reason: "missing-context" }; }
       const floor = Math.max(1, Number(root && root.__dsoInputStartLine) || 1);
-      const unit = __dsoNativeExecutionUnit(model, position.lineNumber, floor);
+      const unit = __dsoExecutionUnitRange(model, position.lineNumber, floor);
       if (!unit || unit.start === floor || __dsoNativeUnitImports(model, unit, label)) { return { changed: false, reason: unit && unit.start === floor ? "first-unit" : "local-or-missing-unit" }; }
       const sourceEdits = Array.isArray(completion.additionalTextEdits) ? completion.additionalTextEdits : [];
       const kept = [], imports = [];

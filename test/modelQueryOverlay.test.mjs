@@ -54,12 +54,18 @@ test("uses query-specific files, submit behavior, context, and panel lifecycle",
   assert.ok(modelQuerySource.includes("releaseOverlay()"));
   assert.ok(modelQuerySource.includes("modelQueryPrelude"));
   assert.ok(modelQuerySource.includes('private draftCode = ""'));
+  assert.ok(modelQuerySource.includes("private lastQueryResult:"));
   assert.ok(modelQuerySource.includes('private inputAuthority: "fallback" | "overlay" = "fallback"'));
   assert.ok(modelQuerySource.includes('message.type === "queryDraftChanged"'));
   assert.ok(modelQuerySource.includes("const requestId = ++this.queryRequestId"));
   assert.ok(modelQuerySource.includes("panel !== this.panel || requestId !== this.queryRequestId"));
   assert.ok(modelQuerySource.includes("while (syncedDraft !== this.draftCode)"));
   assert.ok(runBody.indexOf("this.nextOffset = null") < runBody.indexOf("await this.source.modelQuery"));
+  assert.equal((runBody.match(/setQueryResult/g) || []).length, 2);
+  assert.equal(runBody.includes("await this.overlay?.setQueryResult"), false, "result decoration must not block the backend or grid critical path");
+  assert.ok(overlaySource.includes("private queryResultQueue: Promise<void> = Promise.resolve()"));
+  assert.ok(overlaySource.includes("this.queryResultQueue = this.queryResultQueue.then"), "renderer updates stay ordered off the critical path");
+  assert.ok(modelQuerySource.includes("overlay.setQueryResult(this.lastQueryResult.result, this.lastQueryResult.source)"), "a newly shown overlay receives the last confirmed query result");
   assert.ok(releaseBody.includes("this.draftCode = text"));
   assert.equal(releaseBody.includes("this.lastCode = text"), false);
   assert.ok(extensionSource.includes("backend.supportsHiddenPrelude()"));

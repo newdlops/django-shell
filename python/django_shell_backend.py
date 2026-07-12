@@ -2908,7 +2908,7 @@ def _pty_sql_end(state):
         return []
 
 
-def _pty_tabulate_result(value):
+def _pty_tabulate_result(value, code=None):
     """Serializes a cell result into a rich grid for ORM mode (instance QuerySet/instance -> editable
     columns/relations/rows), reusing the model-browser helpers; any other value (lists/dicts/scalars,
     e.g. an ORM query console result) is tabulated read-only via _browse_tabulate so the Terminal-mode
@@ -2931,20 +2931,24 @@ def _pty_tabulate_result(value):
             has_more = len(rows) > _PTY_ORM_TABULATE_LIMIT
             rows = rows[:_PTY_ORM_TABULATE_LIMIT]
             columns = _browse_columns(model) + [{"annotation": True, "attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "annotation"} for name in ann_names] + _browse_computed_columns(model)
-            return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": has_more, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
+            return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": has_more, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "result": _browse_query_result(value, code) if isinstance(code, str) else None, "rows": rows}
         if isinstance(value, Model):
             model = type(value)
             concrete_names = [column["attname"] for column in _browse_columns(model)]
             row = _browse_serialize_row({attname: getattr(value, attname, None) for attname in concrete_names})
-            return {"app": model._meta.app_label, "columns": _browse_columns(model) + _browse_computed_columns(model), "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [row]}
+            return {"app": model._meta.app_label, "columns": _browse_columns(model) + _browse_computed_columns(model), "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "result": _browse_query_result(value, code) if isinstance(code, str) else None, "rows": [row]}
         if isinstance(value, QuerySet):
             payload = _browse_tabulate(list(itertools.islice(value, _PTY_ORM_TABULATE_LIMIT + 1)), 0, _PTY_ORM_TABULATE_LIMIT)
             payload["ok"] = True
             payload.setdefault("relations", [])
+            if isinstance(code, str):
+                payload["result"] = _browse_query_result(value, code)
             return payload
         payload = _browse_tabulate(value, 0, _PTY_ORM_TABULATE_LIMIT)
         payload["ok"] = True
         payload.setdefault("relations", [])
+        if isinstance(code, str):
+            payload["result"] = _browse_query_result(value, code)
         return payload
     except Exception:
         return None
@@ -3035,7 +3039,7 @@ def _pty_install_ipython_capture(shell):
                 # IPython then reprs the ExecutionResult to build its "Error in callback" message.
                 if value is not None:
                     result_repr = _truncate(repr(value), 4000)
-                grid = _pty_tabulate_result(value)
+                grid = _pty_tabulate_result(value, state.get("raw"))
             except Exception:
                 eval_tb = traceback.format_exc()
                 result_repr = None
@@ -3123,7 +3127,7 @@ def _pty_install_plain_capture(sys, namespace):
             if inspection_probe:
                 out = ""
                 err = ""
-            grid = None if inspection_probe or not ok else _pty_tabulate_result(value)
+            grid = None if inspection_probe or not ok else _pty_tabulate_result(value, raw)
             raw_metadata = {}
             if ok and _pty_is_models_probe(raw):
                 _autoimport_registered_models(namespace)
@@ -5065,9 +5069,10 @@ def _browse_query(namespace, request):
         stderr = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             try:
-                value = _browse_eval_last(namespace, code)
+                value, expression = _browse_eval_last(namespace, code)
                 with _browse_capture() as ctx:
                     payload = _browse_tabulate(value, offset, limit)
+                payload["result"] = _browse_query_result(value, code, expression)
                 payload.update({"ok": True, "orm": code, "sql": _browse_sql(ctx), "stderr": stderr.getvalue(), "stdout": stdout.getvalue()})
                 return payload
             except Exception:
@@ -5075,7 +5080,7 @@ def _browse_query(namespace, request):
 
 
 def _browse_eval_last(namespace, code):
-    """Runs leading statements then returns the value of the final expression (no pprint, no `_`)."""
+    """Runs leading statements, then returns the final expression value and its AST node without evaluating twice."""
     tree = ast.parse(code, filename="<django-shell-query>", mode="exec")
     body, expression = _split_last_expression(tree)
     if body:
@@ -5088,7 +5093,37 @@ def _browse_eval_last(namespace, code):
         raise ValueError("The last line must be an expression to tabulate (for example a QuerySet).")
     expr = ast.Expression(expression.value)
     ast.fix_missing_locations(expr)
-    return eval(compile(expr, "<django-shell-query>", "eval"), namespace)
+    return eval(compile(expr, "<django-shell-query>", "eval"), namespace), expression
+
+
+def _browse_query_result(value, code, expression=None):
+    """Describes the exact final expression and its runtime result shape for ORM Query UI highlighting."""
+    from django.db.models import Model, QuerySet
+
+    if expression is None:
+        try:
+            _body, expression = _split_last_expression(ast.parse(code, filename="<django-shell-query>", mode="exec"))
+        except Exception:
+            expression = None
+    value_node = getattr(expression, "value", expression)
+    start_line = max(1, int(getattr(expression, "lineno", 1) or 1))
+    end_line = max(start_line, int(getattr(expression, "end_lineno", start_line) or start_line))
+    segment = ast.get_source_segment(code, value_node) if value_node is not None else None
+    expression_text = " ".join(str(segment or "").split())[:240]
+    if isinstance(value, QuerySet):
+        model = getattr(value, "model", None)
+        model_label = getattr(getattr(model, "_meta", None), "label", "") or ""
+        iterable_name = getattr(getattr(value, "_iterable_class", None), "__name__", "")
+        shape = "Values-list " if "ValuesList" in iterable_name else "Values " if "Values" in iterable_name else ""
+        kind, label = "queryset", f"{shape}QuerySet[{model_label}]" if model_label else f"{shape}QuerySet"
+    elif isinstance(value, Model):
+        model_label = getattr(getattr(value, "_meta", None), "label", "") or type(value).__name__
+        kind, label = "model", f"{model_label} instance"
+    elif not isinstance(value, (str, bytes)) and hasattr(value, "__iter__"):
+        kind, label = "iterable", type(value).__name__
+    else:
+        kind, label = "scalar", type(value).__name__
+    return {"endLine": end_line, "expression": expression_text, "kind": kind, "label": label, "startLine": start_line}
 
 
 def _browse_tabulate(value, offset, limit):

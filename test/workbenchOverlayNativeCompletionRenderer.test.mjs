@@ -142,6 +142,33 @@ test("leaves the first execution unit on the provider's native edit path", () =>
   assert.equal(item.completion.additionalTextEdits[0].text, "from native_provider_fixture import NativeProviderSentinel\n");
 });
 
+test("relocates native imports only after an import's three-blank separator", () => {
+  const api = rendererApi();
+  const edit = {
+    range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 1 },
+    text: "from native_provider_fixture import NativeProviderSentinel\n"
+  };
+  const conventional = suggestion("NativeProviderSentinel", [{ ...edit, range: { ...edit.range } }]);
+  const separated = suggestion("NativeProviderSentinel", [{ ...edit, range: { ...edit.range } }]);
+
+  const conventionalOutcome = api.relocate(
+    { __dsoInputStartLine: 1 },
+    fakeEditor("import os\n\n\nclient = NativeProviderSen", 4).editor,
+    conventional
+  );
+  const separatedOutcome = api.relocate(
+    { __dsoInputStartLine: 1 },
+    fakeEditor("import os\n\n\n\nclient = NativeProviderSen", 5).editor,
+    separated
+  );
+
+  assert.equal(conventionalOutcome.changed, false);
+  assert.equal(conventionalOutcome.reason, "first-unit");
+  assert.equal(conventional.completion.additionalTextEdits[0].range.startLineNumber, 1);
+  assert.equal(separatedOutcome.changed, true);
+  assert.equal(separated.completion.additionalTextEdits[0].range.startLineNumber, 5);
+});
+
 test("installs and disposes the native import hook with the shell overlay", () => {
   const source = overlayRendererSource("file:///workspace/.django-shell/console-cell.py");
   assert.ok(source.includes("window.__dsoInstallNativeCompletionImports = function"));

@@ -1,6 +1,7 @@
 // Shell execution command for the in-memory Django shell overlay editor.
 import * as vscode from "vscode";
 import { DiagnosticLogger } from "./diagnostics";
+import { overlayExecutionUnitRange, overlayExecutionUnitSeparatorBlankLines } from "./overlayExecutionUnit";
 import { lintOverlayRange } from "./overlayLint";
 import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
 
@@ -88,9 +89,10 @@ export class OverlayShellCommandController implements vscode.Disposable {
     }
     await editor.edit((edit) => {
       const last = editor.document.lineCount - 1;
-      edit.replace(new vscode.Range(payload.end, editor.document.lineAt(payload.end).text.length, last, editor.document.lineAt(last).text.length), "\n\n\n");
+      const separator = "\n".repeat(overlayExecutionUnitSeparatorBlankLines(editor.document.getText(), payload.end, this.inputStartLine) + 1);
+      edit.replace(new vscode.Range(payload.end, editor.document.lineAt(payload.end).text.length, last, editor.document.lineAt(last).text.length), separator);
     });
-    moveEditorToLine(editor, Math.min(editor.document.lineCount - 1, payload.end + 3));
+    moveEditorToLine(editor, editor.document.lineCount - 1);
     this.logger?.log("overlay.command.skip", { end: payload.end + 1, inputStartLine: this.inputStartLine + 1, start: payload.start + 1, target: editor.selection.active.line + 1 });
   }
 
@@ -135,72 +137,8 @@ function documentInputStartLine(document: vscode.TextDocument, fallback: number)
 /** Returns the logical Python statement or block around the cursor. */
 function executionRange(document: vscode.TextDocument, lineNumber: number, inputStartLine: number): { end: number; start: number } {
   const floor = Math.max(0, inputStartLine);
-  let cursor = Math.min(document.lineCount - 1, Math.max(floor, lineNumber));
-  const requested = cursor;
-  if (blankSeparatorAt(document, cursor, floor)) {
-    return { end: requested, start: requested };
-  }
-  let blankRun = 0;
-  while (cursor > floor && !document.lineAt(cursor).text.trim()) {
-    blankRun += 1;
-    if (blankRun >= 2) {
-      return { end: requested, start: requested };
-    }
-    cursor -= 1;
-  }
-  if (!document.lineAt(cursor).text.trim()) {
-    return { end: cursor, start: cursor };
-  }
-  let start = cellStartLine(document, cursor, floor);
-  let end = cellEndLine(document, cursor, floor);
-  while (start <= end && !document.lineAt(start).text.trim()) {
-    start += 1;
-  }
-  while (end > start && !document.lineAt(end).text.trim()) {
-    end -= 1;
-  }
-  return { end, start };
-}
-
-/** Returns whether one blank cursor line belongs to a strict two-line separator. */
-function blankSeparatorAt(document: vscode.TextDocument, lineNumber: number, floor: number): boolean {
-  if (document.lineAt(lineNumber).text.trim()) { return false; }
-  let count = 1;
-  for (let index = lineNumber - 1; index >= floor && !document.lineAt(index).text.trim(); index -= 1) { count += 1; }
-  for (let index = lineNumber + 1; index < document.lineCount && !document.lineAt(index).text.trim(); index += 1) { count += 1; }
-  return count >= 2;
-}
-
-/** Returns the first line of the current shell input unit, preserving single blank lines inside pasted source. */
-function cellStartLine(document: vscode.TextDocument, lineNumber: number, floor: number): number {
-  let blankRun = 0;
-  for (let index = lineNumber - 1; index >= floor; index -= 1) {
-    if (!document.lineAt(index).text.trim()) {
-      blankRun += 1;
-      if (blankRun >= 2) {
-        return index + 2;
-      }
-    } else {
-      blankRun = 0;
-    }
-  }
-  return floor;
-}
-
-/** Returns the last line of the current shell input unit, preserving single blank lines inside pasted source. */
-function cellEndLine(document: vscode.TextDocument, lineNumber: number, floor: number): number {
-  let blankRun = 0;
-  for (let index = lineNumber + 1; index < document.lineCount; index += 1) {
-    if (!document.lineAt(index).text.trim()) {
-      blankRun += 1;
-      if (blankRun >= 2) {
-        return index - 2;
-      }
-    } else {
-      blankRun = 0;
-    }
-  }
-  return document.lineCount - 1;
+  const requested = Math.min(document.lineCount - 1, Math.max(floor, lineNumber));
+  return overlayExecutionUnitRange(document.getText(), requested, floor) ?? { end: requested, start: requested };
 }
 
 /** Returns the first non-empty source line after one execution unit. */
@@ -333,8 +271,9 @@ export async function advanceAfterRun(editor: vscode.TextEditor, endLine: number
     return;
   }
   const last = editor.document.lineCount - 1;
-  await editor.edit((edit) => edit.replace(new vscode.Range(endLine, editor.document.lineAt(endLine).text.length, last, editor.document.lineAt(last).text.length), "\n\n\n"));
-  moveEditorToLine(editor, Math.min(editor.document.lineCount - 1, endLine + 3));
+  const separator = "\n".repeat(overlayExecutionUnitSeparatorBlankLines(editor.document.getText(), endLine) + 1);
+  await editor.edit((edit) => edit.replace(new vscode.Range(endLine, editor.document.lineAt(endLine).text.length, last, editor.document.lineAt(last).text.length), separator));
+  moveEditorToLine(editor, editor.document.lineCount - 1);
 }
 
 /** Returns the indentation that should be used after one Python line. */

@@ -72,6 +72,20 @@ test("decorates runtime symbols in code but not strings, comments, helpers, or s
   assert.equal(api.document.getElementById("django-shell-overlay-semantic-style").textContent.includes("symbolIcon-classForeground"), true);
 });
 
+test("scopes import shadowing across the import-specific blank separator", () => {
+  const api = semanticApi();
+  const model = fakeModel("from local_models import Company\n\n\nCompany.objects");
+  const editor = fakeEditor(model);
+  const root = { __djangoShellEditor: editor, __dsoInputStartLine: 1, __dsoPreludeText: api.window.__djangoShellOverlayPrelude };
+
+  api.refresh(root);
+  assert.deepEqual(editor.decorations, [], "two blank lines keep the local import and expression in one unit");
+
+  model.setValue("from local_models import Company\n\n\n\nCompany.objects");
+  api.refresh(root);
+  assert.deepEqual(editor.decorations.map((item) => item.range.startLineNumber), [5], "three blank lines isolate the lower runtime symbol");
+});
+
 test("full overlay installs renderer decoration augmentation without a semantic-token provider", () => {
   const source = overlayRendererSource("file:///workspace/.django-shell/console-cell.py");
 

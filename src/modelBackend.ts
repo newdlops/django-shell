@@ -335,6 +335,15 @@ export interface ModelQueryRequest {
   offset?: number;
 }
 
+/** Exact final-expression metadata returned after one ORM Query evaluation. */
+export interface BackendModelQueryResult {
+  endLine: number;
+  expression: string;
+  kind: "iterable" | "model" | "queryset" | "scalar";
+  label: string;
+  startLine: number;
+}
+
 /** Tabulated result of a custom ORM query; shares the rows shape so the grid renders it unchanged. */
 export interface BackendModelQuery {
   app?: string;
@@ -347,6 +356,7 @@ export interface BackendModelQuery {
   orm: string;
   pk?: string;
   relations: BackendModelRelation[];
+  result?: BackendModelQueryResult;
   rows: BackendModelRow[];
   sql: BackendSqlEntry[];
   stderr?: string;
@@ -613,6 +623,7 @@ export function parseModelQueryResponse(buffer: string): BackendModelQuery {
     orm: typeof parsed.orm === "string" ? parsed.orm : "",
     pk: parsed.pk,
     relations: Array.isArray(parsed.relations) ? parsed.relations : [],
+    result: parseModelQueryResult(parsed.result),
     rows: Array.isArray(parsed.rows) ? parsed.rows : [],
     sql: Array.isArray(parsed.sql) ? parsed.sql : [],
     stderr: typeof parsed.stderr === "string" ? parsed.stderr : undefined,
@@ -638,11 +649,21 @@ export function parseOrmQueryResponse(buffer: string, limit: number, offset: num
     orm: "",
     pk: grid.pk,
     relations: Array.isArray(grid.relations) ? grid.relations : [],
+    result: parseModelQueryResult(grid.result),
     rows: all.slice(offset, offset + limit),
     sql: Array.isArray(parsed.sql) ? parsed.sql : [],
     stderr: parsed.stderr,
     stdout: parsed.stdout
   };
+}
+
+/** Validates backend metadata that identifies the expression rendered by ORM Query. */
+function parseModelQueryResult(value: unknown): BackendModelQueryResult | undefined {
+  if (!value || typeof value !== "object") { return undefined; }
+  const result = value as Partial<BackendModelQueryResult>;
+  const kinds: BackendModelQueryResult["kind"][] = ["iterable", "model", "queryset", "scalar"];
+  if (!Number.isInteger(result.startLine) || !Number.isInteger(result.endLine) || (result.startLine ?? 0) < 1 || (result.endLine ?? 0) < (result.startLine ?? 1) || !kinds.includes(result.kind as BackendModelQueryResult["kind"])) { return undefined; }
+  return { endLine: result.endLine!, expression: typeof result.expression === "string" ? result.expression : "", kind: result.kind!, label: typeof result.label === "string" ? result.label : result.kind!, startLine: result.startLine! };
 }
 
 /** Parses a backend foreign-key lookup response. */

@@ -130,6 +130,14 @@ test("returns an empty payload on either line of a strict blank separator", () =
   }
 });
 
+test("includes a PEP 8 two-blank import gap in the current payload", () => {
+  const document = new MutableDocument("from pathlib import Path\n\n\nvalue = Path.cwd()");
+  const payload = executionPayload(document, collapsedSelection(3), 0);
+
+  assert.equal(payload.code, "from pathlib import Path\n\n\nvalue = Path.cwd()");
+  assert.deepEqual({ end: payload.end, start: payload.start }, { end: 3, start: 0 });
+});
+
 test("moves to the next existing execution unit without editing source", async () => {
   const document = new MutableDocument("upper = 1\n\n\n    lower = 2");
   const editor = fakeEditor(document, 0);
@@ -152,6 +160,16 @@ test("appends a triple newline after the final execution unit", async () => {
   assert.equal(document.getText(), "only = 1\n\n\n");
   assert.equal(editor.editCalls, 1);
   assert.deepEqual(editor.selection.active, new Position(3, 0));
+});
+
+test("appends three blank lines after an import-only execution unit", async () => {
+  const document = new MutableDocument("from pathlib import (\n    Path,\n)");
+  const editor = fakeEditor(document, 2);
+
+  await advanceAfterRun(editor, 2);
+
+  assert.equal(document.getText(), "from pathlib import (\n    Path,\n)\n\n\n\n");
+  assert.deepEqual(editor.selection.active, new Position(6, 0));
 });
 
 test("leaves editor text untouched when a restart cancels an in-flight execution", async () => {

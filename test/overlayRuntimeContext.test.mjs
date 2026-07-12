@@ -49,12 +49,12 @@ test("routes runtime attribute and chained member completion only", () => {
 });
 
 test("only bindings inside the active independent execution unit shadow runtime names", () => {
-  const upperUnexecuted = "from shop.models import Company\n\n\nCompany.ob";
+  const upperUnexecuted = "from shop.models import Company\n\n\n\nCompany.ob";
   const localImport = "from shop.models import Company\nCompany.ob";
   const assigned = "current_user = load_user()\ncurrent_user.na";
 
-  assert.equal(overlayRuntimeCompletionContext(upperUnexecuted, { character: 10, line: 3 }, PRELUDE)?.kind, "member");
-  assert.equal(overlayRuntimeFeatureContext(upperUnexecuted, { character: 2, line: 3 }, PRELUDE)?.root.name, "Company");
+  assert.equal(overlayRuntimeCompletionContext(upperUnexecuted, { character: 10, line: 4 }, PRELUDE)?.kind, "member");
+  assert.equal(overlayRuntimeFeatureContext(upperUnexecuted, { character: 2, line: 4 }, PRELUDE)?.root.name, "Company");
   assert.equal(overlayRuntimeCompletionContext(localImport, { character: 10, line: 1 }, PRELUDE), undefined);
   assert.equal(overlayRuntimeFeatureContext(localImport, { character: 2, line: 1 }, PRELUDE), undefined);
   assert.equal(overlayRuntimeCompletionContext(assigned, { character: 15, line: 1 }, PRELUDE), undefined);

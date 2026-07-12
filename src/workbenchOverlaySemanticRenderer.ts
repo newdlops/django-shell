@@ -1,10 +1,13 @@
 // Renderer-side semantic decorations for hidden Django shell prelude imports.
+import { overlayExecutionUnitRendererSource } from "./workbenchOverlayExecutionUnitRenderer";
 
 const SEMANTIC_DECORATION_DEBOUNCE_MS = 500;
 
 /** Builds JavaScript that colors prelude-imported symbols in the visible editor. */
-export function overlaySemanticRendererSource(): string {
+export function overlaySemanticRendererSource(includeExecutionUnitHelpers = true): string {
   return `
+    ${includeExecutionUnitHelpers ? overlayExecutionUnitRendererSource() : ""}
+
     let __dsoSemanticPreludeCacheText = null;
     let __dsoSemanticPreludeCacheSymbols = null;
 
@@ -84,22 +87,19 @@ export function overlaySemanticRendererSource(): string {
       return output.join("");
     }
 
-    /** Finds execution units separated by two blank lines. */
+    /** Finds import-aware execution units in one model. */
     function __dsoSemanticUnits(model, startLine) {
       const units = [];
-      let start = Math.max(1, startLine);
-      let blankRun = 0;
-      for (let line = start; line <= model.getLineCount(); line++) {
-        if (!String(model.getLineContent(line) || "").trim()) {
-          blankRun++;
-          if (blankRun >= 2) {
-            const end = line - blankRun;
-            if (end >= start) { units.push({ end: end, start: start }); }
-            start = line + 1;
-          }
-        } else { blankRun = 0; }
+      const floor = Math.max(1, startLine);
+      let line = floor;
+      while (line <= model.getLineCount()) {
+        while (line <= model.getLineCount() && !String(model.getLineContent(line) || "").trim()) { line++; }
+        if (line > model.getLineCount()) { break; }
+        const unit = __dsoExecutionUnitRange(model, line, floor);
+        if (!unit) { line++; continue; }
+        units.push(unit);
+        line = unit.end + 1;
       }
-      if (start <= model.getLineCount()) { units.push({ end: model.getLineCount(), start: start }); }
       return units;
     }
 
