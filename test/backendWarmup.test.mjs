@@ -1,0 +1,121 @@
+// Verifies that IPython backend warmup leaves READY on the fast path without exposing a partial namespace.
+
+import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import path from "node:path";
+import test from "node:test";
+
+const PYTHON = pythonExecutable();
+
+test("IPython READY precedes deferred warmup while requests and user cells wait", { skip: !PYTHON }, () => {
+  const script = [
+    "import builtins, importlib.util, json, socket, threading, time, types",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "namespace={}",
+    "callbacks={}",
+    "class Events:",
+    "    def register(self, name, callback): callbacks[name]=callback",
+    "shell=types.SimpleNamespace(events=Events(), user_ns=namespace)",
+    "builtins.get_ipython=lambda: shell",
+    "markers=[]",
+    "gate=threading.Event()",
+    "warmup_entered=threading.Event()",
+    "marker_seen_by_warmup=[]",
+    "steps=[]",
+    "def base_names(target): target['base_name']=object(); return 1",
+    "def registered_models(target):",
+    "    marker_seen_by_warmup.append(bool(markers))",
+    "    warmup_entered.set()",
+    "    gate.wait(5)",
+    "    target['LateModel']=type('LateModel',(),{'__module__':'late.models'})",
+    "    return 1",
+    "mod._autoimport_base_names=base_names",
+    "mod._autoimport_registered_models=registered_models",
+    "mod._autoimport_enabled=lambda: False",
+    "mod._register_transform_lookups=lambda: steps.append('transforms')",
+    "mod._install_queryset_progress=lambda: steps.append('progress')",
+    "mod._print_marker=lambda prefix,payload: markers.append({'prefix':prefix,'payload':payload})",
+    "started=time.monotonic()",
+    "mod.start(namespace,'tok')",
+    "start_ms=int((time.monotonic()-started)*1000)",
+    "warmup_entered.wait(1)",
+    "server=mod._STATE['server']",
+    "response={}",
+    "request_done=threading.Event()",
+    "def request_prelude():",
+    "    with socket.create_connection(server.server_address,timeout=2) as connection:",
+    "        stream=connection.makefile('rwb')",
+    "        stream.write((json.dumps({'token':'tok','kind':'prelude'})+'\\n').encode('utf-8'))",
+    "        stream.flush()",
+    "        response.update(json.loads(stream.readline().decode('utf-8')))",
+    "    request_done.set()",
+    "request_thread=threading.Thread(target=request_prelude)",
+    "request_thread.start()",
+    "cell_done=threading.Event()",
+    "def run_cell_pre_hook(): callbacks['pre_run_cell'](types.SimpleNamespace(raw_cell='_djs_rpc(1, 2)')); cell_done.set()",
+    "cell_thread=threading.Thread(target=run_cell_pre_hook)",
+    "cell_thread.start()",
+    "time.sleep(0.08)",
+    "request_blocked=not request_done.is_set()",
+    "cell_blocked=not cell_done.is_set()",
+    "gate.set()",
+    "request_thread.join(2)",
+    "cell_thread.join(2)",
+    "warmup=mod._STATE['warmup']",
+    "prelude_names=[item['name'] for item in response.get('variables',[])]",
+    "payload={",
+    "  'autoImportedAfter':warmup.get('autoImported'),",
+    "  'cellBlocked':cell_blocked,",
+    "  'cellFinished':cell_done.is_set(),",
+    "  'debuggerExempt':bool(getattr(warmup.get('thread'),'django_debugger_do_not_trace',False)),",
+    "  'helperCurrent':namespace.get('_djs_backend_initial_names') is server.initial_names,",
+    "  'initialNames':sorted(name for name in server.initial_names if name in ('base_name','LateModel')),",
+    "  'marker':markers[0]['payload'],",
+    "  'markerBeforeWarmup':marker_seen_by_warmup == [True],",
+    "  'preludeNames':prelude_names,",
+    "  'ptyInitialNames':sorted(name for name in namespace.get('_djs_initial_names',()) if name in ('base_name','LateModel')),",
+    "  'requestBlocked':request_blocked,",
+    "  'requestFinished':request_done.is_set(),",
+    "  'startMs':start_ms,",
+    "  'steps':steps,",
+    "  'warmupPendingAfter':warmup.get('pending'),",
+    "}",
+    "server.shutdown()",
+    "server.server_close()",
+    "print(json.dumps(payload))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8", timeout: 10_000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+
+  assert.equal(payload.marker.warmupPending, true);
+  assert.equal(payload.marker.autoImported, 1, "READY reports only work completed on its critical path");
+  assert.equal(typeof payload.marker.readyMs, "number");
+  assert.equal(payload.markerBeforeWarmup, true, "the worker starts only after READY is emitted");
+  assert.equal(payload.requestBlocked, true, "socket inspection must not observe a partial namespace");
+  assert.equal(payload.cellBlocked, true, "the next IPython cell must not overtake warmup");
+  assert.equal(payload.requestFinished, true);
+  assert.equal(payload.cellFinished, true);
+  assert.equal(payload.warmupPendingAfter, false);
+  assert.equal(payload.autoImportedAfter, 2);
+  assert.equal(payload.debuggerExempt, true);
+  assert.deepEqual(payload.steps, ["transforms", "progress"]);
+  assert.deepEqual(payload.initialNames, ["LateModel", "base_name"]);
+  assert.deepEqual(payload.ptyInitialNames, ["LateModel", "base_name"]);
+  assert.equal(payload.helperCurrent, true);
+  assert.ok(payload.preludeNames.includes("LateModel"));
+});
+
+/** Returns the first usable local Python executable. */
+function pythonExecutable() {
+  for (const candidate of [process.env.PYTHON, "python3", "python"].filter(Boolean)) {
+    const result = childProcess.spawnSync(candidate, ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" });
+    if (result.status === 0) {
+      return candidate;
+    }
+  }
+  return undefined;
+}

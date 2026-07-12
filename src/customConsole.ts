@@ -23,7 +23,7 @@ import { overlayEditorUri, resetOverlayBackingFiles } from "./overlayBackingFile
 import { runtimePreludeLines } from "./runtimePrelude";
 import { VersionedAsyncCache } from "./versionedAsyncCache";
 import type { WorkbenchOverlay, WorkbenchOverlayGeometry } from "./workbenchOverlay";
-const VIEW_TYPE = "djangoShell.customConsole"; const DEBUG_ATTACH_TIMEOUT_MS = 120000; const DEBUG_ENRICH_DELAY_MS = 1200; const RUNTIME_REFRESH_DELAY_MS = 5000; const WARM_DEBUG_REFRESH_DELAY_MS = 30000;
+const VIEW_TYPE = "djangoShell.customConsole"; const DEBUG_ATTACH_TIMEOUT_MS = 120000; const DEBUG_ENRICH_DELAY_MS = 1200; const READY_RUNTIME_REFRESH_DELAY_MS = 1000; const RUNTIME_REFRESH_DELAY_MS = 5000; const WARM_DEBUG_REFRESH_DELAY_MS = 30000;
 /** Stores one webview-level overlay tab with its visible Python source. */
 interface OverlayTabState { id: string; label: string; text: string }
 export interface CustomDjangoConsoleActivationOptions { registerCommands?: boolean; }
@@ -43,7 +43,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
   private registerOverlayCommands = true;
   private runtimeReady = false;
   private runtimeGeneration = 0;
-  private runtimeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private runtimeRefreshTimer: ReturnType<typeof setTimeout> | undefined; private runtimeRefreshVersion = 0; private runtimeStartupRefreshPending = false;
   private readonly pythonProgressTimers = new Map<number, ReturnType<typeof setInterval>>();
   private activePythonExecution: number | undefined;
   private session: NotebookPtySession | undefined;
@@ -453,11 +453,10 @@ export class CustomDjangoConsole implements vscode.Disposable {
     this.session?.backend?.setTransportMode(this.selectedTransport ?? this.modelTransportSetting());
     this.runtimeGeneration += 1;
     this.preludeRetryAttempt = 0;
-    this.runtimeEmitter.fire();
-    void this.updateOverlayPrelude(this.runtimeGeneration);
     scheduleWorkspaceGeneratedOverlayTabCleanup();
     if (this.panelActive) { this.post({ show: true, type: "measureEditor" }); }
     this.postTransport();
+    void this.scheduleReadyRuntimeRefresh(this.runtimeGeneration);
   }
 
   /** Handles messages sent by the custom console webview. */
@@ -780,6 +779,16 @@ export class CustomDjangoConsole implements vscode.Disposable {
     void this.overlay?.updatePrelude(lines);
   }
 
+  /** Fetches the analyzer prelude before notifying visible runtime views after a short startup idle grace. */
+  private async scheduleReadyRuntimeRefresh(generation: number): Promise<void> {
+    this.clearRuntimeRefreshTimer(); const refreshVersion = this.runtimeRefreshVersion, started = Date.now(); this.runtimeStartupRefreshPending = true;
+    this.logger?.log("runtime.ready.metadata", { generation, phase: "prelude" });
+    await this.updateOverlayPrelude(generation);
+    if (generation !== this.runtimeGeneration || refreshVersion !== this.runtimeRefreshVersion || !this.runtimeReady) { return; }
+    this.logger?.log("runtime.ready.metadata", { generation, graceMs: READY_RUNTIME_REFRESH_DELAY_MS, phase: "idle", preludeMs: Date.now() - started });
+    this.runtimeRefreshTimer = setTimeout(() => { this.runtimeRefreshTimer = undefined; if (generation !== this.runtimeGeneration || refreshVersion !== this.runtimeRefreshVersion || !this.runtimeReady || this.runtimeRefreshBlocked()) { this.runtimeStartupRefreshPending = false; return; } this.runtimeStartupRefreshPending = false; this.logger?.log("runtime.ready.metadata", { generation, ms: Date.now() - started, phase: "notify" }); this.runtimeEmitter.fire(); }, READY_RUNTIME_REFRESH_DELAY_MS);
+  }
+
   /** Schedules a bounded prelude retry after an empty or failed runtime inspection. */
   private schedulePreludeRetry(generation: number): void {
     if (this.preludeRetryAttempt >= 4) { return; }
@@ -794,11 +803,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
   }
 
   /** Clears any pending prelude retry. */
-  private clearPreludeRetryTimer(): void {
-    if (!this.preludeRetryTimer) { return; }
-    clearTimeout(this.preludeRetryTimer);
-    this.preludeRetryTimer = undefined;
-  }
+  private clearPreludeRetryTimer(): void { if (this.preludeRetryTimer) { clearTimeout(this.preludeRetryTimer); this.preludeRetryTimer = undefined; } }
 
   /** Schedules runtime-dependent UI refresh without blocking rapid shell input. */
   private scheduleRuntimeRefresh(): void {
@@ -815,18 +820,10 @@ export class CustomDjangoConsole implements vscode.Disposable {
   /** Returns whether automatic metadata work must stay out of the execution and debugger critical path. */ private runtimeRefreshBlocked(): boolean { return this.pythonBusy || this.debugRunActive || this.debugPaused || Boolean(this.debugAttachPromise); }
 
   /** Clears any pending delayed runtime refresh. */
-  private clearRuntimeRefreshTimer(): void {
-    if (!this.runtimeRefreshTimer) {
-      return;
-    }
-    clearTimeout(this.runtimeRefreshTimer);
-    this.runtimeRefreshTimer = undefined;
-  }
+  private clearRuntimeRefreshTimer(): void { const startupPending = this.runtimeStartupRefreshPending; this.runtimeRefreshVersion += 1; this.runtimeStartupRefreshPending = false; if (this.runtimeRefreshTimer) { clearTimeout(this.runtimeRefreshTimer); this.runtimeRefreshTimer = undefined; } if (startupPending) { this.logger?.log("runtime.ready.metadata", { generation: this.runtimeGeneration, phase: "cancel" }); } }
 
   /** Clears cached runtime inspection data after code changes the namespace. */
-  private clearInspectionCache(): void {
-    this.runtimeInspection.invalidate(); this.runtimePrelude.invalidate();
-  }
+  private clearInspectionCache(): void { this.runtimeInspection.invalidate(); this.runtimePrelude.invalidate(); }
 
   /** Restarts the setup terminal and clears the current backend readiness state. */
   private async restartSession(): Promise<void> {

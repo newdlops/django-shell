@@ -5,7 +5,8 @@ import { overlayCleanupRendererSource } from "./workbenchOverlayCleanupRenderer"
 import { overlayFrameRendererSource } from "./workbenchOverlayFrameRenderer";
 import { overlayCaptureRendererSource } from "./workbenchOverlayCaptureRenderer";
 import { overlayHoverRendererSource } from "./workbenchOverlayHoverRenderer";
-import { OVERLAY_SHELL_LANGUAGE_ID } from "./overlayLanguage";
+import { overlayNativeCompletionRendererSource } from "./workbenchOverlayNativeCompletionRenderer";
+import { overlaySemanticRendererSource } from "./workbenchOverlaySemanticRenderer";
 
 export interface OverlayRendererOptions {
   executionMode?: "shell" | "submit";
@@ -15,7 +16,7 @@ export interface OverlayRendererOptions {
 /** Builds the JavaScript injected into the focused VS Code workbench window. */
 export function overlayRendererSource(modelUri: string, options: OverlayRendererOptions = {}): string {
   const executionMode = options.executionMode ?? "shell";
-  const modelLanguageId = executionMode === "shell" ? OVERLAY_SHELL_LANGUAGE_ID : "python";
+  const modelLanguageId = "python";
   const panelTitle = options.panelTitle ?? "Django Shell";
   return `
     const __dsoOverlayModelUri = ${JSON.stringify(modelUri)};
@@ -501,7 +502,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       }
       try { if (model && model.setLanguage) { model.setLanguage(__dsoOverlayLanguage()); } } catch (eSetLanguage) {}
       try { if (globalThis.monaco && globalThis.monaco.editor && globalThis.monaco.editor.setModelLanguage) { globalThis.monaco.editor.setModelLanguage(model, __dsoOverlayLanguageId); } } catch (eSetModelLanguage) {}
-      const options = { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, quickSuggestionsDelay: 25, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
+      const options = { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
       const widgetOptions = { isSimpleWidget: false };
       let editor = null;
       try { editor = factory.inst.createInstance(factory.ctor, host, options, widgetOptions); }
@@ -528,7 +529,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       const uri = monacoApi.Uri.parse(__dsoOverlayModelUri);
       let model = monacoApi.editor.getModel(uri); if (model && model.isDisposed && model.isDisposed()) { model = null; } if (model && model.getValue) { try { model.getValue(); } catch (eDisposedValue) { model = null; } } model = model || monacoApi.editor.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", __dsoOverlayLanguageId, uri);
       try { monacoApi.editor.setModelLanguage && monacoApi.editor.setModelLanguage(model, __dsoOverlayLanguageId); } catch (eGlobalLanguage) {}
-      const editor = monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, isSimpleWidget: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, model: model, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, quickSuggestionsDelay: 25, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
+      const editor = monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, isSimpleWidget: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, model: model, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
       try { editor.layout && editor.layout(__dsoLayoutSize(root, host)); } catch (eGlobalLayout) {}
       return editor;
     }
@@ -749,6 +750,8 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     ${overlayHoverRendererSource()}
     ${overlayWidgetRendererSource()}
     ${overlaySyncRendererSource()}
+    ${overlayNativeCompletionRendererSource()}
+    ${overlaySemanticRendererSource()}
     ${overlayCleanupRendererSource()}
     window.__djangoShellOverlayShow = function (geometry, ownerToken) {
       __dsoEnsureStyle();
@@ -789,6 +792,8 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       if (editor && editor !== previousEditor) { __dsoApplyGeometry(root, geometry); }
       if (editor && window.__dsoInstallModelSync) { window.__dsoInstallModelSync(root, editor, __dsoEditorValue, __dsoPost); }
       if (editor && window.__dsoInstallEnterRunner) { window.__dsoInstallEnterRunner(root, editor, __dsoPost); }
+      if (editor && root.__dsoExecutionMode === "shell" && window.__dsoInstallNativeCompletionImports) { window.__dsoInstallNativeCompletionImports(root, editor); }
+      if (editor && window.__dsoInstallPreludeSemanticDecorations) { window.__dsoInstallPreludeSemanticDecorations(root, editor); }
       const pendingOwnerMatches = !window.__dsoPendingOverlayOwnerToken || window.__dsoPendingOverlayOwnerToken === requestedOwner;
       if (editor && window.__dsoSetOverlayVisibleText && ((window.__dsoPendingOverlayVisibleText !== undefined && pendingOwnerMatches) || !root.__dsoHasAppliedInitialText)) {
         window.__dsoSetOverlayVisibleText(window.__dsoPendingOverlayVisibleText !== undefined && pendingOwnerMatches ? window.__dsoPendingOverlayVisibleText : window.__djangoShellOverlayInitialText, requestedOwner);

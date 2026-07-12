@@ -16,6 +16,15 @@ export function overlayHoverRendererSource(): string {
       return owner && actual === owner ? portal : null;
     }
 
+    /** Restores the hover portal above workbench webviews that were promoted after it. */
+    function __dsoPromoteDetachedHoverPortal(root) {
+      const portal = __dsoDetachedHoverPortal(root);
+      const host = portal && portal.parentElement;
+      if (!portal || !host || !host.appendChild || host.lastElementChild === portal) { return portal; }
+      try { host.appendChild(portal); } catch (eHoverPortalPromote) {}
+      return portal;
+    }
+
     /** Returns the detached hover containing one event target. */
     function __dsoDetachedHoverForTarget(root, target) {
       const portal = __dsoDetachedHoverPortal(root);
@@ -115,6 +124,7 @@ export function overlayHoverRendererSource(): string {
 
     /** Starts a bounded handoff interval before the pointer reaches the detached hover. */
     function __dsoStartDetachedHoverTransit(root, editor) {
+      __dsoPromoteDetachedHoverPortal(root);
       const controller = __dsoHoldDetachedHover(root, editor);
       if (!controller) { return; }
       __dsoClearDetachedHoverTransit(root);
@@ -215,6 +225,7 @@ export function overlayHoverRendererSource(): string {
       };
       /** Releases stale controller state when Monaco hides or removes its hover DOM. */
       const onHoverMutation = function () {
+        if (__dsoHasVisibleDetachedHover(root)) { __dsoPromoteDetachedHoverPortal(root); }
         if (root.__dsoDetachedHoverResizeActive) {
           const resizeHover = root.__dsoDetachedHoverResizeHover;
           if (resizeHover && resizeHover.isConnected) { return; }
@@ -227,6 +238,10 @@ export function overlayHoverRendererSource(): string {
           __dsoReleaseDetachedHover(root);
         }
       };
+      /** Reclaims top paint order when a workbench webview is appended after the live portal. */
+      const onPortalHostMutation = function () {
+        if (__dsoHasVisibleDetachedHover(root)) { __dsoPromoteDetachedHoverPortal(root); }
+      };
 
       editorNode.addEventListener("mouseleave", onEditorMouseLeave, true);
       editorNode.addEventListener("mouseout", onEditorMouseOut, true);
@@ -237,11 +252,14 @@ export function overlayHoverRendererSource(): string {
       portal.addEventListener("mouseleave", onPortalMouseLeave, true);
       window.addEventListener("mouseup", onWindowMouseUp, true);
       window.addEventListener("blur", onWindowBlur, true);
+      const portalHostObserver = new MutationObserver(onPortalHostMutation);
+      if (portal.parentElement) { portalHostObserver.observe(portal.parentElement, { childList: true }); }
       const observer = new MutationObserver(onHoverMutation);
       observer.observe(portal, { attributes: true, childList: true, subtree: true });
       root.__dsoDetachedHoverKeeperEditor = editor;
       root.__dsoDetachedHoverKeeperPortal = portal;
       root.__dsoDetachedHoverKeeperObserver = observer;
+      root.__dsoDetachedHoverStackObserver = portalHostObserver;
       /** Removes detached-hover listeners and restores native controller ownership. */
       root.__dsoDetachedHoverKeeperCleanup = function () {
         __dsoClearDetachedHoverResizeEnd(root);
@@ -249,6 +267,7 @@ export function overlayHoverRendererSource(): string {
         root.__dsoDetachedHoverResizeHover = null;
         __dsoReleaseDetachedHover(root);
         root.__dsoDetachedHoverPointerInside = false;
+        try { portalHostObserver.disconnect(); } catch (eHoverStackObserver) {}
         try { observer.disconnect(); } catch (eHoverObserver) {}
         editorNode.removeEventListener("mouseleave", onEditorMouseLeave, true);
         editorNode.removeEventListener("mouseout", onEditorMouseOut, true);
@@ -262,6 +281,7 @@ export function overlayHoverRendererSource(): string {
         root.__dsoDetachedHoverKeeperEditor = null;
         root.__dsoDetachedHoverKeeperPortal = null;
         root.__dsoDetachedHoverKeeperObserver = null;
+        root.__dsoDetachedHoverStackObserver = null;
         root.__dsoDetachedHoverKeeperCleanup = null;
       };
       return "installed";

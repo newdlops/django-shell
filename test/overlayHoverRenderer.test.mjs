@@ -15,6 +15,8 @@ test("keeps a native hover open from editor leave through detached portal entry"
 
   harness.scheduleNativeDismiss();
   harness.editorNode.dispatch("mouseleave", {});
+  assert.equal(harness.portalHost.lastElementChild, harness.portal, "handoff restores the detached portal above later workbench webviews");
+  assert.equal(harness.portalHost.appendCalls, 1);
   assert.equal(harness.controller.shouldKeepOpenOnEditorMouseMoveOrLeave, true);
   assert.equal(harness.controller.cancelSchedulerCalls, 1);
   assert.equal(harness.clock.pending(), 1, "holding cancels the earlier native recompute and leaves only the transit deadline");
@@ -25,6 +27,10 @@ test("keeps a native hover open from editor leave through detached portal entry"
   assert.equal(harness.clock.pending(), 0, "entering the hover cancels the transit deadline");
   harness.clock.runNext();
   assert.equal(harness.controller.hideCalls, 0, "a stale native recompute cannot dismiss the entered hover");
+
+  harness.portalHost.lastElementChild = harness.outsideNode;
+  harness.observers[0].notify();
+  assert.equal(harness.portalHost.lastElementChild, harness.portal, "a later workbench sibling cannot overtake a visible hover portal");
 
   harness.portal.dispatch("mouseout", { relatedTarget: harness.hoverSibling, target: harness.hoverChild });
   assert.equal(harness.controller.shouldKeepOpenOnEditorMouseMoveOrLeave, true, "moving inside the hover subtree stays held");
@@ -114,7 +120,7 @@ test("cleans up listeners without stacking installs or clobbering prior controll
   assert.equal(harness.editorNode.listenerCount(), 0);
   assert.equal(harness.portal.listenerCount(), 0);
   assert.equal(harness.windowTarget.listenerCount(), 0);
-  assert.equal(harness.observers.at(-1).disconnected, true);
+  assert.equal(harness.observers.every((observer) => observer.disconnected), true);
 });
 
 test("wires the detached hover keeper into widget configuration and overlay cleanup", () => {
@@ -145,6 +151,13 @@ function createHoverHarness(options = {}) {
     isConnected: true,
     querySelectorAll: () => [hover]
   });
+  const laterWorkbenchWebview = {};
+  const portalHost = {
+    appendCalls: 0,
+    appendChild(node) { this.appendCalls += 1; this.lastElementChild = node; node.parentElement = this; },
+    lastElementChild: laterWorkbenchWebview
+  };
+  portal.parentElement = portalHost;
   const editorNode = createEventTarget({ contains: (node) => node === editorChild });
   const controller = {
     cancelSchedulerCalls: 0,
@@ -174,7 +187,7 @@ function createHoverHarness(options = {}) {
     constructor(callback) { this.callback = callback; this.disconnected = false; observers.push(this); }
     disconnect() { this.disconnected = true; }
     notify() { this.callback([]); }
-    observe() {}
+    observe(target, options) { this.options = options; this.target = target; }
   }
 
   const source = overlayHoverRendererSource();
@@ -183,7 +196,7 @@ function createHoverHarness(options = {}) {
   const scheduleNativeDismiss = () => {
     nativeDismissTimer = clock.setTimeout(() => { nativeDismissTimer = 0; controller.hideContentHover(); });
   };
-  return { clock, controller, editorChild, editorNode, hover, hoverChild, hoverSash, hoverSibling, install: () => api.install(root, editor), observers, outsideNode, portal, root, scheduleNativeDismiss, windowTarget };
+  return { clock, controller, editorChild, editorNode, hover, hoverChild, hoverSash, hoverSibling, install: () => api.install(root, editor), observers, outsideNode, portal, portalHost, root, scheduleNativeDismiss, windowTarget };
 }
 
 /** Creates a hover-shaped fake element with mutable visibility. */

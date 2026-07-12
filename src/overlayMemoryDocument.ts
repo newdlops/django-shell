@@ -4,8 +4,13 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { DiagnosticLogger } from "./diagnostics";
 import { ensureIgnoredShadowDirectory } from "./filePythonShadow";
+import { PriorityBarrierQueue } from "./priorityBarrierQueue";
 
 export const INPUT_MARKER = "# --- django shell input ---";
+
+export type OverlayAnalysisPriority = "background" | "completion" | "interactive";
+
+const ANALYSIS_PRIORITY: Record<OverlayAnalysisPriority, number> = { background: 0, interactive: 1, completion: 2 };
 
 /** Captures user-relative text and focus after removing a legacy generated prefix. */
 interface OverlayUserSnapshot {
@@ -18,9 +23,10 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   private analysisDirty = false;
   private editorDirty = false;
   private installedAnalysisText: string | undefined;
+  private installedEditorText: string | undefined;
   private prelude = "";
+  private readonly taskQueue = new PriorityBarrierQueue();
   private text = "";
-  private writeQueue: Promise<void> = Promise.resolve();
   readonly analysisUri: vscode.Uri;
   readonly editorUri: vscode.Uri;
 
@@ -118,7 +124,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
   }
 
   /** Keeps one exact analysis snapshot installed until its language provider completes. */
-  async withAnalysisSnapshot<T>(text: string, focusLine: number | undefined, request: () => PromiseLike<T>): Promise<T> {
+  async withAnalysisSnapshot<T>(text: string, focusLine: number | undefined, request: () => PromiseLike<T>, priority: OverlayAnalysisPriority = "interactive"): Promise<T> {
     const snapshotPrelude = this.prelude;
     const snapshot = extractUserSnapshot(text, snapshotPrelude, focusLine);
     const changed = snapshot.text !== this.text;
@@ -128,44 +134,58 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     }
     const analysisSnapshot = analysisText(snapshotPrelude, snapshot.text);
     this.logger?.log("overlay.memory.lease", { ...textFields(snapshot.text), changed, focusLine: snapshot.focusLine ?? -1, fullLines: textFields(text).lines });
-    return this.enqueueWrite(async () => {
+    return this.enqueueAnalysis(priority, async () => {
       await this.writeAnalysisText(analysisSnapshot);
-      return await request();
+      try {
+        return await this.runProvider(priority, request);
+      } finally {
+        if (analysisSnapshot !== this.analysisText()) { await this.writeAnalysisText(this.analysisText()); }
+      }
     });
   }
 
   /** Skips a queued analysis snapshot entirely when its language request is no longer current. */
-  async withCancellableAnalysisSnapshot<T>(text: string, focusLine: number | undefined, isCancelled: () => boolean, request: () => PromiseLike<T>): Promise<T | undefined> {
+  async withCancellableAnalysisSnapshot<T>(text: string, focusLine: number | undefined, isCancelled: () => boolean, request: () => PromiseLike<T>, priority: OverlayAnalysisPriority = "interactive"): Promise<T | undefined> {
+    if (isCancelled()) { return undefined; }
     const snapshotPrelude = this.prelude;
-    return this.enqueueWrite(async () => {
+    const snapshot = extractUserSnapshot(text, snapshotPrelude, focusLine);
+    const changed = snapshot.text !== this.text;
+    if (changed) { this.text = snapshot.text; this.editorDirty = true; }
+    const analysisSnapshot = analysisText(snapshotPrelude, snapshot.text);
+    return this.enqueueAnalysis(priority, async () => {
       if (isCancelled()) { return undefined; }
-      const snapshot = extractUserSnapshot(text, snapshotPrelude, focusLine);
-      const changed = snapshot.text !== this.text;
-      if (changed) { this.text = snapshot.text; this.editorDirty = true; }
-      const analysisSnapshot = analysisText(snapshotPrelude, snapshot.text);
+      if (priority === "background" && analysisSnapshot !== this.analysisText()) { return undefined; }
       this.logger?.log("overlay.memory.cancellableLease", { ...textFields(snapshot.text), changed, focusLine: snapshot.focusLine ?? -1, fullLines: textFields(text).lines });
       await this.writeAnalysisText(analysisSnapshot);
-      return isCancelled() ? undefined : await request();
+      if (isCancelled()) {
+        if (analysisSnapshot !== this.analysisText()) { await this.writeAnalysisText(this.analysisText()); }
+        return undefined;
+      }
+      try {
+        return await this.runProvider(priority, request);
+      } finally {
+        if (analysisSnapshot !== this.analysisText()) { await this.writeAnalysisText(this.analysisText()); }
+      }
     });
   }
 
   /** Installs a provider-only analysis snapshot and restores the latest canonical source afterward. */
-  async withTransientAnalysisSnapshot<T>(text: string, focusLine: number | undefined, request: () => PromiseLike<T>): Promise<T> {
+  async withTransientAnalysisSnapshot<T>(text: string, focusLine: number | undefined, request: () => PromiseLike<T>, priority: OverlayAnalysisPriority = "completion"): Promise<T> {
     const snapshotPrelude = this.prelude;
     const snapshot = extractUserSnapshot(text, snapshotPrelude, focusLine);
     const analysisSnapshot = analysisText(snapshotPrelude, snapshot.text);
     this.logger?.log("overlay.memory.transientLease", { ...textFields(snapshot.text), focusLine: snapshot.focusLine ?? -1, fullLines: textFields(text).lines });
-    return this.enqueueWrite(async () => {
+    return this.enqueueAnalysis(priority, async () => {
       await this.writeAnalysisText(analysisSnapshot);
       try {
-        return await request();
+        return await this.runProvider(priority, request);
       } finally {
         await this.writeAnalysisText(this.analysisText());
       }
     });
   }
 
-  /** Updates editor-only hidden import text while analysis stays on user code. */
+  /** Updates hidden analysis imports without rewriting the unchanged visible editor file. */
   async updatePrelude(prelude: string): Promise<void> {
     const changed = prelude !== this.prelude;
     this.logger?.log("overlay.memory.prelude", { ...textFields(prelude), changed, offset: preludeLineCount(prelude) });
@@ -173,7 +193,7 @@ export class OverlayMemoryDocument implements vscode.Disposable {
       return;
     }
     this.prelude = prelude;
-    await this.enqueueWrite(async () => { await this.writeEditor(); await this.writeAnalysis(); });
+    await this.enqueueWrite(async () => { await this.writeAnalysis(); });
   }
 
   /** Clears user input and generated imports for a fresh shell session. */
@@ -185,18 +205,40 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     await this.enqueueWrite(async () => { await Promise.all([this.writeEditor(), this.writeAnalysis()]); });
   }
 
-  /** Serializes generated file edits so reset, prelude, and sync updates cannot race. */
+  /** Enqueues a state mutation as a barrier that analysis requests cannot cross. */
   private enqueueWrite<T>(action: () => Promise<T>): Promise<T> {
-    const next = this.writeQueue.catch(() => undefined).then(action);
-    this.writeQueue = next.then(() => undefined, (error: unknown) => this.logger?.log("overlay.memory.write.error", { error: error instanceof Error ? error.message : String(error) }));
-    return next;
+    return this.taskQueue.enqueueBarrier(action).catch((error: unknown) => {
+      this.logger?.log("overlay.memory.write.error", { error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    });
+  }
+
+  /** Enqueues a provider lease with completion-first priority inside the current mutation segment. */
+  private enqueueAnalysis<T>(priority: OverlayAnalysisPriority, action: () => Promise<T>): Promise<T> {
+    const queuedAt = Date.now();
+    return this.taskQueue.enqueue(ANALYSIS_PRIORITY[priority], async () => {
+      this.logger?.log("overlay.memory.queue", { priority, queueMs: Date.now() - queuedAt });
+      return action();
+    });
+  }
+
+  /** Measures the nested Python provider separately from queue and snapshot-write time. */
+  private async runProvider<T>(priority: OverlayAnalysisPriority, request: () => PromiseLike<T>): Promise<T> {
+    const started = Date.now();
+    try {
+      return await request();
+    } finally {
+      this.logger?.log("overlay.memory.provider", { ms: Date.now() - started, priority });
+    }
   }
 
   /** Writes generated analysis text into the dirty editor document without saving it. */
   private async writeEditor(): Promise<void> {
     const text = this.editorText();
+    if (text === this.installedEditorText) { this.editorDirty = this.editorText() !== text; return; }
     this.logger?.log("overlay.memory.write", { ...textFields(text), kind: "editor", offset: this.lineOffset() });
     await ensureBackingFile(this.editorUri, text);
+    this.installedEditorText = text;
     this.editorDirty = this.editorText() !== text;
   }
 

@@ -8,16 +8,16 @@ async function assertGoldenNoPreludeImportDiagnostics({ code, evalInWorkbench, e
   const probeName = `__dso_missing_probe_${Date.now().toString(36)}`;
   const document = vscode.workspace.textDocuments.find((item) => item.uri.toString() === uri.toString());
   assert.ok(document, `missing visible overlay document: ${uri.toString()}`);
-  assert.equal(document.languageId, "django-shell-python");
-  assert.equal(vscode.languages.match({ language: "python", scheme: "file" }, document), 0, "direct Python providers must not analyze the full unordered shell source");
-  assert.ok(vscode.languages.match({ language: "django-shell-python", scheme: "file" }, document) > 0);
+  assert.equal(document.languageId, "python");
+  assert.ok(vscode.languages.match({ language: "python", scheme: "file" }, document) > 0, "native Python providers must match the visible shell source");
+  assert.equal(vscode.languages.match({ language: "django-shell-python", scheme: "file" }, document), 0);
   assertNoCompanyDiagnostics(uri, "before probe");
   const started = JSON.parse(await evalInWorkbench(extension, goldenDiagnosticProbeStartExpression(code, probeName)));
   assert.equal(started.ok, true, `golden diagnostic probe failed to start: ${JSON.stringify(started)}`);
   try {
     await delay(500);
     const probeDiagnostics = vscodeDiagnosticSnapshot(uri, probeName).relevantDiagnostics;
-    assert.deepEqual(probeDiagnostics, [], `direct Python diagnostics leaked from the full unordered shell source: ${JSON.stringify({ probeDiagnostics })}`);
+    assert.deepEqual(probeDiagnostics, [], `generated shell diagnostics were not suppressed: ${JSON.stringify({ probeDiagnostics })}`);
     assertNoCompanyDiagnostics(uri, "during probe");
   } finally {
     const restored = JSON.parse(await evalInWorkbench(extension, goldenDiagnosticProbeRestoreExpression()));

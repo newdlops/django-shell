@@ -494,7 +494,7 @@ export class NotebookPtySession implements vscode.Disposable {
       }
       this.state = "ready";
       this.startKeepalive();
-      this.options.diagnosticLogger?.log("backend.ready", { autoImported: ready.autoImported, host: ready.host, port: ready.port, remote: this.bootstrapRetried, sessionId: this.options.sessionId });
+      this.options.diagnosticLogger?.log("backend.ready", { autoImported: ready.autoImported, host: ready.host, port: ready.port, readyMs: ready.readyMs, remote: this.bootstrapRetried, sessionId: this.options.sessionId, warmupPending: ready.warmupPending });
       return;
     }
     const failed = parseBackendFailedMarker(this.outputTail);

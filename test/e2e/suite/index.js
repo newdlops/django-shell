@@ -193,13 +193,14 @@ function pythonExecutable() {
 /** Verifies hidden console-cell.py document changes cannot execute Python code. */
 function assertNoHiddenDocumentEnterRunner(extension) { const source = fs.readFileSync(path.join(extension.extensionPath, "out", "overlayShellCommand.js"), "utf8"); assert.equal(source.includes("onDidChangeTextDocument") || source.includes("overlay.document.enter"), false); }
 
-/** Verifies inlays stay native while semantic colors forward from hidden Pylance analysis. */
+/** Verifies inlays and semantic colors stay on the visible native Python provider path. */
 function assertLanguageProviderRegistration(extension) {
   const source = fs.readFileSync(path.join(extension.extensionPath, "out", "overlayPythonFeatureBridge.js"), "utf8");
   assert.equal(source.includes("registerInlayHintsProvider"), false);
-  assert.equal(source.includes("registerDocumentSemanticTokensProvider"), true);
-  assert.equal(source.includes("vscode.provideDocumentSemanticTokensLegend"), true);
-  assert.equal(source.includes("vscode.provideDocumentSemanticTokens"), true);
+  assert.equal(source.includes("registerDocumentSemanticTokensProvider"), false);
+  assert.equal(source.includes("vscode.provideDocumentSemanticTokensLegend"), false);
+  assert.equal(source.includes("vscode.provideDocumentSemanticTokens"), false);
+  assert.equal(source.includes('language: "python"'), true);
 }
 
 /** Verifies shell Enter cannot trigger formatter rewrites such as Black list expansion. */

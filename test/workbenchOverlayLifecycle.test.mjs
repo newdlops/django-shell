@@ -102,7 +102,7 @@ test("overlay geometry coalesces scroll updates while keeping a settle pass", ()
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 98"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 99"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -113,7 +113,7 @@ test("overlay Monaco layout clamps dimensions instead of trusting transient DOM 
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
   assert.ok(rendererSource.includes("automaticLayout: false"));
-  assert.ok(rendererSource.includes("quickSuggestionsDelay: 25"), "typing pauses start completion providers without an extra visible delay");
+  assert.equal(rendererSource.includes("quickSuggestionsDelay"), false, "native Python editor settings control automatic suggestion timing");
   assert.ok(rendererSource.includes("function __dsoLayoutSize(root, host)"));
   assert.ok(rendererSource.includes("function __dsoMaxEditorHeight(viewportHeight)"));
   assert.ok(rendererSource.includes("availableHeight"));

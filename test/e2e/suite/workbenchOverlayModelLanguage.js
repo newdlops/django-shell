@@ -10,9 +10,9 @@ function assertWorkbenchModelLanguageSelection(extension) {
   const shellReport = shell.window.__djangoShellOverlayShow({ height: 180, left: 12, top: 24, width: 640 });
   const shellRoot = shell.document.getElementById("django-shell-overlay");
   assert.ok(shellReport.includes(":editor:"), shellReport);
-  assert.equal(shell.state.createdLanguageId, "django-shell-python");
+  assert.equal(shell.state.createdLanguageId, "python");
   assert.equal(shellRoot.__dsoLastEditorError || "", "");
-  assert.equal(shellRoot.__djangoShellEditor.getModel().getLanguageId(), "django-shell-python");
+  assert.equal(shellRoot.__djangoShellEditor.getModel().getLanguageId(), "python");
 
   const query = createRendererHarness(renderer.overlayRendererSource("file:///workspace/.django-shell/query-cell.py", { executionMode: "submit" }));
   const queryReport = query.window.__djangoShellOverlayShow({ height: 180, left: 12, top: 24, width: 640 });

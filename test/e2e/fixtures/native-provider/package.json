@@ -1,0 +1,31 @@
+{
+  "name": "django-shell-native-provider-fixture",
+  "displayName": "Django Shell Native Provider E2E Fixture",
+  "description": "Probes direct Python completion participation in the Django Shell overlay.",
+  "version": "0.0.1",
+  "publisher": "django-shell-e2e",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Testing"
+  ],
+  "activationEvents": [
+    "onLanguage:python",
+    "onCommand:djangoShellNativeProvider.reset",
+    "onCommand:djangoShellNativeProvider.snapshot"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "djangoShellNativeProvider.reset",
+        "title": "Reset Django Shell Native Provider Fixture"
+      },
+      {
+        "command": "djangoShellNativeProvider.snapshot",
+        "title": "Snapshot Django Shell Native Provider Fixture"
+      }
+    ]
+  }
+}

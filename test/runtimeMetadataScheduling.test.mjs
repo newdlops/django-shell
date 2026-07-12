@@ -32,6 +32,20 @@ test("hidden prelude requests coalesce within one execution generation", () => {
   assert.ok(clearInspection.includes("this.runtimePrelude.invalidate()"));
 });
 
+test("ready startup measures immediately and notifies runtime views only after prelude idle grace", () => {
+  const snapshot = methodSource("private handleSessionSnapshot", "private async handleMessage");
+  const ready = snapshot.slice(snapshot.indexOf("if (!snapshot.ready || this.runtimeReady)"));
+  const schedule = methodSource("private async scheduleReadyRuntimeRefresh", "private schedulePreludeRetry");
+  const clearRefresh = methodSource("private clearRuntimeRefreshTimer()", "private clearInspectionCache()");
+  assert.ok(ready.indexOf('type: "measureEditor"') < ready.indexOf("void this.scheduleReadyRuntimeRefresh"), "overlay measurement must not wait for metadata");
+  assert.equal(ready.includes("this.runtimeEmitter.fire()"), false, "READY must not fan out background runtime reads immediately");
+  assert.ok(schedule.indexOf("await this.updateOverlayPrelude(generation)") < schedule.indexOf("this.runtimeEmitter.fire()"));
+  assert.ok(schedule.includes("READY_RUNTIME_REFRESH_DELAY_MS"));
+  assert.ok(schedule.includes("refreshVersion !== this.runtimeRefreshVersion"), "restart and execution cancellation must invalidate startup work");
+  assert.ok(clearRefresh.includes("this.runtimeRefreshVersion += 1"));
+  assert.ok(clearRefresh.includes('phase: "cancel"'));
+});
+
 /** Returns one source method section bounded by the next stable declaration. */
 function methodSource(startMarker, endMarker) {
   const start = consoleSource.indexOf(startMarker);

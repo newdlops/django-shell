@@ -18,7 +18,9 @@ export interface BackendEndpoint {
   ipython?: boolean;
   pid?: number;
   port: number;
+  readyMs?: number;
   token: string;
+  warmupPending?: boolean;
 }
 
 export interface BackendPtyResponse {

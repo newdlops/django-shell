@@ -561,9 +561,22 @@ export function overlaySyncRendererSource(): string {
       return false;
     }
 
-    /** Returns whether Enter currently belongs to IntelliSense UI. */
-    function __dsoSuggestOpen() {
-      return __dsoHasVisiblePopup(".suggest-widget,.parameter-hints-widget");
+    /** Returns whether the editor currently renders an inline completion. */
+    function __dsoInlineSuggestionVisible(editor) {
+      const node = editor && editor.getDomNode && editor.getDomNode();
+      if (!node || !node.querySelectorAll) { return false; }
+      const ghosts = node.querySelectorAll(".ghost-text,.ghost-text-decoration,.inline-completion-text-to-replace");
+      for (let index = 0; index < ghosts.length; index++) {
+        const ghost = ghosts[index];
+        if (ghost.classList && ghost.classList.contains("ghost-text-hidden")) { continue; }
+        if (__dsoPopupVisible(ghost)) { return true; }
+      }
+      return false;
+    }
+
+    /** Returns whether Enter currently belongs to completion or parameter UI. */
+    function __dsoSuggestOpen(editor) {
+      return __dsoHasVisiblePopup(".suggest-widget,.parameter-hints-widget") || __dsoInlineSuggestionVisible(editor);
     }
 
     /** Returns the payload that Enter would run from the current editor state. */
@@ -739,17 +752,19 @@ export function overlaySyncRendererSource(): string {
       return cls ? tag + "." + cls : tag;
     }
 
-    /** Returns whether a key event originated in VS Code's conditional-breakpoint editor. */
-    function __dsoBreakpointWidgetOwnsEvent(event) {
+    /** Returns whether a key event originated in a nested editor widget that owns Enter. */
+    function __dsoAuxiliaryWidgetOwnsEvent(event) {
+      const selector = ".breakpoint-widget,.rename-box,.rename-input,.find-widget";
       const raw = event && event.browserEvent ? event.browserEvent : event;
       const target = raw && raw.target ? raw.target : (event && event.target);
-      try { if (target && target.closest && target.closest(".breakpoint-widget")) { return true; } } catch (eClosestBreakpointWidget) {}
+      try { if (target && target.closest && target.closest(selector)) { return true; } } catch (eClosestAuxiliaryWidget) {}
       try {
         const path = raw && raw.composedPath ? raw.composedPath() : (event && event.composedPath ? event.composedPath() : []);
         for (let index = 0; path && index < path.length; index++) {
-          if (path[index] && path[index].classList && path[index].classList.contains("breakpoint-widget")) { return true; }
+          const node = path[index];
+          if (node && node.matches && node.matches(selector)) { return true; }
         }
-      } catch (eBreakpointWidgetPath) {}
+      } catch (eAuxiliaryWidgetPath) {}
       return false;
     }
 
@@ -842,8 +857,8 @@ export function overlaySyncRendererSource(): string {
       const run = function (event, source) {
         const raw = event.browserEvent || event;
         if (!__dsoIsEnter(event, raw)) { return; }
-        if (__dsoBreakpointWidgetOwnsEvent(event)) { __dsoLog(post, "key.enter.breakpointWidget", { source: source }); return; }
-        const suggest = __dsoSuggestOpen();
+        if (__dsoAuxiliaryWidgetOwnsEvent(event)) { __dsoLog(post, "key.enter.auxiliaryWidget", { source: source }); return; }
+        const suggest = __dsoSuggestOpen(editor);
         __dsoLog(post, "key.enter", { alt: !!raw.altKey, composing: !!raw.isComposing, ctrl: !!raw.ctrlKey, meta: !!raw.metaKey, shift: !!raw.shiftKey, source: source, suggest: suggest });
         if (root.__dsoExecutionMode === "submit") {
           if ((raw.ctrlKey || raw.metaKey) && !raw.altKey && !raw.shiftKey && !raw.isComposing && !suggest) { execute(event, source + "-submit", false); }
@@ -928,6 +943,7 @@ export function overlaySyncRendererSource(): string {
       if (model) {
         root.__dsoPreludeText = String(text || "");
         window.__dsoApplyPreludeHiddenArea(root, editor);
+        try { window.__dsoSchedulePreludeSemanticDecorations && window.__dsoSchedulePreludeSemanticDecorations(root); } catch (eVisiblePreludeSemantic) {}
         try { window.__dsoApplyOverlayDebugLine && window.__dsoApplyOverlayDebugLine(root, editor); } catch (eVisiblePreludeDebugLine) {}
         try { window.__dsoApplyOverlayBreakpoints && window.__dsoApplyOverlayBreakpoints(root, editor); } catch (eVisiblePreludeBreakpoints) {}
       }

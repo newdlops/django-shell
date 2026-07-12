@@ -2,11 +2,12 @@
 
 const assert = require("node:assert/strict");
 const vscode = require("vscode");
+const { assertNativeProviderParticipation } = require("./nativeProviderParticipation.js");
 const { assertGoldenPythonExecution } = require("./pythonCellGolden.js");
 const { assertOverlayHoverPointerHandoff } = require("./overlayHoverPointer.js");
 
 const INPUT_MARKER = "# --- django shell input ---";
-const SHELL_LANGUAGE_ID = "django-shell-python";
+const SHELL_LANGUAGE_ID = "python";
 const PRELUDE = "# Django shell runtime imports for analysis.\n# ruff: noqa\nfrom orm_runtime.models import Company\n\n";
 const GOLDEN_PRELUDE_LINES = ["from orm_runtime.models import Company", ...Array.from({ length: 4100 }, (_, index) => `__dso_large_prelude_${index} = ${index}`)];
 const GOLDEN_PRELUDE = `# Django shell runtime imports for analysis.\n# ruff: noqa\n${GOLDEN_PRELUDE_LINES.join("\n")}\n\n`;
@@ -26,6 +27,8 @@ async function assertPythonCellBehavior(extension) {
   await assertGeneratedOverlayFilesHidden("overlay document install");
   await withStageTimeout("overlay editor show", vscode.commands.executeCommand("djangoShell.showOverlayEditor"), 20000);
   await assertGeneratedOverlayFilesHidden("overlay editor show");
+  await withStageTimeout("native provider participation", assertNativeProviderParticipation({ extension, installOverlayDocument, restoreDocumentText: generatedText, restorePrelude: ["from orm_runtime.models import Company"] }), 45000);
+  await assertGeneratedOverlayFilesHidden("native provider participation");
   if (process.env.DJANGO_SHELL_E2E_HOVER_ONLY === "1") {
     await withStageTimeout("renderer hover pointer handoff", assertOverlayHoverPointerHandoff(extension), 30000);
     await assertGeneratedOverlayFilesHidden("renderer hover pointer handoff");
@@ -38,7 +41,7 @@ async function assertPythonCellBehavior(extension) {
   }
   if (process.env.DJANGO_SHELL_E2E_THEME_ONLY === "1") {
     const text = await withStageTimeout("overlay document open", waitForOpenDocumentText((value) => value.includes(USER_CODE)), 20000);
-    await withStageTimeout("forwarded semantic tokens", assertForwardedSemanticTokens(overlayUris().editor, text), 30000);
+    await withStageTimeout("native semantic tokens", assertNativeSemanticTokens(overlayUris().editor, text), 30000);
     await withStageTimeout("renderer theme checks", assertRendererTheme(extension), 30000);
     await assertGeneratedOverlayFilesHidden("renderer theme checks");
     return;
@@ -329,32 +332,32 @@ async function assertProviderFeatures(uri, text) {
   assert.match(ormHover, /Base model:\s*`?(?:orm_runtime\.)?Company`?/, `missing Django ORM extension hover: ${ormHover}`);
   const definitions = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", uri, positionOfText(text, "Company()").translate(0, 1));
   assert.ok(definitionUris(definitions).some((uri) => uri.includes("/orm_runtime/models")), `definition failed for Company: ${JSON.stringify(definitionUris(definitions))}`);
-  await assertForwardedSemanticTokens(uri, text);
+  await assertNativeSemanticTokens(uri, text);
 }
 
-/** Verifies visible custom-language tokens retain Pylance class and variable distinctions. */
-async function assertForwardedSemanticTokens(uri, text) {
+/** Verifies native Python semantic tokens distinguish a known function and local variable. */
+async function assertNativeSemanticTokens(uri, text) {
   let legend;
   let tokens;
   let entries = [];
-  let company;
+  let callable;
   let variable;
   for (let attempt = 0; attempt < 80; attempt++) {
     legend = await vscode.commands.executeCommand("vscode.provideDocumentSemanticTokensLegend", uri);
     tokens = legend ? await vscode.commands.executeCommand("vscode.provideDocumentSemanticTokens", uri) : undefined;
     if (legend?.tokenTypes?.length && tokens?.data?.length) {
       entries = semanticTokenEntries(tokens, legend);
-      company = semanticTokenAt(entries, positionOfText(text, "Company()").translate(0, 1));
+      callable = semanticTokenAt(entries, positionOfText(text, "print(company").translate(0, 1));
       variable = semanticTokenAt(entries, positionOfText(text, "company =").translate(0, 1));
-      if (company && variable && company.type !== variable.type) { return; }
+      if (callable && variable && callable.type !== variable.type) { return; }
     }
     await delay(100);
   }
-  assert.ok(legend?.tokenTypes?.length, "custom Python semantic legend was not registered");
-  assert.ok(tokens?.data?.length, "custom Python semantic tokens were not forwarded");
-  assert.ok(company, `missing Company semantic token: ${JSON.stringify(entries.slice(0, 80))}`);
+  assert.ok(legend?.tokenTypes?.length, "native Python semantic legend was not registered");
+  assert.ok(tokens?.data?.length, "native Python semantic tokens were not provided");
+  assert.ok(callable, `missing print semantic token: ${JSON.stringify(entries.slice(0, 80))}`);
   assert.ok(variable, `missing company semantic token: ${JSON.stringify(entries.slice(0, 80))}`);
-  assert.notEqual(company.type, variable.type, `class and variable collapsed to one semantic color type: ${JSON.stringify({ company, variable })}`);
+  assert.notEqual(callable.type, variable.type, `function and variable collapsed to one semantic color type: ${JSON.stringify({ callable, variable })}`);
 }
 
 /** Decodes delta-encoded semantic token data into absolute visible positions. */
@@ -412,18 +415,32 @@ async function assertUnitLocalAutoImport(originalText) {
 
 /** Verifies a live suggest widget keeps compatible candidates while the active prefix grows. */
 async function assertSuggestionWidgetSurvivesTypingBurst() {
+  const warm = await installOverlayDocument(`${PRELUDE}${INPUT_MARKER}\nupper = 1\n\n\nclient = WidgetImportedCli`);
+  await warmCompletionLabel(overlayUris().editor, warm, "client = WidgetImportedCli", "WidgetImportedClient");
   await installOverlayDocument(`${PRELUDE}${INPUT_MARKER}\nupper = 1\n\n\nclient = WidgetImp`);
   let result = JSON.parse(await evalInWorkbench(undefined, suggestionWidgetBurstStartExpression()));
-  for (let attempt = 0; attempt < 75 && !result.ok && result.reason !== "missing-overlay"; attempt++) {
+  for (let attempt = 0; attempt < 75 && !result.ok && result.reason !== "missing-overlay" && result.elapsedMs <= 1500; attempt++) {
     await delay(40);
     result = JSON.parse(await evalInWorkbench(undefined, suggestionWidgetSnapshotExpression()));
   }
   assert.equal(result.ok, true, `suggest widget lost a known completion during typing: ${JSON.stringify(result)}`);
   assert.equal(result.sawNoSuggestions, false, `suggest widget exposed a false empty result: ${JSON.stringify(result)}`);
-  assert.ok(result.elapsedMs <= 3000, `suggest widget reacted too slowly: ${JSON.stringify(result)}`);
+  assert.ok(result.elapsedMs <= 500, `suggest widget exceeded the 500ms warm latency budget: ${JSON.stringify(result)}`);
 }
 
-/** Verifies one partial completion carries its import edit at the lower execution-unit start. */
+/** Warms one exact native completion request before measuring keyboard-to-widget latency. */
+async function warmCompletionLabel(uri, source, snippet, label) {
+  const position = positionOfText(source, snippet).translate(0, snippet.length);
+  let labels = [];
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    labels = completionLabels(await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", uri, position));
+    if (labels.includes(label)) { return; }
+    await delay(100);
+  }
+  throw new Error(`Timed out warming ${label}: ${labels.slice(0, 80).join(",")}`);
+}
+
+/** Verifies one partial completion carries an auto-import before UI relocation handles unit locality. */
 async function assertAutoImportForSource(source, attempts = 60) {
   const installed = await installOverlayDocument(`${PRELUDE}${INPUT_MARKER}\n${source}`);
   const uri = overlayUris().editor;
@@ -450,11 +467,16 @@ async function assertAutoImportForSource(source, attempts = 60) {
   }
   assert.ok(item, `missing AutoImportedClient completion: ${JSON.stringify(observed)}`);
   const importEdit = item.additionalTextEdits?.find((edit) => edit.newText.includes("from workspace_context import AutoImportedClient"));
-  assert.ok(importEdit, `AutoImportedClient completion lost its auto-import: ${JSON.stringify(completionDebugValue(item))}`);
-  assert.equal(importEdit.range.start.line, unitStart, `auto-import targeted another execution unit: ${JSON.stringify(completionDebugValue(item))}`);
-  assert.equal(importEdit.range.start.character, 0);
-  assert.equal(importEdit.range.end.line, unitStart);
-  assert.equal(item.textEdit?.range.start.line, unitStart, `primary completion edit left the focused unit: ${JSON.stringify(completionDebugValue(item))}`);
+  const existingImport = source.split(/\r?\n/).some((line) => line.trim() === "from workspace_context import AutoImportedClient");
+  assert.ok(importEdit || existingImport, `AutoImportedClient completion lost its auto-import: ${JSON.stringify(completionDebugValue(item))}`);
+  assert.equal(completionPrimaryLine(item), unitStart, `primary completion edit left the focused unit: ${JSON.stringify(completionDebugValue(item))}`);
+}
+
+/** Returns the first line targeted by one native completion's primary edit or range. */
+function completionPrimaryLine(item) {
+  if (item.textEdit?.range) { return item.textEdit.range.start.line; }
+  if (item.range instanceof vscode.Range) { return item.range.start.line; }
+  return item.range?.inserting?.start.line;
 }
 
 /** Verifies a hover contains a concrete signal even when lower-priority providers add noise. */
@@ -497,6 +519,7 @@ async function assertRendererTheme(extension) {
   assert.ok(String(snapshot.uri).endsWith("/.django-shell/console-cell.py"), String(snapshot.uri));
   assert.ok(renderedText(snapshot).includes("name__icontains"), JSON.stringify(snapshot.tokens));
   assert.ok(themeColorCount(snapshot) >= 3, `expected multiple theme colors: ${JSON.stringify(snapshot.tokens)}`);
+  assert.ok(snapshot.runtimeClassDecorations?.some((text) => text.includes("Company")), `runtime Company lacks its class decoration: ${JSON.stringify(snapshot.runtimeClassDecorations)}`);
   for (const symbol of THEMED_SYMBOLS) {
     const token = symbolToken(snapshot, symbol);
     assert.ok(token, `missing rendered symbol ${symbol}: ${JSON.stringify(snapshot.tokens)}`);
@@ -510,7 +533,7 @@ async function waitForRendererSnapshot(extension) {
   let last = {};
   for (let attempt = 0; attempt < 60; attempt++) {
     last = JSON.parse(await evalInWorkbench(extension, rendererSnapshotExpression()));
-    if (last.hasEditor && last.tokens?.length && renderedText(last).includes("Acme")) {
+    if (last.hasEditor && last.tokens?.length && renderedText(last).includes("Acme") && last.runtimeClassDecorations?.some((text) => text.includes("Company"))) {
       return last;
     }
     await vscode.commands.executeCommand("djangoShell.showOverlayEditor");
@@ -549,17 +572,29 @@ async function evalInWorkbench(extension, rendererExpression) {
 
 /** Builds the renderer expression that captures tokens and theme colors. */
 function rendererSnapshotExpression() {
-  return `(async()=>{const delay=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));await delay(220);const root=document.getElementById("django-shell-overlay");const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();const node=editor&&editor.getDomNode&&editor.getDomNode();const css=(el)=>{const s=el&&window.getComputedStyle?window.getComputedStyle(el):null;return s?{backgroundColor:s.backgroundColor,borderColor:s.borderColor,color:s.color}:{};};const allSpans=Array.from((node||root||document).querySelectorAll(".view-line span"));const leafSpans=allSpans.filter((span)=>!span.querySelector("span"));const spans=leafSpans.length?leafSpans:allSpans;const tokens=spans.map((span)=>Object.assign({className:String(span.className||""),text:String(span.textContent||"")},css(span))).filter((token)=>token.text.trim());return JSON.stringify({editorBackground:css(node).backgroundColor,hasEditor:!!editor,language:model&&model.getLanguageId&&model.getLanguageId(),overlayBackground:css(root).backgroundColor,text:model&&model.getValue&&model.getValue(),tokens,uri:model&&model.uri&&String(model.uri)});})()`;
+  return `(async()=>{const delay=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));await delay(220);const root=document.getElementById("django-shell-overlay");const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();const node=editor&&editor.getDomNode&&editor.getDomNode();const css=(el)=>{const s=el&&window.getComputedStyle?window.getComputedStyle(el):null;return s?{backgroundColor:s.backgroundColor,borderColor:s.borderColor,color:s.color}:{};};const allSpans=Array.from((node||root||document).querySelectorAll(".view-line span"));const leafSpans=allSpans.filter((span)=>!span.querySelector("span"));const spans=leafSpans.length?leafSpans:allSpans;const tokens=spans.map((span)=>Object.assign({className:String(span.className||""),text:String(span.textContent||"")},css(span))).filter((token)=>token.text.trim());const runtimeClassDecorations=Array.from((node||root||document).querySelectorAll(".django-shell-semantic-class")).map((span)=>String(span.textContent||""));return JSON.stringify({editorBackground:css(node).backgroundColor,hasEditor:!!editor,language:model&&model.getLanguageId&&model.getLanguageId(),overlayBackground:css(root).backgroundColor,runtimeClassDecorations,semanticDecorationCount:Array.isArray(root&&root.__dsoSemanticDecorationIds)?root.__dsoSemanticDecorationIds.length:0,semanticError:String(root&&root.__dsoSemanticError||""),semanticPrelude:String(root&&root.__dsoPreludeText||"").slice(0,200),semanticTimer:!!(root&&root.__dsoSemanticTimer),text:model&&model.getValue&&model.getValue(),tokens,uri:model&&model.uri&&String(model.uri)});})()`;
 }
 
 /** Builds a renderer probe that starts completion and records every suggest-widget mutation. */
 function suggestionWidgetBurstStartExpression() {
-  return `(async()=>{const delay=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));const root=document.getElementById("django-shell-overlay");const editor=root&&root.__djangoShellEditor;const model=editor&&editor.getModel&&editor.getModel();if(!root||!editor||!model){return JSON.stringify({ok:false,reason:"missing-overlay"});}const prior=window.__dsoSuggestionProbe;try{prior&&prior.observer&&prior.observer.disconnect();}catch(e){}const state={candidateAt:0,candidateSeen:false,finalTypedAt:0,lastText:"",sawNoSuggestions:false,tracking:false};const visible=(node)=>{if(!node){return false;}const aria=node.getAttribute&&node.getAttribute("aria-hidden");const style=getComputedStyle(node);const rect=node.getBoundingClientRect();return aria!=="true"&&!(node.classList&&node.classList.contains("hidden"))&&style.display!=="none"&&style.visibility!=="hidden"&&rect.width>0&&rect.height>0;};state.scan=()=>{const widget=Array.from(document.querySelectorAll(".suggest-widget")).find(visible);const text=String(widget&&widget.textContent||"");if(text){state.lastText=text;}if(state.tracking){state.sawNoSuggestions=state.sawNoSuggestions||/no suggestions/i.test(text);}if(String(model.getValue&&model.getValue()||"").endsWith("WidgetImportedCli")&&text.includes("WidgetImportedClient")){state.candidateSeen=true;state.candidateAt=state.candidateAt||Date.now();}};state.observer=new MutationObserver(state.scan);state.observer.observe(document.body,{attributes:true,characterData:true,childList:true,subtree:true});window.__dsoSuggestionProbe=state;const line=model.getLineCount(),startColumn=model.getLineMaxColumn(line),chunks=["orted","Cl","i"];let column=startColumn;editor.focus&&editor.focus();editor.setPosition&&editor.setPosition({lineNumber:line,column});editor.trigger&&editor.trigger("django-shell-e2e","editor.action.triggerSuggest",{});state.tracking=true;for(let index=0;index<chunks.length;index++){const text=chunks[index];await delay(8);editor.executeEdits("django-shell-e2e-suggest-burst",[{forceMoveMarkers:true,range:{endColumn:column,endLineNumber:line,startColumn:column,startLineNumber:line},text}]);column+=text.length;editor.setPosition&&editor.setPosition({lineNumber:line,column});if(index===chunks.length-1){state.finalTypedAt=Date.now();}editor.trigger&&editor.trigger("django-shell-e2e","editor.action.triggerSuggest",{});}state.scan();const elapsedMs=state.candidateSeen?Math.max(0,state.candidateAt-state.finalTypedAt):0;return JSON.stringify({elapsedMs,lastText:state.lastText.slice(0,500),modelTail:String(model.getValue&&model.getValue()||"").slice(-120),ok:state.candidateSeen,sawNoSuggestions:state.sawNoSuggestions});})()`;
+  return `(async()=>{
+    const delay=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));
+    const root=document.getElementById("django-shell-overlay"),editor=root&&root.__djangoShellEditor,model=editor&&editor.getModel&&editor.getModel();
+    if(!root||!editor||!model){return JSON.stringify({ok:false,reason:"missing-overlay"});}
+    const prior=window.__dsoSuggestionProbe;try{prior&&prior.observer&&prior.observer.disconnect();}catch(error){}
+    const state={candidateAt:0,candidateSeen:false,finalTypedAt:0,focusedLabel:"",lastText:"",sawNoSuggestions:false,tracking:false};
+    const visible=(node)=>{if(!node){return false;}const aria=node.getAttribute&&node.getAttribute("aria-hidden"),style=getComputedStyle(node),rect=node.getBoundingClientRect();return aria!=="true"&&!(node.classList&&node.classList.contains("hidden"))&&style.display!=="none"&&style.visibility!=="hidden"&&rect.width>0&&rect.height>0;};
+    state.scan=()=>{const widget=Array.from(document.querySelectorAll(".suggest-widget")).find(visible),text=String(widget&&widget.textContent||""),controller=editor.getContribution&&editor.getContribution("editor.contrib.suggestController");let focused=null;try{focused=controller&&controller.widget&&controller.widget.value&&controller.widget.value.getFocusedItem&&controller.widget.value.getFocusedItem();}catch(error){}const completion=focused&&focused.item&&focused.item.completion;state.focusedLabel=String(completion&&completion.label&&typeof completion.label==="object"?completion.label.label:completion&&completion.label||"");if(text){state.lastText=text;}else if(state.focusedLabel){state.lastText=state.focusedLabel;}if(state.tracking){state.sawNoSuggestions=state.sawNoSuggestions||/no suggestions/i.test(text);}if(String(model.getValue&&model.getValue()||"").endsWith("WidgetImportedCli")&&(text.includes("WidgetImportedClient")||state.focusedLabel==="WidgetImportedClient")){state.candidateSeen=true;state.candidateAt=state.candidateAt||Date.now();}};
+    state.observer=new MutationObserver(state.scan);state.observer.observe(document.body,{attributes:true,characterData:true,childList:true,subtree:true});window.__dsoSuggestionProbe=state;
+    const line=model.getLineCount(),startColumn=model.getLineMaxColumn(line),chunks=["orted","Cl","i"];let column=startColumn;editor.focus&&editor.focus();editor.setPosition&&editor.setPosition({lineNumber:line,column});editor.trigger&&editor.trigger("django-shell-e2e","editor.action.triggerSuggest",{});state.tracking=true;
+    for(let index=0;index<chunks.length;index++){const text=chunks[index];await delay(8);editor.executeEdits("django-shell-e2e-suggest-burst",[{forceMoveMarkers:true,range:{endColumn:column,endLineNumber:line,startColumn:column,startLineNumber:line},text}]);column+=text.length;editor.setPosition&&editor.setPosition({lineNumber:line,column});if(index===chunks.length-1){state.finalTypedAt=Date.now();}editor.trigger&&editor.trigger("django-shell-e2e","editor.action.triggerSuggest",{});}
+    state.scan();const elapsedMs=state.candidateSeen?Math.max(0,state.candidateAt-state.finalTypedAt):0;return JSON.stringify({elapsedMs,focusedLabel:state.focusedLabel,lastText:state.lastText.slice(0,500),modelTail:String(model.getValue&&model.getValue()||"").slice(-120),ok:state.candidateSeen,sawNoSuggestions:state.sawNoSuggestions});
+  })()`;
 }
 
 /** Builds a renderer probe that snapshots the active completion observation. */
 function suggestionWidgetSnapshotExpression() {
-  return `(function(){const state=window.__dsoSuggestionProbe;if(!state){return JSON.stringify({ok:false,reason:"missing-probe"});}state.scan&&state.scan();const now=Date.now(),elapsedMs=state.candidateSeen?Math.max(0,state.candidateAt-state.finalTypedAt):state.finalTypedAt?now-state.finalTypedAt:0;const root=document.getElementById("django-shell-overlay"),editor=root&&root.__djangoShellEditor,model=editor&&editor.getModel&&editor.getModel();const result={elapsedMs,lastText:String(state.lastText||"").slice(0,500),modelTail:String(model&&model.getValue&&model.getValue()||"").slice(-120),ok:!!state.candidateSeen,sawNoSuggestions:!!state.sawNoSuggestions};if(result.ok||result.elapsedMs>3000){try{state.observer&&state.observer.disconnect();}catch(e){}}return JSON.stringify(result);})()`;
+  return `(function(){const state=window.__dsoSuggestionProbe;if(!state){return JSON.stringify({ok:false,reason:"missing-probe"});}state.scan&&state.scan();const now=Date.now(),elapsedMs=state.candidateSeen?Math.max(0,state.candidateAt-state.finalTypedAt):state.finalTypedAt?now-state.finalTypedAt:0;const root=document.getElementById("django-shell-overlay"),editor=root&&root.__djangoShellEditor,model=editor&&editor.getModel&&editor.getModel();const result={elapsedMs,focusedLabel:String(state.focusedLabel||""),lastText:String(state.lastText||"").slice(0,500),modelTail:String(model&&model.getValue&&model.getValue()||"").slice(-120),ok:!!state.candidateSeen,sawNoSuggestions:!!state.sawNoSuggestions};if(result.ok||result.elapsedMs>1500){try{state.observer&&state.observer.disconnect();}catch(error){}}return JSON.stringify(result);})()`;
 }
 
 /** Builds a renderer expression that proves the overlay editor model accepts Python text. */

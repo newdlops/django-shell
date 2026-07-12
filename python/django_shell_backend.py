@@ -123,22 +123,25 @@ class _InspectionDeferred:
 
 def start(namespace, token):
     """Starts or reuses the backend server for the given interactive shell namespace."""
+    started_at = time.monotonic()
+    warmup = None
     try:
-        # Bind common Django names and registered model classes before any initial-name snapshot; the slower module scan
-        # remains configurable.
+        _wait_for_warmup()
         autoimported = _autoimport_base_names(namespace)
-        autoimported += _autoimport_registered_models(namespace)
-        if _autoimport_enabled():
-            autoimported += _autoimport_django_namespace(namespace)
-        _register_transform_lookups()
-        _install_queryset_progress()
+        ipython = _pty_is_ipython()
+        warmup = _new_warmup_state() if ipython else None
+        if warmup is None:
+            autoimported += _warmup_backend_components(namespace)
         server = _STATE.get("server")
         if server is None:
             server = _Server((_bind_host(), 0), _Handler)
-            server.initial_names = set(namespace)
             server.namespace = namespace
+            server.initial_names = _backend_initial_names(namespace)
             _STATE["server"] = server
             _debugger_exempt_thread(threading.Thread(target=server.serve_forever, daemon=True)).start()
+        else:
+            server.namespace = namespace
+            server.initial_names = _backend_initial_names(namespace)
         server.token = token
         host, port = server.server_address
         try:
@@ -149,9 +152,98 @@ def start(namespace, token):
         # tty canonical-input line limit — and the audit line carries no `_djs_rpc` lambda.
         namespace["_djs_backend_initial_names"] = server.initial_names
         namespace["_djs_rpc"] = lambda _djs_r, _djs_i: _pty_serve(namespace, token, _djs_r, _djs_i, namespace.get("_djs_backend_initial_names", set()))
-        _print_marker(_READY_PREFIX, {"autoImported": autoimported, "cellCapture": bool(capture), "host": _connect_host(host), "ipython": _pty_is_ipython(), "pid": os.getpid(), "port": port, "token": token})
+        ready = {"autoImported": autoimported, "cellCapture": bool(capture), "host": _connect_host(host), "ipython": ipython, "pid": os.getpid(), "port": port, "readyMs": int((time.monotonic() - started_at) * 1000), "token": token}
+        if warmup is not None:
+            ready["warmupPending"] = True
+        _print_marker(_READY_PREFIX, ready)
+        if warmup is not None:
+            _start_backend_warmup(namespace, server, warmup, autoimported)
     except Exception:
+        _release_pending_warmup(warmup)
         _print_marker(_FAILED_PREFIX, {"error": traceback.format_exc()})
+
+
+def _new_warmup_state():
+    """Creates the completion event that gates IPython work while deferred startup finishes."""
+    warmup = {"event": threading.Event(), "pending": True}
+    _STATE["warmup"] = warmup
+    return warmup
+
+
+def _start_backend_warmup(namespace, server, warmup, base_autoimported):
+    """Runs deferred namespace binding and Django instrumentation on a debugger-exempt daemon thread."""
+    try:
+        thread = _debugger_exempt_thread(threading.Thread(target=_run_backend_warmup, args=(namespace, server, warmup, base_autoimported), daemon=True))
+        warmup["thread"] = thread
+        thread.start()
+    except Exception:
+        _run_backend_warmup(namespace, server, warmup, base_autoimported)
+
+
+def _run_backend_warmup(namespace, server, warmup, base_autoimported):
+    """Completes deferred startup, refreshes initial-name helpers, and releases waiting work."""
+    started_at = time.monotonic()
+    try:
+        warmup["autoImported"] = base_autoimported + _warmup_backend_components(namespace)
+    except BaseException:
+        warmup["error"] = traceback.format_exc()
+    finally:
+        try:
+            _refresh_backend_initial_names(namespace, server)
+        except BaseException:
+            warmup.setdefault("error", traceback.format_exc())
+        finally:
+            warmup["ms"] = int((time.monotonic() - started_at) * 1000)
+            _release_pending_warmup(warmup)
+
+
+def _warmup_backend_components(namespace):
+    """Binds registered model names and installs Django helpers that are not needed to emit READY."""
+    autoimported = _autoimport_registered_models(namespace)
+    if _autoimport_enabled():
+        autoimported += _autoimport_django_namespace(namespace)
+    _register_transform_lookups()
+    _install_queryset_progress()
+    return autoimported
+
+
+def _backend_initial_names(namespace):
+    """Returns shell-startup names without private backend helpers added during attachment."""
+    return {name for name in set(namespace) if not name.startswith("_djs_")}
+
+
+def _refresh_backend_initial_names(namespace, server):
+    """Updates server and PTY snapshots after deferred auto-imports finish."""
+    initial_names = getattr(server, "initial_names", None)
+    if not isinstance(initial_names, set):
+        initial_names = set()
+        server.initial_names = initial_names
+    initial_names.clear()
+    initial_names.update(_backend_initial_names(namespace))
+    namespace["_djs_backend_initial_names"] = initial_names
+    namespace["_djs_initial_names"] = frozenset(initial_names)
+
+
+def _wait_for_warmup():
+    """Waits for the current deferred startup unless called by its own worker thread."""
+    warmup = _STATE.get("warmup")
+    if not isinstance(warmup, dict) or not warmup.get("pending"):
+        return
+    if warmup.get("thread") is threading.current_thread():
+        return
+    event = warmup.get("event")
+    if event is not None:
+        event.wait()
+
+
+def _release_pending_warmup(warmup):
+    """Releases waiters after deferred startup completes or attachment fails before it can start."""
+    if not isinstance(warmup, dict):
+        return
+    warmup["pending"] = False
+    event = warmup.get("event")
+    if event is not None:
+        event.set()
 
 
 def _register_transform_lookups():
@@ -334,6 +426,7 @@ def _run_request(namespace, token, request, initial_names):
     """Validates a request and executes its code under the shared execution lock."""
     if request.get("token") != token:
         return {"ok": False, "stdout": "", "stderr": "Invalid backend token.", "traceback": ""}
+    _wait_for_warmup()
     if request.get("kind") == "hotReload":
         return _hot_reload_request(request)
     if request.get("kind") == "nativeDebugger":
@@ -2861,6 +2954,8 @@ def _pty_install_ipython_capture(shell):
     state = {"counter": 0, "err": None, "out": None, "save": None, "skip": False, "scrub": False}
 
     def _pre(info):
+        """Waits for backend warmup, then starts capturing one IPython cell."""
+        _wait_for_warmup()
         if str(getattr(info, "raw_cell", "") or "").lstrip().startswith("_djs_rpc("):
             state["skip"] = True  # plumbing cell: let its own marker print through untouched
             return
@@ -2876,6 +2971,7 @@ def _pty_install_ipython_capture(shell):
         _pty_sql_begin(state)
 
     def _post(result):
+        """Restores streams and emits the captured IPython cell response."""
         if state.get("skip"):
             state["skip"] = False
             return

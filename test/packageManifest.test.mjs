@@ -12,7 +12,7 @@ test("keeps Python language extensions required for v0.0.2 Python cell features"
   assert.equal(manifest.extensionOptionalDependencies.includes("ms-python.vscode-pylance"), false);
 });
 
-test("isolates shell providers behind a Python-syntax wrapper language", () => {
+test("keeps the legacy shell language contribution for persisted editor compatibility", () => {
   const language = manifest.contributes.languages.find((item) => item.id === "django-shell-python");
   const grammar = manifest.contributes.grammars.find((item) => item.language === "django-shell-python");
   const breakpoint = manifest.contributes.breakpoints.find((item) => item.language === "django-shell-python");
@@ -27,6 +27,8 @@ test("isolates shell providers behind a Python-syntax wrapper language", () => {
 });
 
 test("restores v0.0.2 Python analysis defaults globally", () => {
+  assert.equal(manifest.contributes.configurationDefaults["python.analysis.autoImportCompletions"], true);
+  assert.deepEqual(manifest.contributes.configurationDefaults["python.analysis.ignore"], ["**/.django-shell/console-cell.py"]);
   assert.equal(manifest.contributes.configurationDefaults["python.analysis.supportAllPythonDocuments"], true);
   assert.deepEqual(manifest.contributes.configurationDefaults["[python]"], { "editor.semanticHighlighting.enabled": true });
   assert.deepEqual(manifest.contributes.configurationDefaults["[django-shell-python]"], { "editor.semanticHighlighting.enabled": true });
@@ -40,6 +42,7 @@ test("keeps Python cell Enter from interrupting completion UI", () => {
   const binding = manifest.contributes.keybindings.find((item) => item.command === "djangoShell.overlayAcceptInput");
   assert.ok(binding);
   assert.match(binding.when, /resourceFilename == 'console-cell\.py'/);
+  assert.match(binding.when, /editorLangId == 'python'/);
   assert.match(binding.when, /editorLangId == 'django-shell-python'/);
   assert.match(binding.when, /!breakpointWidgetVisible/);
   assert.match(binding.when, /suggestWidgetVisible/);
@@ -51,6 +54,7 @@ test("keeps Python cell continuation Enter out of breakpoint widgets", () => {
   const binding = manifest.contributes.keybindings.find((item) => item.command === "djangoShell.overlayInsertNewline");
   assert.ok(binding);
   assert.match(binding.when, /resourceFilename == 'console-cell\.py'/);
+  assert.match(binding.when, /editorLangId == 'python'/);
   assert.match(binding.when, /editorLangId == 'django-shell-python'/);
   assert.match(binding.when, /!breakpointWidgetVisible/);
 });

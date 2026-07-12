@@ -40,7 +40,7 @@ const GEOMETRY_SETTLE_MS = 80;
 const INITIAL_WINDOW_FOCUS_RETRY_MS = 100;
 const RENDERER_EXECUTE_TIMEOUT_MS = 3200;
 const RENDERER_RECOVERY_DELAY_MS = 400;
-const RENDERER_PATCH_VERSION = 98;
+const RENDERER_PATCH_VERSION = 99;
 /** Injects and coordinates the Django shell editor overlay in the VS Code workbench renderer. */
 export class WorkbenchOverlay implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -380,7 +380,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
   /** Inserts an indented continuation line in the file-backed overlay command. */ async insertNewline(): Promise<void> { await this.shellCommands?.insertNewline(); }
   /** Moves past the active file-backed overlay input command without running it. */ async skipInput(): Promise<void> { await this.shellCommands?.skipInput(); }
   /** Evaluates a renderer expression for extension host E2E tests. */
-  async e2eEvaluate(expression: string): Promise<string> { await this.ensureInjected(); return this.evalInWorkbench(expression); }
+  async e2eEvaluate(expression: string): Promise<string> { await this.ensureInjected(); return this.evalInWorkbench(expression, 8000); }
 
   /** Moves the real workbench renderer mouse for extension-host hover E2E tests. */
   async e2eDispatchMouse(points: WorkbenchMousePoint[]): Promise<unknown> {

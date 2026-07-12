@@ -46,21 +46,14 @@ class TextEdit {
   constructor(range, newText) { this.range = range; this.newText = newText; }
 }
 
-/** Minimal event emitter used by semantic-token invalidation. */
-class EventEmitter {
-  constructor() { this.event = () => ({ dispose() {} }); }
-  dispose() {}
-  fire() {}
+/** Minimal source location used by definition mapping tests. */
+class Location {
+  constructor(uri, range) { this.range = range; this.uri = uri; }
 }
 
-/** Minimal semantic legend constructed when the feature bridge module loads. */
-class SemanticTokensLegend {
-  constructor(tokenTypes, tokenModifiers = []) { this.tokenModifiers = tokenModifiers; this.tokenTypes = tokenTypes; }
-}
-
-/** Minimal semantic-token result used by forwarding tests. */
-class SemanticTokens {
-  constructor(data, resultId) { this.data = data; this.resultId = resultId; }
+/** Minimal markdown value used by synthetic runtime completion documentation. */
+class MarkdownString {
+  constructor(value = "") { this.value = value; }
 }
 
 try {
@@ -199,11 +192,11 @@ test("waits for the latest slow completion instead of losing the result at the f
 test("drops a completion canceled before it enters the analysis lane", async () => {
   vscodeState.executeCalls = 0;
   vscodeState.executeHandler = () => { throw new Error("canceled completion reached a provider"); };
-  const documents = fakeOverlayDocuments("");
+  const documents = fakeOverlayDocuments("from app.models import Company\n");
   const bridge = new OverlayPythonFeatureBridge(documents);
   const token = { isCancellationRequested: false };
 
-  const pending = bridge.provideCompletionItems(fakeDocument("Company", "django-shell-python"), new Position(0, 7), token, {});
+  const pending = bridge.provideCompletionItems(fakeDocument("Company.ob"), new Position(0, 10), token, { triggerCharacter: "." });
   token.isCancellationRequested = true;
 
   assert.equal(await pending, undefined);
@@ -216,20 +209,20 @@ test("keeps an exact active completion alive when a fresh caller replaces its ca
   vscodeState.executeCalls = 0;
   const gate = deferred();
   vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? gate.promise : [];
-  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
-  const document = fakeDocument("WidgetImported", "django-shell-python");
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from app.models import Widget\n"));
+  const document = fakeDocument("Widget.imported");
   const firstToken = { isCancellationRequested: false };
   const secondToken = { isCancellationRequested: false };
 
-  const first = bridge.provideCompletionItems(document, new Position(0, 14), firstToken, {});
+  const first = bridge.provideCompletionItems(document, new Position(0, 15), firstToken, { triggerCharacter: "." });
   await nextTurn();
   assert.equal(vscodeState.executeCalls, 1);
   firstToken.isCancellationRequested = true;
-  const second = bridge.provideCompletionItems(document, new Position(0, 14), secondToken, {});
+  const second = bridge.provideCompletionItems(document, new Position(0, 15), secondToken, { triggerCharacter: "." });
   gate.resolve(new CompletionList([new CompletionItem("WidgetImportedClient")]));
 
   assert.equal(await first, undefined);
-  assert.equal((await second).items[0].label, "WidgetImportedClient");
+  assert.ok((await second).items.some((item) => item.label === "WidgetImportedClient"));
   assert.equal(vscodeState.executeCalls, 1);
   bridge.dispose();
   vscodeState.executeHandler = undefined;
@@ -369,62 +362,66 @@ test("starts a fresh same-shape load after completion state is invalidated", asy
   assert.equal(result[0].label, "fresh");
 });
 
-test("skips the duplicate analysis bridge without a hidden prelude", async () => {
+test("leaves ordinary Python completion to native providers even when a runtime prelude exists", async () => {
   vscodeState.executeCalls = 0;
   vscodeState.executeHandler = undefined;
   const emptyDocuments = fakeOverlayDocuments("");
   const emptyBridge = new OverlayPythonFeatureBridge(emptyDocuments);
   const emptyResult = await emptyBridge.provideCompletionItems(fakeDocument("print"), new Position(0, 5), { isCancellationRequested: false }, {});
 
-  assert.deepEqual(emptyResult, []);
+  assert.equal(emptyResult, undefined);
   assert.equal(emptyDocuments.syncs, 0);
   assert.equal(vscodeState.executeCalls, 0);
 
   const preludeDocuments = fakeOverlayDocuments("from app.models import Company\n");
   const preludeBridge = new OverlayPythonFeatureBridge(preludeDocuments);
-  await preludeBridge.provideCompletionItems(fakeDocument("pri"), new Position(0, 3), { isCancellationRequested: false }, { triggerCharacter: "." });
-  assert.equal(preludeDocuments.syncs, 1);
-  assert.equal(vscodeState.executeCalls, 1);
+  const ordinary = await preludeBridge.provideCompletionItems(fakeDocument("pri"), new Position(0, 3), { isCancellationRequested: false }, {});
+  assert.equal(ordinary, undefined);
+  assert.equal(preludeDocuments.syncs, 0);
+  assert.equal(vscodeState.executeCalls, 0);
   emptyBridge.dispose();
   preludeBridge.dispose();
 });
 
-test("routes an isolated shell language through full-source analysis without a runtime prelude", async () => {
+test("synthesizes top-level runtime names without invoking hidden Python providers", async () => {
   vscodeState.executeCalls = 0;
-  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? [new CompletionItem("focused_name")] : [];
-  const documents = fakeOverlayDocuments("");
+  vscodeState.executeHandler = () => { throw new Error("synthetic runtime name reached a hidden provider"); };
+  const documents = fakeOverlayDocuments("from app.models import Company\ncurrent_user: User\n");
   const bridge = new OverlayPythonFeatureBridge(documents);
-  const document = fakeDocument("focused_na", "django-shell-python");
+  const document = fakeDocument("value = Com");
+
+  const result = await bridge.provideCompletionItems(document, new Position(0, 11), { isCancellationRequested: false }, {});
+
+  assert.equal(documents.syncs, 0);
+  assert.equal(vscodeState.executeCalls, 0);
+  assert.deepEqual(result.items.map((item) => item.label), ["Company"]);
+  assert.equal(result.items[0].range.start.character, 8);
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
+test("forwards only a runtime-rooted member completion through hidden analysis", async () => {
+  vscodeState.executeCalls = 0;
+  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? [new CompletionItem("objects")] : [];
+  const documents = fakeOverlayDocuments("from app.models import Company\n");
+  const bridge = new OverlayPythonFeatureBridge(documents);
+  const document = fakeDocument("Company.ob");
 
   const result = await bridge.provideCompletionItems(document, new Position(0, 10), { isCancellationRequested: false }, { triggerCharacter: "." });
 
   assert.equal(documents.syncs, 1);
   assert.equal(vscodeState.executeCalls, 1);
-  assert.deepEqual(result.map((item) => item.label), ["focused_name"]);
+  assert.equal(result[0].label, "objects");
   bridge.dispose();
   vscodeState.executeHandler = undefined;
 });
 
-test("does not retry a partial identifier when the exact query already returns a prefix match", async () => {
-  vscodeState.executeCalls = 0;
-  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? [new CompletionItem("AutoImportedClient")] : [];
-  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
-  const document = fakeDocument("client = AutoImportedCli", "django-shell-python");
-
-  const result = await bridge.provideCompletionItems(document, new Position(0, 24), { isCancellationRequested: false }, {});
-
-  assert.equal(vscodeState.executeCalls, 1);
-  assert.equal(result[0].label, "AutoImportedClient");
-  bridge.dispose();
-  vscodeState.executeHandler = undefined;
-});
-
-test("registers only the isolated language for shell files and Python for query files", () => {
+test("registers exact Python file selectors for shell and query augmenters", () => {
   vscodeState.selectors.length = 0;
   const shell = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
   shell.activate();
   assert.equal(vscodeState.selectors.length, 6);
-  assert.ok(vscodeState.selectors.every((selector) => selector.length === 1 && selector[0].language === "django-shell-python"));
+  assert.ok(vscodeState.selectors.every((selector) => selector.length === 1 && selector[0].language === "python" && selector[0].pattern === "**/.django-shell/console-cell.py" && selector[0].scheme === "file"));
   shell.dispose();
 
   vscodeState.selectors.length = 0;
@@ -433,89 +430,37 @@ test("registers only the isolated language for shell files and Python for query 
   const query = new OverlayPythonFeatureBridge(queryDocuments);
   query.activate();
   assert.equal(vscodeState.selectors.length, 6);
-  assert.ok(vscodeState.selectors.every((selector) => selector.length === 1 && selector[0].language === "python"));
+  assert.ok(vscodeState.selectors.every((selector) => selector.length === 1 && selector[0].language === "python" && selector[0].pattern === "**/.django-shell/query-cell.py" && selector[0].scheme === "file"));
   query.dispose();
 });
 
-test("registers semantic forwarding only for the isolated shell language", async () => {
+test("does not register a semantic bridge over native Python semantic providers", () => {
   vscodeState.selectors.length = 0;
   const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
 
   bridge.activate();
-  await nextTurn();
 
-  assert.equal(vscodeState.selectors.length, 7);
-  assert.deepEqual(vscodeState.selectors[6], [{ language: "django-shell-python", pattern: "**/.django-shell/console-cell.py", scheme: "file" }]);
+  assert.equal(vscodeState.selectors.length, 6);
+  assert.equal(typeof bridge.provideDocumentSemanticTokens, "undefined");
   bridge.dispose();
 });
 
-test("forwards hidden Pylance semantic tokens onto visible user lines", async () => {
-  vscodeState.executeHandler = (command) => command === "vscode.provideDocumentSemanticTokens"
-    ? new SemanticTokens(Uint32Array.from([0, 0, 4, 1, 0, 1, 0, 5, 2, 8]), "semantic-result")
-    : [];
-  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Name\n"));
-
-  const result = await bridge.provideDocumentSemanticTokens(fakeDocument("value = 1", "django-shell-python"), { isCancellationRequested: false });
-
-  assert.deepEqual([...result.data], [0, 0, 5, 2, 8]);
-  assert.equal(result.resultId, "semantic-result");
-  bridge.dispose();
-  vscodeState.executeHandler = undefined;
-});
-
-test("drops a canceled semantic request before it reaches the shared analysis lane", async () => {
+test("drops canceled hover and highlight work before either background provider starts", async () => {
   vscodeState.executeCalls = 0;
-  vscodeState.executeHandler = () => { throw new Error("canceled semantic work reached a provider"); };
-  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Name\n"));
-  const token = { isCancellationRequested: false };
-
-  const pending = bridge.provideDocumentSemanticTokens(fakeDocument("value = 1", "django-shell-python"), token);
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  token.isCancellationRequested = true;
-
-  assert.equal(await pending, undefined);
-  assert.equal(vscodeState.executeCalls, 0);
-  bridge.dispose();
-  vscodeState.executeHandler = undefined;
-});
-
-test("drops an older semantic result after a newer version starts", async () => {
-  vscodeState.executeCalls = 0;
-  const firstGate = deferred();
-  const semantic = new SemanticTokens(Uint32Array.from([0, 0, 5, 1, 0]), "semantic-result");
-  vscodeState.executeHandler = (command) => command === "vscode.provideDocumentSemanticTokens"
-    ? vscodeState.executeCalls === 1 ? firstGate.promise : semantic
-    : [];
-  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Name\n"));
-  const document = fakeDocument("value = 1", "django-shell-python");
-
-  const older = bridge.provideDocumentSemanticTokens(document, { isCancellationRequested: false });
-  await new Promise((resolve) => setTimeout(resolve, 270));
-  assert.equal(vscodeState.executeCalls, 1);
-  const newer = bridge.provideDocumentSemanticTokens(document, { isCancellationRequested: false });
-  firstGate.resolve(semantic);
-
-  assert.equal(await older, undefined);
-  assert.equal((await newer).resultId, "semantic-result");
-  bridge.dispose();
-  vscodeState.executeHandler = undefined;
-});
-
-test("keeps semantic refresh work behind an active completion", async () => {
-  vscodeState.executeCalls = 0;
-  const completionGate = deferred();
-  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? completionGate.promise : new SemanticTokens(Uint32Array.from([]));
+  vscodeState.executeHandler = () => { throw new Error("canceled background work reached a provider"); };
   const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Name\n"));
   const document = fakeDocument("Name", "django-shell-python");
+  const hoverToken = { isCancellationRequested: false };
+  const highlightToken = { isCancellationRequested: false };
 
-  const completion = bridge.provideCompletionItems(document, new Position(0, 4), { isCancellationRequested: false }, { triggerCharacter: "." });
-  await nextTurn();
-  const semantic = await bridge.provideDocumentSemanticTokens(document, { isCancellationRequested: false });
+  const hover = bridge.provideHover(document, new Position(0, 2), hoverToken);
+  const highlights = bridge.provideDocumentHighlights(document, new Position(0, 2), highlightToken);
+  hoverToken.isCancellationRequested = true;
+  highlightToken.isCancellationRequested = true;
 
-  assert.equal(semantic, undefined);
-  assert.equal(vscodeState.executeCalls, 1);
-  completionGate.resolve([new CompletionItem("Name")]);
-  await completion;
+  assert.equal(await hover, undefined);
+  assert.equal(await highlights, undefined);
+  assert.equal(vscodeState.executeCalls, 0);
   bridge.dispose();
   vscodeState.executeHandler = undefined;
 });
@@ -527,11 +472,12 @@ test("keeps signature help from adding a second hidden-provider load", async () 
   const documents = fakeOverlayDocuments("from app.models import Company\n");
   const bridge = new OverlayPythonFeatureBridge(documents);
   const document = fakeDocument("Company.objects.filter(");
-  const position = new Position(0, 23);
+  const completionPosition = new Position(0, 8);
+  const signaturePosition = new Position(0, 23);
 
-  const completion = bridge.provideCompletionItems(document, position, { isCancellationRequested: false }, { triggerCharacter: "." });
+  const completion = bridge.provideCompletionItems(document, completionPosition, { isCancellationRequested: false }, { triggerCharacter: "." });
   await nextTurn();
-  const signature = await bridge.provideSignatureHelp(document, position, { isCancellationRequested: false }, { triggerCharacter: "(" });
+  const signature = await bridge.provideSignatureHelp(document, signaturePosition, { isCancellationRequested: false }, { triggerCharacter: "(" });
 
   assert.equal(signature, undefined);
   assert.equal(vscodeState.executeCalls, 1);
@@ -544,11 +490,11 @@ test("keeps signature help from adding a second hidden-provider load", async () 
 test("serializes each full-source analysis snapshot through the provider that reads it", async () => {
   vscodeState.executeCalls = 0;
   const firstGate = deferred();
-  const documents = fakeOverlayDocuments("");
+  const documents = fakeOverlayDocuments("Name: object\n");
   const syncLines = [];
   const observed = [];
   let leaseQueue = Promise.resolve();
-  documents.withAnalysisSnapshot = (_text, line, request) => {
+  const enqueueLease = (line, request) => {
     const pending = leaseQueue.then(async () => {
       documents.activeLine = line;
       syncLines.push(line);
@@ -557,16 +503,18 @@ test("serializes each full-source analysis snapshot through the provider that re
     leaseQueue = pending.then(() => undefined, () => undefined);
     return pending;
   };
+  documents.withAnalysisSnapshot = (_text, line, request) => enqueueLease(line, request);
+  documents.withCancellableAnalysisSnapshot = (_text, line, isCancelled, request) => enqueueLease(line, () => isCancelled() ? undefined : request());
   vscodeState.executeHandler = (command) => {
     observed.push([command, documents.activeLine]);
-    return command === "vscode.executeHoverProvider" ? firstGate.promise : [];
+    return command === "vscode.executeHoverProvider" ? firstGate.promise : [new Location(documents.analysisUri, new Range(3, 0, 3, 4))];
   };
   const bridge = new OverlayPythonFeatureBridge(documents);
-  const document = fakeDocument("upper = 1\n\n\nlower = 2");
+  const document = fakeDocument("Name.upper\n\n\nName.lower");
 
-  const upper = bridge.provideHover(document, new Position(0, 2));
-  await nextTurn();
-  const lower = bridge.provideDefinition(document, new Position(3, 2));
+  const upper = bridge.provideHover(document, new Position(0, 7));
+  await new Promise((resolve) => setTimeout(resolve, 110));
+  const lower = bridge.provideDefinition(document, new Position(3, 7));
   await nextTurn();
 
   assert.deepEqual(syncLines, [0], "the second unit cannot replace analysis.py while the first provider is reading it");
@@ -578,6 +526,47 @@ test("serializes each full-source analysis snapshot through the provider that re
   assert.deepEqual(observed, [["vscode.executeHoverProvider", 0], ["vscode.executeDefinitionProvider", 3]]);
   bridge.dispose();
   vscodeState.executeHandler = undefined;
+});
+
+test("maps generated definition locations and links back to the visible overlay", () => {
+  const documents = fakeOverlayDocuments("from hidden import Name\n");
+  const externalUri = { toString: () => "file:///workspace/app/models.py" };
+  const generatedLocation = new Location(documents.analysisUri, new Range(3, 1, 3, 5));
+  const externalLocation = new Location(externalUri, new Range(8, 0, 8, 4));
+  const generatedLink = {
+    originSelectionRange: new Range(4, 2, 4, 6),
+    targetRange: new Range(5, 0, 6, 0),
+    targetSelectionRange: new Range(5, 4, 5, 8),
+    targetUri: documents.analysisUri
+  };
+
+  const mapped = overlayPythonFeatureBridgeTest.mapDefinitions([generatedLocation, externalLocation, generatedLink], documents.analysisUri, documents.editorUri, 2);
+
+  assert.equal(mapped[0].uri, documents.editorUri);
+  assert.deepEqual(mapped[0].range, new Range(1, 1, 1, 5));
+  assert.equal(mapped[1], externalLocation);
+  assert.equal(mapped[2].targetUri, documents.editorUri);
+  assert.deepEqual(mapped[2].originSelectionRange, new Range(2, 2, 2, 6));
+  assert.deepEqual(mapped[2].targetRange, new Range(3, 0, 4, 0));
+  assert.deepEqual(mapped[2].targetSelectionRange, new Range(3, 4, 3, 8));
+});
+
+test("keeps external definition targets while remapping their generated origin", () => {
+  const documents = fakeOverlayDocuments("from hidden import Name\n");
+  const externalUri = { toString: () => "file:///workspace/app/models.py" };
+  const link = {
+    originSelectionRange: new Range(3, 1, 3, 5),
+    targetRange: new Range(20, 0, 24, 0),
+    targetSelectionRange: new Range(20, 6, 20, 10),
+    targetUri: externalUri
+  };
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapDefinitions([link], documents.analysisUri, documents.editorUri, 2);
+
+  assert.equal(mapped.targetUri, externalUri);
+  assert.deepEqual(mapped.originSelectionRange, new Range(1, 1, 1, 5));
+  assert.equal(mapped.targetRange, link.targetRange);
+  assert.equal(mapped.targetSelectionRange, link.targetSelectionRange);
 });
 
 test("relocates a protected Pylance auto-import to the focused lower execution unit", () => {
@@ -750,99 +739,6 @@ test("does not copy a same-named upper import for attribute completion", () => {
   assert.equal(mapped.additionalTextEdits, undefined);
 });
 
-test("resolves a lazy hidden completion edit and maps it through the public provider", async () => {
-  vscodeState.executeCalls = 0;
-  let completionCalls = 0;
-  vscodeState.executeHandler = (command, _uri, _position, _trigger, resolveCount) => {
-    if (command !== "vscode.executeCompletionItemProvider") { return []; }
-    completionCalls += 1;
-    const item = new CompletionItem({ description: "workspace_context", label: "WorkspaceClient" });
-    item.textEdit = new TextEdit(new Range(4, 9, 4, 21), "WorkspaceClient");
-    if (resolveCount === 1) {
-      item.additionalTextEdits = [new TextEdit(new Range(0, 0, 0, 0), "from workspace_context import WorkspaceClient\n")];
-    }
-    return [item];
-  };
-  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Prelude\n"));
-  const source = "upper = 1\n\n\nclient = WorkspaceCli";
-  const document = fakeDocument(source, "django-shell-python");
-
-  const completions = await bridge.provideCompletionItems(document, new Position(3, 21), { isCancellationRequested: false }, { triggerCharacter: "." });
-  assert.equal(completions[0].additionalTextEdits, undefined);
-  const resolved = await bridge.resolveCompletionItem(completions[0], { isCancellationRequested: false });
-
-  assert.equal(completionCalls, 2);
-  assert.deepEqual(resolved.additionalTextEdits[0].range, new Range(3, 0, 3, 0));
-  assert.equal(resolved.additionalTextEdits[0].newText, "from workspace_context import WorkspaceClient\n\n");
-  bridge.dispose();
-  vscodeState.executeHandler = undefined;
-});
-
-test("retries inside a completed import name and preserves that position for lazy resolution", async () => {
-  vscodeState.executeCalls = 0;
-  const observed = [];
-  vscodeState.executeHandler = (command, _uri, position, _trigger, resolveCount) => {
-    if (command !== "vscode.executeCompletionItemProvider") { return []; }
-    observed.push({ character: position.character, resolveCount });
-    if (position.character === 27) { return [new CompletionItem("generic_name")]; }
-    const item = new CompletionItem({ description: "workspace_context", label: "AutoImportedClient" });
-    item.textEdit = new TextEdit(new Range(4, 9, 4, 27), "AutoImportedClient");
-    if (resolveCount === 1) {
-      item.additionalTextEdits = [new TextEdit(new Range(0, 0, 0, 0), "from workspace_context import AutoImportedClient\n")];
-    }
-    return [item];
-  };
-  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Prelude\n"));
-  const source = "upper = 1\n\n\nclient = AutoImportedClient";
-  const document = fakeDocument(source, "django-shell-python");
-
-  const completions = await bridge.provideCompletionItems(document, new Position(3, 27), { isCancellationRequested: false }, {});
-  assert.equal(completions[0].label.label, "AutoImportedClient");
-  const resolved = await bridge.resolveCompletionItem(completions[0], { isCancellationRequested: false });
-
-  assert.deepEqual(observed, [
-    { character: 27, resolveCount: undefined },
-    { character: 26, resolveCount: undefined },
-    { character: 26, resolveCount: 1 }
-  ]);
-  assert.deepEqual(resolved.additionalTextEdits[0].range, new Range(3, 0, 3, 0));
-  assert.equal(resolved.additionalTextEdits[0].newText, "from workspace_context import AutoImportedClient\n\n");
-  bridge.dispose();
-  vscodeState.executeHandler = undefined;
-});
-
-test("does not resolve ordinary completion documentation through another global provider pass", async () => {
-  vscodeState.executeCalls = 0;
-  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? [new CompletionItem("ordinary_name")] : [];
-  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
-  const document = fakeDocument("ordinary_na", "django-shell-python");
-
-  const completions = await bridge.provideCompletionItems(document, new Position(0, 11), { isCancellationRequested: false }, { triggerCharacter: "." });
-  await bridge.resolveCompletionItem(completions[0], { isCancellationRequested: false });
-
-  assert.equal(vscodeState.executeCalls, 1);
-  bridge.dispose();
-  vscodeState.executeHandler = undefined;
-});
-
-test("skips a lazy auto-import resolve after visible typing advances", async () => {
-  vscodeState.executeCalls = 0;
-  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider"
-    ? [new CompletionItem({ description: "workspace_context", label: "WorkspaceClient" })]
-    : [];
-  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
-  const document = fakeDocument("WorkspaceCli", "django-shell-python");
-  const completions = await bridge.provideCompletionItems(document, new Position(0, 12), { isCancellationRequested: false }, { triggerCharacter: "." });
-  vscodeState.textDocuments = [fakeDocument("WorkspaceClient", "django-shell-python")];
-
-  await bridge.resolveCompletionItem(completions[0], { isCancellationRequested: false });
-
-  assert.equal(vscodeState.executeCalls, 1);
-  vscodeState.textDocuments = [];
-  bridge.dispose();
-  vscodeState.executeHandler = undefined;
-});
-
 /** Creates a one-line text document with stable file identity. */
 function fakeDocument(text, languageId = "python") {
   return {
@@ -915,25 +811,24 @@ function nextTurn() { return new Promise((resolve) => setImmediate(resolve)); }
 function createVscodeMock() {
   const register = (selector) => { vscodeState.selectors.push(selector); return { dispose() {} }; };
   return {
-    commands: { async executeCommand(command, ...args) { vscodeState.executeCalls += 1; if (command === "vscode.provideDocumentSemanticTokensLegend") { return new SemanticTokensLegend([]); } return await vscodeState.executeHandler?.(command, ...args) ?? []; } },
+    commands: { async executeCommand(command, ...args) { vscodeState.executeCalls += 1; return await vscodeState.executeHandler?.(command, ...args) ?? []; } },
     CompletionItem,
-    CompletionItemKind: { Property: 9 },
+    CompletionItemKind: { Class: 6, Module: 8, Property: 9, Variable: 5 },
     CompletionList,
-    EventEmitter,
+    Location,
+    MarkdownString,
     Position,
     Range,
-    SemanticTokens,
-    SemanticTokensLegend,
     TextEdit,
     languages: {
       registerCompletionItemProvider: register,
       registerDefinitionProvider: register,
       registerDocumentHighlightProvider: register,
-      registerDocumentSemanticTokensProvider: register,
       registerHoverProvider: register,
       registerReferenceProvider: register,
       registerSignatureHelpProvider: register
     },
+    window: { tabGroups: { all: [], async close() {} } },
     workspace: { async openTextDocument() { return {}; }, get textDocuments() { return vscodeState.textDocuments; } }
   };
 }

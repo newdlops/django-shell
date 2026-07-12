@@ -96,14 +96,15 @@ test("emits parseable workbench overlay renderer source", () => {
   assert.equal(typeof Function(overlayRendererSource("file:///tmp/console-cell.py")), "function");
 });
 
-test("isolates shell providers while retaining ordinary Python for submit overlays", () => {
+test("uses native Python language features for shell and submit overlays", () => {
   const shell = overlayRendererSource("file:///tmp/console-cell.py");
   const query = overlayRendererSource("file:///tmp/query-cell.py", { executionMode: "submit" });
 
-  assert.match(shell, /const __dsoOverlayLanguageId = "django-shell-python"/);
+  assert.match(shell, /const __dsoOverlayLanguageId = "python"/);
   assert.match(query, /const __dsoOverlayLanguageId = "python"/);
   assert.ok(shell.includes("setModelLanguage(model, __dsoOverlayLanguageId)"));
   assert.ok(shell.includes("createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : \"\", __dsoOverlayLanguageId, uri)"));
+  assert.equal(shell.includes("quickSuggestionsDelay"), false, "the overlay inherits native editor suggestion timing");
 });
 
 test("runs Python from lightweight Monaco Enter handling", async () => {
@@ -675,14 +676,19 @@ test("uses the live execution preview for prompt starts", () => {
   assert.equal(api.promptForLine(model, 1, 4, root), ">>>");
 });
 
-test("leaves Enter to IntelliSense while parameter hints are visible", () => {
+test("leaves Enter to popup and inline IntelliSense", () => {
   const source = overlaySyncRendererSource();
   const node = { classList: { contains: (name) => name === "parameter-hints-widget" || name === "visible" }, getBoundingClientRect: () => ({ height: 80, width: 240 }) };
+  const ghost = { classList: { contains: () => false } };
   const window = { addEventListener() {}, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
   const document = { addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [node], removeEventListener() {} };
   const api = Function("window", "document", "__dsoPost", `${source}\nreturn { suggestOpen: __dsoSuggestOpen };`)(window, document, () => undefined);
 
   assert.equal(api.suggestOpen(), true);
+  document.querySelectorAll = () => [];
+  assert.equal(api.suggestOpen({ getDomNode: () => ({ querySelectorAll: () => [ghost] }) }), true);
+  ghost.classList.contains = (name) => name === "ghost-text-hidden";
+  assert.equal(api.suggestOpen({ getDomNode: () => ({ querySelectorAll: () => [ghost] }) }), false);
 });
 
 test("does not run Python while completion UI owns Enter", async () => {
@@ -707,15 +713,13 @@ test("does not run Python while completion UI owns Enter", async () => {
   assert.equal(posts.some((payload) => payload.type === "run"), false);
 });
 
-test("leaves Enter to the conditional breakpoint widget", async () => {
+test("leaves Enter to nested breakpoint, rename, and find widgets", async () => {
   const source = overlaySyncRendererSource();
   let windowKeyHandler;
   const window = { addEventListener(type, callback) { if (type === "keydown") { windowKeyHandler = callback; } }, clearTimeout() {}, removeEventListener() {}, setTimeout(callback) { callback(); return 0; }, __djangoShellOverlayPrelude: "" };
   const document = { activeElement: undefined, addEventListener() {}, getElementById: () => undefined, querySelectorAll: () => [], removeEventListener() {} };
   const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };`)(window, document, () => undefined);
   const editor = fakeEditor(fakeModel("if ready:\n"));
-  const breakpointWidget = { classList: { contains: (name) => name === "breakpoint-widget" } };
-  const conditionInput = { closest: (selector) => selector === ".breakpoint-widget" ? breakpointWidget : null };
   const posts = [];
   const edits = [];
   const eventCalls = { prevented: 0, stopped: 0 };
@@ -726,14 +730,18 @@ test("leaves Enter to the conditional breakpoint widget", async () => {
     return { json: async () => ({ executed: true }) };
   });
   assert.equal(typeof windowKeyHandler, "function");
-  windowKeyHandler({
-    code: "Enter",
-    key: "Enter",
-    preventDefault() { eventCalls.prevented += 1; },
-    stopImmediatePropagation() { eventCalls.stopped += 1; },
-    stopPropagation() { eventCalls.stopped += 1; },
-    target: conditionInput
-  });
+  for (const widgetClass of ["breakpoint-widget", "rename-box", "find-widget"]) {
+    const widget = { classList: { contains: (name) => name === widgetClass } };
+    const input = { closest: (selector) => selector.includes(`.${widgetClass}`) ? widget : null };
+    windowKeyHandler({
+      code: "Enter",
+      key: "Enter",
+      preventDefault() { eventCalls.prevented += 1; },
+      stopImmediatePropagation() { eventCalls.stopped += 1; },
+      stopPropagation() { eventCalls.stopped += 1; },
+      target: input
+    });
+  }
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(posts.some((payload) => payload.type === "run"), false);

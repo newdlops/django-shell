@@ -252,6 +252,37 @@ test("cancellable analysis snapshot skips stale writes and provider work", async
   assert.equal(document.visibleText(), "current_value = 1\n");
 });
 
+test("completion priority skips an older background snapshot without regressing canonical analysis", async () => {
+  mockState.writes.length = 0;
+  const document = new OverlayMemoryDocument(undefined, "priority-cell", "priority-analysis");
+  await document.sync("initial_value = 1\n", 0);
+  const activeStarted = deferred();
+  const releaseActive = deferred();
+  const order = [];
+  const active = document.withAnalysisSnapshot("initial_value = 1\n", 0, async () => {
+    order.push("active");
+    activeStarted.resolve();
+    await releaseActive.promise;
+  });
+  await activeStarted.promise;
+  let backgroundCalls = 0;
+  const background = document.withCancellableAnalysisSnapshot("older_value = 2\n", 0, () => false, async () => {
+    backgroundCalls += 1;
+    order.push("background");
+  }, "background");
+  const completion = document.withCancellableAnalysisSnapshot("latest_value = 3\n", 0, () => false, async () => {
+    order.push("completion");
+  }, "completion");
+  releaseActive.resolve();
+
+  await Promise.all([active, background, completion]);
+  const analysisWrites = mockState.writes.filter((write) => path.basename(write.path) === "priority-analysis.py");
+  assert.deepEqual(order, ["active", "completion"]);
+  assert.equal(backgroundCalls, 0);
+  assert.equal(document.visibleText(), "latest_value = 3\n");
+  assert.equal(analysisWrites.at(-1).text, "latest_value = 3\n");
+});
+
 test("analysis snapshot lease converts a legacy marker focus to user-relative lines", async () => {
   mockState.writes.length = 0;
   const document = new OverlayMemoryDocument(undefined, "legacy-cell", "legacy-analysis");
