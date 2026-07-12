@@ -37,6 +37,7 @@ const terminalReplay = createTerminalReplayState();
 let e2eSawShellPrompt = false;
 let debugAttached = false;
 let debugBusy = false;
+let debugDetail = "";
 let debugDisplayMode = "overlay";
 let debugState = "idle";
 let overlayTabActive = "overlay-1";
@@ -257,7 +258,7 @@ function updateStatus(snapshot) {
   setSetupReady(inputReady);
   setPythonReady(inputReady);
   statusText.textContent = snapshot.ready ? "Python 3 / Django ready" : `${snapshot.state} / ${snapshot.mode}`;
-  if (!runtimeReady) {
+  if (!runtimeReady && !(debugBusy && snapshot.mode === "django" && snapshot.state === "attaching")) {
     setDebugStatus("idle", "");
   } else {
     updateDebugControls();
@@ -336,6 +337,7 @@ function requestDebugControl(action) {
 /** Updates debugger status text and button affordances from host state. */
 function setDebugStatus(state, detail) {
   debugState = state;
+  debugDetail = detail;
   debugBusy = state === "starting";
   debugAttached = state === "attached" || state === "paused" || state === "running";
   updateDebugControls();
@@ -346,11 +348,11 @@ function updateDebugControls() {
   for (const button of debugButtons) {
     button.disabled = false;
     button.dataset.state = debugBusy ? "starting" : debugAttached ? "attached" : "idle";
-    button.title = !runtimeReady ? "Start Django shell before debugging" : debugAttached ? "Stop Django Shell debugger" : "Debug current shell";
+    button.title = !runtimeReady ? debugBusy ? debugDetail || "Waiting for Django shell backend" : "Start Django shell before debugging" : debugAttached ? "Stop Django Shell debugger" : "Debug current shell";
     button.setAttribute("aria-label", button.title);
     const label = button.querySelector(".buttonLabel");
     if (label) {
-      label.textContent = debugAttached ? "Stop" : debugBusy ? "Debugging" : "Debug";
+      label.textContent = debugAttached ? "Stop" : debugBusy ? runtimeReady ? "Debugging" : "Waiting" : "Debug";
     }
   }
   for (const button of debugControlButtons) {

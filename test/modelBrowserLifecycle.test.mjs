@@ -29,7 +29,7 @@ test("debug execution does not publish or advance its expression before the run 
   assert.ok(directRun.includes("await this.runHandler?."), "Debug Current waits for the debug execution lifecycle");
   assert.equal(directRun.includes("void this.runHandler?."), false);
   assert.ok(bridgeRun.includes("const executed = await this.runHandler?."), "the renderer bridge keeps its response pending while the debugger is paused");
-  assert.ok(bridgeRun.includes("Boolean(executed)"));
+  assert.ok(bridgeRun.includes("cancelled: executed === undefined") && bridgeRun.includes("executed: executed === true"), "the renderer distinguishes a cancelled readiness gate from incomplete Python");
 });
 
 test("model browser leaves loading state when the shell is busy or paused in debug", () => {

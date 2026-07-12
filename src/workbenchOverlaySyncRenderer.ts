@@ -843,6 +843,7 @@ export function overlaySyncRendererSource(): string {
         }
         __dsoLog(post, "enter.execute.request", { chars: payload.code.length, end: payload.range ? payload.range.end : 0, inputStartLine: inputStartLine, lines: __dsoLineCount(payload.code), multiline: multilineMode, source: source, start: payload.range ? payload.range.start : 0 });
         __dsoRunCode(post, payload.code, root, editor, payload.range).then(function (outcome) {
+          if (outcome && outcome.cancelled) { __dsoLog(post, "enter.cancelled", { chars: payload.code.length, inputStartLine: inputStartLine, source: source }); return; }
           if (outcome && outcome.executed === false) {
             __dsoLog(post, "enter.incomplete", { chars: payload.code.length, inputStartLine: inputStartLine, source: source });
             if (allowContinuation !== false) { __dsoInsertNewline(editor, post, source + "-incomplete"); }

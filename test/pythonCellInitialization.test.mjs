@@ -54,7 +54,6 @@ test("setup prompt and Python editor initialize ahead of backend metadata withou
   const snapshot = consoleSource.slice(consoleSource.indexOf("private handleSessionSnapshot"), consoleSource.indexOf("private async handleMessage"));
   const run = consoleSource.slice(consoleSource.indexOf("async runCurrentOverlayInput"), consoleSource.indexOf("async runCurrentDebugInput"));
   const executeStart = consoleSource.indexOf("private async executePython");
-  const execute = consoleSource.slice(consoleSource.indexOf("const backend = this.session?.backend", executeStart), consoleSource.indexOf("if (isLikelyIncompletePython", executeStart));
   const executeMethod = consoleSource.slice(executeStart, consoleSource.indexOf("private async executeBackendPython", executeStart));
   const debug = consoleSource.slice(consoleSource.indexOf("async debugShell"), consoleSource.indexOf("private async reuseWarmDebugRun"));
   const restart = consoleSource.slice(consoleSource.indexOf("private async restartSession"), consoleSource.indexOf("private updateOverlayGeometry"));
@@ -66,7 +65,10 @@ test("setup prompt and Python editor initialize ahead of backend metadata withou
   assert.ok(snapshot.indexOf('type: "measureEditor"') < snapshot.indexOf("this.runtimeReady = true"), "editor measurement is posted before metadata readiness");
   assert.ok(run.includes('this.runtimeReady ?') && run.includes('"backend-not-ready"'), "execution remains gated until the backend is ready");
   assert.ok(consoleSource.includes("async acceptOverlayInput(): Promise<void> { await"), "Enter still reaches the editor command so pre-READY multiline typing works");
-  assert.ok(execute.includes("!this.runtimeReady || !backend") && execute.includes('python.execute.gated') && !execute.includes('type: "pythonResult"'), "pre-READY Enter becomes a newline without producing a failed output");
+  assert.ok(executeMethod.indexOf("isLikelyIncompletePython(code)") < executeMethod.indexOf("!this.runtimeReady || !backend"), "pre-READY multiline input is classified before the runtime gate");
+  assert.ok(executeMethod.includes("The cell was kept in the editor") && executeMethod.includes("return undefined"), "a complete pre-READY cell remains unexecuted and does not advance as fake history");
+  assert.ok(debug.includes("this.deferredDebugStart.request()") && debug.includes('"waiting for backend"'), "debug clicks during backend attach are coalesced for READY replay with visible status");
+  assert.ok(consoleSource.includes("this.deferredDebugStart.drain()"), "the first READY snapshot starts the deferred debugger");
   assert.ok(restart.indexOf("this.runtimeReady = false") < restart.indexOf("await this.teardownDebug()"), "restart closes the execution gate before awaiting old-backend teardown");
   assert.ok(executeMethod.indexOf('phase: "breakpoints"') < executeMethod.indexOf("this.executeBackendPython"), "restart can cancel before old-backend execution starts");
   assert.ok(executeMethod.includes("return undefined"), "a stale result reports cancellation instead of advancing editor history");

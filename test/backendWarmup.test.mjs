@@ -7,6 +7,39 @@ import test from "node:test";
 
 const PYTHON = pythonExecutable();
 
+test("backend control socket bypasses Port Manager only for bind and restores its environment", { skip: !PYTHON }, () => {
+  const script = [
+    "import importlib.util, json, os",
+    `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
+    "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
+    "mod=importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "seen=[]",
+    "class SuccessServer:",
+    "    def __init__(self, address, handler): seen.append([os.environ.get('PORT_MANAGER_HOOK'),os.environ.get('PORT_MANAGER_HOOK_DISABLED')])",
+    "os.environ['PORT_MANAGER_HOOK']='original-hook'",
+    "os.environ['PORT_MANAGER_HOOK_DISABLED']='original-disabled'",
+    "mod._Server=SuccessServer",
+    "mod._create_control_server()",
+    "success_after=[os.environ.get('PORT_MANAGER_HOOK'),os.environ.get('PORT_MANAGER_HOOK_DISABLED')]",
+    "os.environ.pop('PORT_MANAGER_HOOK',None)",
+    "os.environ.pop('PORT_MANAGER_HOOK_DISABLED',None)",
+    "class FailureServer:",
+    "    def __init__(self, address, handler): seen.append([os.environ.get('PORT_MANAGER_HOOK'),os.environ.get('PORT_MANAGER_HOOK_DISABLED')]); raise RuntimeError('bind failed')",
+    "mod._Server=FailureServer",
+    "try: mod._create_control_server()",
+    "except RuntimeError: pass",
+    "failure_after=['PORT_MANAGER_HOOK' in os.environ,'PORT_MANAGER_HOOK_DISABLED' in os.environ]",
+    "print(json.dumps({'seen':seen,'successAfter':success_after,'failureAfter':failure_after}))"
+  ].join("\n");
+  const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.deepEqual(payload.seen, [["0", "1"], ["0", "1"]]);
+  assert.deepEqual(payload.successAfter, ["original-hook", "original-disabled"]);
+  assert.deepEqual(payload.failureAfter, [false, false]);
+});
+
 test("IPython READY precedes deferred warmup while user cells wait", { skip: !PYTHON }, () => {
   const script = [
     "import builtins, importlib.util, json, threading, time, types",

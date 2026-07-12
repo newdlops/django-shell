@@ -105,6 +105,29 @@ class _Handler(socketserver.StreamRequestHandler):
         self.wfile.write((json.dumps(response) + "\n").encode("utf-8"))
 
 
+@contextlib.contextmanager
+def _local_control_socket_scope():
+    """Temporarily bypasses Port Manager while the extension-only loopback control socket binds."""
+    keys = ("PORT_MANAGER_HOOK", "PORT_MANAGER_HOOK_DISABLED")
+    previous = {key: os.environ[key] if key in os.environ else _MISSING for key in keys}
+    os.environ["PORT_MANAGER_HOOK"] = "0"
+    os.environ["PORT_MANAGER_HOOK_DISABLED"] = "1"
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is _MISSING:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _create_control_server():
+    """Creates the private backend server without routing its ephemeral port as an application listener."""
+    with _local_control_socket_scope():
+        return _Server((_bind_host(), 0), _Handler)
+
+
 class _InspectionError:
     """Represents an attribute that exists but raised while inspection tried to read its value."""
 
@@ -140,7 +163,7 @@ def start(namespace, token):
         phase_started = time.monotonic()
         server = _STATE.get("server")
         if server is None:
-            server = _Server((_bind_host(), 0), _Handler)
+            server = _create_control_server()
             server.namespace = namespace
             server.initial_names = _backend_initial_names(namespace)
             _STATE["server"] = server

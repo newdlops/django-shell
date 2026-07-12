@@ -591,7 +591,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
           this.logger?.log("overlay.bridge.run.error", { error: error instanceof Error ? error.message : String(error) });
           return false;
         });
-        if (!res.destroyed) { res.writeHead(200, { ...CORS_HEADERS, "content-type": "application/json" }).end(JSON.stringify({ executed: Boolean(executed) })); }
+        if (!res.destroyed) { res.writeHead(200, { ...CORS_HEADERS, "content-type": "application/json" }).end(JSON.stringify({ cancelled: executed === undefined, executed: executed === true })); }
         return;
       }
       res.writeHead(204, CORS_HEADERS).end();
