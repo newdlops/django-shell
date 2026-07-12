@@ -3,10 +3,8 @@
 import * as vscode from "vscode";
 import { cloneCompletionResult, CompletionResult, completionRequestShape, completionResultCount } from "./completionRequestCache";
 import { DiagnosticLogger } from "./diagnostics";
-import { withLatencyBudget } from "./latencyBudget";
 
 const COMPLETION_CACHE_TTL_MS = 3000;
-const COMPLETION_BUDGET_MS = 150;
 const EMPTY_COMPLETION_CACHE_TTL_MS = 400;
 const MAX_COMPLETION_CACHE_ENTRIES = 16;
 
@@ -32,7 +30,7 @@ interface CompletionRequest {
   promise: Promise<CompletionResult>;
 }
 
-/** Caches repeated overlay completion requests while the user extends one token. */
+/** Caches repeated exact overlay completion requests while serializing provider work. */
 export class OverlayCompletionRequestCache {
   private readonly completionCache = new Map<string, { expiresAt: number; result: CompletionResult }>();
   private activeRequest: ActiveRequest | undefined;
@@ -47,8 +45,9 @@ export class OverlayCompletionRequestCache {
   async provide(document: vscode.TextDocument, position: vscode.Position, trigger: string | undefined, loader: Loader): Promise<CompletionResult> {
     const started = Date.now();
     const shape = completionRequestShape(document, position);
-    const key = `${this.generation}:${trigger ?? ""}:${shape.key}`;
-    const requestKey = this.requestKey(document, position, shape.replacementRange, key);
+    const shapeKey = `${this.generation}:${trigger ?? ""}:${shape.key}`;
+    const requestKey = this.requestKey(document, position, shape.replacementRange, shapeKey);
+    const key = requestKey;
     this.latestRequestKey = requestKey;
     this.cancelSupersededPending(requestKey);
     const cached = this.cachedCompletion(key);
@@ -61,9 +60,9 @@ export class OverlayCompletionRequestCache {
       return cloneCompletionResult(cached, shape.replacementRange);
     }
     const request = this.request(key, requestKey, loader);
-    const ready = await withLatencyBudget(request.promise, COMPLETION_BUDGET_MS);
-    this.log(started, ready.completed ? request.mode : "budget", ready.value ? completionResultCount(ready.value) : 0, trigger);
-    return ready.completed && ready.value ? cloneCompletionResult(ready.value, shape.replacementRange) : [];
+    const result = await request.promise;
+    this.log(started, request.mode, completionResultCount(result), trigger);
+    return cloneCompletionResult(result, shape.replacementRange);
   }
 
   /** Clears cached and not-yet-started completion work. */
@@ -137,7 +136,7 @@ export class OverlayCompletionRequestCache {
     }
   }
 
-  /** Builds an exact request identity while the cache key remains stable across token extension. */
+  /** Builds an exact request identity from the active token and its stable surrounding shape. */
   private requestKey(document: vscode.TextDocument, position: vscode.Position, replacementRange: vscode.Range, key: string): string {
     const start = document.offsetAt(replacementRange.start);
     const end = document.offsetAt(position);
@@ -162,6 +161,7 @@ export class OverlayCompletionRequestCache {
 
   /** Stores one completion result with a short negative-cache lifetime and bounded LRU size. */
   private remember(key: string, result: CompletionResult): void {
+    if (result instanceof vscode.CompletionList && result.isIncomplete) { return; }
     this.pruneCache();
     this.completionCache.delete(key);
     while (this.completionCache.size >= MAX_COMPLETION_CACHE_ENTRIES) {

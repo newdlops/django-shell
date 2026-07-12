@@ -46,9 +46,21 @@ class TextEdit {
   constructor(range, newText) { this.range = range; this.newText = newText; }
 }
 
+/** Minimal event emitter used by semantic-token invalidation. */
+class EventEmitter {
+  constructor() { this.event = () => ({ dispose() {} }); }
+  dispose() {}
+  fire() {}
+}
+
 /** Minimal semantic legend constructed when the feature bridge module loads. */
 class SemanticTokensLegend {
-  constructor(tokenTypes) { this.tokenTypes = tokenTypes; }
+  constructor(tokenTypes, tokenModifiers = []) { this.tokenModifiers = tokenModifiers; this.tokenTypes = tokenTypes; }
+}
+
+/** Minimal semantic-token result used by forwarding tests. */
+class SemanticTokens {
+  constructor(data, resultId) { this.data = data; this.resultId = resultId; }
 }
 
 try {
@@ -61,7 +73,7 @@ try {
   NodeModule._load = originalLoad;
 }
 
-test("joins one token-extension load and briefly caches empty results", async () => {
+test("reloads token extensions and only caches an exact empty request", async () => {
   const cache = new OverlayCompletionRequestCache();
   let loads = 0;
   const first = await cache.provide(fakeDocument("Co"), new Position(0, 2), undefined, async () => {
@@ -73,7 +85,7 @@ test("joins one token-extension load and briefly caches empty results", async ()
     return [new CompletionItem("Company")];
   });
 
-  assert.equal(loads, 1);
+  assert.equal(loads, 2);
   assert.equal(first[0].range.end.character, 2);
   assert.equal(extended[0].range.end.character, 7);
 
@@ -81,7 +93,7 @@ test("joins one token-extension load and briefly caches empty results", async ()
   let emptyLoads = 0;
   await emptyCache.provide(fakeDocument("missing"), new Position(0, 7), undefined, async () => { emptyLoads += 1; return []; });
   await emptyCache.provide(fakeDocument("missings"), new Position(0, 8), undefined, async () => { emptyLoads += 1; return []; });
-  assert.equal(emptyLoads, 1, "a short negative cache prevents immediate cold-load retries");
+  assert.equal(emptyLoads, 2, "a longer token cannot reuse an empty short-prefix result");
 
   const boundedCache = new OverlayCompletionRequestCache();
   for (let index = 0; index < 24; index += 1) {
@@ -89,6 +101,35 @@ test("joins one token-extension load and briefly caches empty results", async ()
     await boundedCache.provide(fakeDocument(text), new Position(0, text.length), undefined, async () => [new CompletionItem(String(index))]);
   }
   assert.equal(boundedCache.completionCache.size, 16, "large completion arrays remain bounded across a long session");
+});
+
+test("does not cache incomplete completion lists at an exact token", async () => {
+  const cache = new OverlayCompletionRequestCache();
+  let loads = 0;
+  const document = fakeDocument("AutoImportedClient");
+  const position = new Position(0, 18);
+  const load = async () => {
+    loads += 1;
+    return new CompletionList([new CompletionItem("AutoImportedClient")], true);
+  };
+
+  await cache.provide(document, position, undefined, load);
+  await cache.provide(document, position, undefined, load);
+
+  assert.equal(loads, 2);
+});
+
+test("waits for the latest slow completion instead of losing the result at the final character", async () => {
+  const cache = new OverlayCompletionRequestCache();
+  const document = fakeDocument("AutoImportedClient");
+  const position = new Position(0, 18);
+
+  const result = await cache.provide(document, position, undefined, async () => {
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    return [new CompletionItem("AutoImportedClient")];
+  });
+
+  assert.equal(result[0].label, "AutoImportedClient");
 });
 
 test("runs one completion load at a time and retains only the latest pending context", async () => {
@@ -208,6 +249,20 @@ test("routes an isolated shell language through full-source analysis without a r
   vscodeState.executeHandler = undefined;
 });
 
+test("does not retry a partial identifier when the exact query already returns a prefix match", async () => {
+  vscodeState.executeCalls = 0;
+  vscodeState.executeHandler = (command) => command === "vscode.executeCompletionItemProvider" ? [new CompletionItem("AutoImportedClient")] : [];
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
+  const document = fakeDocument("client = AutoImportedCli", "django-shell-python");
+
+  const result = await bridge.provideCompletionItems(document, new Position(0, 24), { isCancellationRequested: false }, {});
+
+  assert.equal(vscodeState.executeCalls, 1);
+  assert.equal(result[0].label, "AutoImportedClient");
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
 test("registers only the isolated language for shell files and Python for query files", () => {
   vscodeState.selectors.length = 0;
   const shell = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
@@ -224,6 +279,32 @@ test("registers only the isolated language for shell files and Python for query 
   assert.equal(vscodeState.selectors.length, 6);
   assert.ok(vscodeState.selectors.every((selector) => selector.length === 1 && selector[0].language === "python"));
   query.dispose();
+});
+
+test("registers semantic forwarding only for the isolated shell language", async () => {
+  vscodeState.selectors.length = 0;
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments(""));
+
+  bridge.activate();
+  await nextTurn();
+
+  assert.equal(vscodeState.selectors.length, 7);
+  assert.deepEqual(vscodeState.selectors[6], [{ language: "django-shell-python", pattern: "**/.django-shell/console-cell.py", scheme: "file" }]);
+  bridge.dispose();
+});
+
+test("forwards hidden Pylance semantic tokens onto visible user lines", async () => {
+  vscodeState.executeHandler = (command) => command === "vscode.provideDocumentSemanticTokens"
+    ? new SemanticTokens(Uint32Array.from([0, 0, 4, 1, 0, 1, 0, 5, 2, 8]), "semantic-result")
+    : [];
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Name\n"));
+
+  const result = await bridge.provideDocumentSemanticTokens(fakeDocument("value = 1", "django-shell-python"), { isCancellationRequested: false });
+
+  assert.deepEqual([...result.data], [0, 0, 5, 2, 8]);
+  assert.equal(result.resultId, "semantic-result");
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
 });
 
 test("keeps signature help from adding a second hidden-provider load", async () => {
@@ -484,11 +565,45 @@ test("resolves a lazy hidden completion edit and maps it through the public prov
   vscodeState.executeHandler = undefined;
 });
 
+test("retries inside a completed import name and preserves that position for lazy resolution", async () => {
+  vscodeState.executeCalls = 0;
+  const observed = [];
+  vscodeState.executeHandler = (command, _uri, position, _trigger, resolveCount) => {
+    if (command !== "vscode.executeCompletionItemProvider") { return []; }
+    observed.push({ character: position.character, resolveCount });
+    if (position.character === 27) { return [new CompletionItem("generic_name")]; }
+    const item = new CompletionItem("AutoImportedClient");
+    item.textEdit = new TextEdit(new Range(4, 9, 4, 27), "AutoImportedClient");
+    if (resolveCount === 1) {
+      item.additionalTextEdits = [new TextEdit(new Range(0, 0, 0, 0), "from workspace_context import AutoImportedClient\n")];
+    }
+    return [item];
+  };
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Prelude\n"));
+  const source = "upper = 1\n\n\nclient = AutoImportedClient";
+  const document = fakeDocument(source, "django-shell-python");
+
+  const completions = await bridge.provideCompletionItems(document, new Position(3, 27), { isCancellationRequested: false }, {});
+  assert.equal(completions[0].label, "AutoImportedClient");
+  const resolved = await bridge.resolveCompletionItem(completions[0], { isCancellationRequested: false });
+
+  assert.deepEqual(observed, [
+    { character: 27, resolveCount: undefined },
+    { character: 26, resolveCount: undefined },
+    { character: 26, resolveCount: 1 }
+  ]);
+  assert.deepEqual(resolved.additionalTextEdits[0].range, new Range(3, 0, 3, 0));
+  assert.equal(resolved.additionalTextEdits[0].newText, "from workspace_context import AutoImportedClient\n\n");
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
 /** Creates a one-line text document with stable file identity. */
 function fakeDocument(text, languageId = "python") {
   return {
     getText: () => text,
     languageId,
+    lineCount: text.split(/\r\n|\n|\r/).length,
     offsetAt: (position) => offsetAtText(text, position),
     positionAt: (offset) => positionAtText(text, offset),
     uri: { toString: () => "file:///workspace/.django-shell/console-cell.py" }
@@ -535,7 +650,8 @@ function fakeOverlayDocuments(prelude) {
     lineOffset: () => prelude ? 1 : 0,
     preludeText: () => prelude,
     syncs: 0,
-    async withAnalysisSnapshot(_text, _line, request) { this.syncs += 1; return await request(); }
+    async withAnalysisSnapshot(_text, _line, request) { this.syncs += 1; return await request(); },
+    async withTransientAnalysisSnapshot(_text, _line, request) { this.syncs += 1; return await request(); }
   };
 }
 
@@ -553,21 +669,25 @@ function nextTurn() { return new Promise((resolve) => setImmediate(resolve)); }
 function createVscodeMock() {
   const register = (selector) => { vscodeState.selectors.push(selector); return { dispose() {} }; };
   return {
-    commands: { async executeCommand(command, ...args) { vscodeState.executeCalls += 1; return await vscodeState.executeHandler?.(command, ...args) ?? []; } },
+    commands: { async executeCommand(command, ...args) { vscodeState.executeCalls += 1; if (command === "vscode.provideDocumentSemanticTokensLegend") { return new SemanticTokensLegend([]); } return await vscodeState.executeHandler?.(command, ...args) ?? []; } },
     CompletionItem,
     CompletionItemKind: { Property: 9 },
     CompletionList,
+    EventEmitter,
     Position,
     Range,
+    SemanticTokens,
     SemanticTokensLegend,
     TextEdit,
     languages: {
       registerCompletionItemProvider: register,
       registerDefinitionProvider: register,
       registerDocumentHighlightProvider: register,
+      registerDocumentSemanticTokensProvider: register,
       registerHoverProvider: register,
       registerReferenceProvider: register,
       registerSignatureHelpProvider: register
-    }
+    },
+    workspace: { async openTextDocument() { return {}; } }
   };
 }

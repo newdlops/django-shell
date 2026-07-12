@@ -9,23 +9,44 @@ import { OverlayCompletionRequestCache } from "./overlayCompletionRequestCache";
 import { overlayExecutionUnitRange, type OverlayExecutionUnitRange } from "./overlayExecutionUnit";
 import { OVERLAY_SHELL_LANGUAGE_ID } from "./overlayLanguage";
 import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
+import { mapOverlaySemanticTokenData } from "./overlaySemanticTokens";
 
-const SEMANTIC_TOKEN_TYPES = ["namespace", "class", "function", "variable"];
-const SEMANTIC_LEGEND = new vscode.SemanticTokensLegend(SEMANTIC_TOKEN_TYPES);
 const COMPLETION_DEBOUNCE_MS = 30;
+const SEMANTIC_REGISTRATION_ATTEMPTS = 300;
+const SEMANTIC_REGISTRATION_DELAY_MS = 100;
 const SIGNATURE_BUDGET_MS = 200;
 const SIGNATURE_DEBOUNCE_MS = 40;
+const COMPLETION_QUERY_SNAPSHOT = Symbol("overlayCompletionQuerySnapshot");
+
+/** Captures the provider-only source and cursor used to obtain a fallback item. */
+interface CompletionQuerySnapshot {
+  position: vscode.Position;
+  text: string;
+}
+
+/** Extends a completion item with the hidden query snapshot used to obtain it. */
+interface CompletionItemWithQuerySnapshot extends vscode.CompletionItem {
+  [COMPLETION_QUERY_SNAPSHOT]?: CompletionQuerySnapshot;
+}
 
 /** Carries visible source geometry needed to relocate Pylance auto-import edits. */
 interface CompletionEditContext { focusCharacter?: number; focusLine: number; text: string }
 
 /** Retains one hidden-provider request so a lazily resolved Pylance item can be mapped later. */
 interface CompletionResolveContext extends CompletionEditContext {
+  analysisText: string;
   index: number;
   offset: number;
   position: vscode.Position;
   protectedLineCount: number;
   triggerCharacter: string | undefined;
+}
+
+/** Describes a one-character-left retry for a completed bare identifier. */
+interface CompletionEndFallback {
+  identifier: string;
+  position: vscode.Position;
+  text: string;
 }
 
 /** Describes a safe import insertion point and whether it follows future imports. */
@@ -37,19 +58,23 @@ interface AutoImportInsertion {
 }
 
 /** Forwards overlay language requests to the complete workspace-backed Python analysis document. */
-export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider, vscode.DefinitionProvider, vscode.DocumentHighlightProvider, vscode.Disposable, vscode.HoverProvider, vscode.ReferenceProvider, vscode.SignatureHelpProvider {
+export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider, vscode.DefinitionProvider, vscode.DocumentHighlightProvider, vscode.Disposable, vscode.DocumentSemanticTokensProvider, vscode.HoverProvider, vscode.ReferenceProvider, vscode.SignatureHelpProvider {
   private readonly disposables: vscode.Disposable[] = [];
   private readonly completionCache: OverlayCompletionRequestCache;
   private readonly completionResolutions = new WeakMap<vscode.CompletionItem, CompletionResolveContext>();
+  private readonly semanticTokensChanged = new vscode.EventEmitter<void>();
   private analysisSuggestionBusy = false;
   private cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  private disposed = false;
   private signatureVersion = 0;
+  readonly onDidChangeSemanticTokens = this.semanticTokensChanged.event;
 
   /** Stores memory documents used for visible and analysis text. */
   constructor(private readonly documents: OverlayMemoryDocument, private readonly logger?: DiagnosticLogger) { this.completionCache = new OverlayCompletionRequestCache(logger); }
 
   /** Registers Python providers for this instance's overlay editor file (console-cell.py or query-cell.py). */
   activate(): void {
+    this.disposed = false;
     const file = path.basename(this.documents.editorUri.fsPath);
     const pattern = `**/.django-shell/${file}`;
     const language = file === "query-cell.py" ? "python" : OVERLAY_SHELL_LANGUAGE_ID;
@@ -62,20 +87,26 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       vscode.languages.registerDocumentHighlightProvider(selector, this),
       vscode.languages.registerSignatureHelpProvider(selector, this, "(", ",")
     );
+    if (language === OVERLAY_SHELL_LANGUAGE_ID) { void this.registerSemanticTokenProvider(selector); }
   }
 
   /** Releases provider registrations. */
   dispose(): void {
+    this.disposed = true;
     clearTimeout(this.cleanupTimer);
     this.signatureVersion += 1;
     this.completionCache.clear();
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
+    this.semanticTokensChanged.dispose();
   }
 
   /** Invalidates completion results and pending work after hidden imports change. */
   invalidateCompletions(): void { this.completionCache.clear(); }
+
+  /** Requests fresh visible semantic tokens after the hidden analysis source is installed. */
+  refreshSemanticTokens(): void { this.semanticTokensChanged.fire(); }
 
   /** Provides completions through the hidden analysis document. */
   async provideCompletionItems(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken, context: vscode.CompletionContext): Promise<vscode.CompletionList | vscode.CompletionItem[] | undefined> {
@@ -99,15 +130,17 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       return item;
     }
     const analysisPosition = context.position.translate(context.offset, 0);
-    const result = await this.enqueueAnalysisRequest(context.text, context.focusLine, () => token.isCancellationRequested
-      ? Promise.resolve([])
-      : vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>(
+    const result = await this.documents.withTransientAnalysisSnapshot(context.analysisText, context.focusLine, async () => {
+      return token.isCancellationRequested
+        ? []
+        : await vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>(
         "vscode.executeCompletionItemProvider",
         this.documents.analysisUri,
         analysisPosition,
         context.triggerCharacter,
         context.index + 1
-      ));
+        );
+    });
     this.cleanupGeneratedTabs();
     if (token.isCancellationRequested) {
       return item;
@@ -144,12 +177,26 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     }
     this.analysisSuggestionBusy = true;
     try {
-      const result = await this.enqueueAnalysisRequest(text, position.line, () => isCurrent()
+      let result = await this.enqueueAnalysisRequest(text, position.line, () => isCurrent()
         ? vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>("vscode.executeCompletionItemProvider", this.documents.analysisUri, analysisPosition, context.triggerCharacter)
         : Promise.resolve([]));
+      const fallback = completionEndFallback(text, position, context.triggerCharacter, result);
+      let usedEndFallback = false;
+      if (fallback && isCurrent()) {
+        const fallbackAnalysisPosition = this.analysisPosition(fallback.position, offset);
+        const fallbackResult = await this.documents.withTransientAnalysisSnapshot(fallback.text, position.line, async () => {
+          return isCurrent()
+            ? await vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>("vscode.executeCompletionItemProvider", this.documents.analysisUri, fallbackAnalysisPosition, context.triggerCharacter)
+            : [];
+        });
+        if (fallbackResult && completionItems(fallbackResult).some((item) => completionLabel(item) === fallback.identifier)) {
+          result = rememberCompletionQuerySnapshot(fallbackResult, fallback);
+          usedEndFallback = true;
+        }
+      }
       this.cleanupGeneratedTabs();
       const current = isCurrent();
-      this.logger?.log("overlay.feature", { current, feature: "completion", items: current ? completionCount(result) : 0, ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
+      this.logger?.log("overlay.feature", { current, feature: "completion", items: current ? completionCount(result) : 0, ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1, endFallback: usedEndFallback });
       return current ? mapCompletionResult(result, offset, protectedLineCount, { focusCharacter: position.character, focusLine: position.line, text }) : [];
     } finally {
       this.analysisSuggestionBusy = false;
@@ -251,15 +298,22 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     }
   }
 
-  /** Provides semantic tokens for prelude-imported names in the visible shell input. */
-  provideDocumentSemanticTokens(document: vscode.TextDocument): vscode.SemanticTokens | undefined {
-    if (!this.isEditorDocument(document)) {
+  /** Forwards complete Pylance semantic tokens while removing the hidden analysis prelude. */
+  async provideDocumentSemanticTokens(document: vscode.TextDocument, token: vscode.CancellationToken): Promise<vscode.SemanticTokens | undefined> {
+    if (!this.isEditorDocument(document) || token.isCancellationRequested) {
       return undefined;
     }
     const started = Date.now();
-    const result = semanticTokensForVisibleText(document.getText(), this.preludeSource(document.getText()));
-    this.logger?.log("overlay.feature", { feature: "semanticTokens", items: result.count, ms: Date.now() - started, symbols: result.symbols });
-    return result.tokens;
+    const text = document.getText();
+    const analysisUserStartLine = this.documents.lineOffset();
+    const visibleUserStartLine = semanticVisibleUserStartLine(text, this.documents.preludeText(), analysisUserStartLine);
+    const result = await this.enqueueAnalysisRequest(text, visibleUserStartLine, () => token.isCancellationRequested
+      ? Promise.resolve(undefined)
+      : vscode.commands.executeCommand<vscode.SemanticTokens | undefined>("vscode.provideDocumentSemanticTokens", this.documents.analysisUri));
+    if (!result || token.isCancellationRequested) { return undefined; }
+    const data = mapOverlaySemanticTokenData(result.data, analysisUserStartLine, visibleUserStartLine, document.lineCount);
+    this.logger?.log("overlay.feature", { feature: "semanticTokens", items: data.length / 5, ms: Date.now() - started });
+    return new vscode.SemanticTokens(data, result.resultId);
   }
 
   /** Returns whether a document is the visible overlay editor document. */
@@ -283,20 +337,45 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     return position.translate(offset, 0);
   }
 
+  /** Registers the visible custom-language provider with Pylance's exact semantic legend. */
+  private async registerSemanticTokenProvider(selector: vscode.DocumentSelector): Promise<void> {
+    let lastError = "semantic legend unavailable";
+    for (let attempt = 0; attempt < SEMANTIC_REGISTRATION_ATTEMPTS && !this.disposed; attempt += 1) {
+      try {
+        await vscode.workspace.openTextDocument(this.documents.analysisUri);
+        const legend = await vscode.commands.executeCommand<vscode.SemanticTokensLegend | undefined>("vscode.provideDocumentSemanticTokensLegend", this.documents.analysisUri);
+        if (legend && !this.disposed) {
+          const registration = vscode.languages.registerDocumentSemanticTokensProvider(selector, this, legend);
+          if (this.disposed) { registration.dispose(); } else { this.disposables.push(registration); }
+          this.logger?.log("overlay.semantic.registration", { modifiers: legend.tokenModifiers.length, tokenTypes: legend.tokenTypes.length });
+          return;
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+      await suggestionDelay(SEMANTIC_REGISTRATION_DELAY_MS);
+    }
+    if (!this.disposed) { this.logger?.log("overlay.semantic.registration.error", { error: lastError }); }
+  }
+
   /** Associates returned completion clones with the current visible source for lazy resolution. */
   private rememberCompletionResolutions(result: vscode.CompletionList | vscode.CompletionItem[], text: string, position: vscode.Position, triggerCharacter: string | undefined): void {
     const offset = analysisOffsetForText(text, this.documents.inputStartLine(), this.documents.lineOffset());
     const protectedLineCount = protectedLineCountForText(text, offset);
-    completionItems(result).forEach((item, index) => this.completionResolutions.set(item, {
-      focusLine: position.line,
-      focusCharacter: position.character,
-      index,
-      offset,
-      position,
-      protectedLineCount,
-      text,
-      triggerCharacter
-    }));
+    completionItems(result).forEach((item, index) => {
+      const query = (item as CompletionItemWithQuerySnapshot)[COMPLETION_QUERY_SNAPSHOT];
+      this.completionResolutions.set(item, {
+        analysisText: query?.text ?? text,
+        focusLine: position.line,
+        focusCharacter: position.character,
+        index,
+        offset,
+        position: query?.position ?? position,
+        protectedLineCount,
+        text,
+        triggerCharacter
+      });
+    });
   }
 
   /** Returns the best prelude source for provider-only fallback logic. */
@@ -338,6 +417,13 @@ function markerLineForText(text: string): number {
     if (line.trim() === INPUT_MARKER) { marker = index; }
   });
   return marker;
+}
+
+/** Returns the first visible user line corresponding to analysis source after its hidden prelude. */
+function semanticVisibleUserStartLine(text: string, prelude: string, analysisUserStartLine: number): number {
+  const marker = markerLineForText(text);
+  if (marker >= 0) { return marker + 1; }
+  return prelude && text.startsWith(prelude) ? analysisUserStartLine : 0;
 }
 
 /** Maps completion ranges back from the analysis document to the visible editor. */
@@ -396,6 +482,49 @@ function completionCount(result: vscode.CompletionList | vscode.CompletionItem[]
 /** Returns completion items independently of their array or list container. */
 function completionItems(result: vscode.CompletionList | vscode.CompletionItem[] | undefined): vscode.CompletionItem[] {
   return result instanceof vscode.CompletionList ? result.items : result ?? [];
+}
+
+/** Returns a safe inside-word retry when providers omit the exact completed import name. */
+function completionEndFallback(text: string, position: vscode.Position, triggerCharacter: string | undefined, result: vscode.CompletionList | vscode.CompletionItem[] | undefined): CompletionEndFallback | undefined {
+  if (triggerCharacter || /[A-Za-z0-9_]/u.test(lineAtText(text, position.line)[position.character] ?? "")) { return undefined; }
+  const prefix = lineAtText(text, position.line).slice(0, position.character);
+  const match = prefix.match(/[A-Za-z_]\w*$/u);
+  if (!match || match[0].length < 2 || (match.index ?? 0) > 0 && prefix[(match.index ?? 0) - 1] === ".") { return undefined; }
+  const identifier = match[0];
+  return completionItems(result).some((item) => completionLabelStartsWith(item, identifier))
+    ? undefined
+    : { identifier, position: position.translate(0, -1), text: textWithoutCharacterBeforePosition(text, position) };
+}
+
+/** Returns whether a completion label already extends the active identifier prefix. */
+function completionLabelStartsWith(item: vscode.CompletionItem, identifier: string): boolean {
+  return completionLabel(item).toLowerCase().startsWith(identifier.toLowerCase());
+}
+
+/** Marks fallback items so lazy resolution repeats the same hidden query snapshot. */
+function rememberCompletionQuerySnapshot<T extends vscode.CompletionList | vscode.CompletionItem[]>(result: T, snapshot: CompletionQuerySnapshot): T {
+  for (const item of completionItems(result)) {
+    (item as CompletionItemWithQuerySnapshot)[COMPLETION_QUERY_SNAPSHOT] = snapshot;
+  }
+  return result;
+}
+
+/** Removes the single UTF-16 character immediately before a source position. */
+function textWithoutCharacterBeforePosition(text: string, position: vscode.Position): string {
+  const offset = offsetAtTextPosition(text, position);
+  return offset > 0 ? `${text.slice(0, offset - 1)}${text.slice(offset)}` : text;
+}
+
+/** Converts a line/character pair to a bounded source offset without a TextDocument. */
+function offsetAtTextPosition(text: string, position: vscode.Position): number {
+  let line = 0;
+  let lineStart = 0;
+  for (const match of text.matchAll(/\r\n|\n|\r/g)) {
+    if (line >= position.line) { break; }
+    line += 1;
+    lineStart = (match.index ?? 0) + match[0].length;
+  }
+  return Math.min(text.length, lineStart + Math.max(0, position.character));
 }
 
 /** Finds the lazily resolved version of one previously returned completion item. */
@@ -624,44 +753,6 @@ function mapRange(range: vscode.Range, offset: number): vscode.Range {
   );
 }
 
-/** Builds semantic tokens for visible code that references hidden prelude imports. */
-function semanticTokensForText(text: string): { count: number; symbols: number; tokens: vscode.SemanticTokens } {
-  return semanticTokensForVisibleText(userTextFromFullText(text), text);
-}
-
-/** Builds semantic tokens for visible code using a separate prelude source. */
-function semanticTokensForVisibleText(visibleText: string, preludeSource: string): { count: number; symbols: number; tokens: vscode.SemanticTokens } {
-  const builder = new vscode.SemanticTokensBuilder(SEMANTIC_LEGEND);
-  const symbols = importedPreludeSymbols(preludeSource);
-  const lines = visibleText.split(/\r?\n/);
-  let count = 0;
-  for (let line = 0; line < lines.length; line++) {
-    count += pushLineSemanticTokens(builder, line, lines[line], symbols);
-  }
-  return { count, symbols: symbols.size, tokens: builder.build() };
-}
-
-/** Pushes semantic tokens for one source line and returns how many were added. */
-function pushLineSemanticTokens(builder: vscode.SemanticTokensBuilder, line: number, source: string, symbols: Map<string, string>): number {
-  let count = 0;
-  const code = source.split("#", 1)[0] ?? "";
-  const pattern = /\b[A-Za-z_]\w*\b/g;
-  for (let match = pattern.exec(code); match; match = pattern.exec(code)) {
-    const tokenType = symbols.get(match[0]);
-    if (!tokenType) {
-      continue;
-    }
-    builder.push(line, match.index, match[0].length, SEMANTIC_TOKEN_TYPES.indexOf(tokenType));
-    count += 1;
-  }
-  return count;
-}
-
-/** Returns imported names from the generated prelude and their token type. */
-function importedPreludeSymbols(text: string): Map<string, string> {
-  return new Map([...importedPreludeSymbolDetails(text)].map(([name, symbol]) => [name, symbol.tokenType]));
-}
-
 /** Returns imported names from the generated prelude with display metadata. */
 function importedPreludeSymbolDetails(text: string): Map<string, { importLine?: string; tokenType: string }> {
   const symbols = new Map<string, string>();
@@ -722,15 +813,6 @@ function preludeText(text: string): string {
   return index >= 0 ? text.slice(0, index) : text;
 }
 
-/** Returns visible user text from a generated full analysis document. */
-function userTextFromFullText(text: string): string {
-  const index = text.indexOf(`${INPUT_MARKER}\n`);
-  if (index < 0) {
-    return text;
-  }
-  return text.slice(index + INPUT_MARKER.length + 1);
-}
-
 /** Returns one line of text or an empty string when out of range. */
 function lineAtText(text: string, line: number): string {
   return text.split(/\r\n|\n|\r/)[line] ?? "";
@@ -763,4 +845,4 @@ function compact<T>(values: Array<T | undefined>): T[] {
   return values.filter((value): value is T => value !== undefined);
 }
 
-export const __test = { SEMANTIC_TOKEN_TYPES, analysisOffsetForText, djangoManagerCompletionForText, mapCompletionResult, preludeHoverForText, protectedLineCountForText, semanticTokensForText, semanticTokensForVisibleText };
+export const __test = { analysisOffsetForText, djangoManagerCompletionForText, mapCompletionResult, preludeHoverForText, protectedLineCountForText, semanticVisibleUserStartLine };

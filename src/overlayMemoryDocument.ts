@@ -134,6 +134,22 @@ export class OverlayMemoryDocument implements vscode.Disposable {
     });
   }
 
+  /** Installs a provider-only analysis snapshot and restores the latest canonical source afterward. */
+  async withTransientAnalysisSnapshot<T>(text: string, focusLine: number | undefined, request: () => PromiseLike<T>): Promise<T> {
+    const snapshotPrelude = this.prelude;
+    const snapshot = extractUserSnapshot(text, snapshotPrelude, focusLine);
+    const analysisSnapshot = analysisText(snapshotPrelude, snapshot.text);
+    this.logger?.log("overlay.memory.transientLease", { ...textFields(snapshot.text), focusLine: snapshot.focusLine ?? -1, fullLines: textFields(text).lines });
+    return this.enqueueWrite(async () => {
+      await this.writeAnalysisText(analysisSnapshot);
+      try {
+        return await request();
+      } finally {
+        await this.writeAnalysisText(this.analysisText());
+      }
+    });
+  }
+
   /** Updates editor-only hidden import text while analysis stays on user code. */
   async updatePrelude(prelude: string): Promise<void> {
     const changed = prelude !== this.prelude;

@@ -227,7 +227,7 @@ export class WorkbenchOverlay implements vscode.Disposable {
       return;
     }
     this.prelude = nextPrelude; this.featureBridge.invalidateCompletions();
-    await this.memoryDocument.updatePrelude(this.prelude);
+    await this.memoryDocument.updatePrelude(this.prelude); this.featureBridge.refreshSemanticTokens();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) { return; }
     const report = await this.evalInWorkbench(preludeExpression(this.prelude, this.token)).catch((error: unknown) => {
       this.logger?.log("overlay.prelude.error", { error: error instanceof Error ? error.message : String(error) });

@@ -217,6 +217,26 @@ test("analysis snapshot lease blocks sync and prelude writes until its provider 
   assert.equal(analysisWrites().at(-1).text, "new_runtime: str\nnew_upper = 3\n\n\nnew_lower = 4\n");
 });
 
+test("transient analysis snapshot restores the complete canonical source after a provider request", async () => {
+  mockState.writes.length = 0;
+  const document = new OverlayMemoryDocument(undefined, "transient-cell", "transient-analysis");
+  const prelude = "runtime_value: int\n";
+  const source = "client = AutoImportedClient\n";
+  const partial = "client = AutoImportedClien\n";
+  await document.updatePrelude(prelude);
+  await document.sync(source, 0);
+
+  await document.withTransientAnalysisSnapshot(partial, 0, async () => {
+    const active = mockState.writes.filter((write) => path.basename(write.path) === "transient-analysis.py").at(-1);
+    assert.equal(active.text, prelude + partial);
+    assert.equal(document.fullText(), source, "a provider-only retry cannot replace the executable source");
+  });
+
+  const analysisWrites = mockState.writes.filter((write) => path.basename(write.path) === "transient-analysis.py");
+  assert.deepEqual(analysisWrites.slice(-2).map((write) => write.text), [prelude + partial, prelude + source]);
+  assert.equal(document.analysisText(), prelude + source);
+});
+
 test("analysis snapshot lease converts a legacy marker focus to user-relative lines", async () => {
   mockState.writes.length = 0;
   const document = new OverlayMemoryDocument(undefined, "legacy-cell", "legacy-analysis");

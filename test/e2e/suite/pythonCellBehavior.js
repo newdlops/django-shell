@@ -36,6 +36,13 @@ async function assertPythonCellBehavior(extension) {
     await assertGeneratedOverlayFilesHidden("unit-local auto import");
     return;
   }
+  if (process.env.DJANGO_SHELL_E2E_THEME_ONLY === "1") {
+    const text = await withStageTimeout("overlay document open", waitForOpenDocumentText((value) => value.includes(USER_CODE)), 20000);
+    await withStageTimeout("forwarded semantic tokens", assertForwardedSemanticTokens(overlayUris().editor, text), 30000);
+    await withStageTimeout("renderer theme checks", assertRendererTheme(extension), 30000);
+    await assertGeneratedOverlayFilesHidden("renderer theme checks");
+    return;
+  }
   await withStageTimeout("golden python execution", assertGoldenPythonExecution({ extension, generatedText, importLines: GOLDEN_PRELUDE_LINES, inputMarker: INPUT_MARKER, installOverlayDocument, prelude: GOLDEN_PRELUDE, restoreImportLines: ["from orm_runtime.models import Company"], waitForOpenDocumentText }), 90000);
   await assertGeneratedOverlayFilesHidden("golden python execution");
   await withStageTimeout("overlay input smoke", assertOverlayAcceptsPythonInput(extension), 20000);
@@ -231,14 +238,16 @@ async function assertExtensionLoaded(id) {
   assert.equal(extension.isActive, true);
 }
 
-/** Installs the full generated overlay file text into both editor and analysis files. */
+/** Installs user-only editor text and marker-free full analysis text. */
 async function installOverlayDocument(text) {
   const uris = overlayUris();
-  await replaceDocument(uris.editor, text);
-  await replaceDocument(uris.analysis, text);
   const marker = `${INPUT_MARKER}\n`;
-  const visibleText = text.includes(marker) ? text.slice(text.lastIndexOf(marker) + marker.length) : text;
-  return await waitForOpenDocumentText((value) => value === text || value === visibleText || (value.includes(marker) && value.slice(value.lastIndexOf(marker) + marker.length) === visibleText));
+  const markerIndex = text.lastIndexOf(marker);
+  const visibleText = markerIndex >= 0 ? text.slice(markerIndex + marker.length) : text;
+  const analysisText = markerIndex >= 0 ? `${text.slice(0, markerIndex)}${visibleText}` : text;
+  await replaceDocument(uris.editor, visibleText);
+  await replaceDocument(uris.analysis, analysisText);
+  return await waitForOpenDocumentText((value) => value === visibleText);
 }
 
 /** Replaces one workspace text document. */
@@ -320,6 +329,51 @@ async function assertProviderFeatures(uri, text) {
   assert.match(ormHover, /Base model:\s*`?(?:orm_runtime\.)?Company`?/, `missing Django ORM extension hover: ${ormHover}`);
   const definitions = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", uri, positionOfText(text, "Company()").translate(0, 1));
   assert.ok(definitionUris(definitions).some((uri) => uri.includes("/orm_runtime/models")), `definition failed for Company: ${JSON.stringify(definitionUris(definitions))}`);
+  await assertForwardedSemanticTokens(uri, text);
+}
+
+/** Verifies visible custom-language tokens retain Pylance class and variable distinctions. */
+async function assertForwardedSemanticTokens(uri, text) {
+  let legend;
+  let tokens;
+  let entries = [];
+  let company;
+  let variable;
+  for (let attempt = 0; attempt < 80; attempt++) {
+    legend = await vscode.commands.executeCommand("vscode.provideDocumentSemanticTokensLegend", uri);
+    tokens = legend ? await vscode.commands.executeCommand("vscode.provideDocumentSemanticTokens", uri) : undefined;
+    if (legend?.tokenTypes?.length && tokens?.data?.length) {
+      entries = semanticTokenEntries(tokens, legend);
+      company = semanticTokenAt(entries, positionOfText(text, "Company()").translate(0, 1));
+      variable = semanticTokenAt(entries, positionOfText(text, "company =").translate(0, 1));
+      if (company && variable && company.type !== variable.type) { return; }
+    }
+    await delay(100);
+  }
+  assert.ok(legend?.tokenTypes?.length, "custom Python semantic legend was not registered");
+  assert.ok(tokens?.data?.length, "custom Python semantic tokens were not forwarded");
+  assert.ok(company, `missing Company semantic token: ${JSON.stringify(entries.slice(0, 80))}`);
+  assert.ok(variable, `missing company semantic token: ${JSON.stringify(entries.slice(0, 80))}`);
+  assert.notEqual(company.type, variable.type, `class and variable collapsed to one semantic color type: ${JSON.stringify({ company, variable })}`);
+}
+
+/** Decodes delta-encoded semantic token data into absolute visible positions. */
+function semanticTokenEntries(tokens, legend) {
+  const entries = [];
+  let line = 0;
+  let character = 0;
+  for (let index = 0; index + 4 < tokens.data.length; index += 5) {
+    const deltaLine = tokens.data[index];
+    line += deltaLine;
+    character = deltaLine === 0 ? character + tokens.data[index + 1] : tokens.data[index + 1];
+    entries.push({ character, length: tokens.data[index + 2], line, type: legend.tokenTypes[tokens.data[index + 3]] });
+  }
+  return entries;
+}
+
+/** Returns the semantic token covering one source position. */
+function semanticTokenAt(entries, position) {
+  return entries.find((entry) => entry.line === position.line && position.character >= entry.character && position.character < entry.character + entry.length);
 }
 
 /** Verifies a lower execution unit keeps completion, hover, and definition context from an upper workspace import. */
@@ -348,22 +402,25 @@ async function assertCrossUnitWorkspaceContext(originalText) {
 async function assertUnitLocalAutoImport(originalText) {
   try {
     await assertAutoImportForSource("upper = 1\n\n\nclient = AutoImportedCli");
-    await assertAutoImportForSource("from workspace_context import AutoImportedClient\nupper = AutoImportedClient()\n\n\nclient = AutoImportedCli");
+    await assertAutoImportForSource("upper = 1\n\n\nclient = AutoImportedClient", 1);
+    await assertAutoImportForSource("from workspace_context import AutoImportedClient\nupper = AutoImportedClient()\n\n\nclient = AutoImportedClient", 1);
   } finally {
     await installOverlayDocument(originalText);
   }
 }
 
 /** Verifies one partial completion carries its import edit at the lower execution-unit start. */
-async function assertAutoImportForSource(source) {
+async function assertAutoImportForSource(source, attempts = 60) {
   const installed = await installOverlayDocument(`${PRELUDE}${INPUT_MARKER}\n${source}`);
   const uri = overlayUris().editor;
-  const unitPosition = positionOfText(installed, "client = AutoImportedCli");
-  const completionPosition = unitPosition.translate(0, "client = AutoImportedCli".length);
+  const inputLine = source.split(/\r?\n/).find((line) => line.startsWith("client = AutoImportedCli"));
+  assert.ok(inputLine, `missing auto-import input line: ${source}`);
+  const unitPosition = positionOfText(installed, inputLine);
+  const completionPosition = unitPosition.translate(0, inputLine.length);
   const unitStart = unitPosition.line;
   let item;
   let observed = [];
-  for (let attempt = 0; attempt < 60; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     let result = await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", uri, completionPosition);
     let items = completionItems(result);
     observed = items.slice(0, 80).map(completionDebugValue);
@@ -375,7 +432,7 @@ async function assertAutoImportForSource(source) {
       item = items.find((candidate) => completionLabel(candidate) === "AutoImportedClient");
     }
     if (item?.additionalTextEdits?.some((edit) => edit.newText.includes("from workspace_context import AutoImportedClient"))) { break; }
-    await delay(150);
+    if (attempt + 1 < attempts) { await delay(150); }
   }
   assert.ok(item, `missing AutoImportedClient completion: ${JSON.stringify(observed)}`);
   const importEdit = item.additionalTextEdits?.find((edit) => edit.newText.includes("from workspace_context import AutoImportedClient"));

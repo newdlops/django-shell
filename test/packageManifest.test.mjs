@@ -20,14 +20,16 @@ test("isolates shell providers behind a Python-syntax wrapper language", () => {
 
   assert.ok(breakpoint, "VS Code enables native breakpoint widgets through the separate breakpoints contribution");
   assert.equal(language?.configuration, "./syntaxes/django-shell-python-language-configuration.json");
-  assert.equal(grammar?.scopeName, "source.django-shell-python");
+  assert.equal(grammar?.scopeName, "source.python.django-shell");
   assert.equal(grammar?.path, "./syntaxes/django-shell-python.tmLanguage.json");
+  assert.equal(grammarSource.scopeName, "source.python.django-shell");
   assert.deepEqual(grammarSource.patterns, [{ include: "source.python" }]);
 });
 
 test("restores v0.0.2 Python analysis defaults globally", () => {
   assert.equal(manifest.contributes.configurationDefaults["python.analysis.supportAllPythonDocuments"], true);
   assert.deepEqual(manifest.contributes.configurationDefaults["[python]"], { "editor.semanticHighlighting.enabled": true });
+  assert.deepEqual(manifest.contributes.configurationDefaults["[django-shell-python]"], { "editor.semanticHighlighting.enabled": true });
 });
 
 test("enables diagnostic logging by default so the shell session is captured for troubleshooting", () => {
