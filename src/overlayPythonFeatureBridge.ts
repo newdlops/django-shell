@@ -6,6 +6,7 @@ import { DiagnosticLogger } from "./diagnostics";
 import { closeGeneratedOverlayTabs } from "./generatedOverlayTabs";
 import { withLatencyBudget } from "./latencyBudget";
 import { OverlayCompletionRequestCache } from "./overlayCompletionRequestCache";
+import { overlayExecutionUnitRange, type OverlayExecutionUnitRange } from "./overlayExecutionUnit";
 import { OVERLAY_SHELL_LANGUAGE_ID } from "./overlayLanguage";
 import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
 
@@ -15,10 +16,31 @@ const COMPLETION_DEBOUNCE_MS = 30;
 const SIGNATURE_BUDGET_MS = 200;
 const SIGNATURE_DEBOUNCE_MS = 40;
 
+/** Carries visible source geometry needed to relocate Pylance auto-import edits. */
+interface CompletionEditContext { focusCharacter?: number; focusLine: number; text: string }
+
+/** Retains one hidden-provider request so a lazily resolved Pylance item can be mapped later. */
+interface CompletionResolveContext extends CompletionEditContext {
+  index: number;
+  offset: number;
+  position: vscode.Position;
+  protectedLineCount: number;
+  triggerCharacter: string | undefined;
+}
+
+/** Describes a safe import insertion point and whether it follows future imports. */
+interface AutoImportInsertion {
+  afterFuture: boolean;
+  character: number;
+  followingLine: number;
+  line: number;
+}
+
 /** Forwards overlay language requests to the complete workspace-backed Python analysis document. */
 export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider, vscode.DefinitionProvider, vscode.DocumentHighlightProvider, vscode.Disposable, vscode.HoverProvider, vscode.ReferenceProvider, vscode.SignatureHelpProvider {
   private readonly disposables: vscode.Disposable[] = [];
   private readonly completionCache: OverlayCompletionRequestCache;
+  private readonly completionResolutions = new WeakMap<vscode.CompletionItem, CompletionResolveContext>();
   private analysisSuggestionBusy = false;
   private cleanupTimer: ReturnType<typeof setTimeout> | undefined;
   private signatureVersion = 0;
@@ -66,7 +88,43 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       return [];
     }
     const result = await this.completionCache.provide(document, position, context.triggerCharacter, (isCurrent) => this.loadCompletionItems(text, position, context, isCurrent));
+    this.rememberCompletionResolutions(result, text, position, context.triggerCharacter);
     return withDjangoCompletions(result, text, position, prelude);
+  }
+
+  /** Resolves Pylance's lazy auto-import edit and remaps it into the selected execution unit. */
+  async resolveCompletionItem(item: vscode.CompletionItem, token: vscode.CancellationToken): Promise<vscode.CompletionItem> {
+    const context = this.completionResolutions.get(item);
+    if (!context || token.isCancellationRequested || item.additionalTextEdits?.length) {
+      return item;
+    }
+    const analysisPosition = context.position.translate(context.offset, 0);
+    const result = await this.enqueueAnalysisRequest(context.text, context.focusLine, () => token.isCancellationRequested
+      ? Promise.resolve([])
+      : vscode.commands.executeCommand<vscode.CompletionList | vscode.CompletionItem[]>(
+        "vscode.executeCompletionItemProvider",
+        this.documents.analysisUri,
+        analysisPosition,
+        context.triggerCharacter,
+        context.index + 1
+      ));
+    this.cleanupGeneratedTabs();
+    if (token.isCancellationRequested) {
+      return item;
+    }
+    const resolved = matchingCompletionItem(completionItems(result), item, context.index);
+    if (!resolved) {
+      return item;
+    }
+    const inferred = completionImportText(resolved, context);
+    item.additionalTextEdits = mapAdditionalTextEdits(
+      resolved.additionalTextEdits ?? [],
+      context.offset,
+      context.protectedLineCount,
+      context,
+      inferred ? [inferred] : []
+    );
+    return item;
   }
 
   /** Loads uncached completions through the hidden analysis document. */
@@ -92,7 +150,7 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
       this.cleanupGeneratedTabs();
       const current = isCurrent();
       this.logger?.log("overlay.feature", { current, feature: "completion", items: current ? completionCount(result) : 0, ms: Date.now() - started, offset, trigger: context.triggerCharacter, visibleLine: position.line + 1, analysisLine: analysisPosition.line + 1 });
-      return current ? mapCompletionResult(result, offset, protectedLineCount) : [];
+      return current ? mapCompletionResult(result, offset, protectedLineCount, { focusCharacter: position.character, focusLine: position.line, text }) : [];
     } finally {
       this.analysisSuggestionBusy = false;
     }
@@ -225,6 +283,22 @@ export class OverlayPythonFeatureBridge implements vscode.CompletionItemProvider
     return position.translate(offset, 0);
   }
 
+  /** Associates returned completion clones with the current visible source for lazy resolution. */
+  private rememberCompletionResolutions(result: vscode.CompletionList | vscode.CompletionItem[], text: string, position: vscode.Position, triggerCharacter: string | undefined): void {
+    const offset = analysisOffsetForText(text, this.documents.inputStartLine(), this.documents.lineOffset());
+    const protectedLineCount = protectedLineCountForText(text, offset);
+    completionItems(result).forEach((item, index) => this.completionResolutions.set(item, {
+      focusLine: position.line,
+      focusCharacter: position.character,
+      index,
+      offset,
+      position,
+      protectedLineCount,
+      text,
+      triggerCharacter
+    }));
+  }
+
   /** Returns the best prelude source for provider-only fallback logic. */
   private preludeSource(text: string): string {
     const index = text.indexOf(INPUT_MARKER);
@@ -259,14 +333,18 @@ function protectedLineCountForText(text: string, fallback: number): number {
 
 /** Returns the zero-based marker line in one editor text snapshot. */
 function markerLineForText(text: string): number {
-  return text.split(/\r?\n/).findIndex((line) => line.trim() === INPUT_MARKER);
+  let marker = -1;
+  text.split(/\r\n|\n|\r/).forEach((line, index) => {
+    if (line.trim() === INPUT_MARKER) { marker = index; }
+  });
+  return marker;
 }
 
 /** Maps completion ranges back from the analysis document to the visible editor. */
-function mapCompletionResult(result: vscode.CompletionList | vscode.CompletionItem[] | undefined, offset: number, protectedLineCount = offset): vscode.CompletionList | vscode.CompletionItem[] {
+function mapCompletionResult(result: vscode.CompletionList | vscode.CompletionItem[] | undefined, offset: number, protectedLineCount = offset, context?: CompletionEditContext): vscode.CompletionList | vscode.CompletionItem[] {
   const items = result instanceof vscode.CompletionList ? result.items : result ?? [];
   for (const item of items) {
-    mapCompletionItem(item, offset, protectedLineCount);
+    mapCompletionItem(item, offset, protectedLineCount, context);
   }
   return result instanceof vscode.CompletionList ? new vscode.CompletionList(items, result.isIncomplete) : items;
 }
@@ -315,6 +393,27 @@ function completionCount(result: vscode.CompletionList | vscode.CompletionItem[]
   return result instanceof vscode.CompletionList ? result.items.length : result?.length ?? 0;
 }
 
+/** Returns completion items independently of their array or list container. */
+function completionItems(result: vscode.CompletionList | vscode.CompletionItem[] | undefined): vscode.CompletionItem[] {
+  return result instanceof vscode.CompletionList ? result.items : result ?? [];
+}
+
+/** Finds the lazily resolved version of one previously returned completion item. */
+function matchingCompletionItem(items: vscode.CompletionItem[], expected: vscode.CompletionItem, preferredIndex: number): vscode.CompletionItem | undefined {
+  const identity = completionIdentity(expected);
+  const preferred = items[preferredIndex];
+  return preferred && completionIdentity(preferred) === identity
+    ? preferred
+    : items.find((item) => completionIdentity(item) === identity);
+}
+
+/** Builds a stable identity from fields that completion resolution cannot change. */
+function completionIdentity(item: vscode.CompletionItem): string {
+  const label = typeof item.label === "string" ? item.label : item.label.label;
+  const description = typeof item.label === "string" ? "" : item.label.description ?? "";
+  return JSON.stringify([label, description, item.kind, item.sortText, item.filterText]);
+}
+
 /** Maps one completion item range shape back to the visible editor. */
 function mapCompletionRange(range: vscode.CompletionItem["range"], offset: number): vscode.CompletionItem["range"] {
   if (!range) {
@@ -327,17 +426,155 @@ function mapCompletionRange(range: vscode.CompletionItem["range"], offset: numbe
 }
 
 /** Maps one completion item and its edits back to the visible editor. */
-function mapCompletionItem(item: vscode.CompletionItem, offset: number, protectedLineCount: number): vscode.CompletionItem {
+function mapCompletionItem(item: vscode.CompletionItem, offset: number, protectedLineCount: number, context?: CompletionEditContext): vscode.CompletionItem {
   item.range = mapCompletionRange(item.range, offset);
   item.textEdit = mapTextEdit(item.textEdit, offset, protectedLineCount);
-  const additionalTextEdits = compact((item.additionalTextEdits ?? []).map((edit) => mapTextEdit(edit, offset, protectedLineCount)));
-  item.additionalTextEdits = additionalTextEdits.length ? additionalTextEdits : undefined;
+  const inferred = context ? completionImportText(item, context) : undefined;
+  item.additionalTextEdits = mapAdditionalTextEdits(item.additionalTextEdits ?? [], offset, protectedLineCount, context, inferred ? [inferred] : []);
   return item;
+}
+
+/** Maps ordinary additional edits while relocating imports into the active independent execution unit. */
+function mapAdditionalTextEdits(edits: vscode.TextEdit[], offset: number, protectedLineCount: number, context?: CompletionEditContext, inferredImports: string[] = []): vscode.TextEdit[] | undefined {
+  if (!context) { const mapped = compact(edits.map((edit) => mapTextEdit(edit, offset, protectedLineCount))); return mapped.length ? mapped : undefined; }
+  const floor = completionInputFloor(context.text), unit = overlayExecutionUnitRange(context.text, context.focusLine, floor) ?? { end: context.focusLine, start: context.focusLine };
+  const mapped: vscode.TextEdit[] = [], imports = [...inferredImports];
+  let hasLocalImportEdit = false;
+  for (const edit of edits) {
+    const visible = mapTextEdit(edit, offset, protectedLineCount);
+    const autoImport = isAutoImportEdit(edit.newText);
+    if (autoImport && (!visible || !rangeInsideUnit(visible.range, unit) || emptyRange(edit.range))) {
+      if (!inferredImports.length) { imports.push(edit.newText); }
+      continue;
+    }
+    if (visible && rangeInsideUnit(visible.range, unit)) {
+      hasLocalImportEdit ||= autoImport || rangeTargetsImportLine(visible.range, context.text);
+      mapped.push(autoImport ? normalizedTextEdit(visible, context.text) : visible);
+    }
+  }
+  if (hasLocalImportEdit) { imports.splice(0, inferredImports.length); }
+  const insertion = autoImportInsertion(context.text, unit);
+  const importText = relocatedAutoImportText(imports, context.text, unit, insertion);
+  if (importText) {
+    mapped.unshift(new vscode.TextEdit(
+      new vscode.Range(insertion.line, insertion.character, insertion.line, insertion.character),
+      importText
+    ));
+  }
+  return mapped.length ? mapped : undefined;
+}
+
+/** Returns the first user line after an optional legacy input marker. */
+function completionInputFloor(text: string): number { const marker = markerLineForText(text); return marker >= 0 ? marker + 1 : 0; }
+
+/** Returns whether an edit stays wholly inside the current execution unit. */
+function rangeInsideUnit(range: vscode.Range, unit: OverlayExecutionUnitRange): boolean { return range.start.line >= unit.start && range.end.line <= unit.end; }
+
+/** Returns whether one edit only inserts text at a position. */
+function emptyRange(range: vscode.Range): boolean { return range.start.line === range.end.line && range.start.character === range.end.character; }
+
+/** Returns whether an edit changes an existing import statement in the focused unit. */
+function rangeTargetsImportLine(range: vscode.Range, text: string): boolean {
+  return /^\s*(?:from|import)\b/u.test(lineAtText(text, range.start.line));
+}
+
+/** Returns whether Pylance supplied an import statement suitable for unit-local relocation. */
+function isAutoImportEdit(text: string): boolean { return /^\s*(?:from\s+(?:\.+|\.*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+import\b|import\s+[A-Za-z_]\w*)/u.test(text); }
+
+/** Returns a non-overlapping insertion point after leading future imports when present. */
+function autoImportInsertion(text: string, unit: OverlayExecutionUnitRange): AutoImportInsertion {
+  let line = unit.start;
+  while (line <= unit.end && /^\s*from\s+__future__\s+import\b/u.test(lineAtText(text, line))) { line += 1; }
+  if (line === unit.start) {
+    return { afterFuture: false, character: 0, followingLine: line, line };
+  }
+  const futureLine = line - 1;
+  return { afterFuture: true, character: lineAtText(text, futureLine).length, followingLine: line, line: futureLine };
+}
+
+/** Normalizes and combines relocated import blocks using the visible document's line ending. */
+function relocatedAutoImportText(imports: string[], text: string, unit: OverlayExecutionUnitRange, insertion: AutoImportInsertion): string {
+  if (!imports.length) { return ""; }
+  const eol = documentEol(text);
+  const blocks = [...new Set(imports.map((item) => normalizeLineBreaks(item, eol).trim()).filter(Boolean))]
+    .filter((item) => !unitContainsImport(text, unit, item));
+  if (!blocks.length) { return ""; }
+  const firstLine = lineAtText(text, insertion.followingLine).trim();
+  if (insertion.afterFuture) {
+    const separator = firstLine && !/^(?:from|import)\b/u.test(firstLine) ? eol : "";
+    return `${eol}${blocks.join(eol)}${separator}`;
+  }
+  const separator = !firstLine || /^(?:from|import)\b/u.test(firstLine) ? eol : `${eol}${eol}`;
+  return `${blocks.join(eol)}${separator}`;
+}
+
+/** Returns whether an identical import block is already present in the focused unit only. */
+function unitContainsImport(text: string, unit: OverlayExecutionUnitRange, importText: string): boolean {
+  const normalizedUnit = text.split(/\r\n|\n|\r/).slice(unit.start, unit.end + 1).join("\n");
+  const normalizedImport = normalizeLineBreaks(importText, "\n").trim();
+  return normalizedImport.includes("\n")
+    ? normalizedUnit.includes(normalizedImport)
+    : normalizedUnit.split("\n").some((line) => line.trim() === normalizedImport);
+}
+
+/** Returns a text edit whose inserted line endings match the visible document. */
+function normalizedTextEdit(edit: vscode.TextEdit, text: string): vscode.TextEdit {
+  return new vscode.TextEdit(edit.range, normalizeLineBreaks(edit.newText, documentEol(text)));
+}
+
+/** Returns the first existing line ending used for new completion edits. */
+function documentEol(text: string): string { return text.match(/\r\n|\n|\r/)?.[0] ?? "\n"; }
+
+/** Rewrites every supported line ending without introducing doubled carriage returns. */
+function normalizeLineBreaks(text: string, eol: string): string { return text.replace(/\r\n|\n|\r/g, eol); }
+
+/** Extracts a strict Python import fence carried by a lazy Pylance auto-import item. */
+function completionAutoImportText(item: vscode.CompletionItem): string | undefined {
+  const description = typeof item.label === "string" ? "" : item.label.description?.trim() ?? "";
+  const documentation = typeof item.documentation === "string" ? item.documentation : item.documentation?.value;
+  if (!description || !documentation) { return undefined; }
+  const match = documentation.match(/```(?:python)?[ \t]*[\r\n]+([\s\S]*?)[\r\n]+```/iu);
+  const candidate = match?.[1]?.trim();
+  return candidate && isAutoImportEdit(candidate) && importOnlyText(candidate) ? candidate : undefined;
+}
+
+/** Returns an import from Pylance metadata or a different visible unit that binds the completion. */
+function completionImportText(item: vscode.CompletionItem, context: CompletionEditContext): string | undefined {
+  return completionAutoImportText(item) ?? visibleUnitImportText(item, context);
+}
+
+/** Copies a top-level import binding from another unit so the focused unit stays executable alone. */
+function visibleUnitImportText(item: vscode.CompletionItem, context: CompletionEditContext): string | undefined {
+  const floor = completionInputFloor(context.text);
+  const unit = overlayExecutionUnitRange(context.text, context.focusLine, floor);
+  if (!unit || !bareCompletionContext(context)) { return undefined; }
+  const name = completionLabel(item);
+  const lines = context.text.split(/\r\n|\n|\r/);
+  for (let line = floor; line < lines.length; line += 1) {
+    if (line >= unit.start && line <= unit.end) { continue; }
+    const source = lines[line];
+    if (source !== source.trimStart() || !/^(?:from|import)\b/u.test(source)) { continue; }
+    if (parseImportSymbols(source).some((symbol) => symbol.name === name)) { return source.trim(); }
+  }
+  return undefined;
+}
+
+/** Returns whether completion occurs on a bare name instead of an attribute after a dot. */
+function bareCompletionContext(context: CompletionEditContext): boolean {
+  if (context.focusCharacter === undefined) { return true; }
+  const prefix = lineAtText(context.text, context.focusLine).slice(0, context.focusCharacter);
+  const tokenStart = prefix.search(/[A-Za-z_]\w*$/u);
+  return tokenStart < 1 || prefix[tokenStart - 1] !== ".";
+}
+
+/** Returns whether fenced auto-import metadata contains imports and whitespace only. */
+function importOnlyText(text: string): boolean {
+  return text.split(/\r\n|\n|\r/).every((line) => !line.trim() || /^(?:from|import)\b/u.test(line.trim()));
 }
 
 /** Maps one completion text edit back to the visible editor. */
 function mapTextEdit(edit: vscode.TextEdit | undefined, offset: number, protectedLineCount = offset): vscode.TextEdit | undefined {
-  if (!edit || edit.range.end.line < protectedLineCount) {
+  if (!edit || edit.range.start.line < protectedLineCount) {
     return undefined;
   }
   return new vscode.TextEdit(mapRange(edit.range, offset), edit.newText);
@@ -447,7 +684,7 @@ function parseImportSymbols(line: string): Array<{ name: string; tokenType: stri
   if (moduleImport) {
     return parseImportedNames(moduleImport[1], true);
   }
-  const fromImport = trimmed.match(/^from\s+[A-Za-z_][\w.]*\s+import\s+(.+)$/);
+  const fromImport = trimmed.match(/^from\s+(?:\.+|\.*[A-Za-z_][\w.]*)\s+import\s+(.+)$/);
   return fromImport ? parseImportedNames(fromImport[1], false) : [];
 }
 
@@ -496,7 +733,7 @@ function userTextFromFullText(text: string): string {
 
 /** Returns one line of text or an empty string when out of range. */
 function lineAtText(text: string, line: number): string {
-  return text.split(/\r?\n/)[line] ?? "";
+  return text.split(/\r\n|\n|\r/)[line] ?? "";
 }
 
 /** Returns the identifier around a visible text position. */

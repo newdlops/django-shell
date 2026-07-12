@@ -42,29 +42,32 @@ async function run() {
 
   const bridge = require(path.join(extension.extensionPath, "out", "overlayPythonFeatureBridge.js"));
   const item = new vscode.CompletionItem("Company", vscode.CompletionItemKind.Class);
-  item.range = new vscode.Range(12, 4, 12, 7);
-  item.textEdit = new vscode.TextEdit(new vscode.Range(12, 4, 12, 7), "Company");
+  item.range = new vscode.Range(13, 4, 13, 7);
+  item.textEdit = new vscode.TextEdit(new vscode.Range(13, 4, 13, 7), "Company");
   item.additionalTextEdits = [new vscode.TextEdit(new vscode.Range(0, 0, 0, 0), "from app.models import Company\n")];
-  const [mapped] = bridge.__test.mapCompletionResult([item], 10);
-  assert.equal(mapped.range.start.line, 2);
+  const [mapped] = bridge.__test.mapCompletionResult([item], 10, 10, { focusLine: 3, text: "upper = 1\n\n\nuse Company" });
+  assert.equal(mapped.range.start.line, 3);
   assert.equal(mapped.range.start.character, 4);
-  assert.equal(mapped.textEdit.range.start.line, 2);
+  assert.equal(mapped.textEdit.range.start.line, 3);
   assert.equal(mapped.textEdit.range.start.character, 4);
-  assert.equal(mapped.additionalTextEdits, undefined);
+  assert.equal(mapped.additionalTextEdits[0].range.start.line, 3);
+  assert.equal(mapped.additionalTextEdits[0].newText, "from app.models import Company\n\n");
 
   const objectItem = new vscode.CompletionItem("objects", vscode.CompletionItemKind.Property);
   objectItem.range = { inserting: new vscode.Range(210, 18, 210, 23), replacing: new vscode.Range(210, 18, 210, 23) };
   objectItem.textEdit = new vscode.TextEdit(new vscode.Range(210, 18, 210, 23), "objects");
   objectItem.additionalTextEdits = [new vscode.TextEdit(new vscode.Range(2, 0, 2, 0), "from app.models import Company\n")];
-  const [mappedObjects] = bridge.__test.mapCompletionResult([objectItem], 210);
+  const [mappedObjects] = bridge.__test.mapCompletionResult([objectItem], 210, 210, { focusLine: 0, text: "Company.objects" });
   assert.equal(mappedObjects.range.inserting.start.line, 0);
   assert.equal(mappedObjects.range.inserting.start.character, 18);
   assert.equal(mappedObjects.textEdit.range.start.character, 18);
-  assert.equal(mappedObjects.additionalTextEdits, undefined);
+  assert.equal(mappedObjects.additionalTextEdits[0].range.start.line, 0);
+  assert.equal(mappedObjects.additionalTextEdits[0].newText, "from app.models import Company\n\n");
   assert.equal(bridge.__test.analysisOffsetForText("from app.models import Company\n# --- django shell input ---\nCompany.obj", 2, 1), -1);
   assert.equal(bridge.__test.analysisOffsetForText("Company.obj", 2, 1), 1);
   objectItem.additionalTextEdits = [new vscode.TextEdit(new vscode.Range(0, 0, 0, 0), "from app.models import Company\n")];
-  assert.equal(bridge.__test.mapCompletionResult([objectItem], 0, 2)[0].additionalTextEdits, undefined);
+  const [protectedObjects] = bridge.__test.mapCompletionResult([objectItem], 0, 2, { focusLine: 0, text: "Company.objects" });
+  assert.equal(protectedObjects.additionalTextEdits[0].range.start.line, 0);
   const memory = require(path.join(extension.extensionPath, "out", "overlayMemoryDocument.js"));
   assert.equal(memory.__test.extractUserText("from stale import Old\n# --- django shell input ---\nfrom fresh import New\n# --- django shell input ---\nCompany.objects", "from fresh import New\n"), "Company.objects");
 

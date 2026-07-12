@@ -31,6 +31,11 @@ async function assertPythonCellBehavior(extension) {
     await assertGeneratedOverlayFilesHidden("renderer hover pointer handoff");
     return;
   }
+  if (process.env.DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY === "1") {
+    await withStageTimeout("unit-local auto import", assertUnitLocalAutoImport(generatedText), 45000);
+    await assertGeneratedOverlayFilesHidden("unit-local auto import");
+    return;
+  }
   await withStageTimeout("golden python execution", assertGoldenPythonExecution({ extension, generatedText, importLines: GOLDEN_PRELUDE_LINES, inputMarker: INPUT_MARKER, installOverlayDocument, prelude: GOLDEN_PRELUDE, restoreImportLines: ["from orm_runtime.models import Company"], waitForOpenDocumentText }), 90000);
   await assertGeneratedOverlayFilesHidden("golden python execution");
   await withStageTimeout("overlay input smoke", assertOverlayAcceptsPythonInput(extension), 20000);
@@ -45,6 +50,8 @@ async function assertPythonCellBehavior(extension) {
   await assertGeneratedOverlayFilesHidden("provider feature checks");
   await withStageTimeout("cross-unit workspace context", assertCrossUnitWorkspaceContext(generatedText), 45000);
   await assertGeneratedOverlayFilesHidden("cross-unit workspace context");
+  await withStageTimeout("unit-local auto import", assertUnitLocalAutoImport(generatedText), 45000);
+  await assertGeneratedOverlayFilesHidden("unit-local auto import");
   await withStageTimeout("renderer theme checks", assertRendererTheme(extension), 30000);
   await assertGeneratedOverlayFilesHidden("renderer theme checks");
   await withStageTimeout("renderer hover pointer handoff", assertOverlayHoverPointerHandoff(extension), 30000);
@@ -196,7 +203,7 @@ async function writeDjangoOrmRuntimeFixture(root) {
     "    objects: models.Manager[Company]",
     ""
   ].join("\n"));
-  await writeFile(root, "workspace_context.py", "class WorkspaceClient:\n    def workspace_method(self) -> str:\n        return 'workspace'\n\ndef make_workspace_client() -> WorkspaceClient:\n    return WorkspaceClient()\n");
+  await writeFile(root, "workspace_context.py", "class AutoImportedClient:\n    def auto_imported_method(self) -> str:\n        return 'auto-imported'\n\nclass WorkspaceClient:\n    def workspace_method(self) -> str:\n        return 'workspace'\n\ndef make_workspace_client() -> WorkspaceClient:\n    return WorkspaceClient()\n");
 }
 
 /** Writes one UTF-8 fixture file under the E2E workspace root. */
@@ -337,6 +344,48 @@ async function assertCrossUnitWorkspaceContext(originalText) {
   }
 }
 
+/** Verifies Pylance auto-imports and full-source fallback imports target only the focused unit. */
+async function assertUnitLocalAutoImport(originalText) {
+  try {
+    await assertAutoImportForSource("upper = 1\n\n\nclient = AutoImportedCli");
+    await assertAutoImportForSource("from workspace_context import AutoImportedClient\nupper = AutoImportedClient()\n\n\nclient = AutoImportedCli");
+  } finally {
+    await installOverlayDocument(originalText);
+  }
+}
+
+/** Verifies one partial completion carries its import edit at the lower execution-unit start. */
+async function assertAutoImportForSource(source) {
+  const installed = await installOverlayDocument(`${PRELUDE}${INPUT_MARKER}\n${source}`);
+  const uri = overlayUris().editor;
+  const unitPosition = positionOfText(installed, "client = AutoImportedCli");
+  const completionPosition = unitPosition.translate(0, "client = AutoImportedCli".length);
+  const unitStart = unitPosition.line;
+  let item;
+  let observed = [];
+  for (let attempt = 0; attempt < 60; attempt++) {
+    let result = await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", uri, completionPosition);
+    let items = completionItems(result);
+    observed = items.slice(0, 80).map(completionDebugValue);
+    const index = items.findIndex((candidate) => completionLabel(candidate) === "AutoImportedClient");
+    item = index >= 0 ? items[index] : undefined;
+    if (item && !item.additionalTextEdits?.length) {
+      result = await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", uri, completionPosition, undefined, index + 1);
+      items = completionItems(result);
+      item = items.find((candidate) => completionLabel(candidate) === "AutoImportedClient");
+    }
+    if (item?.additionalTextEdits?.some((edit) => edit.newText.includes("from workspace_context import AutoImportedClient"))) { break; }
+    await delay(150);
+  }
+  assert.ok(item, `missing AutoImportedClient completion: ${JSON.stringify(observed)}`);
+  const importEdit = item.additionalTextEdits?.find((edit) => edit.newText.includes("from workspace_context import AutoImportedClient"));
+  assert.ok(importEdit, `AutoImportedClient completion lost its auto-import: ${JSON.stringify(completionDebugValue(item))}`);
+  assert.equal(importEdit.range.start.line, unitStart, `auto-import targeted another execution unit: ${JSON.stringify(completionDebugValue(item))}`);
+  assert.equal(importEdit.range.start.character, 0);
+  assert.equal(importEdit.range.end.line, unitStart);
+  assert.equal(item.textEdit?.range.start.line, unitStart, `primary completion edit left the focused unit: ${JSON.stringify(completionDebugValue(item))}`);
+}
+
 /** Verifies a hover contains a concrete signal even when lower-priority providers add noise. */
 function assertConcreteHover(text, pattern, label) {
   assert.match(text, pattern, `missing concrete ${label} hover: ${text}`);
@@ -459,8 +508,29 @@ function overlayOnlyLatencyExpression() {
 
 /** Returns completion labels from a provider result. */
 function completionLabels(result) {
-  const items = result instanceof vscode.CompletionList ? result.items : result ?? [];
-  return items.map((item) => typeof item.label === "string" ? item.label : item.label.label);
+  return completionItems(result).map(completionLabel);
+}
+
+/** Returns completion items independently of their result container. */
+function completionItems(result) {
+  return result instanceof vscode.CompletionList ? result.items : result ?? [];
+}
+
+/** Returns one completion label as plain text. */
+function completionLabel(item) {
+  return typeof item.label === "string" ? item.label : item.label.label;
+}
+
+/** Returns compact completion fields for actionable E2E failures. */
+function completionDebugValue(item) {
+  return {
+    additionalTextEdits: item.additionalTextEdits?.map((edit) => ({ newText: edit.newText, range: edit.range })),
+    description: typeof item.label === "string" ? undefined : item.label.description,
+    detail: item.detail,
+    documentation: typeof item.documentation === "string" ? item.documentation.slice(0, 160) : item.documentation?.value?.slice(0, 160),
+    label: completionLabel(item),
+    textEdit: item.textEdit
+  };
 }
 
 /** Returns the next Python execution id from the custom console E2E snapshot. */

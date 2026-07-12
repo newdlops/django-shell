@@ -9,6 +9,7 @@ const NodeModule = require("node:module");
 const originalLoad = NodeModule._load;
 let OverlayCompletionRequestCache;
 let OverlayPythonFeatureBridge;
+let overlayPythonFeatureBridgeTest;
 const vscodeState = { executeCalls: 0, executeHandler: undefined, selectors: [] };
 
 /** Minimal position value used by completion range mapping. */
@@ -19,7 +20,15 @@ class Position {
 
 /** Minimal range value used by completion range mapping. */
 class Range {
-  constructor(start, end) { this.start = start; this.end = end; }
+  constructor(startOrLine, startCharacterOrEnd, endLine, endCharacter) {
+    if (typeof startOrLine === "number") {
+      this.start = new Position(startOrLine, startCharacterOrEnd);
+      this.end = new Position(endLine, endCharacter);
+      return;
+    }
+    this.start = startOrLine;
+    this.end = startCharacterOrEnd;
+  }
 }
 
 /** Minimal completion item retaining mutable VS Code fields. */
@@ -47,7 +56,7 @@ try {
     return request === "vscode" ? createVscodeMock() : originalLoad.call(this, request, parent, isMain);
   };
   ({ OverlayCompletionRequestCache } = require("../out/overlayCompletionRequestCache.js"));
-  ({ OverlayPythonFeatureBridge } = require("../out/overlayPythonFeatureBridge.js"));
+  ({ OverlayPythonFeatureBridge, __test: overlayPythonFeatureBridgeTest } = require("../out/overlayPythonFeatureBridge.js"));
 } finally {
   NodeModule._load = originalLoad;
 }
@@ -277,15 +286,244 @@ test("serializes each full-source analysis snapshot through the provider that re
   vscodeState.executeHandler = undefined;
 });
 
+test("relocates a protected Pylance auto-import to the focused lower execution unit", () => {
+  const source = "upper = 1\n\n\nclient = WorkspaceCli";
+  const item = completionWithImport(5, "from workspace_context import WorkspaceClient\n");
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, { focusLine: 3, text: source });
+
+  assert.equal(mapped.textEdit.range.start.line, 3);
+  assert.equal(mapped.additionalTextEdits.length, 1);
+  assert.deepEqual(mapped.additionalTextEdits[0].range, new Range(3, 0, 3, 0));
+  assert.equal(mapped.additionalTextEdits[0].newText, "from workspace_context import WorkspaceClient\n\n");
+});
+
+test("keeps auto-imports local when the focused execution unit is first", () => {
+  const source = "client = WorkspaceCli\n\n\nlower = 1";
+  const item = completionWithImport(2, "import workspace_context\n");
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, { focusLine: 0, text: source });
+
+  assert.deepEqual(mapped.additionalTextEdits[0].range, new Range(0, 0, 0, 0));
+  assert.equal(mapped.additionalTextEdits[0].newText, "import workspace_context\n\n");
+});
+
+test("relocates an auto-import aimed at another unit without changing that unit", () => {
+  const source = "from workspace_context import Existing\nupper = Existing()\n\n\nclient = WorkspaceCli";
+  const item = completionWithImport(6, "from workspace_context import Existing, WorkspaceClient\n", 2);
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, { focusLine: 4, text: source });
+
+  assert.deepEqual(mapped.additionalTextEdits[0].range, new Range(4, 0, 4, 0));
+  assert.equal(mapped.additionalTextEdits[0].newText, "from workspace_context import Existing, WorkspaceClient\n\n");
+});
+
+test("preserves a completion edit that already targets an import in the focused unit", () => {
+  const source = "from workspace_context import Existing\nclient = WorkspaceCli";
+  const item = completionWithImport(3, "from workspace_context import Existing, WorkspaceClient", 2);
+  item.additionalTextEdits[0].range = new Range(2, 0, 2, "from workspace_context import Existing".length);
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, { focusLine: 1, text: source });
+
+  assert.deepEqual(mapped.additionalTextEdits[0].range, new Range(0, 0, 0, "from workspace_context import Existing".length));
+  assert.equal(mapped.additionalTextEdits[0].newText, "from workspace_context import Existing, WorkspaceClient");
+});
+
+test("prefers a focused-unit import merge over duplicate lazy metadata", () => {
+  const existing = "from workspace_context import Existing";
+  const source = `${existing}\nclient = WorkspaceCli`;
+  const item = new CompletionItem({ description: "workspace_context", label: "WorkspaceClient" });
+  item.documentation = "```\nfrom workspace_context import WorkspaceClient\n```";
+  item.textEdit = new TextEdit(new Range(3, 9, 3, 21), "WorkspaceClient");
+  item.additionalTextEdits = [new TextEdit(new Range(2, existing.length, 2, existing.length), ", WorkspaceClient")];
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, { focusLine: 1, text: source });
+
+  assert.equal(mapped.additionalTextEdits.length, 1);
+  assert.deepEqual(mapped.additionalTextEdits[0].range, new Range(0, existing.length, 0, existing.length));
+  assert.equal(mapped.additionalTextEdits[0].newText, ", WorkspaceClient");
+});
+
+test("deduplicates only against imports in the focused execution unit", () => {
+  const imported = "from workspace_context import WorkspaceClient";
+  const localSource = `upper = 1\n\n\n${imported}\nclient = WorkspaceCli`;
+  const localItem = completionWithImport(6, `${imported}\n`);
+
+  const [local] = overlayPythonFeatureBridgeTest.mapCompletionResult([localItem], 2, 2, { focusLine: 4, text: localSource });
+
+  assert.equal(local.additionalTextEdits, undefined);
+
+  const upperSource = `${imported}\nupper = WorkspaceClient()\n\n\nclient = WorkspaceCli`;
+  const upperItem = completionWithImport(6, `${imported}\n`);
+  const [upper] = overlayPythonFeatureBridgeTest.mapCompletionResult([upperItem], 2, 2, { focusLine: 4, text: upperSource });
+
+  assert.deepEqual(upper.additionalTextEdits[0].range, new Range(4, 0, 4, 0));
+  assert.equal(upper.additionalTextEdits[0].newText, `${imported}\n\n`);
+});
+
+test("normalizes and deduplicates relocated auto-import text for CRLF input", () => {
+  const source = "upper = 1\r\n\r\n\r\nclient = WorkspaceCli";
+  const item = completionWithImport(5, "from workspace_context import WorkspaceClient\n");
+  item.additionalTextEdits.push(new TextEdit(new Range(0, 0, 0, 0), "from workspace_context import WorkspaceClient\n"));
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, { focusLine: 3, text: source });
+
+  assert.equal(mapped.additionalTextEdits.length, 1);
+  assert.equal(mapped.additionalTextEdits[0].newText, "from workspace_context import WorkspaceClient\r\n\r\n");
+});
+
+test("normalizes auto-imports in the first unit and preserves a lone carriage-return EOL", () => {
+  const crlfItem = completionWithImport(2, "from workspace_context import WorkspaceClient\n");
+  const [crlf] = overlayPythonFeatureBridgeTest.mapCompletionResult([crlfItem], 2, 2, {
+    focusLine: 0,
+    text: "client = WorkspaceCli\r\n\r\n\r\nlower = 1"
+  });
+  assert.equal(crlf.additionalTextEdits[0].newText, "from workspace_context import WorkspaceClient\r\n\r\n");
+
+  const carriageItem = completionWithImport(5, "from . import WorkspaceClient\n");
+  const [carriage] = overlayPythonFeatureBridgeTest.mapCompletionResult([carriageItem], 2, 2, {
+    focusLine: 3,
+    text: "upper = 1\r\r\rclient = WorkspaceCli"
+  });
+  assert.equal(carriage.additionalTextEdits[0].newText, "from . import WorkspaceClient\r\r");
+});
+
+test("inserts ordinary auto-imports after leading future imports", () => {
+  const source = "from __future__ import annotations\nclient = WorkspaceCli";
+  const item = completionWithImport(3, "from workspace_context import WorkspaceClient\n");
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, { focusLine: 1, text: source });
+
+  const futureLength = "from __future__ import annotations".length;
+  assert.deepEqual(mapped.additionalTextEdits[0].range, new Range(0, futureLength, 0, futureLength));
+  assert.equal(mapped.additionalTextEdits[0].newText, "\nfrom workspace_context import WorkspaceClient\n");
+});
+
+test("drops protected non-import completion edits", () => {
+  const source = "upper = 1\n\n\nclient = WorkspaceCli";
+  const item = completionWithImport(5, "__all__ = ['WorkspaceClient']\n");
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, { focusLine: 3, text: source });
+
+  assert.equal(mapped.additionalTextEdits, undefined);
+});
+
+test("relocates rather than clamping an import edit that crosses the protected prefix", () => {
+  const source = "client = WorkspaceCli";
+  const item = completionWithImport(2, "from workspace_context import WorkspaceClient\n");
+  item.additionalTextEdits[0].range = new Range(0, 0, 2, 6);
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, { focusLine: 0, text: source });
+
+  assert.deepEqual(mapped.additionalTextEdits[0].range, new Range(0, 0, 0, 0));
+  assert.equal(mapped.additionalTextEdits[0].newText, "from workspace_context import WorkspaceClient\n\n");
+});
+
+test("synthesizes a unit-local edit from lazy Pylance auto-import metadata", () => {
+  const source = "upper = 1\n\n\nclient = WorkspaceCli";
+  const item = new CompletionItem({ description: "workspace_context", label: "WorkspaceClient" });
+  item.documentation = "```\nfrom workspace_context import WorkspaceClient\n```";
+  item.textEdit = new TextEdit(new Range(5, 9, 5, 21), "WorkspaceClient");
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, { focusLine: 3, text: source });
+
+  assert.deepEqual(mapped.additionalTextEdits[0].range, new Range(3, 0, 3, 0));
+  assert.equal(mapped.additionalTextEdits[0].newText, "from workspace_context import WorkspaceClient\n\n");
+});
+
+test("copies an upper-unit import when full-source analysis suppresses Pylance auto-import metadata", () => {
+  const source = "from workspace_context import WorkspaceClient\nupper = WorkspaceClient()\n\n\nclient = WorkspaceCli";
+  const item = new CompletionItem("WorkspaceClient");
+  item.textEdit = new TextEdit(new Range(6, 9, 6, 21), "WorkspaceClient");
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, { focusLine: 4, text: source });
+
+  assert.deepEqual(mapped.additionalTextEdits[0].range, new Range(4, 0, 4, 0));
+  assert.equal(mapped.additionalTextEdits[0].newText, "from workspace_context import WorkspaceClient\n\n");
+});
+
+test("does not copy a same-named upper import for attribute completion", () => {
+  const source = "from workspace_context import objects\nupper = objects\n\n\nclient.obj";
+  const item = new CompletionItem("objects");
+  item.textEdit = new TextEdit(new Range(6, 7, 6, 10), "objects");
+
+  const [mapped] = overlayPythonFeatureBridgeTest.mapCompletionResult([item], 2, 2, {
+    focusCharacter: "client.obj".length,
+    focusLine: 4,
+    text: source
+  });
+
+  assert.equal(mapped.additionalTextEdits, undefined);
+});
+
+test("resolves a lazy hidden completion edit and maps it through the public provider", async () => {
+  vscodeState.executeCalls = 0;
+  let completionCalls = 0;
+  vscodeState.executeHandler = (command, _uri, _position, _trigger, resolveCount) => {
+    if (command !== "vscode.executeCompletionItemProvider") { return []; }
+    completionCalls += 1;
+    const item = new CompletionItem("WorkspaceClient");
+    item.textEdit = new TextEdit(new Range(4, 9, 4, 21), "WorkspaceClient");
+    if (resolveCount === 1) {
+      item.additionalTextEdits = [new TextEdit(new Range(0, 0, 0, 0), "from workspace_context import WorkspaceClient\n")];
+    }
+    return [item];
+  };
+  const bridge = new OverlayPythonFeatureBridge(fakeOverlayDocuments("from hidden import Prelude\n"));
+  const source = "upper = 1\n\n\nclient = WorkspaceCli";
+  const document = fakeDocument(source, "django-shell-python");
+
+  const completions = await bridge.provideCompletionItems(document, new Position(3, 21), { isCancellationRequested: false }, { triggerCharacter: "." });
+  assert.equal(completions[0].additionalTextEdits, undefined);
+  const resolved = await bridge.resolveCompletionItem(completions[0], { isCancellationRequested: false });
+
+  assert.equal(completionCalls, 2);
+  assert.deepEqual(resolved.additionalTextEdits[0].range, new Range(3, 0, 3, 0));
+  assert.equal(resolved.additionalTextEdits[0].newText, "from workspace_context import WorkspaceClient\n\n");
+  bridge.dispose();
+  vscodeState.executeHandler = undefined;
+});
+
 /** Creates a one-line text document with stable file identity. */
 function fakeDocument(text, languageId = "python") {
   return {
     getText: () => text,
     languageId,
-    offsetAt: (position) => position.character,
-    positionAt: (offset) => new Position(0, offset),
+    offsetAt: (position) => offsetAtText(text, position),
+    positionAt: (offset) => positionAtText(text, offset),
     uri: { toString: () => "file:///workspace/.django-shell/console-cell.py" }
   };
+}
+
+/** Converts one test position to an offset across LF and CRLF source. */
+function offsetAtText(text, position) {
+  const starts = lineStartOffsets(text);
+  const line = Math.max(0, Math.min(position.line, starts.length - 1));
+  return Math.min(text.length, starts[line] + Math.max(0, position.character));
+}
+
+/** Converts one test offset to a position across LF and CRLF source. */
+function positionAtText(text, offset) {
+  const starts = lineStartOffsets(text);
+  const bounded = Math.max(0, Math.min(offset, text.length));
+  let line = 0;
+  while (line + 1 < starts.length && starts[line + 1] <= bounded) { line += 1; }
+  return new Position(line, bounded - starts[line]);
+}
+
+/** Returns every logical line-start offset in one test source. */
+function lineStartOffsets(text) {
+  const starts = [0];
+  for (const match of text.matchAll(/\r\n|\n|\r/g)) { starts.push(match.index + match[0].length); }
+  return starts;
+}
+
+/** Creates one completion item with a primary replacement and one additional edit. */
+function completionWithImport(analysisLine, importText, importLine = 0) {
+  const item = new CompletionItem("WorkspaceClient");
+  item.textEdit = new TextEdit(new Range(analysisLine, 9, analysisLine, 21), "WorkspaceClient");
+  item.additionalTextEdits = [new TextEdit(new Range(importLine, 0, importLine, 0), importText)];
+  return item;
 }
 
 /** Creates the generated-document surface consumed by the overlay feature bridge. */
@@ -315,7 +553,7 @@ function nextTurn() { return new Promise((resolve) => setImmediate(resolve)); }
 function createVscodeMock() {
   const register = (selector) => { vscodeState.selectors.push(selector); return { dispose() {} }; };
   return {
-    commands: { async executeCommand(command) { vscodeState.executeCalls += 1; return await vscodeState.executeHandler?.(command) ?? []; } },
+    commands: { async executeCommand(command, ...args) { vscodeState.executeCalls += 1; return await vscodeState.executeHandler?.(command, ...args) ?? []; } },
     CompletionItem,
     CompletionItemKind: { Property: 9 },
     CompletionList,

@@ -229,7 +229,7 @@ test("runs import-led execution units independently in arbitrary cursor order", 
   const api = Function("window", "document", "__dsoPost", `${source}\nreturn { installEnterRunner: window.__dsoInstallEnterRunner };`)(window, document, () => undefined);
   let keyHandler;
   const upperCode = "import unexecuted_upper_side_effect";
-  const lowerCode = "execution_order = ['lower']\nexecution_order.append('done')";
+  const lowerCode = "from workspace_context import WorkspaceClient\nclient = WorkspaceClient()";
   const text = `${upperCode}\n\n\n${lowerCode}\n`;
   const editor = fakeEditor(fakeModel(text), { column: 1, lineNumber: 5 });
   editor.onKeyDown = (callback) => { keyHandler = callback; return { dispose() {} }; };
