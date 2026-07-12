@@ -262,7 +262,8 @@ function assertRestartResetGuards(extension) {
   assert.ok(consoleSource.includes("resetPythonCell"));
   assert.ok(consoleSource.includes("this.runtimeInspection.invalidate()"));
   assert.ok(consoleSource.includes("this.runtimePrelude.invalidate()"));
-  assert.ok(overlaySource.includes("resetExpression")); assert.ok((consoleSource.match(/show: this\.runtimeReady/g) ?? []).length >= 2);
+  assert.ok(overlaySource.includes("resetExpression")); assert.ok((consoleSource.match(/show: this\.pythonInputShown/g) ?? []).length >= 2);
+  assert.ok(consoleSource.includes("runtimeOperationCurrent"));
 }
 
 /** Verifies generated file-only provider artifacts stay hidden and are removable. */

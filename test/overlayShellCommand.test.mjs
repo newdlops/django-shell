@@ -80,8 +80,9 @@ class MutableDocument {
   }
 }
 
+const commandCalls = [];
 const vscodeMock = {
-  commands: { executeCommand: async () => undefined, registerCommand: () => ({ dispose() {} }) },
+  commands: { executeCommand: async (...args) => { commandCalls.push(args); }, registerCommand: () => ({ dispose() {} }) },
   Position,
   Range,
   Selection,
@@ -100,11 +101,12 @@ const vscodeMock = {
 let advanceAfterRun;
 let executionPayload;
 let nextInputUnitLine;
+let OverlayShellCommandController;
 try {
   NodeModule._load = function loadWithVscodeMock(request, parent, isMain) {
     return request === "vscode" ? vscodeMock : originalLoad.call(this, request, parent, isMain);
   };
-  ({ advanceAfterRun, executionPayload, nextInputUnitLine } = require("../out/overlayShellCommand.js"));
+  ({ advanceAfterRun, executionPayload, nextInputUnitLine, OverlayShellCommandController } = require("../out/overlayShellCommand.js"));
 } finally {
   NodeModule._load = originalLoad;
 }
@@ -150,6 +152,23 @@ test("appends a triple newline after the final execution unit", async () => {
   assert.equal(document.getText(), "only = 1\n\n\n");
   assert.equal(editor.editCalls, 1);
   assert.deepEqual(editor.selection.active, new Position(3, 0));
+});
+
+test("leaves editor text untouched when a restart cancels an in-flight execution", async () => {
+  const document = new MutableDocument("value = slow_call()\n");
+  const editor = fakeEditor(document, 0);
+  const documents = { editorUri: document.uri, inputStartLine: () => 0, sync: async () => undefined };
+  const controller = new OverlayShellCommandController(documents, async () => undefined, undefined, { registerCommands: false });
+  commandCalls.length = 0;
+  vscodeMock.window.activeTextEditor = editor;
+
+  await controller.acceptInput();
+
+  assert.equal(document.getText(), "value = slow_call()\n");
+  assert.equal(editor.editCalls, 0);
+  assert.deepEqual(commandCalls, []);
+  controller.dispose();
+  vscodeMock.window.activeTextEditor = undefined;
 });
 
 /** Creates one collapsed selection on a source line. */

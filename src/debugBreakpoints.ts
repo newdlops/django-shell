@@ -46,7 +46,7 @@ export async function syncDebugBreakpoints(request: DebugBreakpointSyncRequest):
     request.logger?.log("debug.breakpoints.skip", { breakpoints: JSON.stringify(breakpoints), lines: JSON.stringify(lines), path: request.uri.fsPath, reason: request.reason, session: false });
     return;
   }
-  const payload = { breakpoints: breakpoints.map(debugBreakpointPayload), lines, source: { name: path.basename(request.uri.fsPath), path: request.uri.fsPath }, sourceModified: true };
+  const payload = { breakpoints: breakpoints.map(debugBreakpointPayload), lines, source: { name: path.basename(request.uri.fsPath), path: request.uri.fsPath }, sourceModified: true, ...(request.sourceText === undefined ? {} : { sourceText: request.sourceText }) };
   request.logger?.log("debug.breakpoints.request", { breakpoints: JSON.stringify(breakpoints), dropped: requestedBreakpoints.length - breakpoints.length, lineOffset: request.lineOffset, lines: JSON.stringify(lines), path: request.uri.fsPath, reason: request.reason, requested: JSON.stringify(requestedBreakpoints), sessionId: request.session.id, sourceChars: request.sourceText?.length ?? 0, sourceLines });
   try {
     const response = await request.session.customRequest("setBreakpoints", payload) as DapSetBreakpointsResponse;

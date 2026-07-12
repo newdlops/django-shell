@@ -9424,6 +9424,37 @@ var xterm_default = `/**
 }
 `;
 
+// src/terminalSnapshotReplay.ts
+function createTerminalReplayState() {
+  return { buffered: "", snapshotWritten: false };
+}
+function consumeTerminalData(state, data) {
+  if (state.snapshotWritten) {
+    return { clear: false, write: data };
+  }
+  state.buffered += data;
+  return { clear: false, write: "" };
+}
+function applyTerminalSnapshot(state, snapshot) {
+  const text = String(snapshot.text || "");
+  if (snapshot.state === "starting" && !text) {
+    state.buffered = "";
+    state.snapshotWritten = false;
+    return { clear: true, write: "" };
+  }
+  if (state.snapshotWritten) {
+    return { clear: false, write: "" };
+  }
+  let overlap = Math.min(text.length, state.buffered.length);
+  while (overlap > 0 && text.slice(-overlap) !== state.buffered.slice(0, overlap)) {
+    overlap -= 1;
+  }
+  const suffix = state.buffered.slice(overlap);
+  state.buffered = "";
+  state.snapshotWritten = true;
+  return { clear: false, write: text + suffix };
+}
+
 // media/customConsoleSource.js
 var STYLE_ID = "django-shell-custom-console-style";
 var vscode = acquireVsCodeApi();
@@ -9452,7 +9483,7 @@ var lastGeometryKey = "";
 var pendingExecution = 0;
 var runningOutputs = /* @__PURE__ */ new Map();
 var LIVE_OUTPUT_LIMIT = 2e4;
-var snapshotWritten = false;
+var terminalReplay = createTerminalReplayState();
 var e2eSawShellPrompt = false;
 var debugAttached = false;
 var debugBusy = false;
@@ -9596,8 +9627,10 @@ function handleHostMessage(message) {
     vscode.postMessage(payload);
   }
   if (message.type === "terminalData" && typeof message.data === "string") {
-    snapshotWritten = true;
-    terminal.write(message.data);
+    const replay = consumeTerminalData(terminalReplay, message.data);
+    if (replay.write) {
+      terminal.write(replay.write);
+    }
   }
   if (message.type === "terminalStatus" && message.snapshot) {
     updateStatus(message.snapshot);
@@ -9645,9 +9678,10 @@ function overlayLineOffset(range) {
 }
 function updateStatus(snapshot) {
   runtimeReady = Boolean(snapshot.ready);
+  const inputReady = runtimeReady || snapshot.mode === "django" && snapshot.state === "attaching";
   status.dataset.ready = snapshot.ready ? "true" : "false";
-  setSetupReady(Boolean(snapshot.ready));
-  setPythonReady(Boolean(snapshot.ready));
+  setSetupReady(inputReady);
+  setPythonReady(inputReady);
   statusText.textContent = snapshot.ready ? "Python 3 / Django ready" : `${snapshot.state} / ${snapshot.mode}`;
   if (!runtimeReady) {
     setDebugStatus("idle", "");
@@ -9655,14 +9689,12 @@ function updateStatus(snapshot) {
     updateDebugControls();
   }
   updateOverlayTabControls();
-  if (snapshot.state === "starting" && !snapshot.text) {
+  const replay = applyTerminalSnapshot(terminalReplay, snapshot);
+  if (replay.clear) {
     terminal.clear();
-    snapshotWritten = false;
-    return;
   }
-  if (!snapshotWritten && snapshot.text) {
-    snapshotWritten = true;
-    terminal.write(snapshot.text);
+  if (replay.write) {
+    terminal.write(replay.write);
   }
 }
 function setSetupReady(ready) {

@@ -14,7 +14,7 @@ const { DirectDebugAdapterSession } = require("../out/directDebugAdapterSession.
 const PYTHON = pythonExecutable();
 const BACKEND_PATH = path.resolve("python", "django_shell_backend.py");
 const TRACER_PATH = path.resolve("python", "django_shell_native_tracer.py");
-const TRACER_VERSION = "2026.07.11.3";
+const TRACER_VERSION = "2026.07.11.4";
 
 test("debugs and hot-reloads only opted-in backend work with the vendored experimental engine", { skip: !PYTHON, timeout: 25_000 }, async () => {
   assert.equal(fs.existsSync(BACKEND_PATH), true, `Missing backend: ${BACKEND_PATH}`);

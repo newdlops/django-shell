@@ -19,6 +19,7 @@ export interface BackendEndpoint {
   pid?: number;
   port: number;
   readyMs?: number;
+  readyPhases?: Record<string, number>;
   token: string;
   warmupPending?: boolean;
 }

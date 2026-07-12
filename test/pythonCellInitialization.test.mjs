@@ -46,6 +46,37 @@ test("console overlaps shell startup with backing reset but gates overlay constr
   assert.ok(overlayResetAwait >= 0 && overlayImport > overlayResetAwait, "WorkbenchOverlay creation waits for stale-file cleanup");
 });
 
+test("setup prompt and Python editor initialize ahead of backend metadata without enabling execution", () => {
+  const consoleSource = fs.readFileSync(new URL("../src/customConsole.ts", import.meta.url), "utf8");
+  const clientSource = fs.readFileSync(new URL("../media/customConsoleSource.js", import.meta.url), "utf8");
+  const ptySource = fs.readFileSync(new URL("../src/notebookPtySession.ts", import.meta.url), "utf8");
+  const open = consoleSource.slice(consoleSource.indexOf("async openConsole(): Promise<void>"), consoleSource.indexOf("async showOverlayEditor"));
+  const snapshot = consoleSource.slice(consoleSource.indexOf("private handleSessionSnapshot"), consoleSource.indexOf("private async handleMessage"));
+  const run = consoleSource.slice(consoleSource.indexOf("async runCurrentOverlayInput"), consoleSource.indexOf("async runCurrentDebugInput"));
+  const executeStart = consoleSource.indexOf("private async executePython");
+  const execute = consoleSource.slice(consoleSource.indexOf("const backend = this.session?.backend", executeStart), consoleSource.indexOf("if (isLikelyIncompletePython", executeStart));
+  const executeMethod = consoleSource.slice(executeStart, consoleSource.indexOf("private async executeBackendPython", executeStart));
+  const debug = consoleSource.slice(consoleSource.indexOf("async debugShell"), consoleSource.indexOf("private async reuseWarmDebugRun"));
+  const restart = consoleSource.slice(consoleSource.indexOf("private async restartSession"), consoleSource.indexOf("private updateOverlayGeometry"));
+  const injectedPrelude = consoleSource.slice(consoleSource.indexOf("async e2eSetPrelude"), consoleSource.indexOf("e2eWriteTerminal"));
+
+  assert.ok(open.indexOf("this.ensureSession()") < open.indexOf("createWebviewPanel"), "PTY spawn overlaps panel and xterm initialization");
+  assert.ok(snapshot.includes('snapshot.mode === "django" && snapshot.state === "attaching"'), "only an actively attaching Django prompt unlocks editor construction before backend READY");
+  assert.ok(snapshot.includes("this.overlay?.park()"), "failed or closed attachment parks an editor shown optimistically");
+  assert.ok(snapshot.indexOf('type: "measureEditor"') < snapshot.indexOf("this.runtimeReady = true"), "editor measurement is posted before metadata readiness");
+  assert.ok(run.includes('this.runtimeReady ?') && run.includes('"backend-not-ready"'), "execution remains gated until the backend is ready");
+  assert.ok(consoleSource.includes("async acceptOverlayInput(): Promise<void> { await"), "Enter still reaches the editor command so pre-READY multiline typing works");
+  assert.ok(execute.includes("!this.runtimeReady || !backend") && execute.includes('python.execute.gated') && !execute.includes('type: "pythonResult"'), "pre-READY Enter becomes a newline without producing a failed output");
+  assert.ok(restart.indexOf("this.runtimeReady = false") < restart.indexOf("await this.teardownDebug()"), "restart closes the execution gate before awaiting old-backend teardown");
+  assert.ok(executeMethod.indexOf('phase: "breakpoints"') < executeMethod.indexOf("this.executeBackendPython"), "restart can cancel before old-backend execution starts");
+  assert.ok(executeMethod.includes("return undefined"), "a stale result reports cancellation instead of advancing editor history");
+  assert.ok(debug.includes("attachGeneration = this.runtimeGeneration") && debug.includes("__djangoShellGeneration"), "debug attach sessions carry the runtime generation across awaits");
+  assert.ok((debug.match(/runtimeOperationCurrent\(attachGeneration, backend\)/g) ?? []).length >= 5, "each slow attach phase rejects a restarted backend");
+  assert.ok(injectedPrelude.indexOf("this.runtimePrelude.invalidate()") < injectedPrelude.indexOf("this.ensureOverlay()"), "an explicit prelude invalidates an older runtime refresh before installing its source");
+  assert.ok(clientSource.includes('snapshot.mode === "django" && snapshot.state === "attaching"'), "failed attachment restores the setup terminal instead of hiding it");
+  assert.ok(ptySource.includes('failed && this.state !== "failed"') && ptySource.includes("this.dataEmitter.fire(visibleFailure)"), "a hidden bootstrap failure streams to an already-mounted terminal exactly once");
+});
+
 test("runtime prelude output stays bounded without starving late model imports", () => {
   const variables = [
     ...Array.from({ length: 4000 }, (_, index) => ({

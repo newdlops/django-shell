@@ -28,7 +28,7 @@ sys.modules["django_shell_native_tracer"] = module
 spec.loader.exec_module(module)
 
 assert module.TRACER_API_VERSION == 1
-assert module.TRACER_VERSION == "2026.07.11.3"
+assert module.TRACER_VERSION == "2026.07.11.4"
 assert module.OPT_IN_THREAD_ATTRIBUTE == "django_shell_debugger_trace_enabled"
 assert sys.modules["django_shell_native_tracer"] is module
 assert sys.modules["_django_shell_native_tracer"] is module
@@ -261,7 +261,7 @@ print(json.dumps({
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const payload = JSON.parse(result.stdout.trim());
-  assert.equal(payload.status.version, "2026.07.11.3");
+  assert.equal(payload.status.version, "2026.07.11.4");
   assert.equal(payload.status.pausedThreads, 0);
   assert.equal(payload.pauses.length, 2);
   assert.deepEqual(

@@ -17,7 +17,7 @@ import { overlayRendererSource } from "./workbenchOverlayRenderer";
 import { mainProcessEvalExpression, parseFocusedWorkbenchCandidate } from "./workbenchWindowEval";
 import { mainProcessMouseInputExpression, type WorkbenchMousePoint } from "./workbenchMouseInput";
 interface CdpResponse { error?: { message?: string }; id?: number; result?: { exceptionDetails?: { exception?: { description?: string }; text?: string }; result?: { value?: unknown } }; }
-type PendingReply = (response: CdpResponse) => void; type RunHandler = (code: string, lineOffset?: number) => Promise<boolean>;
+type PendingReply = (response: CdpResponse) => void; type RunHandler = (code: string, lineOffset?: number) => Promise<boolean | undefined>;
 /** Associates one CDP response callback with the socket generation that issued it. */
 interface PendingRequest { reply: PendingReply; socket: WebSocket; }
 /** Describes the Python cell editor anchor inside the custom webview viewport. */
@@ -34,7 +34,7 @@ const CAPTURE_FALLBACK_OPEN_TIMEOUT_MS = 1000;
 const CAPTURE_FALLBACK_SETTLE_MS = 50;
 const CAPTURE_FALLBACK_TIMEOUT_MS = 1700;
 const CAPTURE_PROBE_TIMEOUT_MS = 450;
-const CDP_EVALUATE_TIMEOUT_MS = 4500;
+const CDP_EVALUATE_TIMEOUT_MS = 10000;
 const CDP_REQUEST_TIMEOUT_MS = 10000;
 const GEOMETRY_SETTLE_MS = 80;
 const INITIAL_WINDOW_FOCUS_RETRY_MS = 100;

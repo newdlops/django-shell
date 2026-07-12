@@ -23,7 +23,7 @@ interface DebugEventHooks {
   refreshBreakpoints(): void;
   runCurrentInput(): Promise<string>;
   setPausedThread(threadId: number | undefined): void;
-  setSession(session: vscode.DebugSession | undefined): void;
+  setSession(session: vscode.DebugSession | undefined): boolean;
   shouldRefocusOverlay(): boolean;
   syncBreakpoints(reason: string): Promise<void>;
 }
@@ -85,7 +85,7 @@ export function registerCustomConsoleDebugEvents(disposables: vscode.Disposable[
     vscode.debug.onDidStartDebugSession((session) => {
       if (!isDjangoShellSession(session)) { return; }
       hooks.logger?.log("debug.session.start", { sessionId: session.id });
-      hooks.setSession(session); hooks.postStatus("attached", "active"); clearInfo("attached"); hooks.refreshBreakpoints();
+      if (!hooks.setSession(session)) { return; } hooks.postStatus("attached", "active"); clearInfo("attached"); hooks.refreshBreakpoints();
       if (hooks.consumeRunOnSessionStart()) { void startDebuggedInput(hooks); } else { hooks.logger?.log("debug.session.start.skipRun", { sessionId: session.id }); }
     }),
     vscode.debug.onDidTerminateDebugSession((session) => {

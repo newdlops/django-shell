@@ -143,6 +143,37 @@ test("retries the socket after a transient failure instead of disabling it for t
   }
 });
 
+test("keeps local runtime inspection off the interactive ORM terminal stream", async () => {
+  let request;
+  let fallbackCalled = false;
+  const server = net.createServer((socket) => {
+    socket.on("data", (chunk) => {
+      request = JSON.parse(chunk.toString());
+      socket.end(`${JSON.stringify({ loadedModuleCount: 3, modules: [], ok: true, variables: [{ name: "Company", preview: "<class>", type: "type" }] })}\n`);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const socketOnly = new BackendClient({ host: "127.0.0.1", port, token: "secret" });
+  socketOnly.setTransportMode("orm");
+  assert.equal(socketOnly.supportsRuntimeInspection(), true);
+  const client = new BackendClient({ host: "127.0.0.1", port, token: "secret" }, undefined, async () => {
+    fallbackCalled = true;
+    throw new Error("runtime inspection must not occupy the interactive shell when the local socket is healthy");
+  });
+  client.setTransportMode("orm");
+  try {
+    const inspection = await client.inspect();
+    assert.equal(inspection.ok, true);
+    assert.equal(inspection.variables[0].name, "Company");
+    assert.equal(request.kind, "inspect");
+    assert.equal(request.token, "secret");
+    assert.equal(fallbackCalled, false);
+  } finally {
+    server.close();
+  }
+});
+
 test("pins debug cell executes to the PTY while the socket keeps serving parallel reads", async () => {
   let connections = 0;
   const server = net.createServer((socket) => {

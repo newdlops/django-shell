@@ -124,14 +124,20 @@ class _InspectionDeferred:
 def start(namespace, token):
     """Starts or reuses the backend server for the given interactive shell namespace."""
     started_at = time.monotonic()
+    phase_started = started_at
+    phases = {}
     warmup = None
     try:
         _wait_for_warmup()
-        autoimported = _autoimport_base_names(namespace)
         ipython = _pty_is_ipython()
+        phases["shell"] = int((time.monotonic() - phase_started) * 1000)
+        phase_started = time.monotonic()
         warmup = _new_warmup_state() if ipython else None
+        autoimported = 0
         if warmup is None:
             autoimported += _warmup_backend_components(namespace)
+        phases["namespace"] = int((time.monotonic() - phase_started) * 1000)
+        phase_started = time.monotonic()
         server = _STATE.get("server")
         if server is None:
             server = _Server((_bind_host(), 0), _Handler)
@@ -142,17 +148,20 @@ def start(namespace, token):
         else:
             server.namespace = namespace
             server.initial_names = _backend_initial_names(namespace)
+        phases["server"] = int((time.monotonic() - phase_started) * 1000)
+        phase_started = time.monotonic()
         server.token = token
         host, port = server.server_address
         try:
             capture = _pty_install_capture(namespace)
         except Exception:
             capture = False
+        phases["capture"] = int((time.monotonic() - phase_started) * 1000)
         # Wire the namespace helpers here (not in the typed bootstrap) so the bootstrap command stays short — well under the
         # tty canonical-input line limit — and the audit line carries no `_djs_rpc` lambda.
         namespace["_djs_backend_initial_names"] = server.initial_names
         namespace["_djs_rpc"] = lambda _djs_r, _djs_i: _pty_serve(namespace, token, _djs_r, _djs_i, namespace.get("_djs_backend_initial_names", set()))
-        ready = {"autoImported": autoimported, "cellCapture": bool(capture), "host": _connect_host(host), "ipython": ipython, "pid": os.getpid(), "port": port, "readyMs": int((time.monotonic() - started_at) * 1000), "token": token}
+        ready = {"autoImported": autoimported, "cellCapture": bool(capture), "host": _connect_host(host), "ipython": ipython, "pid": os.getpid(), "port": port, "readyMs": int((time.monotonic() - started_at) * 1000), "readyPhases": phases, "token": token}
         if warmup is not None:
             ready["warmupPending"] = True
         _print_marker(_READY_PREFIX, ready)
@@ -198,8 +207,9 @@ def _run_backend_warmup(namespace, server, warmup, base_autoimported):
 
 
 def _warmup_backend_components(namespace):
-    """Binds registered model names and installs Django helpers that are not needed to emit READY."""
-    autoimported = _autoimport_registered_models(namespace)
+    """Binds Django names and installs helpers that are not needed to emit READY."""
+    autoimported = _autoimport_base_names(namespace)
+    autoimported += _autoimport_registered_models(namespace)
     if _autoimport_enabled():
         autoimported += _autoimport_django_namespace(namespace)
     _register_transform_lookups()

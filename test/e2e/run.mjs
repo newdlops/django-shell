@@ -39,7 +39,7 @@ async function main() {
     extensionDevelopmentPath: [extensionPath, nativeProviderFixturePath],
     extensionTestsEnv: { DJANGO_SHELL_E2E: "1", DJANGO_SHELL_E2E_EXTENSION_ID: `${manifest.publisher}.${manifest.name}`, ...(process.env.DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY === "1" ? { DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_HOVER_ONLY === "1" ? { DJANGO_SHELL_E2E_HOVER_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_THEME_ONLY === "1" ? { DJANGO_SHELL_E2E_THEME_ONLY: "1" } : {}), ...(python ? { DJANGO_SHELL_E2E_PYTHON: python } : {}) },
     extensionTestsPath: path.join(ROOT, "test", "e2e", "suite", "index.js"),
-    launchArgs: ["--inspect=9239", `--user-data-dir=${userData}`, workspace],
+    launchArgs: ["--inspect=9239", "--force-disable-user-env", `--user-data-dir=${userData}`, workspace],
     reuseMachineInstall: Boolean(process.env.VSCODE_E2E_EXECUTABLE),
     vscodeExecutablePath: vscodeExecutablePath()
   });

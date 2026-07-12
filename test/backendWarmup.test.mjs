@@ -7,9 +7,9 @@ import test from "node:test";
 
 const PYTHON = pythonExecutable();
 
-test("IPython READY precedes deferred warmup while requests and user cells wait", { skip: !PYTHON }, () => {
+test("IPython READY precedes deferred warmup while user cells wait", { skip: !PYTHON }, () => {
   const script = [
-    "import builtins, importlib.util, json, socket, threading, time, types",
+    "import builtins, importlib.util, json, threading, time, types",
     `path=${JSON.stringify(path.resolve("python/django_shell_backend.py"))}`,
     "spec=importlib.util.spec_from_file_location('django_shell_backend', path)",
     "mod=importlib.util.module_from_spec(spec)",
@@ -20,16 +20,24 @@ test("IPython READY precedes deferred warmup while requests and user cells wait"
     "    def register(self, name, callback): callbacks[name]=callback",
     "shell=types.SimpleNamespace(events=Events(), user_ns=namespace)",
     "builtins.get_ipython=lambda: shell",
+    "class Server:",
+    "    def __init__(self, address, handler): self.server_address=('127.0.0.1',32100)",
+    "    def serve_forever(self): pass",
+    "    def shutdown(self): pass",
+    "    def server_close(self): pass",
+    "mod._Server=Server",
     "markers=[]",
     "gate=threading.Event()",
     "warmup_entered=threading.Event()",
     "marker_seen_by_warmup=[]",
     "steps=[]",
-    "def base_names(target): target['base_name']=object(); return 1",
-    "def registered_models(target):",
+    "def base_names(target):",
     "    marker_seen_by_warmup.append(bool(markers))",
     "    warmup_entered.set()",
     "    gate.wait(5)",
+    "    target['base_name']=object()",
+    "    return 1",
+    "def registered_models(target):",
     "    target['LateModel']=type('LateModel',(),{'__module__':'late.models'})",
     "    return 1",
     "mod._autoimport_base_names=base_names",
@@ -42,29 +50,18 @@ test("IPython READY precedes deferred warmup while requests and user cells wait"
     "mod.start(namespace,'tok')",
     "start_ms=int((time.monotonic()-started)*1000)",
     "warmup_entered.wait(1)",
+    "if 'server' not in mod._STATE: print(json.dumps({'startupError':markers})); raise SystemExit(0)",
     "server=mod._STATE['server']",
-    "response={}",
-    "request_done=threading.Event()",
-    "def request_prelude():",
-    "    with socket.create_connection(server.server_address,timeout=2) as connection:",
-    "        stream=connection.makefile('rwb')",
-    "        stream.write((json.dumps({'token':'tok','kind':'prelude'})+'\\n').encode('utf-8'))",
-    "        stream.flush()",
-    "        response.update(json.loads(stream.readline().decode('utf-8')))",
-    "    request_done.set()",
-    "request_thread=threading.Thread(target=request_prelude)",
-    "request_thread.start()",
     "cell_done=threading.Event()",
     "def run_cell_pre_hook(): callbacks['pre_run_cell'](types.SimpleNamespace(raw_cell='_djs_rpc(1, 2)')); cell_done.set()",
     "cell_thread=threading.Thread(target=run_cell_pre_hook)",
     "cell_thread.start()",
     "time.sleep(0.08)",
-    "request_blocked=not request_done.is_set()",
     "cell_blocked=not cell_done.is_set()",
     "gate.set()",
-    "request_thread.join(2)",
     "cell_thread.join(2)",
     "warmup=mod._STATE['warmup']",
+    "response=mod._run_request(namespace,'tok',{'kind':'prelude','token':'tok'},server.initial_names)",
     "prelude_names=[item['name'] for item in response.get('variables',[])]",
     "payload={",
     "  'autoImportedAfter':warmup.get('autoImported'),",
@@ -77,8 +74,6 @@ test("IPython READY precedes deferred warmup while requests and user cells wait"
     "  'markerBeforeWarmup':marker_seen_by_warmup == [True],",
     "  'preludeNames':prelude_names,",
     "  'ptyInitialNames':sorted(name for name in namespace.get('_djs_initial_names',()) if name in ('base_name','LateModel')),",
-    "  'requestBlocked':request_blocked,",
-    "  'requestFinished':request_done.is_set(),",
     "  'startMs':start_ms,",
     "  'steps':steps,",
     "  'warmupPendingAfter':warmup.get('pending'),",
@@ -90,14 +85,15 @@ test("IPython READY precedes deferred warmup while requests and user cells wait"
   const result = childProcess.spawnSync(PYTHON, ["-c", script], { encoding: "utf8", timeout: 10_000 });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const payload = JSON.parse(result.stdout);
+  assert.equal(payload.startupError, undefined, JSON.stringify(payload.startupError));
 
   assert.equal(payload.marker.warmupPending, true);
-  assert.equal(payload.marker.autoImported, 1, "READY reports only work completed on its critical path");
+  assert.equal(payload.marker.autoImported, 0, "READY does no Django namespace imports on its critical path");
   assert.equal(typeof payload.marker.readyMs, "number");
-  assert.equal(payload.markerBeforeWarmup, true, "the worker starts only after READY is emitted");
-  assert.equal(payload.requestBlocked, true, "socket inspection must not observe a partial namespace");
+  assert.deepEqual(Object.keys(payload.marker.readyPhases), ["shell", "namespace", "server", "capture"]);
+  assert.equal(payload.markerBeforeWarmup, true, "even common Django imports start only after READY is emitted");
+  assert.ok(payload.startMs < 1000, `READY waited ${payload.startMs}ms for deferred namespace imports`);
   assert.equal(payload.cellBlocked, true, "the next IPython cell must not overtake warmup");
-  assert.equal(payload.requestFinished, true);
   assert.equal(payload.cellFinished, true);
   assert.equal(payload.warmupPendingAfter, false);
   assert.equal(payload.autoImportedAfter, 2);

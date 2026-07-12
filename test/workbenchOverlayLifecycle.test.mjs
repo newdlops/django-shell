@@ -601,8 +601,8 @@ test("overlay debug uses a direct DAP session so the shell overlay stays focused
   assert.ok(customConsoleSource.includes("debug.direct."));
   assert.ok(customConsoleSource.includes("vscode.debug.startDebugging"));
   assert.ok(customConsoleSource.includes("runCurrentInput: () => this.runCurrentDebugInput()"));
-  assert.ok(customConsoleSource.includes("await this.showOverlay(); try { await direct.attach"));
-  assert.ok(customConsoleSource.includes('direct), { ...configuration, engine: requestedEngine })'));
+  assert.ok(customConsoleSource.includes("await this.showOverlay(); if (!this.runtimeOperationCurrent(attachGeneration, backend))"), "restart is checked between showing and attaching the direct adapter");
+  assert.ok(customConsoleSource.includes('direct.attach(attachEndpoint, async () => undefined, { ...configuration, engine: requestedEngine })'));
   assert.ok(customConsoleSource.includes('if (this.debugMode === "overlay") { const direct = new DirectDebugAdapterSession'));
   assert.ok(customConsoleSource.includes('await this.runCurrentDebugInput(); return;'));
   assert.ok(customConsoleSource.includes("this.debugpyEndpoint = undefined"));

@@ -3,6 +3,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import xtermCss from "@xterm/xterm/css/xterm.css";
+import { applyTerminalSnapshot, consumeTerminalData, createTerminalReplayState } from "../src/terminalSnapshotReplay";
 
 const STYLE_ID = "django-shell-custom-console-style";
 const vscode = acquireVsCodeApi();
@@ -32,7 +33,7 @@ let lastGeometryKey = "";
 let pendingExecution = 0;
 const runningOutputs = new Map();
 const LIVE_OUTPUT_LIMIT = 20000;
-let snapshotWritten = false;
+const terminalReplay = createTerminalReplayState();
 let e2eSawShellPrompt = false;
 let debugAttached = false;
 let debugBusy = false;
@@ -198,8 +199,8 @@ function handleHostMessage(message) {
     vscode.postMessage(payload);
   }
   if (message.type === "terminalData" && typeof message.data === "string") {
-    snapshotWritten = true;
-    terminal.write(message.data);
+    const replay = consumeTerminalData(terminalReplay, message.data);
+    if (replay.write) { terminal.write(replay.write); }
   }
   if (message.type === "terminalStatus" && message.snapshot) {
     updateStatus(message.snapshot);
@@ -251,9 +252,10 @@ function overlayLineOffset(range) {
 /** Updates the status label and writes the initial terminal snapshot once. */
 function updateStatus(snapshot) {
   runtimeReady = Boolean(snapshot.ready);
+  const inputReady = runtimeReady || (snapshot.mode === "django" && snapshot.state === "attaching");
   status.dataset.ready = snapshot.ready ? "true" : "false";
-  setSetupReady(Boolean(snapshot.ready));
-  setPythonReady(Boolean(snapshot.ready));
+  setSetupReady(inputReady);
+  setPythonReady(inputReady);
   statusText.textContent = snapshot.ready ? "Python 3 / Django ready" : `${snapshot.state} / ${snapshot.mode}`;
   if (!runtimeReady) {
     setDebugStatus("idle", "");
@@ -261,15 +263,9 @@ function updateStatus(snapshot) {
     updateDebugControls();
   }
   updateOverlayTabControls();
-  if (snapshot.state === "starting" && !snapshot.text) {
-    terminal.clear();
-    snapshotWritten = false;
-    return;
-  }
-  if (!snapshotWritten && snapshot.text) {
-    snapshotWritten = true;
-    terminal.write(snapshot.text);
-  }
+  const replay = applyTerminalSnapshot(terminalReplay, snapshot);
+  if (replay.clear) { terminal.clear(); }
+  if (replay.write) { terminal.write(replay.write); }
 }
 
 /** Minimizes the setup terminal while Django shell input is active. */
@@ -301,7 +297,7 @@ function setInputPrompt(text) {
   e2eCellState("prompt");
 }
 
-/** Enables Python input only after the setup terminal has attached the backend. */
+/** Enables Python typing once Django reaches its prompt while execution remains backend-gated. */
 function setPythonReady(ready) {
   pythonCell?.classList.toggle("disabled", !ready);
 }

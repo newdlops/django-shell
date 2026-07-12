@@ -300,10 +300,12 @@ export class BackendClient {
   /** Returns whether reads reconstruct as readable ORM cells (ORM + Terminal modes) instead of `_djs_rpc` plumbing. */
   private get reconstructsViaOrmCell(): boolean { return this.mode === "pty" || (this.mode === "orm" && !this.parallelModelReads); }
 
+  /** Returns whether runtime-tree metadata truly needs the interactive shell because no local socket path is available or Terminal mode was explicitly selected. */
+  private get reconstructsRuntimeInspectionViaOrmCell(): boolean { return this.mode === "pty" || (this.mode === "orm" && this.socketUnavailable); }
   /** Returns whether expensive runtime tree requests are safe for the active transport. */
   supportsRuntimeInspection(): boolean {
-    // Runtime inspection uses pure Python probe cells; the capture hook attaches metadata without logging helper calls.
-    if (this.reconstructsViaOrmCell) { return Boolean(this.fallback); }
+    // Local inspection uses the parallel socket; remote/Terminal fallback uses pure Python probe cells whose capture hook attaches metadata.
+    if (this.reconstructsRuntimeInspectionViaOrmCell) { return Boolean(this.fallback); }
     return !this.socketUnavailable || Boolean(this.fallback);
   }
 
@@ -480,7 +482,7 @@ export class BackendClient {
 
   /** Returns safe summaries for variables and modules in the attached runtime. */
   inspect(): Promise<BackendRuntimeInspection> {
-    if (this.reconstructsViaOrmCell) { return this.ormCell(buildInspectOrm(), parseOrmInspectResponse); }
+    if (this.reconstructsRuntimeInspectionViaOrmCell) { return this.ormCell(buildInspectOrm(), parseOrmInspectResponse); }
     return this.request({ kind: "inspect" }, parseInspectionResponse);
   }
 
@@ -496,7 +498,7 @@ export class BackendClient {
 
   /** Returns safe child summaries for one inspected runtime value path using pure Python probe cells in ORM/terminal mode. */
   children(path: BackendRuntimePathSegment[], kind?: string): Promise<BackendRuntimeChildren> {
-    if (this.reconstructsViaOrmCell) {
+    if (this.reconstructsRuntimeInspectionViaOrmCell) {
       const expression = buildInspectChildrenOrm(path, kind);
       if (expression) { return this.ormCell(expression, (buffer) => parseOrmInspectChildren(buffer, path)); }
     }

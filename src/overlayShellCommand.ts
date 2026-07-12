@@ -4,7 +4,7 @@ import { DiagnosticLogger } from "./diagnostics";
 import { lintOverlayRange } from "./overlayLint";
 import { INPUT_MARKER, OverlayMemoryDocument } from "./overlayMemoryDocument";
 
-type RunHandler = (code: string, lineOffset?: number) => Promise<boolean>;
+type RunHandler = (code: string, lineOffset?: number) => Promise<boolean | undefined>;
 
 export interface OverlayShellCommandOptions {
   registerCommands?: boolean;
@@ -47,7 +47,9 @@ export class OverlayShellCommandController implements vscode.Disposable {
       payload = executionPayload(editor.document, editor.selection, this.inputStartLine);
     }
     this.logger?.log("overlay.command.enter", { chars: payload.code.length, end: payload.end + 1, inputStartLine: this.inputStartLine + 1, lines: lineCount(payload.code), start: payload.start + 1 });
-    if (!await this.runHandler(payload.code, payload.start)) {
+    const outcome = await this.runHandler(payload.code, payload.start);
+    if (outcome === undefined) { this.logger?.log("overlay.command.enter.cancelled", { start: payload.start + 1 }); return; }
+    if (!outcome) {
       this.logger?.log("overlay.command.enter.incomplete", { end: payload.end + 1, inputStartLine: this.inputStartLine + 1, lines: lineCount(payload.code), start: payload.start + 1 });
       await vscode.commands.executeCommand("type", { text: `\n${nextIndent(editor.document, payload.end)}` });
       return;

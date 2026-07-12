@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 
 TRACER_API_VERSION = 1
-TRACER_VERSION = "2026.07.11.3"
+TRACER_VERSION = "2026.07.11.4"
 OPT_IN_THREAD_ATTRIBUTE = "django_shell_debugger_trace_enabled"
 
 _CANONICAL_MODULE_NAME = "django_shell_native_tracer"
@@ -447,9 +447,14 @@ def _thread_is_opted_in(thread: Optional[threading.Thread] = None) -> bool:
         return False
 
 
-def _executable_lines(filename: str) -> Set[int]:
-    with open(filename, "rb") as source_file:
-        code = compile(source_file.read(), filename, "exec")
+def _executable_lines(filename: str, source_text: Optional[str] = None) -> Set[int]:
+    """Returns executable lines from an optional line-stable execution-unit projection."""
+    if source_text is None:
+        with open(filename, "rb") as source_file:
+            source = source_file.read()
+    else:
+        source = source_text
+    code = compile(source, filename, "exec")
 
     lines = set()  # type: Set[int]
 
@@ -2866,9 +2871,12 @@ class NativeDapTracer:
         error: Optional[str] = None
         if not isinstance(filename, str) or not filename.endswith(".py"):
             error = "Experimental native tracer supports Python files only"
-        else:
+        elif requested:
             try:
-                executable = _executable_lines(filename)
+                source_text = args.get("sourceText")
+                executable = _executable_lines(
+                    filename, source_text if isinstance(source_text, str) else None
+                )
             except Exception as exc:
                 error = f"Cannot load source: {exc}"
 

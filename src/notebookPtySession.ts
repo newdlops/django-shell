@@ -54,7 +54,7 @@ export class NotebookPtySession implements vscode.Disposable {
   private keepaliveInFlight = false;
   private keepaliveTimer: NodeJS.Timeout | undefined;
   private lastDjangoCommandAt = 0;
-  private lastOutputAt = 0; private lastPrimaryPromptAt = 0; private lastTerminalInputAt = 0;
+  private firstOutputAt = 0; private lastOutputAt = 0; private lastPrimaryPromptAt = 0; private lastTerminalInputAt = 0;
   private mode: DjangoTerminalMode = "shell";
   private outputTail = "";
   private process: pty.IPty | undefined;
@@ -355,6 +355,7 @@ export class NotebookPtySession implements vscode.Disposable {
   /** Processes PTY output, detects prompts, and attaches the backend once. */
   private handleOutput(data: string): void {
     this.lastOutputAt = Date.now();
+    if (!this.firstOutputAt) { this.firstOutputAt = this.lastOutputAt; this.options.diagnosticLogger?.log("terminal.firstOutput", { sessionId: this.options.sessionId, sinceSpawnMs: this.firstOutputAt - this.spawnedAt }); }
     if (this.options.diagnosticLogger?.enabled()) { this.shellLogTail = appendShellTranscript(this.options.diagnosticLogger, this.shellLogTail, data); }
     const previousMode = this.mode;
     const suppressVisible = this.suppressBackendOutput || this.ptyRequests.size > 0 || this.pendingCell !== undefined;
@@ -494,14 +495,16 @@ export class NotebookPtySession implements vscode.Disposable {
       }
       this.state = "ready";
       this.startKeepalive();
-      this.options.diagnosticLogger?.log("backend.ready", { autoImported: ready.autoImported, host: ready.host, port: ready.port, readyMs: ready.readyMs, remote: this.bootstrapRetried, sessionId: this.options.sessionId, warmupPending: ready.warmupPending });
+      this.options.diagnosticLogger?.log("backend.ready", { autoImported: ready.autoImported, host: ready.host, port: ready.port, readyMs: ready.readyMs, readyPhases: JSON.stringify(ready.readyPhases ?? {}), remote: this.bootstrapRetried, sessionId: this.options.sessionId, warmupPending: ready.warmupPending });
       return;
     }
     const failed = parseBackendFailedMarker(this.outputTail);
-    if (failed) {
+    if (failed && this.state !== "failed") {
       this.suppressBackendOutput = false;
       this.state = "failed";
-      this.displayText = `${this.displayText}\n${failed}`;
+      const visibleFailure = `\r\n${failed}\r\n`;
+      this.displayText = `${this.displayText}${visibleFailure}`;
+      this.dataEmitter.fire(visibleFailure);
       this.options.diagnosticLogger?.log("backend.failed", {
         error: failed,
         sessionId: this.options.sessionId
@@ -756,6 +759,7 @@ export class NotebookPtySession implements vscode.Disposable {
     this.bootstrapRetryPending = false;
     this.debugpyBundlePaths.clear();
     this.displayText = "";
+    this.firstOutputAt = 0;
     this.inputTracker = new InputLineTracker();
     this.kubectlTarget = undefined;
     this.sshTarget = undefined;
