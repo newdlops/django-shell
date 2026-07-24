@@ -879,11 +879,58 @@ function pyScalar(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : pyStr(value);
 }
 
-/** Returns a Python literal for an edited cell value, typed by its column (bool/number/FK id/text/null). */
+/** Returns a safe Python literal for a JSON-compatible value, including nested arrays and objects. */
+function pyJsonValue(value: unknown): string {
+  if (value === null) {
+    return "None";
+  }
+  if (typeof value === "boolean") {
+    return value ? "True" : "False";
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (typeof value === "string") {
+    return pyStr(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => pyJsonValue(item)).join(", ")}]`;
+  }
+  if (typeof value === "object") {
+    return `{${Object.entries(value).map(([key, item]) => `${pyStr(key)}: ${pyJsonValue(item)}`).join(", ")}}`;
+  }
+  return pyStr(value);
+}
+
+/** Returns a structured-field Python literal when an array/object edit contains valid JSON. */
+function structuredEditValue(column: BackendModelColumn | undefined, value: unknown): string | undefined {
+  if (!column || (column.type !== "ArrayField" && column.type !== "JSONField")) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    return pyJsonValue(value);
+  }
+  const text = value.trim();
+  if (column.type === "JSONField" && !text.startsWith("[") && !text.startsWith("{")) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return column.type !== "ArrayField" || Array.isArray(parsed) ? pyJsonValue(parsed) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Returns a Python literal for an edited cell value, typed by its column (structured/bool/number/FK id/text/null). */
 function editValue(column: BackendModelColumn | undefined, value: unknown): string {
   const text = String(value ?? "");
   if (text === "" && column && column.null) {
     return "None";
+  }
+  const structured = structuredEditValue(column, value);
+  if (structured !== undefined) {
+    return structured;
   }
   if (column && column.type === "BooleanField") {
     return TRUTHY.test(text.trim()) ? "True" : "False";
