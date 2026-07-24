@@ -126,6 +126,24 @@ th.computed{cursor:default;color:var(--vscode-descriptionForeground)}
 td.computed{color:var(--vscode-descriptionForeground);font-style:italic}
 td.dirty{background-color:var(--vscode-inputValidation-warningBackground,rgba(255,196,0,.14))!important;box-shadow:inset 2px 0 0 var(--vscode-inputValidation-warningBorder,var(--vscode-charts-yellow,#cca700))}
 .celledit{width:100%;box-sizing:border-box;font:inherit;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-focusBorder);border-radius:2px;padding:1px 3px;outline:none}
+.arrayedit-open{float:right;display:inline-flex;align-items:center;gap:3px;margin-left:6px;padding:0 4px;border:1px solid var(--vscode-panel-border);border-radius:8px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);font-size:10px;line-height:16px;vertical-align:middle}
+.arrayedit-open:hover{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}
+.arrayedit-backdrop{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.24)}
+.arrayedit-panel{display:flex;flex-direction:column;width:min(780px,calc(100vw - 32px));max-height:min(680px,calc(100vh - 32px));overflow:hidden;border:1px solid var(--vscode-editorWidget-border,var(--vscode-focusBorder));border-radius:6px;background:var(--vscode-editorWidget-background,var(--vscode-editor-background));box-shadow:0 8px 30px rgba(0,0,0,.45)}
+.arrayedit-head,.arrayedit-foot{display:flex;align-items:center;gap:8px;flex:0 0 auto;padding:8px 10px}
+.arrayedit-head{border-bottom:1px solid var(--vscode-panel-border)}
+.arrayedit-foot{border-top:1px solid var(--vscode-panel-border)}
+.arrayedit-title{font-weight:600}.arrayedit-count{color:var(--vscode-descriptionForeground);font-size:11px}.arrayedit-close{margin-left:auto;padding:1px 6px;background:none;color:var(--vscode-foreground)}
+.arrayedit-note{padding:6px 10px;color:var(--vscode-descriptionForeground);font-size:11px;border-bottom:1px solid var(--vscode-panel-border)}
+.arrayedit-scroll{min-height:90px;overflow:auto}.arrayedit-spacer{flex:1}
+.arrayedit-table{width:100%;min-width:max-content;border:0;font-size:12px}
+.arrayedit-table th,.arrayedit-table td{position:static;max-width:320px;overflow:visible;padding:4px 6px;background:transparent}
+.arrayedit-table th{cursor:default;background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}
+.arrayedit-index{width:38px;text-align:right!important;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums}
+.arrayedit-actions{width:36px;text-align:center!important}.arrayedit-remove{padding:0 7px;background:none;color:var(--vscode-errorForeground);font-size:16px}
+.arrayedit-empty{padding:20px!important;text-align:center!important;color:var(--vscode-descriptionForeground);font-style:italic}
+.arrayedit-control{box-sizing:border-box;width:100%;min-width:130px;font:inherit;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:3px;padding:3px 5px;outline:none}
+.arrayedit-control:focus{border-color:var(--vscode-focusBorder)}textarea.arrayedit-json{min-width:240px;min-height:48px;resize:vertical;white-space:pre}
 .fkpick{position:relative}
 td:has(.fkpick){overflow:visible}
 .fkresults{position:absolute;left:0;top:100%;z-index:30;min-width:100%;max-width:360px;max-height:240px;overflow-y:auto;background:var(--vscode-editorWidget-background,var(--vscode-editor-background));border:1px solid var(--vscode-editorWidget-border,var(--vscode-focusBorder));border-radius:2px;box-shadow:0 2px 8px rgba(0,0,0,.35)}

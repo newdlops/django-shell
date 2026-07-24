@@ -1,5 +1,6 @@
 // In-place cell editing with client-side staging: nothing is saved or sent until Commit.
 
+import { openArrayEditor, parseEditableArray } from "./gridArrayEdit.js";
 import { openFkPicker } from "./gridFkPicker.js";
 
 /** Builds the editing control best suited to a column: dropdown for choices/booleans, native picker for dates, text otherwise. */
@@ -117,6 +118,7 @@ export function stagedDisplay(column, staged) {
 export function createEditor(ctx) {
   // ctx: { post(msg), reload(), paintCell(td), onChange(count), notify(text) }
   const pending = new Map();
+  let activeArrayEditor = null;
   let activePicker = null;
   let lookupSeq = 0;
 
@@ -169,6 +171,22 @@ export function createEditor(ctx) {
     });
   }
 
+  /** Opens the list mini-table for an ArrayField or array-valued JSONField cell. */
+  function editArray(td, column, start) {
+    activeArrayEditor?.cancel();
+    let opened;
+    opened = openArrayEditor(td, column, start, {
+      closed: () => {
+        if (activeArrayEditor === opened) {
+          activeArrayEditor = null;
+        }
+      },
+      done: () => ctx.paintCell(td),
+      stage: (value) => stage(td, value)
+    });
+    activeArrayEditor = opened || null;
+  }
+
   /** Routes a foreign-key lookup response to the picker that requested it. */
   function onLookup(message) {
     if (activePicker) {
@@ -178,11 +196,15 @@ export function createEditor(ctx) {
 
   /** Turns an editable cell into the control fitting its field type; commits on Enter/blur (or change for dropdowns), cancels on Escape. */
   function editCell(td) {
-    if (!td.dataset.attname || td.querySelector("input, select")) {
+    if (!td || !td.dataset.attname || td.querySelector("input, select, textarea")) {
       return;
     }
     const column = td._column || {};
     const start = td.dataset.staged !== undefined ? td.dataset.staged : (td._editval ?? "");
+    if (parseEditableArray(column, start)) {
+      editArray(td, column, start);
+      return;
+    }
     if (column.relation) {
       editForeignKey(td, column, start);
       return;
@@ -235,6 +257,7 @@ export function createEditor(ctx) {
     if (!pending.size) {
       return;
     }
+    activeArrayEditor?.cancel();
     pending.clear();
     ctx.onChange(0);
     ctx.reload();
@@ -244,6 +267,7 @@ export function createEditor(ctx) {
   function handleResult(result) {
     const data = result || {};
     if (data.ok) {
+      activeArrayEditor?.cancel();
       pending.clear();
       ctx.onChange(0);
       ctx.notify(`Committed ${data.saved} row${data.saved === 1 ? "" : "s"}.`);
@@ -264,6 +288,7 @@ export function createEditor(ctx) {
 
   /** Clears all staged edits without reloading (used when the table is rebuilt). */
   function reset() {
+    activeArrayEditor?.cancel();
     pending.clear();
     ctx.onChange(0);
   }

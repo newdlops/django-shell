@@ -140,16 +140,354 @@ function tokenClass(match) {
   return "sql-punct";
 }
 
+// media/gridArrayEdit.js
+var NUMERIC_FIELD = /(?:AutoField|IntegerField|FloatField)$/;
+var TEMPORAL_INPUT = { DateField: "date", DateTimeField: "datetime-local", TimeField: "time" };
+var editorSequence = 0;
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function parseEditableArray(column, text) {
+  if (!column || column.type !== "ArrayField" && column.type !== "JSONField") {
+    return void 0;
+  }
+  const source = String(text ?? "").trim();
+  if (!source && column.type === "ArrayField") {
+    return { items: [], nullValue: true };
+  }
+  try {
+    const value = JSON.parse(source);
+    return Array.isArray(value) ? { items: value, nullValue: false } : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function arrayShape(items) {
+  if (!items.length || !items.every((item) => isRecord(item))) {
+    return { keys: [], kind: "scalar" };
+  }
+  const keys = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const item of items) {
+    for (const key of Object.keys(item)) {
+      if (!seen.has(key)) {
+        seen.add(key);
+        keys.push(key);
+      }
+    }
+  }
+  return { keys, kind: "object" };
+}
+function inputText(value) {
+  if (value === null) {
+    return "null";
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return String(value ?? "");
+}
+function coerceInput(text, sample, fieldType = "") {
+  if (fieldType === "BooleanField" || typeof sample === "boolean") {
+    return text === "" ? null : text === "true";
+  }
+  if (NUMERIC_FIELD.test(fieldType) || typeof sample === "number") {
+    const numeric = Number(text);
+    return text.trim() !== "" && Number.isFinite(numeric) ? numeric : text;
+  }
+  if (sample === null || typeof sample === "object") {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  }
+  return text;
+}
+function defaultItem(column, shape, items) {
+  if (shape.kind === "object") {
+    return Object.fromEntries(shape.keys.map((key) => [key, ""]));
+  }
+  const item = column.arrayItem || {};
+  if (Array.isArray(item.choices) && item.choices.length) {
+    return item.choices[0][0];
+  }
+  if (item.type === "BooleanField") {
+    return false;
+  }
+  const sample = items.find((value) => value !== null);
+  if (typeof sample === "number") {
+    return 0;
+  }
+  if (typeof sample === "boolean") {
+    return false;
+  }
+  if (Array.isArray(sample)) {
+    return [];
+  }
+  if (isRecord(sample)) {
+    return {};
+  }
+  return "";
+}
+function element(tag, className = "", text = "") {
+  const node = document.createElement(tag);
+  node.className = className;
+  if (text !== "") {
+    node.textContent = text;
+  }
+  return node;
+}
+function button(label, className, title) {
+  const node = element("button", className, label);
+  node.type = "button";
+  node.title = title || "";
+  return node;
+}
+function scalarSuggestions(items) {
+  const values = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const item of items) {
+    if (item === null || typeof item === "object" || typeof item === "boolean") {
+      continue;
+    }
+    const text = String(item);
+    if (text && !seen.has(text)) {
+      seen.add(text);
+      values.push(text);
+    }
+    if (values.length >= 100) {
+      break;
+    }
+  }
+  return values;
+}
+function choiceIndex(choices, value) {
+  const exact = choices.findIndex((choice) => JSON.stringify(choice[0]) === JSON.stringify(value));
+  return exact >= 0 ? exact : choices.findIndex((choice) => String(choice[0]) === String(value));
+}
+function choiceControl(spec, value, onValue) {
+  const choices = [...spec.choices];
+  let selected = choiceIndex(choices, value);
+  if (selected < 0) {
+    choices.push([value, String(value)]);
+    selected = choices.length - 1;
+  }
+  const select = element("select", "arrayedit-control");
+  choices.forEach((choice, index) => {
+    const option = element("option", "", String(choice[1]));
+    option.value = String(index);
+    select.appendChild(option);
+  });
+  select.value = String(selected);
+  select.addEventListener("change", () => onValue(choices[Number(select.value)][0]));
+  return select;
+}
+function booleanControl(spec, value, onValue) {
+  const select = element("select", "arrayedit-control");
+  const options = spec.null ? [[null, "(null)"], [true, "true"], [false, "false"]] : [[true, "true"], [false, "false"]];
+  options.forEach(([optionValue, label], index) => {
+    const option = element("option", "", label);
+    option.value = String(index);
+    select.appendChild(option);
+  });
+  const selected = options.findIndex(([optionValue]) => optionValue === value);
+  select.value = String(selected >= 0 ? selected : 0);
+  select.addEventListener("change", () => onValue(options[Number(select.value)][0]));
+  return select;
+}
+function valueControl(value, spec, suggestionsId, onValue, label) {
+  if (Array.isArray(spec.choices) && spec.choices.length) {
+    const control2 = choiceControl(spec, value, onValue);
+    control2.setAttribute("aria-label", label);
+    return control2;
+  }
+  if (spec.type === "BooleanField" || typeof value === "boolean") {
+    const control2 = booleanControl(spec, value, onValue);
+    control2.setAttribute("aria-label", label);
+    return control2;
+  }
+  const nested = value === null || typeof value === "object";
+  const fieldType = String(spec.type || "");
+  const control = element(nested ? "textarea" : "input", nested ? "arrayedit-control arrayedit-json" : "arrayedit-control");
+  if (!nested) {
+    control.type = TEMPORAL_INPUT[fieldType] || (NUMERIC_FIELD.test(fieldType) || typeof value === "number" ? "number" : "text");
+    if (control.type === "number") {
+      control.step = fieldType.includes("Integer") || fieldType.includes("AutoField") ? "1" : "any";
+    }
+    if (control.type === "text" && suggestionsId) {
+      control.setAttribute("list", suggestionsId);
+    }
+  }
+  control.value = inputText(value);
+  control.setAttribute("aria-label", label);
+  control.addEventListener("input", () => onValue(coerceInput(control.value, value, spec.type)));
+  return control;
+}
+function openArrayEditor(td, column, start, host) {
+  const parsed = parseEditableArray(column, start);
+  if (!parsed) {
+    return void 0;
+  }
+  const baseline = parsed.nullValue ? "" : JSON.stringify(parsed.items);
+  const items = JSON.parse(JSON.stringify(parsed.items));
+  const shape = arrayShape(items);
+  const suggestions = scalarSuggestions(items);
+  const suggestionsId = `arrayedit-values-${editorSequence += 1}`;
+  const backdrop = element("div", "arrayedit-backdrop");
+  const panel = element("section", "arrayedit-panel");
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-label", `Edit ${column.name || column.attname || "list"}`);
+  const header = element("header", "arrayedit-head");
+  const heading = element("div", "arrayedit-title", column.name || column.attname || "List");
+  const count = element("span", "arrayedit-count");
+  const closeButton = button("\u2715", "arrayedit-close", "Cancel list editing");
+  header.append(heading, count, closeButton);
+  const note = element("div", "arrayedit-note");
+  const scroll = element("div", "arrayedit-scroll");
+  const table = element("table", "arrayedit-table");
+  const footer = element("footer", "arrayedit-foot");
+  const addButton = button("+ Add item", "secondary", "Append a list item");
+  const nullButton = column.null ? button("Set null", "secondary", "Replace this list with null") : null;
+  const spacer = element("span", "arrayedit-spacer");
+  const cancelButton = button("Cancel", "secondary", "Discard list changes");
+  const applyButton = button("Apply", "", "Stage list changes (Ctrl/Cmd+Enter)");
+  footer.append(addButton);
+  if (nullButton) {
+    footer.append(nullButton);
+  }
+  footer.append(spacer, cancelButton, applyButton);
+  scroll.appendChild(table);
+  panel.append(header, note, scroll, footer);
+  backdrop.appendChild(panel);
+  document.body.appendChild(backdrop);
+  if (suggestions.length) {
+    const list = element("datalist");
+    list.id = suggestionsId;
+    for (const value of suggestions) {
+      const option = element("option");
+      option.value = value;
+      list.appendChild(option);
+    }
+    panel.appendChild(list);
+  }
+  let settled = false;
+  function finish(next) {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    window.removeEventListener("keydown", onKey, true);
+    backdrop.remove();
+    host.closed?.();
+    if (next === void 0 || next === baseline) {
+      host.done();
+    } else {
+      host.stage(next);
+    }
+  }
+  function removeRow(index) {
+    items.splice(index, 1);
+    render();
+  }
+  function addRow() {
+    items.push(defaultItem(column, shape, items));
+    render(true);
+  }
+  function appendValueCell(tr, value, spec, label, onValue) {
+    const tdValue = element("td");
+    tdValue.appendChild(valueControl(value, spec, suggestionsId, onValue, label));
+    tr.appendChild(tdValue);
+  }
+  function render(focusLast = false) {
+    table.textContent = "";
+    const thead = element("thead");
+    const headRow = element("tr");
+    headRow.appendChild(element("th", "arrayedit-index", "#"));
+    if (shape.kind === "object") {
+      for (const key of shape.keys) {
+        headRow.appendChild(element("th", "", key));
+      }
+    } else {
+      headRow.appendChild(element("th", "", "Value"));
+    }
+    headRow.appendChild(element("th", "arrayedit-actions", ""));
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = element("tbody");
+    items.forEach((item, index) => {
+      const tr = element("tr");
+      tr.appendChild(element("td", "arrayedit-index", String(index)));
+      if (shape.kind === "object") {
+        shape.keys.forEach((key) => {
+          appendValueCell(tr, item[key], {}, `${key}, row ${index + 1}`, (value) => {
+            item[key] = value;
+          });
+        });
+      } else {
+        appendValueCell(tr, item, column.arrayItem || {}, `Value, row ${index + 1}`, (value) => {
+          items[index] = value;
+        });
+      }
+      const actions = element("td", "arrayedit-actions");
+      const remove = button("\u2212", "arrayedit-remove", `Delete row ${index + 1}`);
+      remove.addEventListener("click", () => removeRow(index));
+      actions.appendChild(remove);
+      tr.appendChild(actions);
+      tbody.appendChild(tr);
+    });
+    if (!items.length) {
+      const emptyRow = element("tr");
+      const empty = element("td", "arrayedit-empty", "No items. Use \u201C+ Add item\u201D to create one.");
+      empty.colSpan = (shape.kind === "object" ? shape.keys.length : 1) + 2;
+      emptyRow.appendChild(empty);
+      tbody.appendChild(emptyRow);
+    }
+    table.appendChild(tbody);
+    count.textContent = `${items.length} item${items.length === 1 ? "" : "s"}`;
+    note.textContent = parsed.nullValue ? "Current value is null. Applying converts it to a list." : shape.kind === "object" ? "Object items are expanded into columns." : "Edit each item, add rows, or remove rows.";
+    if (focusLast) {
+      tbody.querySelector("tr:last-child .arrayedit-control")?.focus();
+    }
+  }
+  function onKey(event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      finish(void 0);
+    } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      finish(JSON.stringify(items));
+    }
+  }
+  addButton.addEventListener("click", addRow);
+  applyButton.addEventListener("click", () => finish(JSON.stringify(items)));
+  cancelButton.addEventListener("click", () => finish(void 0));
+  closeButton.addEventListener("click", () => finish(void 0));
+  nullButton?.addEventListener("click", () => finish(""));
+  backdrop.addEventListener("mousedown", (event) => {
+    if (event.target === backdrop) {
+      finish(void 0);
+    }
+  });
+  window.addEventListener("keydown", onKey, true);
+  render();
+  const firstControl = panel.querySelector(".arrayedit-control");
+  (firstControl || addButton).focus();
+  return { cancel: () => finish(void 0), td };
+}
+
 // media/gridPin.js
-function togglePin(col, button, state2, gridwrap) {
+function togglePin(col, button2, state2, gridwrap) {
   if (state2.pinned.has(col)) {
     state2.pinned.delete(col);
-    button.classList.remove("active");
-    button.title = "Pin column (freeze left)";
+    button2.classList.remove("active");
+    button2.title = "Pin column (freeze left)";
   } else {
     state2.pinned.add(col);
-    button.classList.add("active");
-    button.title = "Unpin column";
+    button2.classList.add("active");
+    button2.title = "Unpin column";
   }
   repaintPins(gridwrap, state2);
 }
@@ -394,6 +732,7 @@ function stagedDisplay(column, staged) {
 }
 function createEditor(ctx) {
   const pending = /* @__PURE__ */ new Map();
+  let activeArrayEditor = null;
   let activePicker = null;
   let lookupSeq = 0;
   function pendingCount() {
@@ -437,17 +776,35 @@ function createEditor(ctx) {
       stage: (value) => stage(td, value)
     });
   }
+  function editArray(td, column, start) {
+    activeArrayEditor?.cancel();
+    let opened;
+    opened = openArrayEditor(td, column, start, {
+      closed: () => {
+        if (activeArrayEditor === opened) {
+          activeArrayEditor = null;
+        }
+      },
+      done: () => ctx.paintCell(td),
+      stage: (value) => stage(td, value)
+    });
+    activeArrayEditor = opened || null;
+  }
   function onLookup(message) {
     if (activePicker) {
       activePicker.fill(message);
     }
   }
   function editCell(td) {
-    if (!td.dataset.attname || td.querySelector("input, select")) {
+    if (!td || !td.dataset.attname || td.querySelector("input, select, textarea")) {
       return;
     }
     const column = td._column || {};
     const start = td.dataset.staged !== void 0 ? td.dataset.staged : td._editval ?? "";
+    if (parseEditableArray(column, start)) {
+      editArray(td, column, start);
+      return;
+    }
     if (column.relation) {
       editForeignKey(td, column, start);
       return;
@@ -496,6 +853,7 @@ function createEditor(ctx) {
     if (!pending.size) {
       return;
     }
+    activeArrayEditor?.cancel();
     pending.clear();
     ctx.onChange(0);
     ctx.reload();
@@ -503,6 +861,7 @@ function createEditor(ctx) {
   function handleResult(result) {
     const data = result || {};
     if (data.ok) {
+      activeArrayEditor?.cancel();
       pending.clear();
       ctx.onChange(0);
       ctx.notify(`Committed ${data.saved} row${data.saved === 1 ? "" : "s"}.`);
@@ -519,6 +878,7 @@ function createEditor(ctx) {
     return failed.map((row) => `pk=${row.pk} ${row.error || Object.entries(row.fieldErrors || {}).map(([field, messages]) => `${field}: ${messages[0]}`).join("; ")}`).join(" \xB7 ") || "validation error";
   }
   function reset() {
+    activeArrayEditor?.cancel();
     pending.clear();
     ctx.onChange(0);
   }
@@ -676,7 +1036,7 @@ function rawOf(cell) {
   return cell !== null && typeof cell === "object" ? cell.v : cell;
 }
 function textOf(cell) {
-  return cell === null || cell === void 0 ? "" : typeof cell === "object" ? cell.v == null ? "" : String(cell.v) : String(cell);
+  return cell === null || cell === void 0 ? "" : typeof cell === "object" ? (cell.edit ?? cell.v) == null ? "" : String(cell.edit ?? cell.v) : String(cell);
 }
 function paintRelatedCell(td, el2, renderValue2) {
   const column = td._column;
@@ -2687,7 +3047,7 @@ function buildCell(row, column, pk) {
   if (column.editable) {
     td.classList.add("editable");
     td.dataset.attname = column.attname;
-    td.title = "Double-click to edit";
+    td.title = parseEditableArray(column, cellRawText(td._cell)) ? "Double-click to edit list items" : "Double-click to edit";
     td._editval = cellRawText(td._cell);
   }
   paintCell(td);
@@ -2715,11 +3075,13 @@ function paintCell(td) {
   if (td.dataset.staged !== void 0) {
     td.classList.add("dirty");
     td.appendChild(el("span", {}, stagedDisplay(column, td.dataset.staged)));
+    appendArrayEditButton(td, column, td.dataset.staged);
     return;
   }
   td.classList.remove("dirty");
   const cell = td._cell;
   td.appendChild(renderValue(cell));
+  appendArrayEditButton(td, column, cellRawText(cell));
   if (column.relation && rawValue(cell) !== null && rawValue(cell) !== void 0) {
     const wrap = el("span", { className: "fk" });
     wrap.appendChild(el("button", { className: "linkbtn", title: "Expand related row", dataset: { act: "fk", rel: column.relation.field, pk: String(td._pk), val: String(rawValue(cell)) } }, "\u2398"));
@@ -2732,7 +3094,18 @@ function cellRawText(cell) {
   if (cell === null || cell === void 0) {
     return "";
   }
-  return typeof cell === "object" ? cell.v == null ? "" : String(cell.v) : String(cell);
+  return typeof cell === "object" ? (cell.edit ?? cell.v) == null ? "" : String(cell.edit ?? cell.v) : String(cell);
+}
+function appendArrayEditButton(td, column, text) {
+  if (!column.editable) {
+    return;
+  }
+  const parsed = parseEditableArray(column, text);
+  if (!parsed) {
+    return;
+  }
+  const button2 = el("button", { className: "arrayedit-open", dataset: { act: "editArray" }, title: `Edit ${parsed.items.length} list item${parsed.items.length === 1 ? "" : "s"}` }, `\u25A6 ${parsed.items.length}`);
+  td.insertBefore(button2, td.firstChild);
 }
 function renderValue(cell) {
   if (cell === null || cell === void 0) {
@@ -2759,7 +3132,9 @@ function onTableClick(event) {
     return;
   }
   const data = node.dataset;
-  if (data.act === "pin") {
+  if (data.act === "editArray") {
+    editor.editCell(node.closest("td"));
+  } else if (data.act === "pin") {
     togglePin(data.col, node, state, els.gridwrap);
   } else if (data.act === "loadComputed") {
     toggleComputed(data.field, node);
@@ -2786,7 +3161,7 @@ function toggleSort(col) {
   updateSortArrows();
   applyQuery({ collectFilters: false });
 }
-function toggleComputed(field, button) {
+function toggleComputed(field, button2) {
   const active = !state.computedActive.has(field);
   if (active) {
     state.computedActive.add(field);
@@ -2795,10 +3170,10 @@ function toggleComputed(field, button) {
     state.computedActive.delete(field);
     delete state.computed[field];
   }
-  if (button) {
-    button.classList.toggle("active", active);
-    button.textContent = active ? "\u25BC" : "\u25B7";
-    button.title = active ? "Reload computed values for loaded rows" : "Load this @property for loaded rows (lazy \u2014 not auto-computed)";
+  if (button2) {
+    button2.classList.toggle("active", active);
+    button2.textContent = active ? "\u25BC" : "\u25B7";
+    button2.title = active ? "Reload computed values for loaded rows" : "Load this @property for loaded rows (lazy \u2014 not auto-computed)";
   }
   virtual.refresh();
 }
@@ -2987,17 +3362,17 @@ function onAggregate(message) {
   els.status.textContent = `${count} ${noun}${result.hasMore ? " \xB7 more available" : ""}${scan}`;
   els.more.disabled = true;
 }
-function expandInto(button, request) {
-  if (button.dataset.open === "1") {
-    closeDetail(button);
+function expandInto(button2, request) {
+  if (button2.dataset.open === "1") {
+    closeDetail(button2);
     return;
   }
   const body = el("div", { className: "nestedscroll" }, "Loading\u2026");
-  const row = insertDetailRow(detailAnchor(button.closest("tr")), nestedPanel(request.relation, button, body));
+  const row = insertDetailRow(detailAnchor(button2.closest("tr")), nestedPanel(request.relation, button2, body));
   const requestId = relRequestId += 1;
   pendingRelated.set(requestId, { body, label: request.relation });
-  button.dataset.open = "1";
-  button._detailRow = row;
+  button2.dataset.open = "1";
+  button2._detailRow = row;
   vscode.postMessage({ type: "expandRelated", requestId, relation: request.relation, pk: request.pk, value: request.value, single: request.single });
 }
 function nestedPanel(title, trigger, body) {
@@ -3012,12 +3387,12 @@ function nestedPanel(title, trigger, body) {
   wrap.appendChild(body);
   return wrap;
 }
-function closeDetail(button) {
-  if (button._detailRow && button._detailRow.isConnected) {
-    button._detailRow.remove();
+function closeDetail(button2) {
+  if (button2._detailRow && button2._detailRow.isConnected) {
+    button2._detailRow.remove();
   }
-  button._detailRow = null;
-  button.dataset.open = "";
+  button2._detailRow = null;
+  button2.dataset.open = "";
 }
 function onRelated(message) {
   const pending = pendingRelated.get(message.requestId);

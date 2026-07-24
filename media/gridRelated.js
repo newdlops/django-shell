@@ -9,7 +9,7 @@ function rawOf(cell) {
 
 /** Returns editable text for a related cell. */
 function textOf(cell) {
-  return cell === null || cell === undefined ? "" : typeof cell === "object" ? (cell.v == null ? "" : String(cell.v)) : String(cell);
+  return cell === null || cell === undefined ? "" : typeof cell === "object" ? ((cell.edit ?? cell.v) == null ? "" : String(cell.edit ?? cell.v)) : String(cell);
 }
 
 /** Paints one related cell: staged value when dirty, else the value plus an Open link for foreign keys. */

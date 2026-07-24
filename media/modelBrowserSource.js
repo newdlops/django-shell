@@ -1,6 +1,7 @@
 // Webview grid frontend for the Django model data browser.
 
 import { appendLogEntry } from "./sqlHighlight.js";
+import { parseEditableArray } from "./gridArrayEdit.js";
 import { repaintPins, togglePin } from "./gridPin.js";
 import { createEditor, stagedDisplay } from "./gridEdit.js";
 import { enterQueryMode, measureQueryEditor, setQueryDraft } from "./gridQuery.js";
@@ -353,7 +354,7 @@ function buildCell(row, column, pk) {
   if (column.editable) {
     td.classList.add("editable");
     td.dataset.attname = column.attname;
-    td.title = "Double-click to edit";
+    td.title = parseEditableArray(column, cellRawText(td._cell)) ? "Double-click to edit list items" : "Double-click to edit";
     td._editval = cellRawText(td._cell);
   }
   paintCell(td);
@@ -384,11 +385,13 @@ function paintCell(td) {
   if (td.dataset.staged !== undefined) {
     td.classList.add("dirty");
     td.appendChild(el("span", {}, stagedDisplay(column, td.dataset.staged)));
+    appendArrayEditButton(td, column, td.dataset.staged);
     return;
   }
   td.classList.remove("dirty");
   const cell = td._cell;
   td.appendChild(renderValue(cell));
+  appendArrayEditButton(td, column, cellRawText(cell));
   if (column.relation && rawValue(cell) !== null && rawValue(cell) !== undefined) {
     const wrap = el("span", { className: "fk" });
     wrap.appendChild(el("button", { className: "linkbtn", title: "Expand related row", dataset: { act: "fk", rel: column.relation.field, pk: String(td._pk), val: String(rawValue(cell)) } }, "⎘"));
@@ -402,7 +405,20 @@ function cellRawText(cell) {
   if (cell === null || cell === undefined) {
     return "";
   }
-  return typeof cell === "object" ? (cell.v == null ? "" : String(cell.v)) : String(cell);
+  return typeof cell === "object" ? ((cell.edit ?? cell.v) == null ? "" : String(cell.edit ?? cell.v)) : String(cell);
+}
+
+/** Adds a compact item-count button that opens the list mini-table with one click. */
+function appendArrayEditButton(td, column, text) {
+  if (!column.editable) {
+    return;
+  }
+  const parsed = parseEditableArray(column, text);
+  if (!parsed) {
+    return;
+  }
+  const button = el("button", { className: "arrayedit-open", dataset: { act: "editArray" }, title: `Edit ${parsed.items.length} list item${parsed.items.length === 1 ? "" : "s"}` }, `▦ ${parsed.items.length}`);
+  td.insertBefore(button, td.firstChild);
 }
 
 function renderValue(cell) {
@@ -431,7 +447,9 @@ function onTableClick(event) {
     return;
   }
   const data = node.dataset;
-  if (data.act === "pin") {
+  if (data.act === "editArray") {
+    editor.editCell(node.closest("td"));
+  } else if (data.act === "pin") {
     togglePin(data.col, node, state, els.gridwrap);
   } else if (data.act === "loadComputed") {
     toggleComputed(data.field, node);
