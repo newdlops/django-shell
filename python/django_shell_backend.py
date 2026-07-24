@@ -3491,11 +3491,32 @@ def _browse_columns(model):
             relation = {"field": field.name, "single": True, "target": _browse_label(field.related_model)}
             relation.update(_browse_relation_subquery_meta(model, field))
             column["relation"] = relation
-        choices = getattr(field, "choices", None)
+        choices = _browse_field_choices(field)
         if choices:
-            column["choices"] = [[_browse_jsonable(choice[0]), str(choice[1])] for choice in list(choices)[:200]]
+            column["choices"] = choices
+        base_field = getattr(field, "base_field", None)
+        if base_field is not None:
+            column["arrayItem"] = _browse_array_item(base_field)
         columns.append(column)
     return columns
+
+
+def _browse_field_choices(field):
+    """Returns bounded JSON-safe choice pairs for a model field."""
+    choices = getattr(field, "choices", None)
+    return [[_browse_jsonable(choice[0]), str(choice[1])] for choice in list(choices)[:200]] if choices else []
+
+
+def _browse_array_item(field):
+    """Returns recursive editor metadata for one ArrayField base field."""
+    item = {"null": bool(getattr(field, "null", False)), "type": type(field).__name__}
+    choices = _browse_field_choices(field)
+    if choices:
+        item["choices"] = choices
+    base_field = getattr(field, "base_field", None)
+    if base_field is not None:
+        item["arrayItem"] = _browse_array_item(base_field)
+    return item
 
 
 def _browse_declared_annotations(model):
@@ -3795,13 +3816,25 @@ def _browse_cell(value):
         raw = bytes(value)
         return {"len": len(raw), "t": "bytes", "v": base64.b64encode(raw[:64]).decode("ascii")}
     if isinstance(value, (list, tuple, dict, set, frozenset)):
-        return {"t": "json", "v": _truncate(repr(value), 400)}
+        edit_text = _browse_json_edit_text(value)
+        return {"edit": edit_text, "t": "json", "v": _truncate(edit_text, 400)}
     # File/Image fields and other value-objects: show the stored value (e.g. the file path / str()), not the "<FieldFile: ...>" object ref.
     try:
         text = str(value)
     except Exception:
         text = repr(value)
     return {"t": "repr", "v": _truncate(text, 400)}
+
+
+def _browse_json_edit_text(value):
+    """Returns collection text that the grid can edit and deserialize as JSON."""
+    import json
+
+    normalized = list(value) if isinstance(value, (set, frozenset)) else value
+    try:
+        return json.dumps(normalized, ensure_ascii=False, default=str)
+    except Exception:
+        return repr(value)
 
 
 def _browse_jsonable(value):
@@ -4962,8 +4995,14 @@ def _browse_coerce_edit_value(field, value):
         return None
     if field.is_relation:
         return value if value not in ("", None) else None
-    if isinstance(value, str) and field.get_internal_type() == "BooleanField":
+    field_type = field.get_internal_type()
+    if isinstance(value, str) and field_type == "BooleanField":
         return value.strip().lower() in ("true", "1", "t", "yes", "on")
+    if isinstance(value, str) and field_type == "JSONField" and value.lstrip().startswith(("[", "{")):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
     try:
         return field.to_python(value)
     except Exception:

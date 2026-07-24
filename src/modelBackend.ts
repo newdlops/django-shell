@@ -31,10 +31,19 @@ export interface BackendModelColumnRelation {
   throughTarget?: string;
 }
 
+/** Editor metadata for one ArrayField item; nested arrays recursively describe their base field. */
+export interface BackendModelArrayItem {
+  arrayItem?: BackendModelArrayItem;
+  choices?: Array<[unknown, string]>;
+  null: boolean;
+  type: string;
+}
+
 /** One concrete column descriptor for a model. */
 export interface BackendModelColumn {
   annotated?: boolean;
   annotation?: boolean;
+  arrayItem?: BackendModelArrayItem;
   attname: string;
   choices?: Array<[unknown, string]>;
   computed?: boolean;
@@ -80,8 +89,8 @@ export interface BackendSqlEntry {
   time: string;
 }
 
-/** A JSON-safe cell value; tagged objects describe non-primitive field types. */
-export type BackendModelCell = boolean | number | string | null | { len?: number; t: string; v: string };
+/** A JSON-safe cell value; tagged objects describe non-primitive field types and may retain full editor text beside a truncated preview. */
+export type BackendModelCell = boolean | number | string | null | { edit?: string; len?: number; t: string; v: string };
 
 /** One serialized row keyed by column attname. */
 export type BackendModelRow = Record<string, BackendModelCell>;
