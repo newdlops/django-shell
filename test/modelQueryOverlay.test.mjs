@@ -57,11 +57,14 @@ test("uses query-specific files, submit behavior, context, and panel lifecycle",
   assert.ok(modelQuerySource.includes("private lastQueryResult:"));
   assert.ok(modelQuerySource.includes('private inputAuthority: "fallback" | "overlay" = "fallback"'));
   assert.ok(modelQuerySource.includes('message.type === "queryDraftChanged"'));
-  assert.ok(modelQuerySource.includes("const requestId = ++this.queryRequestId"));
-  assert.ok(modelQuerySource.includes("panel !== this.panel || requestId !== this.queryRequestId"));
+  assert.ok(modelQuerySource.includes("new ModelQueryRunController"));
+  assert.ok(modelQuerySource.includes("this.queryRun.run"));
+  assert.ok(modelQuerySource.includes("this.queryRun.cancel(\"modelQuery.dispose\")"));
+  assert.equal(modelQuerySource.includes("queryRequestId"), false, "query lifecycle belongs to ModelQueryRunController instead of a raw request counter");
   assert.ok(modelQuerySource.includes("while (syncedDraft !== this.draftCode)"));
-  assert.ok(runBody.indexOf("this.nextOffset = null") < runBody.indexOf("await this.source.modelQuery"));
-  assert.equal((runBody.match(/setQueryResult/g) || []).length, 2);
+  assert.ok(runBody.includes("const pending = this.queryRun.run"));
+  assert.equal(runBody.includes("await this.source.modelQuery"), false, "the controller owns backend awaiting and late-result retirement");
+  assert.equal((runBody.match(/setQueryResult/g) || []).length, 1, "a query keeps the last confirmed overlay result until its next successful response");
   assert.equal(runBody.includes("await this.overlay?.setQueryResult"), false, "result decoration must not block the backend or grid critical path");
   assert.ok(overlaySource.includes("private queryResultQueue: Promise<void> = Promise.resolve()"));
   assert.ok(overlaySource.includes("this.queryResultQueue = this.queryResultQueue.then"), "renderer updates stay ordered off the critical path");

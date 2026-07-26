@@ -3,10 +3,11 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import type { BackendTransportMode } from "./backendClient";
-import type { BackendModelColumn, BackendModelQueryResult, ModelCommitChange, ModelRelatedQuery } from "./modelBackend";
+import type { BackendModelColumn, BackendModelQuery, BackendModelQueryResult, ModelCommitChange, ModelRelatedQuery } from "./modelBackend";
 import type { ModelDataSource } from "./modelBrowser";
 import { modelBrowserHtml } from "./modelBrowserHtml";
 import { DiagnosticLogger } from "./diagnostics";
+import { ModelQueryRunController, type ModelQueryRunOutcome, type ModelQueryRunSnapshot } from "./modelQueryRunController";
 import type { WorkbenchOverlay, WorkbenchOverlayGeometry } from "./workbenchOverlay";
 
 interface IncomingMessage {
@@ -49,14 +50,20 @@ export class ModelQueryConsole implements vscode.Disposable {
   private draftCode = "";
   private lastCode: string | undefined;
   private lastQueryResult: { result?: BackendModelQueryResult; source: string } | undefined;
-  private queryRequestId = 0;
+  private readonly queryRun: ModelQueryRunController;
   private nextOffset: number | null = null;
   private pageSize = PAGE_SIZE;
   private current: { app: string; model: string } | undefined;
   private columns: BackendModelColumn[] = [];
 
-  /** Stores the extension path and the model data source. */
-  constructor(private readonly extensionPath: string, private readonly source: ModelDataSource, private readonly logger?: DiagnosticLogger) {}
+  /** Stores the extension path and source, and initializes the query lifecycle with the live user setting. */
+  constructor(private readonly extensionPath: string, private readonly source: ModelDataSource, private readonly logger?: DiagnosticLogger) {
+    this.queryRun = new ModelQueryRunController({
+      interrupt: (reason) => this.source.interruptModelQuery(reason),
+      onChange: (snapshot) => this.postQueryRunState(snapshot),
+      timeoutMs: () => queryTimeoutMs()
+    });
+  }
 
   /** Registers the run-query command and runtime change refresh. */
   activate(context: vscode.ExtensionContext): void {
@@ -73,6 +80,7 @@ export class ModelQueryConsole implements vscode.Disposable {
   dispose(): void {
     const panel = this.panel;
     this.closePanel();
+    this.queryRun.dispose();
     panel?.dispose();
     for (const disposable of this.disposables) {
       disposable.dispose();
@@ -97,7 +105,7 @@ export class ModelQueryConsole implements vscode.Disposable {
     });
     this.panelActive = this.panel.active;
     this.panelVisible = this.panel.visible;
-    this.panel.webview.html = modelBrowserHtml(this.panel.webview, this.extensionPath);
+    this.panel.webview.html = modelBrowserHtml(this.panel.webview, this.extensionPath, { mode: "query" });
     this.panelDisposables.push(
       this.panel.onDidDispose(() => this.closePanel()),
       this.panel.onDidChangeViewState((event) => this.handleViewState(event.webviewPanel.visible, event.webviewPanel.active)),
@@ -112,7 +120,7 @@ export class ModelQueryConsole implements vscode.Disposable {
     this.panelReady = false;
     this.panelVisible = false;
     this.viewGeneration += 1;
-    this.queryRequestId += 1;
+    void this.queryRun.cancel("modelQuery.dispose");
     this.lastEditorGeometry = undefined;
     for (const disposable of this.panelDisposables.splice(0)) { disposable.dispose(); }
     this.releaseOverlay();
@@ -129,8 +137,9 @@ export class ModelQueryConsole implements vscode.Disposable {
       if (panel !== this.panel) { return; }
       this.panelReady = true;
       this.post({ code: this.draftCode, type: "queryMode" });
+      this.postQueryRunState(this.queryRun.snapshot);
       this.postTransport();
-      if (this.lastCode) {
+      if (this.lastCode && !this.queryRun.active) {
         await this.runQuery(this.lastCode, true);
       }
     } else if (message.type === "queryEditorGeometry" && isOverlayGeometry(message.rect)) {
@@ -143,6 +152,8 @@ export class ModelQueryConsole implements vscode.Disposable {
     } else if (message.type === "runQuery" && typeof message.code === "string") {
       const code = message.useOverlay === false ? message.code : await this.currentQueryText(message.code);
       await this.runQuery(code, true, true);
+    } else if (message.type === "interruptQuery") {
+      await this.queryRun.cancel("modelQuery.cancel");
     } else if (message.type === "loadMore") {
       if (this.lastCode && this.nextOffset !== null) {
         await this.runQuery(this.lastCode, false);
@@ -151,6 +162,8 @@ export class ModelQueryConsole implements vscode.Disposable {
       if (this.lastCode) {
         await this.runQuery(this.lastCode, true);
       }
+    } else if (message.type === "openConsole") {
+      await vscode.commands.executeCommand("djangoShell.openConsole");
     } else if (message.type === "commitEdits") {
       await this.commitEdits(message);
     } else if (message.type === "commitRelated") {
@@ -168,29 +181,35 @@ export class ModelQueryConsole implements vscode.Disposable {
     }
   }
 
-  /** Runs the user's ORM code and posts a synthesized schema (on reset) plus the tabulated rows. */
-  private async runQuery(code: string, reset: boolean, recordExecution = false): Promise<void> {
+  /** Runs the user's ORM code through the lifecycle controller and applies only the current successful result. */
+  private async runQuery(code: string, reset: boolean, recordExecution = false): Promise<boolean> {
     const panel = this.panel;
-    if (!panel) {
-      return;
+    if (!panel || this.queryRun.active) {
+      return false;
     }
-    const requestId = ++this.queryRequestId;
     if (recordExecution) { this.draftCode = code; this.lastCode = code; }
-    this.post({ type: "queryStarted" });
-    if (reset) { this.lastQueryResult = { source: code }; this.overlay?.setQueryResult(undefined, code); }
     const offset = reset ? 0 : this.nextOffset ?? 0;
-    this.nextOffset = null;
-    const result = await this.source.modelQuery({ code, limit: this.pageSize, offset });
-    if (panel !== this.panel || requestId !== this.queryRequestId) {
-      return;
+    const pending = this.queryRun.run(() => this.source.modelQuery({ code, limit: this.pageSize, offset }));
+    if (!this.queryRun.active) {
+      return false;
     }
+    this.post({ type: "queryStarted" });
+    const outcome = await pending;
+    if (panel !== this.panel || outcome.kind === "busy") {
+      return outcome.kind !== "busy";
+    }
+    if (outcome.kind !== "succeeded") {
+      this.handleQueryOutcome(outcome);
+      return true;
+    }
+    const result = outcome.value;
     if (reset && this.overlay) { void this.updateOverlayPrelude(this.overlay); }
     this.logger?.log("model.query.run", { editable: result.editable, ok: result.ok, rows: result.rows.length });
     if (!result.ok) {
       this.nextOffset = null;
       this.current = undefined;
       this.post({ message: result.error ?? "Query failed.", type: "error" });
-      return;
+      return true;
     }
     this.nextOffset = result.hasMore ? offset + this.pageSize : null;
     this.current = result.app && result.model ? { app: result.app, model: result.model } : undefined;
@@ -201,24 +220,36 @@ export class ModelQueryConsole implements vscode.Disposable {
       this.post({ schema: { app: result.app ?? "", columns: result.columns, label: resultLabel, model: result.model ?? "query", ok: true, pk: result.pk ?? "", relations: result.relations, table: "" }, type: "schema" });
     }
     this.post({ append: !reset, rows: result, type: "rows" });
+    return true;
   }
 
   /** Runs the complete query overlay document, preserving query-console whole-buffer semantics. */
   private async runCurrentQuery(): Promise<boolean> {
-    if (!this.panel || !this.panelActive) { return false; }
+    if (!this.panel || !this.panelActive || this.queryRun.active) { return false; }
     const code = await this.currentQueryText(this.draftCode);
     if (!code.trim()) { return false; }
-    await this.runQuery(code, true, true);
-    return true;
+    return this.runQuery(code, true, true);
   }
 
   /** Accepts a whole-document submit sent directly by the live query overlay bridge. */
   private async runOverlaySubmission(code: string): Promise<boolean> {
-    if (!this.panel || !this.panelActive || !code.trim()) { return false; }
+    if (!this.panel || !this.panelActive || !code.trim() || this.queryRun.active) { return false; }
     this.inputAuthority = "overlay";
     this.draftCode = code;
-    await this.runQuery(code, true, true);
-    return true;
+    return this.runQuery(code, true, true);
+  }
+
+  /** Maps a non-success lifecycle result to the existing webview error surface. */
+  private handleQueryOutcome(outcome: Exclude<ModelQueryRunOutcome<BackendModelQuery>, { kind: "busy" } | { kind: "succeeded"; value: BackendModelQuery }>): void {
+    if (outcome.kind === "failed") {
+      this.post({ message: outcome.error || "Query failed.", type: "error" });
+      return;
+    }
+    if (outcome.kind === "timedOut") {
+      this.post({ message: outcome.error ?? "Query timed out after 30 seconds and Django Shell requested an interrupt.", type: "error" });
+      return;
+    }
+    this.post({ message: outcome.error ?? "Query interrupt requested.", type: "error" });
   }
 
   /** Returns text from whichever query surface is currently authoritative. */
@@ -426,15 +457,28 @@ export class ModelQueryConsole implements vscode.Disposable {
   /** Re-runs the last query when the attached runtime changes. */
   private handleRuntimeChange(): void {
     if (this.overlay) { void this.updateOverlayPrelude(this.overlay); }
-    if (this.panel && this.panelReady && this.lastCode) {
-      void this.runQuery(this.lastCode, true);
+    this.nextOffset = null;
+    const rerun = (): void => {
+      if (this.panel && this.panelReady && this.lastCode && !this.queryRun.active) {
+        void this.runQuery(this.lastCode, true);
+      }
+    };
+    if (this.queryRun.active) {
+      void this.queryRun.cancel("modelQuery.cancel").then(rerun);
+      return;
     }
+    rerun();
   }
 
   /** Posts the active transport and the user's transport preference to the webview. */
   private postTransport(): void {
     const transport = this.source.modelTransportInfo();
     this.post({ active: transport.active, mode: transport.mode, type: "transport" });
+  }
+
+  /** Sends the lifecycle snapshot to the webview, including a stable request identifier for future query controls. */
+  private postQueryRunState(snapshot: ModelQueryRunSnapshot): void {
+    this.post({ snapshot, type: "queryRunState" });
   }
 
   /** Posts one message to the webview when a panel is open. */
@@ -447,4 +491,10 @@ export class ModelQueryConsole implements vscode.Disposable {
 function isOverlayGeometry(value: unknown): value is WorkbenchOverlayGeometry {
   const rect = value as WorkbenchOverlayGeometry | undefined;
   return !!rect && Number.isFinite(rect.left) && Number.isFinite(rect.top) && Number.isFinite(rect.width) && Number.isFinite(rect.height) && rect.width > 40 && rect.height > 40;
+}
+
+/** Returns the configured hard timeout, treating malformed values as the documented 30-second default. */
+function queryTimeoutMs(): number {
+  const configured = vscode.workspace.getConfiguration("djangoShell.modelBrowser").get<number>("queryTimeoutMs", 30000);
+  return Number.isFinite(configured) && configured >= 0 ? configured : 30000;
 }
