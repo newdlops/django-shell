@@ -244,6 +244,12 @@ function button(label, className, title) {
   node.title = title || "";
   return node;
 }
+function icon(name) {
+  const node = document.createElement("span");
+  node.className = `codicon codicon-${name}`;
+  node.setAttribute("aria-hidden", "true");
+  return node;
+}
 function scalarSuggestions(items) {
   const values = [];
   const seen = /* @__PURE__ */ new Set();
@@ -333,7 +339,9 @@ function openArrayEditor(td, column, start, host) {
   const items = JSON.parse(JSON.stringify(parsed.items));
   const shape = arrayShape(items);
   const suggestions = scalarSuggestions(items);
-  const suggestionsId = `arrayedit-values-${editorSequence += 1}`;
+  const editorId = editorSequence += 1;
+  const suggestionsId = `arrayedit-values-${editorId}`;
+  const previousFocus = document.activeElement;
   const backdrop = element("div", "arrayedit-backdrop");
   const panel = element("section", "arrayedit-panel");
   panel.setAttribute("role", "dialog");
@@ -341,12 +349,18 @@ function openArrayEditor(td, column, start, host) {
   panel.setAttribute("aria-label", `Edit ${column.name || column.attname || "list"}`);
   const header = element("header", "arrayedit-head");
   const heading = element("div", "arrayedit-title", column.name || column.attname || "List");
+  heading.id = `arrayedit-title-${editorId}`;
+  panel.setAttribute("aria-labelledby", heading.id);
   const count = element("span", "arrayedit-count");
-  const closeButton = button("\u2715", "arrayedit-close", "Cancel list editing");
+  count.setAttribute("aria-live", "polite");
+  const closeButton = button("", "arrayedit-close", "Cancel list editing");
+  closeButton.appendChild(icon("close"));
+  closeButton.setAttribute("aria-label", "Cancel list editing");
   header.append(heading, count, closeButton);
   const note = element("div", "arrayedit-note");
   const scroll = element("div", "arrayedit-scroll");
   const table = element("table", "arrayedit-table");
+  table.setAttribute("aria-label", `${column.name || column.attname || "List"} items`);
   const footer = element("footer", "arrayedit-foot");
   const addButton = button("+ Add item", "secondary", "Append a list item");
   const nullButton = column.null ? button("Set null", "secondary", "Replace this list with null") : null;
@@ -386,6 +400,7 @@ function openArrayEditor(td, column, start, host) {
     } else {
       host.stage(next);
     }
+    previousFocus?.focus?.();
   }
   function removeRow(index) {
     items.splice(index, 1);
@@ -404,15 +419,25 @@ function openArrayEditor(td, column, start, host) {
     table.textContent = "";
     const thead = element("thead");
     const headRow = element("tr");
-    headRow.appendChild(element("th", "arrayedit-index", "#"));
+    const indexHead = element("th", "arrayedit-index", "#");
+    indexHead.scope = "col";
+    indexHead.setAttribute("aria-label", "Item number");
+    headRow.appendChild(indexHead);
     if (shape.kind === "object") {
       for (const key of shape.keys) {
-        headRow.appendChild(element("th", "", key));
+        const keyHead = element("th", "", key);
+        keyHead.scope = "col";
+        headRow.appendChild(keyHead);
       }
     } else {
-      headRow.appendChild(element("th", "", "Value"));
+      const valueHead = element("th", "", "Value");
+      valueHead.scope = "col";
+      headRow.appendChild(valueHead);
     }
-    headRow.appendChild(element("th", "arrayedit-actions", ""));
+    const actionsHead = element("th", "arrayedit-actions", "");
+    actionsHead.scope = "col";
+    actionsHead.setAttribute("aria-label", "Row actions");
+    headRow.appendChild(actionsHead);
     thead.appendChild(headRow);
     table.appendChild(thead);
     const tbody = element("tbody");
@@ -432,6 +457,7 @@ function openArrayEditor(td, column, start, host) {
       }
       const actions = element("td", "arrayedit-actions");
       const remove = button("\u2212", "arrayedit-remove", `Delete row ${index + 1}`);
+      remove.setAttribute("aria-label", `Delete row ${index + 1}`);
       remove.addEventListener("click", () => removeRow(index));
       actions.appendChild(remove);
       tr.appendChild(actions);
@@ -452,7 +478,23 @@ function openArrayEditor(td, column, start, host) {
     }
   }
   function onKey(event) {
-    if (event.key === "Escape") {
+    if (event.key === "Tab") {
+      const focusable = [...panel.querySelectorAll("button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled])")];
+      if (!focusable.length) {
+        event.preventDefault();
+        panel.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    } else if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
       finish(void 0);
@@ -497,25 +539,26 @@ function repaintPins(gridwrap, state2) {
   if (!headRow) {
     return;
   }
-  const lead = headRow.children[0] && headRow.children[0].classList.contains("rownum") ? 1 : 0;
   const lefts = {};
-  let offset = lead && headRow.children[0] ? headRow.children[0].offsetWidth : 0;
-  for (let i = 0; i < state2.columns.length; i += 1) {
-    if (state2.pinned.has(state2.columns[i].attname)) {
-      lefts[i] = offset;
-      offset += headRow.children[i + lead] ? headRow.children[i + lead].offsetWidth : 0;
+  let offset = headRow.querySelector(".rownum")?.offsetWidth || 0;
+  const headerCells = [...headRow.querySelectorAll("[data-key]")];
+  for (const cell of headerCells) {
+    const key = cell.dataset.key;
+    if (key && state2.pinned.has(key)) {
+      lefts[key] = offset;
+      offset += cell.offsetWidth;
     }
   }
-  for (let i = 0; i < state2.columns.length; i += 1) {
-    setPin(headRow.children[i + lead], lefts[i]);
+  for (const cell of headerCells) {
+    setPin(cell, lefts[cell.dataset.key]);
   }
   if (body) {
     for (const row of body.children) {
       if (!row.dataset.pk) {
         continue;
       }
-      for (let i = 0; i < state2.columns.length; i += 1) {
-        setPin(row.children[i + lead], lefts[i]);
+      for (const cell of row.querySelectorAll("[data-key]")) {
+        setPin(cell, lefts[cell.dataset.key]);
       }
     }
   }
@@ -847,6 +890,7 @@ function createEditor(ctx) {
     if (!pendingCount()) {
       return;
     }
+    ctx.onCommitStart?.(pendingCount());
     ctx.post({ changes: [...pending.values()], type: "commitEdits" });
   }
   function discardEdits() {
@@ -864,11 +908,13 @@ function createEditor(ctx) {
       activeArrayEditor?.cancel();
       pending.clear();
       ctx.onChange(0);
-      ctx.notify(`Committed ${data.saved} row${data.saved === 1 ? "" : "s"}.`);
+      ctx.onCommitEnd?.();
+      ctx.notify(`Saved ${data.saved} changes.`);
       ctx.reload();
       return;
     }
-    ctx.notify(`Commit failed (nothing saved): ${summarize(data)}`);
+    ctx.onCommitEnd?.();
+    ctx.notify(`Commit failed: ${summarize(data)}`);
   }
   function summarize(data) {
     if (data.error) {
@@ -966,7 +1012,25 @@ function requestQueryOverlay(show) {
 }
 
 // media/gridResize.js
-var MIN_WIDTH = 48;
+var MIN_WIDTH = 72;
+var MAX_WIDTH = 480;
+function clampWidth(width) {
+  return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Math.round(width)));
+}
+function announceWidth(th, width) {
+  const handle = th.querySelector(".colresize");
+  handle?.setAttribute("aria-valuenow", String(width));
+  handle?.setAttribute("aria-valuetext", `${width} pixels`);
+}
+function setWidth(th, width, state2, onResize) {
+  const next = clampWidth(width);
+  th.style.width = `${next}px`;
+  announceWidth(th, next);
+  if (th.dataset.key) {
+    state2.widths[th.dataset.key] = next;
+  }
+  onResize?.();
+}
 function freezeLayout(table, state2) {
   if (table.dataset.fixed === "1") {
     return;
@@ -975,6 +1039,7 @@ function freezeLayout(table, state2) {
     const key = th.dataset.key;
     const width = state2.widths[key] || Math.round(th.getBoundingClientRect().width);
     th.style.width = `${width}px`;
+    announceWidth(th, width);
     if (key) {
       state2.widths[key] = width;
     }
@@ -988,6 +1053,7 @@ function applyStoredWidths(table, state2) {
     const width = state2.widths[th.dataset.key];
     if (width) {
       th.style.width = `${width}px`;
+      announceWidth(th, width);
       applied = true;
     }
   }
@@ -1007,19 +1073,11 @@ function makeResizable(table, state2, onResize) {
     event.stopPropagation();
     freezeLayout(table, state2);
     const th = handle.closest("th");
-    const key = th.dataset.key;
     const startX = event.clientX;
     const startWidth = th.getBoundingClientRect().width;
     document.body.style.cursor = "col-resize";
     const move = (moveEvent) => {
-      const width = Math.max(MIN_WIDTH, Math.round(startWidth + (moveEvent.clientX - startX)));
-      th.style.width = `${width}px`;
-      if (key) {
-        state2.widths[key] = width;
-      }
-      if (onResize) {
-        onResize();
-      }
+      setWidth(th, startWidth + (moveEvent.clientX - startX), state2, onResize);
     };
     const up = () => {
       document.removeEventListener("mousemove", move);
@@ -1028,6 +1086,22 @@ function makeResizable(table, state2, onResize) {
     };
     document.addEventListener("mousemove", move);
     document.addEventListener("mouseup", up);
+  });
+  table.tHead.addEventListener("keydown", (event) => {
+    const handle = event.target.closest(".colresize");
+    if (!handle) {
+      return;
+    }
+    const th = handle.closest("th");
+    const current = Number(state2.widths[th.dataset.key] || th.getBoundingClientRect().width);
+    const amount = event.shiftKey ? 32 : 8;
+    const next = event.key === "ArrowLeft" ? current - amount : event.key === "ArrowRight" ? current + amount : event.key === "Home" ? MIN_WIDTH : event.key === "End" ? MAX_WIDTH : void 0;
+    if (next === void 0) {
+      return;
+    }
+    event.preventDefault();
+    freezeLayout(table, state2);
+    setWidth(th, next, state2, onResize);
   });
 }
 
@@ -1050,7 +1124,7 @@ function paintRelatedCell(td, el2, renderValue2) {
   td.appendChild(renderValue2(td._cell));
   if (column.relation && rawOf(td._cell) !== null && rawOf(td._cell) !== void 0) {
     td.appendChild(document.createTextNode(" "));
-    td.appendChild(el2("button", { className: "linkbtn", dataset: { act: "open", target: column.relation.target, val: String(rawOf(td._cell)) }, title: `Open ${column.relation.target} filtered to this row` }, "\u2197"));
+    td.appendChild(el2("button", { ariaLabel: `Open ${column.relation.target} filtered to this row`, className: "linkbtn", dataset: { act: "open", target: column.relation.target, val: String(rawOf(td._cell)) }, title: `Open ${column.relation.target} filtered to this row` }, el2("span", { ariaHidden: "true", className: "codicon codicon-open-preview" })));
   }
 }
 function buildEditableRelatedTable(result, deps) {
@@ -1126,19 +1200,165 @@ function buildEditableRelatedTable(result, deps) {
   return wrap;
 }
 
+// media/gridViewport.js
+var DEFAULT_COLUMN_WIDTH = 160;
+var DEFAULT_ROW_HEIGHT = 24;
+var DOM_CELL_BUDGET = 1200;
+var MAX_COLUMN_WIDTH = 480;
+var MIN_COLUMN_WIDTH = 72;
+var ROW_OVERSCAN = 8;
+var COLUMN_OVERSCAN = 2;
+function columnWidth(key, widths) {
+  const value = Number(widths && widths[key]);
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_COLUMN_WIDTH;
+  }
+  return Math.max(MIN_COLUMN_WIDTH, Math.min(MAX_COLUMN_WIDTH, Math.round(value)));
+}
+function logicalColumns(columns, relations, widths) {
+  const fields = (columns || []).map((column) => ({
+    key: column.attname,
+    kind: "field",
+    source: column,
+    width: columnWidth(column.attname, widths)
+  }));
+  const relationColumns = (relations || []).map((relation) => ({
+    key: `rel:${relation.name}`,
+    kind: "relation",
+    source: relation,
+    width: columnWidth(`rel:${relation.name}`, widths)
+  }));
+  return [...fields, ...relationColumns];
+}
+function calculateColumnWindow(columns, pinnedKeys, scrollLeft, viewportWidth) {
+  const available = columns || [];
+  const byKey = new Map(available.map((column) => [column.key, column]));
+  const pinned = [];
+  for (const key of pinnedKeys || []) {
+    const column = byKey.get(key);
+    if (column?.kind === "field") {
+      pinned.push(column);
+    }
+  }
+  const pinnedKeySet = new Set(pinned.map((column) => column.key));
+  const scrollable = available.filter((column) => !pinnedKeySet.has(column.key));
+  const width = Math.max(1, Number(viewportWidth) || 1);
+  let before = 0;
+  let first = 0;
+  while (first < scrollable.length && before + scrollable[first].width <= scrollLeft) {
+    before += scrollable[first].width;
+    first += 1;
+  }
+  let visibleEnd = first;
+  let covered = before;
+  const target = scrollLeft + width;
+  while (visibleEnd < scrollable.length && covered < target) {
+    covered += scrollable[visibleEnd].width;
+    visibleEnd += 1;
+  }
+  const start = Math.max(0, first - COLUMN_OVERSCAN);
+  const end = Math.min(scrollable.length, visibleEnd + COLUMN_OVERSCAN);
+  const leftSpacerWidth = scrollable.slice(0, start).reduce((sum, column) => sum + column.width, 0);
+  const visible = scrollable.slice(start, end);
+  const rightSpacerWidth = scrollable.slice(end).reduce((sum, column) => sum + column.width, 0);
+  const pinnedWidth = pinned.reduce((sum, column) => sum + column.width, 0);
+  const totalWidth = 46 + pinnedWidth + leftSpacerWidth + visible.reduce((sum, column) => sum + column.width, 0) + rightSpacerWidth;
+  const logicalColumnIndices = Object.fromEntries([...pinned, ...scrollable].map((column, index) => [column.key, index + 2]));
+  return { end, leftSpacerWidth, logicalColumnIndices, pinned, rightSpacerWidth, scrollable, start, totalWidth, visible };
+}
+function calculateRowWindow({ maxRows = Number.POSITIVE_INFINITY, rowCount, rowHeight = DEFAULT_ROW_HEIGHT, scrollTop, viewportHeight }) {
+  const count = Math.max(0, Number(rowCount) || 0);
+  const height = Math.max(1, Number(rowHeight) || DEFAULT_ROW_HEIGHT);
+  const rowLimit = Number.isFinite(Number(maxRows)) ? Math.max(1, Number(maxRows)) : Number.POSITIVE_INFINITY;
+  const first = Math.max(0, Math.floor(Math.max(0, Number(scrollTop) || 0) / height) - ROW_OVERSCAN);
+  const visible = Math.ceil(Math.max(0, Number(viewportHeight) || 0) / height) + ROW_OVERSCAN * 2;
+  const end = Math.min(count, first + Math.max(1, Math.min(visible, rowLimit)));
+  return { bottomSpacerHeight: Math.max(0, count - end) * height, end, first, topSpacerHeight: first * height };
+}
+function createGridViewport(ctx) {
+  let columns = [];
+  let snapshot = calculateColumnWindow(columns, ctx.pinned(), 0, ctx.scroller.clientWidth);
+  let scheduled = false;
+  function schedule() {
+    if (scheduled) {
+      return;
+    }
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      refresh();
+    });
+  }
+  function refresh(force = false) {
+    const next = calculateColumnWindow(columns, ctx.pinned(), ctx.scroller.scrollLeft, ctx.scroller.clientWidth);
+    const changed = force || next.start !== snapshot.start || next.end !== snapshot.end || next.pinned.map((column) => column.key).join(",") !== snapshot.pinned.map((column) => column.key).join(",") || next.totalWidth !== snapshot.totalWidth;
+    snapshot = next;
+    if (changed) {
+      ctx.onChange(snapshot);
+    }
+    return snapshot;
+  }
+  function offsetFor(key) {
+    let offset = 0;
+    for (const column of snapshot.scrollable) {
+      if (column.key === key) {
+        return offset;
+      }
+      offset += column.width;
+    }
+    return void 0;
+  }
+  function scrollToKey(key) {
+    if (!key || snapshot.pinned.some((column) => column.key === key)) {
+      return false;
+    }
+    const offset = offsetFor(key);
+    if (offset === void 0) {
+      return false;
+    }
+    const target = Math.max(0, offset - Math.max(0, (ctx.scroller.clientWidth - columnWidth(key, ctx.widths())) / 2));
+    ctx.scroller.scrollLeft = target;
+    refresh(true);
+    return true;
+  }
+  ctx.scroller.addEventListener("scroll", schedule, { passive: true });
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => refresh(true)).observe(ctx.scroller);
+  }
+  return {
+    /** Replaces logical columns and forces an initial render. */
+    setColumns(next) {
+      columns = next || [];
+      refresh(true);
+    },
+    /** Forces a geometry refresh after pinning or resizing. */
+    refresh,
+    /** Returns the current rendered column band. */
+    snapshot() {
+      return snapshot;
+    },
+    /** Scrolls an offscreen column into view. */
+    scrollToKey,
+    /** Returns whether row virtualization is required for the current logical grid. */
+    shouldVirtualizeRows(rowCount) {
+      return rowCount > 80 || rowCount * (columns.length + 1) > 900;
+    }
+  };
+}
+
 // media/gridVirtual.js
-var OVERSCAN = 12;
 var RENDER_ALL_MAX = 80;
-var DEFAULT_ROW_H = 24;
 function createVirtualRows(ctx) {
   let rows = [];
-  let rowH = DEFAULT_ROW_H;
+  let rowH = DEFAULT_ROW_HEIGHT;
   let measured = false;
   let renderedFirst = 0;
   let renderedEnd = 0;
-  function isEditing() {
+  function settleActiveEditor() {
     const active = document.activeElement;
-    return Boolean(active && ctx.scroller.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
+    if (active && ctx.scroller.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) {
+      active.blur();
+    }
   }
   function spacer(height) {
     const tr = document.createElement("tr");
@@ -1150,11 +1370,7 @@ function createVirtualRows(ctx) {
     return tr;
   }
   function windowRange() {
-    const top = ctx.scroller.scrollTop;
-    const viewH = ctx.scroller.clientHeight || 0;
-    const first = Math.max(0, Math.floor(top / rowH) - OVERSCAN);
-    const count = Math.ceil(viewH / rowH) + OVERSCAN * 2;
-    return { end: Math.min(rows.length, first + count), first };
+    return calculateRowWindow({ maxRows: ctx.maxRows?.(), rowCount: rows.length, rowHeight: rowH, scrollTop: ctx.scroller.scrollTop, viewportHeight: ctx.scroller.clientHeight || 0 });
   }
   function paintWindow(first, end) {
     const body = ctx.getBody();
@@ -1207,8 +1423,11 @@ function createVirtualRows(ctx) {
       ctx.onRender();
     }
   }
+  function needsWindowing() {
+    return rows.length > RENDER_ALL_MAX || Boolean(ctx.shouldWindow?.(rows.length));
+  }
   function render() {
-    if (rows.length <= RENDER_ALL_MAX) {
+    if (!needsWindowing()) {
       paintAll();
     } else {
       const range = windowRange();
@@ -1216,7 +1435,7 @@ function createVirtualRows(ctx) {
     }
   }
   function onScroll() {
-    if (rows.length <= RENDER_ALL_MAX || isEditing()) {
+    if (!needsWindowing()) {
       return;
     }
     const top = ctx.scroller.scrollTop;
@@ -1224,6 +1443,7 @@ function createVirtualRows(ctx) {
     const needFirst = Math.floor(top / rowH);
     const needEnd = Math.ceil((top + viewH) / rowH);
     if (needFirst < renderedFirst || needEnd > renderedEnd) {
+      settleActiveEditor();
       const range = windowRange();
       paintWindow(range.first, range.end);
     }
@@ -1231,7 +1451,7 @@ function createVirtualRows(ctx) {
   ctx.scroller.addEventListener("scroll", onScroll, { passive: true });
   if (typeof ResizeObserver !== "undefined") {
     new ResizeObserver(() => {
-      if (rows.length > RENDER_ALL_MAX) {
+      if (needsWindowing()) {
         render();
       }
     }).observe(ctx.scroller);
@@ -1258,17 +1478,535 @@ function createVirtualRows(ctx) {
   };
 }
 
+// media/gridKeyboard.js
+function installGridKeyboard(table, ctx) {
+  function activate(cell) {
+    for (const peer of table.querySelectorAll('[role="gridcell"][tabindex="0"]')) {
+      peer.tabIndex = -1;
+    }
+    cell.tabIndex = 0;
+  }
+  function focus(rowIndex, key) {
+    const selector = `tr[data-row-index="${rowIndex}"] [role="gridcell"][data-key="${CSS.escape(key)}"]`;
+    const cell = table.querySelector(selector);
+    if (cell) {
+      activate(cell);
+      cell.focus();
+      return;
+    }
+    ctx.reveal(rowIndex, key);
+  }
+  table.addEventListener("focusin", (event) => {
+    const cell = event.target.closest('[role="gridcell"]');
+    if (cell) {
+      activate(cell);
+    }
+  });
+  table.addEventListener("keydown", (event) => {
+    if (event.target.matches("input,select,textarea,button")) {
+      return;
+    }
+    const cell = event.target.closest('[role="gridcell"]');
+    if (!cell) {
+      return;
+    }
+    const row = cell.closest("tr[data-row-index]");
+    const rowIndex = Number(row?.dataset.rowIndex);
+    const key = cell.dataset.key;
+    const keys = ctx.logicalKeys();
+    const columnIndex = keys.indexOf(key);
+    if (!Number.isFinite(rowIndex) || columnIndex < 0) {
+      return;
+    }
+    let nextRow = rowIndex;
+    let nextKey = key;
+    if (event.key === "ArrowLeft") {
+      nextKey = keys[Math.max(0, columnIndex - 1)];
+    } else if (event.key === "ArrowRight") {
+      nextKey = keys[Math.min(keys.length - 1, columnIndex + 1)];
+    } else if (event.key === "ArrowUp") {
+      nextRow = Math.max(0, rowIndex - 1);
+    } else if (event.key === "ArrowDown") {
+      nextRow = Math.min(ctx.rowCount() - 1, rowIndex + 1);
+    } else if (event.key === "Home") {
+      nextKey = keys[0];
+      nextRow = event.metaKey || event.ctrlKey ? 0 : rowIndex;
+    } else if (event.key === "End") {
+      nextKey = keys[keys.length - 1];
+      nextRow = event.metaKey || event.ctrlKey ? Math.max(0, ctx.rowCount() - 1) : rowIndex;
+    } else if (event.key === "PageUp") {
+      nextRow = Math.max(0, rowIndex - Math.max(1, ctx.viewportRows?.() ?? 10));
+    } else if (event.key === "PageDown") {
+      nextRow = Math.min(ctx.rowCount() - 1, rowIndex + Math.max(1, ctx.viewportRows?.() ?? 10));
+    } else if (event.key === "Escape" && ctx.closeDetail?.()) {
+      event.preventDefault();
+      return;
+    } else if (event.key === "Enter" || event.key === "F2") {
+      event.preventDefault();
+      ctx.activate(cell);
+      return;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    focus(nextRow, nextKey);
+  });
+}
+
+// media/gridDiagnostics.js
+function reportGridRender({ logicalRows, post, snapshot, startedAt, table }) {
+  const renderedCells = table.querySelectorAll('[role="gridcell"]').length;
+  post({
+    grid: {
+      logicalColumns: snapshot.pinned.length + snapshot.scrollable.length + 1,
+      logicalRows,
+      ms: Math.round((performance.now() - startedAt) * 10) / 10,
+      renderedCells,
+      renderedColumns: snapshot.pinned.length + snapshot.visible.length + 1,
+      renderedRows: table.querySelectorAll("tbody tr[data-row-index]").length
+    },
+    type: "gridRendered"
+  });
+}
+
+// media/modelBrowserIcons.js
+function codicon(name) {
+  const icon2 = document.createElement("span");
+  icon2.className = `codicon codicon-${name}`;
+  icon2.setAttribute("aria-hidden", "true");
+  return icon2;
+}
+
+// media/gridRenderer.js
+function createGridHeaderRenderer({ el: el2, relationKindLabel: relationKindLabel2, relationModelName: relationModelName2, state: state2 }) {
+  function buildHead(snapshot) {
+    const head = el2("thead", {});
+    const row = el2("tr", { ariaRowIndex: "1", role: "row" });
+    row.appendChild(el2("th", { ariaColIndex: "1", ariaLabel: "Row number", className: "rownum", role: "columnheader", title: "Row number" }, "#"));
+    for (const descriptor of snapshot.pinned) {
+      appendHeaderCell(row, descriptor, snapshot);
+    }
+    appendGridSpacer(row, snapshot.leftSpacerWidth, "left");
+    for (const descriptor of snapshot.visible) {
+      appendHeaderCell(row, descriptor, snapshot);
+    }
+    appendGridSpacer(row, snapshot.rightSpacerWidth, "right");
+    head.appendChild(row);
+    return head;
+  }
+  function appendHeaderCell(row, descriptor, snapshot) {
+    const ariaColIndex = String(snapshot.logicalColumnIndices?.[descriptor.key] ?? 1);
+    if (descriptor.kind === "relation") {
+      const relation = descriptor.source;
+      const th2 = el2("th", { ariaColIndex, className: "relcol", dataset: { key: descriptor.key }, role: "columnheader", title: `${relationKindLabel2(relation.kind)} \u2192 ${relation.target}` }, document.createTextNode(relation.name), el2("span", { className: "coltype" }, `${relationKindLabel2(relation.kind)} (${relationModelName2(relation.target)})`), el2("span", { ariaLabel: `Resize ${relation.name} column`, ariaOrientation: "vertical", ariaValueMax: 480, ariaValueMin: 72, ariaValueNow: descriptor.width, className: "colresize", dataset: { key: descriptor.key }, role: "separator", tabIndex: 0, title: "Drag to resize" }));
+      th2.style.width = `${descriptor.width}px`;
+      row.appendChild(th2);
+      return;
+    }
+    const column = descriptor.source;
+    const sortable = !column.computed;
+    const headClass = column.annotation ? "annotation" : column.computed ? "computed" : "sortable";
+    const headTitle = sortable ? `Sort by ${column.name} (${column.type})` : `${column.name} (computed @property \u2014 read-only)`;
+    const order = state2.order.find((term) => term.field === column.attname);
+    const th = el2("th", { ariaColIndex, ariaSort: sortable ? order ? order.desc ? "descending" : "ascending" : "none" : void 0, className: headClass, dataset: { key: column.attname }, role: "columnheader", title: headTitle });
+    th.style.width = `${descriptor.width}px`;
+    const pinned = state2.pinned.has(column.attname);
+    th.appendChild(el2("button", { ariaLabel: pinned ? `Unpin ${column.attname} column` : `Pin ${column.attname} column`, className: pinned ? "pinbtn active" : "pinbtn", dataset: { act: "pin", col: column.attname }, title: pinned ? "Unpin column" : "Pin column (freeze left)" }, codicon(pinned ? "pinned" : "pin")));
+    if (column.computed) {
+      const loading = state2.computedActive.has(column.attname);
+      const cost = column.annotated ? "DB annotation \u2014 single query" : "per-row @property \u2014 N+1";
+      th.appendChild(el2("button", { ariaLabel: `${loading ? "Reload" : "Load"} ${column.attname} computed values`, className: loading ? "loadbtn active" : "loadbtn", dataset: { act: "loadComputed", field: column.attname }, title: `${loading ? "Reload" : "Load"} this column for loaded rows (${cost})` }, codicon(loading ? "refresh" : "triangle-right")));
+    }
+    if (sortable) {
+      th.appendChild(el2("button", { ariaLabel: headTitle, className: "sortbtn", dataset: { act: "sort", col: column.attname } }, column.attname));
+    } else {
+      th.appendChild(document.createTextNode(column.attname));
+    }
+    if (column.pk) {
+      th.appendChild(el2("span", { ariaLabel: "Primary key", className: "pkmark", title: "primary key" }, codicon("key")));
+    }
+    if (sortable) {
+      th.appendChild(el2("span", { className: "sortarrow", dataset: { arrow: column.attname } }, ""));
+    }
+    th.appendChild(el2("span", { className: "coltype" }, column.relation ? `\u2192 ${column.relation.target}` : column.computed ? column.annotated ? "@property \xB7 1 query" : "@property" : column.type));
+    th.appendChild(el2("span", { ariaLabel: `Resize ${column.attname} column`, ariaOrientation: "vertical", ariaValueMax: 480, ariaValueMin: 72, ariaValueNow: descriptor.width, className: "colresize", dataset: { key: descriptor.key }, role: "separator", tabIndex: 0, title: "Drag to resize" }));
+    row.appendChild(th);
+  }
+  function appendGridSpacer(row, width, side) {
+    if (!width) {
+      return;
+    }
+    const spacer = el2("th", { ariaHidden: "true", className: "gridspacer", role: "presentation" });
+    spacer.dataset.side = side;
+    spacer.style.width = `${width}px`;
+    row.appendChild(spacer);
+  }
+  return { buildHead };
+}
+
+// media/modelBrowserLogDrawer.js
+function installLogDrawer({ panel, resizeHandle, toggle, vscode: vscode2 }) {
+  if (!resizeHandle || !panel) {
+    return;
+  }
+  const savedState = vscode2.getState() || {};
+  toggleLogPanel({ open: Boolean(savedState.logOpen), panel, toggle });
+  setPanelHeight(savedState.logHeight || panel.offsetHeight || 220, resizeHandle);
+  resizeHandle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = panel.offsetHeight;
+    resizeHandle.classList.add("dragging");
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    const move = (moveEvent) => {
+      setPanelHeight(startHeight + (startY - moveEvent.clientY), resizeHandle);
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+      resizeHandle.classList.remove("dragging");
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      vscode2.setState({ ...vscode2.getState() || {}, logHeight: Math.round(panel.offsetHeight) });
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  });
+  resizeHandle.addEventListener("keydown", (event) => {
+    const maximum = maximumLogHeight();
+    const current = panel.offsetHeight || 220;
+    const step = event.shiftKey ? 64 : 16;
+    let next;
+    if (event.key === "ArrowUp") {
+      next = current + step;
+    } else if (event.key === "ArrowDown") {
+      next = current - step;
+    } else if (event.key === "Home") {
+      next = 72;
+    } else if (event.key === "End") {
+      next = maximum;
+    }
+    if (next === void 0) {
+      return;
+    }
+    event.preventDefault();
+    setPanelHeight(next, resizeHandle);
+    vscode2.setState({ ...vscode2.getState() || {}, logHeight: Math.round(clampLogHeight(next)) });
+  });
+}
+function toggleLogPanel({ open, panel, toggle }) {
+  panel.hidden = !open;
+  toggle.setAttribute("aria-expanded", String(open));
+}
+function clampLogHeight(value) {
+  return Math.max(72, Math.min(value, maximumLogHeight()));
+}
+function maximumLogHeight() {
+  return Math.max(120, Math.min(Math.floor(window.innerHeight * 0.6), window.innerHeight - 160));
+}
+function setPanelHeight(value, resizeHandle) {
+  const next = clampLogHeight(value);
+  document.documentElement.style.setProperty("--log-h", `${next}px`);
+  resizeHandle.setAttribute("aria-valuemin", "72");
+  resizeHandle.setAttribute("aria-valuemax", String(maximumLogHeight()));
+  resizeHandle.setAttribute("aria-valuenow", String(Math.round(next)));
+}
+
+// media/queryRunUi.js
+function createQueryRunUi(ctx) {
+  const run = document.getElementById("runQuery");
+  const interrupt = document.getElementById("interruptQuery");
+  const openConsole = document.getElementById("openQueryConsole");
+  const guarded = ["transport", "reload", "more"].map((id) => document.getElementById(id)).filter(Boolean);
+  let snapshot;
+  let timer = 0;
+  let lastSecond = -1;
+  let announcedState = "";
+  function stop() {
+    if (timer) {
+      clearInterval(timer);
+      timer = 0;
+    }
+  }
+  function text() {
+    if (!snapshot) {
+      return "";
+    }
+    const seconds = Math.max(0, Math.floor((Date.now() - (snapshot.startedAt || Date.now())) / 1e3));
+    if (snapshot.state === "idle") {
+      return "Ready to run a Django ORM query.";
+    }
+    if (snapshot.state === "running") {
+      return `Running query \xB7 ${seconds}s`;
+    }
+    if (snapshot.state === "slow") {
+      return `Still running in the live Django shell \xB7 ${seconds}s`;
+    }
+    if (snapshot.state === "cancelling") {
+      return "Interrupting query\u2026";
+    }
+    if (snapshot.state === "timedOut") {
+      return `Query interrupted after ${Math.round((snapshot.timeoutMs || 0) / 1e3)}s.`;
+    }
+    if (snapshot.state === "cancelled") {
+      return snapshot.error ? "Interrupt could not be confirmed. Open Django Shell and use Restart Kernel." : "Query interrupted.";
+    }
+    return snapshot.error || "";
+  }
+  function render(next) {
+    snapshot = next;
+    const active = ["running", "slow", "cancelling"].includes(next?.state);
+    document.querySelector(".app")?.setAttribute("aria-busy", String(active));
+    run.disabled = active;
+    run.textContent = ["failed", "timedOut"].includes(next?.state) ? "Retry" : "Run query";
+    interrupt.hidden = !active;
+    interrupt.disabled = next?.state === "cancelling";
+    interrupt.setAttribute("aria-hidden", String(!active));
+    if (openConsole) {
+      const needsRecovery = next?.state === "cancelled" && Boolean(next.error);
+      openConsole.hidden = !needsRecovery;
+      openConsole.setAttribute("aria-hidden", String(!needsRecovery));
+    }
+    for (const control of guarded) {
+      if (active) {
+        control.dataset.queryRunDisabled = control.disabled ? "preserve" : "restore";
+        control.disabled = true;
+      } else if (control.dataset.queryRunDisabled === "restore") {
+        control.disabled = false;
+        delete control.dataset.queryRunDisabled;
+      }
+    }
+    if (active) {
+      updateStatus();
+      if (!timer) {
+        timer = setInterval(updateStatus, 250);
+      }
+    } else {
+      stop();
+      const message = text();
+      if (message) {
+        ctx.status.textContent = message;
+      }
+    }
+    if (next?.state && next.state !== announcedState) {
+      announcedState = next.state;
+      (next.state === "failed" ? ctx.announcer?.announceError : ctx.announcer?.announceStatus)?.(text());
+    }
+  }
+  function updateStatus() {
+    const second = Math.max(0, Math.floor((Date.now() - (snapshot?.startedAt || Date.now())) / 1e3));
+    if (second === lastSecond && ctx.status.textContent) {
+      return;
+    }
+    lastSecond = second;
+    ctx.status.textContent = text();
+  }
+  function successText(rowCount) {
+    const seconds = Math.max(0, Number(snapshot?.elapsedMs) || 0) / 1e3;
+    return `Loaded ${rowCount} row${rowCount === 1 ? "" : "s"} in ${seconds.toFixed(seconds < 10 ? 1 : 0)}s.`;
+  }
+  interrupt.addEventListener("click", () => ctx.post({ type: "interruptQuery" }));
+  openConsole?.addEventListener("click", () => ctx.post({ type: "openConsole" }));
+  return { render, successText };
+}
+
+// media/uiAnnouncer.js
+function createAnnouncer(root = document) {
+  const polite = root.getElementById("politeAnnouncements");
+  const assertive = root.getElementById("assertiveAnnouncements");
+  function announce(target, message) {
+    if (!target || !message) {
+      return;
+    }
+    target.textContent = "";
+    requestAnimationFrame(() => {
+      target.textContent = String(message);
+    });
+  }
+  return {
+    /** Announces normal progress and completion without interrupting speech. */
+    announceStatus(message) {
+      announce(polite, message);
+    },
+    /** Announces an actionable failure immediately. */
+    announceError(message) {
+      announce(assertive, message);
+    }
+  };
+}
+
+// media/uiOverflowMenu.js
+function createOverflowMenu({
+  actions,
+  compactContainer,
+  menu,
+  narrowAt = 640,
+  trigger,
+  wideAt = 960,
+  wideContainer
+}) {
+  let open = false;
+  let lastCompact = false;
+  const root = trigger.closest("[data-overflow-root]") || document.body;
+  function menuItems() {
+    return [...menu.querySelectorAll('[role="menuitem"]:not([hidden]):not([disabled])')];
+  }
+  function close({ restoreFocus = false } = {}) {
+    if (!open) {
+      return;
+    }
+    open = false;
+    menu.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    if (restoreFocus) {
+      trigger.focus();
+    }
+  }
+  function show() {
+    const items = menuItems();
+    if (!items.length) {
+      return;
+    }
+    open = true;
+    menu.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    items[0].focus();
+  }
+  function layout(width = root.clientWidth) {
+    const compact = width < wideAt;
+    const narrow = width < narrowAt;
+    for (const action of actions) {
+      const { element: element2, priority } = action;
+      const overflow = priority === "secondary" || priority === "context" && narrow;
+      const destination = compact && overflow ? menu : compact && priority === "context" ? compactContainer : wideContainer;
+      if (element2.parentElement !== destination) {
+        destination.appendChild(element2);
+      }
+      element2.hidden = false;
+      if (destination === menu) {
+        element2.setAttribute("role", "menuitem");
+      } else {
+        element2.removeAttribute("role");
+      }
+    }
+    compactContainer.hidden = !compactContainer.childElementCount;
+    lastCompact = compact;
+    const hasMenuItems = menu.querySelectorAll('[role="menuitem"]').length > 0;
+    trigger.hidden = !hasMenuItems;
+    if (!hasMenuItems) {
+      close();
+    }
+  }
+  function onMenuKeydown(event) {
+    const items = menuItems();
+    const index = items.indexOf(document.activeElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close({ restoreFocus: true });
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      items[(index + direction + items.length) % items.length]?.focus();
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      items[0]?.focus();
+    } else if (event.key === "End") {
+      event.preventDefault();
+      items.at(-1)?.focus();
+    }
+  }
+  trigger.setAttribute("aria-haspopup", "menu");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.setAttribute("aria-controls", menu.id);
+  trigger.addEventListener("click", () => open ? close({ restoreFocus: true }) : show());
+  menu.addEventListener("keydown", onMenuKeydown);
+  menu.addEventListener("click", () => close());
+  document.addEventListener("pointerdown", (event) => {
+    if (open && !root.contains(event.target)) {
+      close();
+    }
+  });
+  root.addEventListener("focusout", () => {
+    requestAnimationFrame(() => {
+      if (open && !root.contains(document.activeElement)) {
+        close();
+      }
+    });
+  });
+  const observer = new ResizeObserver((entries) => layout(entries[0]?.contentRect.width));
+  observer.observe(root);
+  layout();
+  return {
+    /** Closes the menu and disconnects its observer. */
+    dispose() {
+      observer.disconnect();
+      close();
+    },
+    /** Re-evaluates action placement after a caller changes visibility. */
+    refresh() {
+      layout();
+    },
+    /** Reports whether actions are currently using compact placement. */
+    isCompact() {
+      return lastCompact;
+    }
+  };
+}
+
+// media/modelBrowserChrome.js
+function installModelBrowserChrome(root = document) {
+  const trigger = root.getElementById("browserOverflow");
+  const menu = root.getElementById("browserOverflowMenu");
+  const wideContainer = root.getElementById("browserWideActions");
+  const compactContainer = root.getElementById("browserCompactActions");
+  if (!trigger || !menu || !wideContainer || !compactContainer) {
+    return { dispose() {
+    }, refresh() {
+    } };
+  }
+  const actions = [
+    { element: root.getElementById("groupToggle"), priority: "secondary" },
+    { element: root.getElementById("logToggle"), priority: "secondary" },
+    { element: root.getElementById("reload"), priority: "context" }
+  ].filter((action) => action.element);
+  return createOverflowMenu({ actions, compactContainer, menu, trigger, wideContainer });
+}
+
+// media/modelBrowserSurface.js
+function isQuerySurface(root = document) {
+  return root.querySelector(".app")?.dataset.surface === "query";
+}
+function renderBrowserError({ create, grid, message, onOpenConsole, onRetry, status }) {
+  const detail = conciseError(message);
+  grid.innerHTML = "";
+  const box = create("div", { className: "error-state" }, create("strong", {}, "Could not load Django data"), create("span", {}, detail));
+  box.append(create("button", { className: "secondary", type: "button" }, "Retry"), create("button", { className: "secondary", type: "button" }, "Open Django Shell"));
+  const [retry, openConsole] = box.querySelectorAll("button");
+  retry.addEventListener("click", onRetry);
+  openConsole.addEventListener("click", onOpenConsole);
+  grid.appendChild(box);
+  status.textContent = detail;
+  return detail;
+}
+function conciseError(message) {
+  const text = String(message || "Django Shell could not load this result.").split(/\r?\n/)[0].replace(/^[\w.]+(?:Error|Exception):\s*/, "").trim();
+  return text.length <= 220 ? text || "Django Shell could not load this result." : `${text.slice(0, 217)}...`;
+}
+
 // media/gridCombobox.js
 var NONE = -1;
+var comboboxSequence = 0;
 function createCombobox(deps) {
-  const { el: el2, options = [], value = "", placeholder = "", onChange, title = "", dataset } = deps;
+  const { ariaLabel = "", el: el2, options = [], value = "", placeholder = "", onChange, title = "", dataset } = deps;
   let items = normalize(options);
   let current = value == null ? "" : value;
   let activeIndex = NONE;
   let open = false;
   let visible = [];
-  const input = el2("input", { className: "cbx-input", placeholder, spellcheck: false, title, type: "text" });
-  const list = el2("div", { className: "cbx-list" });
+  const listId = `cbx-list-${comboboxSequence += 1}`;
+  const input = el2("input", { ariaAutocomplete: "list", ariaControls: listId, ariaExpanded: "false", ariaLabel: ariaLabel || title || placeholder || "Choose option", className: "cbx-input", placeholder, role: "combobox", spellcheck: false, title, type: "text" });
+  const list = el2("div", { className: "cbx-list", id: listId, role: "listbox" });
   list.hidden = true;
   const node = el2("span", { className: "combobox" }, input, list);
   if (dataset) {
@@ -1298,9 +2036,9 @@ function createCombobox(deps) {
     visible.forEach((option, index) => {
       if (option.group && option.group !== group) {
         group = option.group;
-        list.appendChild(el2("div", { className: "cbx-group" }, group));
+        list.appendChild(el2("div", { ariaHidden: "true", className: "cbx-group", role: "presentation" }, group));
       }
-      const optionNode = el2("div", { className: index === activeIndex ? "cbx-opt active" : "cbx-opt", title: option.title }, option.label);
+      const optionNode = el2("div", { ariaSelected: String(index === activeIndex), className: index === activeIndex ? "cbx-opt active" : "cbx-opt", id: `${listId}-option-${index}`, role: "option", title: option.title }, option.label);
       optionNode.addEventListener("click", () => choose(option));
       optionNode.addEventListener("mouseenter", () => {
         activeIndex = index;
@@ -1309,8 +2047,9 @@ function createCombobox(deps) {
       list.appendChild(optionNode);
     });
     if (!visible.length) {
-      list.appendChild(el2("div", { className: "cbx-empty" }, "no matches"));
+      list.appendChild(el2("div", { className: "cbx-empty", role: "status" }, "No matches"));
     }
+    syncAria();
   }
   function highlight() {
     let index = 0;
@@ -1319,18 +2058,31 @@ function createCombobox(deps) {
         continue;
       }
       child.className = index === activeIndex ? "cbx-opt active" : "cbx-opt";
+      child.setAttribute?.("aria-selected", String(index === activeIndex));
       index += 1;
+    }
+    syncAria();
+  }
+  function syncAria() {
+    input.setAttribute?.("aria-expanded", String(open));
+    if (open && activeIndex !== NONE && visible[activeIndex]) {
+      input.setAttribute?.("aria-activedescendant", `${listId}-option-${activeIndex}`);
+    } else {
+      input.removeAttribute?.("aria-activedescendant");
     }
   }
   function show() {
     open = true;
     list.hidden = false;
+    const selected = matches().findIndex((option) => option.value === current);
+    activeIndex = selected === NONE ? 0 : selected;
     render();
   }
   function hide() {
     open = false;
     list.hidden = true;
     input.value = labelFor(current);
+    syncAria();
   }
   function choose(option) {
     const changed = option.value !== current;
@@ -1338,6 +2090,7 @@ function createCombobox(deps) {
     input.value = option.label;
     open = false;
     list.hidden = true;
+    syncAria();
     if (changed) {
       if (onChange) {
         onChange(current);
@@ -1372,6 +2125,13 @@ function createCombobox(deps) {
         return;
       }
       activeIndex = activeIndex === NONE ? 0 : (activeIndex + (event.key === "ArrowDown" ? 1 : -1) + visible.length) % visible.length;
+      highlight();
+    } else if (event.key === "Home" || event.key === "End") {
+      if (!open) {
+        return;
+      }
+      event.preventDefault();
+      activeIndex = visible.length ? event.key === "Home" ? 0 : visible.length - 1 : NONE;
       highlight();
     } else if (event.key === "Enter") {
       if (open && visible[activeIndex]) {
@@ -1596,14 +2356,14 @@ function createFilterBar(deps) {
     return splitTarget(target).model;
   }
   async function addTerm(initial) {
-    const term = el2("span", { className: "term" });
+    const term = el2("span", { ariaLabel: "Filter condition", className: "term", role: "group" });
     term._segs = [];
     const path = el2("span", { className: "path", dataset: { role: "path" } });
-    const lookupCombo = createCombobox({ dataset: { role: "lookup" }, el: el2, onChange: () => rebuildValue(term), options: [], placeholder: "\u2014" });
+    const lookupCombo = createCombobox({ ariaLabel: "Filter operator", dataset: { role: "lookup" }, el: el2, onChange: () => rebuildValue(term), options: [], placeholder: "\u2014" });
     term._lookupCombo = lookupCombo;
     const value = el2("span", { className: "valwrap", dataset: { role: "value" } });
-    const negate = el2("input", { checked: Boolean(initial && initial.negate), dataset: { role: "negate" }, type: "checkbox" });
-    const remove = el2("button", { className: "linkbtn", dataset: { role: "remove" }, title: "Remove filter" }, "\u2715");
+    const negate = el2("input", { ariaLabel: "Negate filter", checked: Boolean(initial && initial.negate), dataset: { role: "negate" }, type: "checkbox" });
+    const remove = el2("button", { ariaLabel: "Remove filter condition", className: "linkbtn", dataset: { role: "remove" }, title: "Remove filter" }, el2("span", { ariaHidden: "true", className: "codicon codicon-close" }));
     remove.addEventListener("click", () => term.remove());
     term.append(path, lookupCombo.node, value, el2("label", { className: "neg" }, negate, "not"), remove);
     termsEl.appendChild(term);
@@ -1627,7 +2387,7 @@ function createFilterBar(deps) {
     const comboOptions = options.map((option) => ({ group: option.role === "relation" ? "relations (drill in \u2192)" : "", label: option.label, title: option.title || "", value: option.value }));
     const presetValue = preset[level];
     const match = presetValue === void 0 ? null : options.find((option) => option.value === `${REL}${presetValue}` || option.value === `${FIELD}${presetValue}`);
-    const combo = createCombobox({ dataset: { level: String(level), role: "seg" }, el: el2, onChange: () => void onSegmentChange(term, level), options: comboOptions, placeholder: level === 0 ? "\u2014 pick field / relation \u2014" : "\u2014 exists / pick field \u2014", value: match ? match.value : "" });
+    const combo = createCombobox({ ariaLabel: level === 0 ? "Filter field or relation" : `Related filter field ${level + 1}`, dataset: { level: String(level), role: "seg" }, el: el2, onChange: () => void onSegmentChange(term, level), options: comboOptions, placeholder: level === 0 ? "\u2014 pick field / relation \u2014" : "\u2014 exists / pick field \u2014", value: match ? match.value : "" });
     const select = combo.node;
     select._options = options;
     term._segs[level] = { combo, select };
@@ -1701,7 +2461,7 @@ function createFilterBar(deps) {
   }
   function buildValueControl(terminal, lookup, presetValue) {
     if (lookup === "isnull") {
-      const select = el2("select", {});
+      const select = el2("select", { ariaLabel: "Null-value filter" });
       select.append(el2("option", { value: "false" }, "has value"), el2("option", { value: "true" }, "is null"));
       select.value = isTruthy2(presetValue) ? "true" : "false";
       return { getValue: () => select.value, node: select };
@@ -1713,7 +2473,7 @@ function createFilterBar(deps) {
       return chips(presetValue);
     }
     if ((lookup === "exact" || lookup === "iexact") && terminal && terminal.type === "BooleanField") {
-      const select = el2("select", {});
+      const select = el2("select", { ariaLabel: "Boolean filter value" });
       select.append(el2("option", { value: "True" }, "true"), el2("option", { value: "False" }, "false"));
       select.value = isTruthy2(presetValue) ? "True" : "False";
       return { getValue: () => select.value, node: select };
@@ -1722,11 +2482,11 @@ function createFilterBar(deps) {
       const choiceOptions2 = terminal.choices.map((choice) => ({ label: `${choice[1]}`, value: String(choice[0]) }));
       const carried = presetValue === void 0 || presetValue === null ? "" : String(presetValue);
       const selected = choiceOptions2.some((option) => option.value === carried) ? carried : choiceOptions2[0] ? choiceOptions2[0].value : "";
-      const combo = createCombobox({ el: el2, options: choiceOptions2, placeholder: "\u2014 choose \u2014", value: selected });
+      const combo = createCombobox({ ariaLabel: "Filter value", el: el2, options: choiceOptions2, placeholder: "\u2014 choose \u2014", value: selected });
       return { getValue: () => combo.getValue(), node: combo.node };
     }
     const type = lookup === "date" ? "DateField" : INT_LOOKUPS.has(lookup) || String(lookup).startsWith("length") ? "IntegerField" : terminal ? terminal.type : "";
-    const input = el2("input", { type: inputTypeFor(type) });
+    const input = el2("input", { ariaLabel: "Filter value", type: inputTypeFor(type) });
     if (presetValue !== void 0 && presetValue !== null) {
       input.value = String(presetValue);
     }
@@ -1734,8 +2494,8 @@ function createFilterBar(deps) {
   }
   function rangePair(terminal, presetValue) {
     const type = inputTypeFor(terminal ? terminal.type : "");
-    const from = el2("input", { className: "rangefrom", placeholder: "from", type });
-    const to = el2("input", { className: "rangeto", placeholder: "to", type });
+    const from = el2("input", { ariaLabel: "Range start", className: "rangefrom", placeholder: "from", type });
+    const to = el2("input", { ariaLabel: "Range end", className: "rangeto", placeholder: "to", type });
     const parts = String(presetValue || "").split(",");
     from.value = (parts[0] || "").trim();
     to.value = (parts[1] || "").trim();
@@ -1744,12 +2504,12 @@ function createFilterBar(deps) {
   }
   function chips(presetValue) {
     const values = [];
-    const node = el2("span", { className: "chips" });
-    const input = el2("input", { className: "chipinput", placeholder: "value + Enter", type: "text" });
+    const node = el2("span", { ariaLabel: "Filter values", ariaLive: "polite", className: "chips", role: "group" });
+    const input = el2("input", { ariaLabel: "Add filter value", className: "chipinput", placeholder: "value + Enter", type: "text" });
     const render = () => {
       node.innerHTML = "";
       values.forEach((text, index) => {
-        const close = el2("button", { className: "chipx", title: "Remove", type: "button" }, "\u2715");
+        const close = el2("button", { ariaLabel: `Remove value ${text}`, className: "chipx", title: "Remove", type: "button" }, el2("span", { ariaHidden: "true", className: "codicon codicon-close" }));
         close.addEventListener("click", () => {
           values.splice(index, 1);
           render();
@@ -1849,13 +2609,13 @@ function createFilterBar(deps) {
     }
     activeEl.appendChild(el2("span", { className: "tag" }, "Applied"));
     filters.forEach((filter, index) => {
-      const remove = el2("button", { className: "chipx", title: "Remove this filter", type: "button" }, "\u2715");
+      const remove = el2("button", { ariaLabel: `Remove filter ${describe(filter)}`, className: "chipx", title: "Remove this filter", type: "button" }, el2("span", { ariaHidden: "true", className: "codicon codicon-close" }));
       remove.addEventListener("click", () => {
         if (onRemove) {
           onRemove(filters.filter((_, other) => other !== index));
         }
       });
-      activeEl.appendChild(el2("span", { className: "filterchip", title: "Applied filter \u2014 \u2715 to remove" }, describe(filter), remove));
+      activeEl.appendChild(el2("span", { className: "filterchip", title: "Applied filter \u2014 use Remove to clear" }, describe(filter), remove));
     });
   }
   function describe(filter) {
@@ -2213,7 +2973,7 @@ function createColumnConditionBuilder(deps) {
     const rhsKind = createCombobox({ dataset: { role: "condition-rhs-kind" }, el: el2, onChange: () => rebuildRhs(row), options: [{ label: "value", value: "value" }], value: "value" });
     const rhsSlot = el2("span", { className: "condition-rhs", dataset: { role: "condition-rhs" } });
     const negate = el2("input", { checked: Boolean(initial && initial.negate), dataset: { role: "condition-negate" }, type: "checkbox" });
-    const remove = el2("button", { className: "chipx", dataset: { role: "condition-remove" }, title: "Remove condition", type: "button" }, "\u2715");
+    const remove = el2("button", { ariaLabel: "Remove condition", className: "chipx", dataset: { role: "condition-remove" }, title: "Remove condition", type: "button" }, el2("span", { ariaHidden: "true", className: "codicon codicon-close" }));
     remove.addEventListener("click", () => {
       row.remove();
       refreshGroupUi();
@@ -2393,7 +3153,7 @@ function createColumnBuilder(deps) {
   function addGroupBy() {
     const row = el2("span", { className: "aggchip" });
     const picker = pathPicker(groupRootOptions, "field / fk \u2192");
-    const remove = el2("button", { className: "chipx", title: "Remove group-by field", type: "button" }, "\u2715");
+    const remove = el2("button", { ariaLabel: "Remove group-by field", className: "chipx", title: "Remove group-by field", type: "button" }, el2("span", { ariaHidden: "true", className: "codicon codicon-close" }));
     remove.addEventListener("click", () => row.remove());
     row._picker = picker;
     row.append(picker.node, remove);
@@ -2403,7 +3163,7 @@ function createColumnBuilder(deps) {
     const chip = el2("span", { className: "winchip" });
     const combo = createCombobox({ el: el2, options: concreteFields(), placeholder: "field", value: value || "" });
     const dir = withDirection ? createCombobox({ el: el2, options: ORDER_DIR, value: desc ? "desc" : "asc" }) : null;
-    const remove = el2("button", { className: "chipx", title: "Remove", type: "button" }, "\u2715");
+    const remove = el2("button", { ariaLabel: "Remove field", className: "chipx", title: "Remove", type: "button" }, el2("span", { ariaHidden: "true", className: "codicon codicon-close" }));
     remove.addEventListener("click", () => chip.remove());
     chip.append(combo.node, ...dir ? [dir.node] : [], remove);
     chip._read = () => withDirection ? { desc: dir.node.value === "desc", field: combo.node.value } : combo.node.value;
@@ -2626,7 +3386,7 @@ function createColumnBuilder(deps) {
     const kindCombo = createCombobox({ el: el2, options: KINDS, value: seed.kind || "aggregate" });
     const body = el2("span", { className: "termbody" });
     const alias = el2("input", { className: "aggalias", placeholder: "as alias", spellcheck: false, type: "text", value: seed.alias || "" });
-    const remove = el2("button", { className: "chipx", title: "Remove column", type: "button" }, "\u2715");
+    const remove = el2("button", { ariaLabel: "Remove column", className: "chipx", title: "Remove column", type: "button" }, el2("span", { ariaHidden: "true", className: "codicon codicon-close" }));
     remove.addEventListener("click", () => row.remove());
     let readBody = () => ({});
     const rebuild = () => {
@@ -2732,23 +3492,40 @@ function renderAggregateResult(result, helpers) {
 // media/modelBrowserSource.js
 var vscode = acquireVsCodeApi();
 var els = {};
-for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "activefilters", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode", "groupToggle", "aggregatebar", "aggregateGroupBy", "aggregateTerms", "addGroupBy", "addAggregate", "runAggregate", "aggregateOff", "fieldfinder", "fieldfindslot", "fieldfindClose"]) {
+for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "activefilters", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode", "groupToggle", "aggregatebar", "aggregateGroupBy", "aggregateTerms", "addGroupBy", "addAggregate", "runAggregate", "aggregateOff", "fieldfinder", "fieldfindslot", "fieldfindClose", "interruptQuery", "openQueryConsole", "detailDrawer", "detailContent"]) {
   els[id] = document.getElementById(id);
 }
+var announcer = createAnnouncer();
+installModelBrowserChrome(document);
 var LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "length", "length__gt", "length__gte", "length__lt", "length__lte", "trim"];
 var MAX_LOG_ENTRIES = 200;
 var ALL_PAGE_SIZE = 1e9;
-var state = { columns: [], pk: "id", relations: [], rowCount: 0, hasMore: false, filters: [], order: [], annotations: [], model: "", pinned: /* @__PURE__ */ new Set(), widths: {}, computed: {}, computedActive: /* @__PURE__ */ new Set(), aggregateActive: false, aggregateGroupBy: [], aggregateColumns: [] };
+var state = { columns: [], pk: "id", relations: [], rowCount: 0, totalCount: void 0, hasMore: false, filters: [], order: [], annotations: [], model: "", pinned: /* @__PURE__ */ new Set(), widths: {}, computed: {}, computedActive: /* @__PURE__ */ new Set(), aggregateActive: false, aggregateGroupBy: [], aggregateColumns: [] };
 var pendingRelated = /* @__PURE__ */ new Map();
 var relRequestId = 0;
 var progressLabel = "";
 var progressStartedAt = 0;
 var progressTimer = 0;
+var gridSnapshot;
+var gridViewport;
+var detailTrigger;
+var commitInFlight = false;
 var editor = createEditor({
   post: (message) => vscode.postMessage(message),
   reload: () => send({ type: "reload" }),
   paintCell: (td) => paintCell(td),
   onChange: (count) => updateEditButtons(count),
+  onCommitEnd: () => {
+    commitInFlight = false;
+    setCommitBlocked(false);
+    updateEditButtons(editor.pendingCount());
+  },
+  onCommitStart: (count) => {
+    commitInFlight = true;
+    setCommitBlocked(true);
+    els.status.textContent = `Committing ${count} changes\u2026`;
+    announcer.announceStatus(`Committing ${count} changes\u2026`);
+  },
   notify: (text) => {
     els.status.textContent = text;
   }
@@ -2756,14 +3533,24 @@ var editor = createEditor({
 var virtual = createVirtualRows({
   scroller: els.gridwrap,
   getBody: () => document.getElementById("tbody"),
-  columnSpan: () => totalColumnCount(),
+  columnSpan: () => 1 + (gridSnapshot?.pinned.length || 0) + (gridSnapshot?.visible.length || 0) + Number(Boolean(gridSnapshot?.leftSpacerWidth)) + Number(Boolean(gridSnapshot?.rightSpacerWidth)),
   buildRow: (row, index) => {
     const tr = buildRow(row, index);
     editor.applyStaged(tr);
     return tr;
   },
-  onRender: () => repaintPins(els.gridwrap, state)
+  maxRows: () => Math.max(1, Math.floor(DOM_CELL_BUDGET / Math.max(1, (gridSnapshot?.pinned.length || 0) + (gridSnapshot?.visible.length || 0)))),
+  onRender: () => repaintPins(els.gridwrap, state),
+  shouldWindow: (rowCount) => gridViewport?.shouldVirtualizeRows(rowCount) ?? rowCount > 80
 });
+gridViewport = createGridViewport({
+  onChange: (snapshot) => renderViewport(snapshot),
+  pinned: () => state.pinned,
+  scroller: els.gridwrap,
+  widths: () => state.widths
+});
+var queryRunUi = createQueryRunUi({ announcer, post: (message) => vscode.postMessage(message), status: els.status });
+var gridHeader = createGridHeaderRenderer({ el, relationKindLabel, relationModelName, state });
 var filterBar = createFilterBar({
   el,
   termsEl: els.filterterms,
@@ -2800,7 +3587,9 @@ els.commit.addEventListener("click", () => editor.commitEdits());
 els.discard.addEventListener("click", () => editor.discardEdits());
 els.transport.addEventListener("change", () => vscode.postMessage({ type: "setTransport", mode: els.transport.value }));
 els.logToggle.addEventListener("click", () => {
-  els.logpanel.hidden = !els.logpanel.hidden;
+  const open = els.logpanel.hidden;
+  toggleLogPanel({ open, panel: els.logpanel, toggle: els.logToggle });
+  vscode.setState({ ...vscode.getState() || {}, logOpen: open });
 });
 els.logClear.addEventListener("click", () => {
   els.logbody.innerHTML = "";
@@ -2810,7 +3599,7 @@ els.logMode.addEventListener("click", () => {
   els.logbody.classList.toggle("mode-sql", !showOrm);
   els.logMode.textContent = showOrm ? "View: Django ORM" : "View: SQL";
 });
-setupLogResize();
+installLogDrawer({ panel: els.logpanel, resizeHandle: els.logresize, toggle: els.logToggle, vscode });
 els.fieldfindClose.addEventListener("click", () => closeFieldFinder());
 window.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && (event.key === "f" || event.key === "F")) {
@@ -2845,6 +3634,8 @@ function handleMessage(message) {
   } else if (message.type === "count") {
     stopProgress();
     els.countinfo.textContent = message.ok ? `\xB7 total ${message.count}` : `\xB7 count failed`;
+    state.totalCount = message.ok && Number.isFinite(Number(message.count)) ? Number(message.count) : void 0;
+    els.gridwrap.querySelector("table")?.setAttribute("aria-rowcount", state.totalCount === void 0 ? "-1" : String(state.totalCount + 1));
     logSql(`count ${state.model}`, message.sql, message.orm);
   } else if (message.type === "aggregate") {
     onAggregate(message);
@@ -2861,7 +3652,9 @@ function handleMessage(message) {
   } else if (message.type === "queryDraft") {
     setQueryDraft(message.code);
   } else if (message.type === "queryStarted") {
-    startProgress("Running query");
+    queryRunUi.render({ startedAt: Date.now(), state: "running" });
+  } else if (message.type === "queryRunState") {
+    queryRunUi.render(message.snapshot || { state: "idle" });
   } else if (message.type === "overlayRunPython") {
     const code = typeof message.text === "string" ? message.text : String(message.code || "");
     send({ code, type: "runQuery", useOverlay: false });
@@ -2872,11 +3665,17 @@ function handleMessage(message) {
   }
 }
 function renderLoading(message) {
-  els.title.textContent = message.model || "Model Data";
+  if (!isQuerySurface()) {
+    els.title.textContent = message.model || "Model Data";
+  }
   els.subtitle.textContent = message.label || "";
-  els.gridwrap.innerHTML = "";
-  els.gridwrap.appendChild(el("div", { className: "empty" }, "Loading\u2026"));
-  startProgress("Loading model data");
+  const labels = { aggregate: "Running aggregate\u2026", filters: "Applying filters\u2026", more: "Loading more rows\u2026", rows: "Loading model rows\u2026", schema: "Loading model schema\u2026" };
+  const label = labels[message.phase] || "Loading model rows\u2026";
+  if (!document.getElementById("tbody")) {
+    els.gridwrap.innerHTML = "";
+    els.gridwrap.appendChild(el("div", { className: "empty" }, label));
+  }
+  startProgress(label);
   els.more.disabled = true;
 }
 function renderBusy(messageText) {
@@ -2895,15 +3694,18 @@ function onSchema(schema) {
   state.pk = schema.pk || "id";
   state.relations = schema.relations || [];
   state.rowCount = 0;
+  state.totalCount = void 0;
   state.order = [];
   if (!sameModel) {
     state.pinned = /* @__PURE__ */ new Set();
     state.computed = {};
     state.computedActive = /* @__PURE__ */ new Set();
+    els.gridwrap.scrollLeft = 0;
+    els.gridwrap.scrollTop = 0;
   }
   exitAggregateView();
   state.model = model;
-  els.title.textContent = model;
+  els.title.textContent = isQuerySurface() ? "ORM Query" : model;
   els.subtitle.textContent = `${schema.label || ""} \xB7 ${schema.table || ""}`;
   filterBar.sync(state.filters);
   filterBar.renderSummary(state.filters);
@@ -2914,14 +3716,27 @@ function onSchema(schema) {
   }
 }
 function installGridTable() {
-  const table = el("table", {});
-  table.appendChild(buildHead());
-  table.appendChild(el("tbody", { id: "tbody" }));
+  const table = el("table", { ariaLabel: `${state.model || "Model"} data`, ariaReadOnly: "false", role: "grid" });
   els.gridwrap.innerHTML = "";
   els.gridwrap.appendChild(table);
-  makeResizable(table, state, () => repaintPins(els.gridwrap, state));
   table.addEventListener("click", onTableClick);
   table.addEventListener("dblclick", onTableDblClick);
+  installGridKeyboard(table, {
+    activate: (cell) => {
+      const button2 = cell.querySelector("button");
+      if (button2) {
+        button2.click();
+      } else {
+        editor.editCell(cell);
+      }
+    },
+    logicalKeys: () => [...gridSnapshot?.pinned || [], ...gridSnapshot?.scrollable || []].map((column) => column.key),
+    reveal: revealGridCell,
+    closeDetail: closeOpenDetail,
+    rowCount: () => state.rowCount,
+    viewportRows: () => Math.floor(els.gridwrap.clientHeight / 24)
+  });
+  gridViewport.setColumns(logicalColumns(state.columns, state.relations, state.widths));
 }
 function onTableDblClick(event) {
   const td = event.target.closest("td.editable");
@@ -2930,9 +3745,29 @@ function onTableDblClick(event) {
   }
 }
 function updateEditButtons(count) {
-  els.commit.textContent = count ? `Commit (${count})` : "Commit";
-  els.commit.disabled = !count;
-  els.discard.disabled = !count;
+  els.commit.textContent = count ? `Commit ${count} changes` : "Commit";
+  els.commit.disabled = !count || commitInFlight;
+  els.discard.hidden = !count;
+  els.discard.disabled = !count || commitInFlight;
+  if (count && !commitInFlight) {
+    els.status.textContent = `${count} uncommitted changes`;
+  }
+}
+function setCommitBlocked(blocked) {
+  for (const control of [els.reload, els.more, els.pageSize, els.addFilter, els.applyFilter, els.clearFilter, els.count, els.groupToggle, els.runAggregate, els.aggregateOff, els.transport]) {
+    if (!control) {
+      continue;
+    }
+    if (blocked) {
+      control.dataset.commitDisabled = control.disabled ? "preserve" : "restore";
+      control.disabled = true;
+    } else if (control.dataset.commitDisabled === "restore") {
+      control.disabled = false;
+      delete control.dataset.commitDisabled;
+    } else {
+      delete control.dataset.commitDisabled;
+    }
+  }
 }
 function relationKindLabel(kind) {
   return { "fk": "FK", "m2m": "m2m", "o2o": "o2o", "reverse-fk": "reverseFK" }[kind] || kind;
@@ -2940,38 +3775,20 @@ function relationKindLabel(kind) {
 function relationModelName(target) {
   return String(target || "").split(".").pop();
 }
-function buildHead() {
-  const head = el("thead", {});
-  const row = el("tr", {});
-  row.appendChild(el("th", { className: "rownum", title: "Row number" }, "#"));
-  for (const column of state.columns) {
-    const sortable = !column.computed;
-    const headClass = column.annotation ? "annotation" : column.computed ? "computed" : "sortable";
-    const headTitle = sortable ? `Sort by ${column.name} (${column.type})` : `${column.name} (computed @property \u2014 read-only)`;
-    const th = el("th", { className: headClass, dataset: sortable ? { act: "sort", col: column.attname, key: column.attname } : { key: column.attname }, title: headTitle });
-    const pinned = state.pinned.has(column.attname);
-    th.appendChild(el("button", { className: pinned ? "pinbtn active" : "pinbtn", dataset: { act: "pin", col: column.attname }, title: pinned ? "Unpin column" : "Pin column (freeze left)" }, "\u21E4"));
-    if (column.computed) {
-      const loading = state.computedActive.has(column.attname);
-      const cost = column.annotated ? "DB annotation \u2014 single query" : "per-row @property \u2014 N+1";
-      th.appendChild(el("button", { className: loading ? "loadbtn active" : "loadbtn", dataset: { act: "loadComputed", field: column.attname }, title: `${loading ? "Reload" : "Load"} this column for loaded rows (${cost})` }, loading ? "\u25BC" : "\u25B7"));
-    }
-    th.appendChild(document.createTextNode(column.attname));
-    if (column.pk) {
-      th.appendChild(el("span", { className: "pkmark", title: "primary key" }, "\u25C6"));
-    }
-    if (sortable) {
-      th.appendChild(el("span", { className: "sortarrow", dataset: { arrow: column.attname } }, ""));
-    }
-    th.appendChild(el("span", { className: "coltype" }, column.relation ? `\u2192 ${column.relation.target}` : column.computed ? column.annotated ? "@property \xB7 1 query" : "@property" : column.type));
-    th.appendChild(el("span", { className: "colresize", title: "Drag to resize" }));
-    row.appendChild(th);
+function renderViewport(snapshot) {
+  const startedAt = performance.now();
+  const table = els.gridwrap.querySelector("table");
+  if (!table) {
+    return;
   }
-  for (const relation of state.relations) {
-    row.appendChild(el("th", { className: "relcol", dataset: { key: `rel:${relation.name}` }, title: `${relationKindLabel(relation.kind)} \u2192 ${relation.target}` }, document.createTextNode(relation.name), el("span", { className: "coltype" }, `${relationKindLabel(relation.kind)} (${relationModelName(relation.target)})`), el("span", { className: "colresize", title: "Drag to resize" })));
-  }
-  head.appendChild(row);
-  return head;
+  gridSnapshot = snapshot;
+  table.setAttribute("aria-colcount", String(1 + snapshot.pinned.length + snapshot.scrollable.length));
+  table.setAttribute("aria-rowcount", state.totalCount === void 0 ? "-1" : String(state.totalCount + 1));
+  table.style.width = `${Math.max(snapshot.totalWidth, els.gridwrap.clientWidth)}px`;
+  table.replaceChildren(gridHeader.buildHead(snapshot), el("tbody", { id: "tbody" }));
+  makeResizable(table, state, () => gridViewport.refresh(true));
+  virtual.refresh();
+  reportGridRender({ logicalRows: state.rowCount, post: vscode.postMessage.bind(vscode), snapshot, startedAt, table });
 }
 function columnAttnames(columns) {
   return (columns || []).map((column) => column.attname).join(",");
@@ -2983,9 +3800,11 @@ function onRows(message) {
     renderError(rows.error || "Could not load rows.");
     return;
   }
-  const columnsChanged = !message.append && Array.isArray(rows.columns) && rows.columns.length > 0 && columnAttnames(rows.columns) !== columnAttnames(state.columns);
+  const fallbackColumns = !state.columns.length ? inferColumnsFromRows(rows.rows) : [];
+  const responseColumns = Array.isArray(rows.columns) && rows.columns.length ? rows.columns : fallbackColumns;
+  const columnsChanged = !message.append && responseColumns.length > 0 && columnAttnames(responseColumns) !== columnAttnames(state.columns);
   if (columnsChanged) {
-    state.columns = rows.columns;
+    state.columns = responseColumns;
   }
   if (state.aggregateActive || !document.getElementById("tbody") || columnsChanged) {
     exitAggregateView();
@@ -2999,6 +3818,7 @@ function onRows(message) {
     state.order = message.order;
   }
   if (!message.append) {
+    state.totalCount = void 0;
     if (columnsChanged && els.filterterms.querySelector(".term")) {
       filterBar.refresh();
     } else {
@@ -3016,23 +3836,69 @@ function onRows(message) {
   state.hasMore = Boolean(rows.hasMore);
   els.more.disabled = !state.hasMore;
   const filterText = state.filters.length ? ` \xB7 ${state.filters.length} filter${state.filters.length === 1 ? "" : "s"}` : "";
-  els.status.textContent = state.rowCount ? `${state.rowCount} row${state.rowCount === 1 ? "" : "s"} loaded${state.hasMore ? " \xB7 more available" : ""}${filterText}` : `No rows${filterText}.`;
+  const loaded = state.rowCount ? `${state.rowCount} row${state.rowCount === 1 ? "" : "s"} loaded${state.hasMore ? " \xB7 more available" : ""}${filterText}` : `No rows${filterText}.`;
+  if (isQuerySurface() && !message.append) {
+    const queryStatus = queryRunUi.successText(state.rowCount);
+    els.status.textContent = queryStatus;
+    announcer.announceStatus(queryStatus);
+  } else {
+    els.status.textContent = loaded;
+  }
+}
+function inferColumnsFromRows(rows) {
+  const sample = Array.isArray(rows) ? rows.find((row) => row && typeof row === "object" && !Array.isArray(row)) : void 0;
+  if (!sample) {
+    return [];
+  }
+  return Object.keys(sample).map((attname) => ({ attname, editable: false, name: attname, type: "Unknown" }));
 }
 function buildRow(row, index) {
   const pk = rawValue(row[state.pk]);
-  const tr = el("tr", {});
+  const tr = el("tr", { ariaRowIndex: String((index ?? 0) + 2), role: "row" });
   tr.dataset.pk = String(pk);
+  tr.dataset.rowIndex = String(index ?? 0);
   tr._pk = pk;
-  tr.appendChild(el("td", { className: "rownum", title: "Row number" }, String((index ?? 0) + 1)));
-  for (const column of state.columns) {
-    tr.appendChild(buildCell(row, column, pk));
+  tr.appendChild(el("td", { ariaColIndex: "1", className: "rownum", role: "rowheader", title: "Row number" }, String((index ?? 0) + 1)));
+  const snapshot = gridSnapshot || { leftSpacerWidth: 0, logicalColumnIndices: {}, pinned: [], rightSpacerWidth: 0, visible: [] };
+  for (const descriptor of snapshot.pinned) {
+    appendRowCell(tr, row, descriptor, pk, snapshot.logicalColumnIndices[descriptor.key]);
   }
-  for (const relation of state.relations) {
-    const td = el("td", { className: "relcell" });
-    td.appendChild(el("button", { className: "chip", dataset: { act: "rel", rel: relation.name, pk: String(pk), single: String(Boolean(relation.single)) }, title: `${relation.kind} \u2192 ${relation.target}` }, `${relation.name} \u2192`));
-    tr.appendChild(td);
+  appendRowSpacer(tr, snapshot.leftSpacerWidth, "left");
+  for (const descriptor of snapshot.visible) {
+    appendRowCell(tr, row, descriptor, pk, snapshot.logicalColumnIndices[descriptor.key]);
+  }
+  appendRowSpacer(tr, snapshot.rightSpacerWidth, "right");
+  if (index === 0) {
+    tr.querySelector('[role="gridcell"]')?.setAttribute("tabindex", "0");
   }
   return tr;
+}
+function appendRowCell(tr, row, descriptor, pk, columnIndex) {
+  if (descriptor.kind === "relation") {
+    const relation = descriptor.source;
+    const td2 = el("td", { ariaColIndex: String(columnIndex ?? 1), ariaReadOnly: "true", className: "relcell", dataset: { key: descriptor.key }, role: "gridcell", tabIndex: -1 });
+    td2.style.width = `${descriptor.width}px`;
+    td2.appendChild(el("button", { ariaLabel: `Open ${relation.name} related rows`, className: "chip", dataset: { act: "rel", rel: relation.name, pk: String(pk), single: String(Boolean(relation.single)) }, title: `${relation.kind} \u2192 ${relation.target}` }, `${relation.name} \u2192`));
+    tr.appendChild(td2);
+    return;
+  }
+  const td = buildCell(row, descriptor.source, pk);
+  td.dataset.key = descriptor.key;
+  td.setAttribute("aria-colindex", String(columnIndex ?? 1));
+  td.setAttribute("role", "gridcell");
+  td.setAttribute("aria-readonly", String(!descriptor.source.editable));
+  td.tabIndex = -1;
+  td.style.width = `${descriptor.width}px`;
+  tr.appendChild(td);
+}
+function appendRowSpacer(tr, width, side) {
+  if (!width) {
+    return;
+  }
+  const td = el("td", { ariaHidden: "true", className: "gridspacer", role: "presentation" });
+  td.dataset.side = side;
+  td.style.width = `${width}px`;
+  tr.appendChild(td);
 }
 function buildCell(row, column, pk) {
   const td = el("td", {});
@@ -3066,7 +3932,7 @@ function paintComputedCell(td, column, pk) {
     td.title = "Loading @property\u2026";
   } else {
     td.appendChild(el("span", { className: "cellnull" }, "\xB7"));
-    td.title = "Computed @property \u2014 click \u25B7 in the header to load (lazy)";
+    td.title = "Computed @property \u2014 use Load in the header (lazy)";
   }
 }
 function paintCell(td) {
@@ -3074,18 +3940,20 @@ function paintCell(td) {
   td.textContent = "";
   if (td.dataset.staged !== void 0) {
     td.classList.add("dirty");
+    td.setAttribute("aria-description", "modified, not committed");
     td.appendChild(el("span", {}, stagedDisplay(column, td.dataset.staged)));
     appendArrayEditButton(td, column, td.dataset.staged);
     return;
   }
   td.classList.remove("dirty");
+  td.removeAttribute("aria-description");
   const cell = td._cell;
   td.appendChild(renderValue(cell));
   appendArrayEditButton(td, column, cellRawText(cell));
   if (column.relation && rawValue(cell) !== null && rawValue(cell) !== void 0) {
     const wrap = el("span", { className: "fk" });
-    wrap.appendChild(el("button", { className: "linkbtn", title: "Expand related row", dataset: { act: "fk", rel: column.relation.field, pk: String(td._pk), val: String(rawValue(cell)) } }, "\u2398"));
-    wrap.appendChild(el("button", { className: "linkbtn", title: `Open ${column.relation.target} filtered to this row`, dataset: { act: "open", target: column.relation.target, val: String(rawValue(cell)) } }, "\u2197"));
+    wrap.appendChild(el("button", { ariaLabel: "Expand related row", className: "linkbtn", title: "Expand related row", dataset: { act: "fk", rel: column.relation.field, pk: String(td._pk), val: String(rawValue(cell)) } }, codicon("copy")));
+    wrap.appendChild(el("button", { ariaLabel: `Open ${column.relation.target} filtered to this row`, className: "linkbtn", title: `Open ${column.relation.target} filtered to this row`, dataset: { act: "open", target: column.relation.target, val: String(rawValue(cell)) } }, codicon("open-preview")));
     td.appendChild(document.createTextNode(" "));
     td.appendChild(wrap);
   }
@@ -3135,7 +4003,12 @@ function onTableClick(event) {
   if (data.act === "editArray") {
     editor.editCell(node.closest("td"));
   } else if (data.act === "pin") {
+    if (!state.pinned.has(data.col) && !canPinColumn(data.col)) {
+      els.status.textContent = "Unpin a field before pinning another; pinned fields can use at most half of the grid width.";
+      return;
+    }
     togglePin(data.col, node, state, els.gridwrap);
+    gridViewport.refresh(true);
   } else if (data.act === "loadComputed") {
     toggleComputed(data.field, node);
   } else if (data.act === "sort") {
@@ -3148,6 +4021,12 @@ function onTableClick(event) {
   } else if (data.act === "rel") {
     expandInto(node, { relation: data.rel, pk: coerce(data.pk), single: data.single === "true" });
   }
+}
+function canPinColumn(key) {
+  const snapshot = gridViewport.snapshot();
+  const next = snapshot.pinned.find((column) => column.key === key) || snapshot.scrollable.find((column) => column.key === key);
+  const pinnedWidth = snapshot.pinned.reduce((sum, column) => sum + column.width, 0);
+  return Boolean(next) && pinnedWidth + next.width <= Math.max(1, els.gridwrap.clientWidth) / 2;
 }
 function toggleSort(col) {
   const current = state.order[0];
@@ -3172,7 +4051,7 @@ function toggleComputed(field, button2) {
   }
   if (button2) {
     button2.classList.toggle("active", active);
-    button2.textContent = active ? "\u25BC" : "\u25B7";
+    button2.replaceChildren(codicon(active ? "refresh" : "triangle-right"));
     button2.title = active ? "Reload computed values for loaded rows" : "Load this @property for loaded rows (lazy \u2014 not auto-computed)";
   }
   virtual.refresh();
@@ -3197,10 +4076,13 @@ function onComputed(message) {
 function updateSortArrows() {
   const arrows = {};
   for (const term of state.order) {
-    arrows[term.field] = term.desc ? "\u25BC" : "\u25B2";
+    arrows[term.field] = term.desc ? "arrow-down" : "arrow-up";
   }
   for (const span of els.gridwrap.querySelectorAll(".sortarrow")) {
-    span.textContent = arrows[span.dataset.arrow] || "";
+    const direction = arrows[span.dataset.arrow];
+    span.textContent = "";
+    span.className = direction ? `sortarrow codicon codicon-${direction}` : "sortarrow";
+    span.setAttribute("aria-hidden", "true");
   }
 }
 function applyQuery(options = {}) {
@@ -3232,7 +4114,7 @@ function progressLabelForMessage(message) {
     return "Running query";
   }
   if (message.type === "loadMore") {
-    return "Loading more rows";
+    return "Loading more rows\u2026";
   }
   if (message.type === "reload") {
     return "Reloading rows";
@@ -3241,10 +4123,10 @@ function progressLabelForMessage(message) {
     return "Counting rows";
   }
   if (message.type === "aggregate") {
-    return "Summarizing rows";
+    return "Running aggregate\u2026";
   }
   if (message.type === "applyQuery") {
-    return "Loading rows";
+    return "Applying filters\u2026";
   }
   return "";
 }
@@ -3368,18 +4250,19 @@ function expandInto(button2, request) {
     return;
   }
   const body = el("div", { className: "nestedscroll" }, "Loading\u2026");
-  const row = insertDetailRow(detailAnchor(button2.closest("tr")), nestedPanel(request.relation, button2, body));
+  els.detailDrawer.hidden = false;
+  els.detailContent.replaceChildren(nestedPanel(request.relation, button2, body));
   const requestId = relRequestId += 1;
   pendingRelated.set(requestId, { body, label: request.relation });
   button2.dataset.open = "1";
-  button2._detailRow = row;
+  detailTrigger = button2;
   vscode.postMessage({ type: "expandRelated", requestId, relation: request.relation, pk: request.pk, value: request.value, single: request.single });
 }
 function nestedPanel(title, trigger, body) {
   const head = el("div", { className: "nestedhead" });
-  head.appendChild(el("span", { className: "tag" }, `\u25BE ${title}`));
+  head.appendChild(el("span", { className: "tag" }, codicon("chevron-down"), ` ${title}`));
   head.appendChild(el("span", { className: "grow" }));
-  const close = el("button", { className: "linkbtn", title: "Close" }, "\u2715 close");
+  const close = el("button", { ariaLabel: "Close related rows", className: "linkbtn", title: "Close" }, codicon("close"));
   close.addEventListener("click", () => closeDetail(trigger));
   head.appendChild(close);
   const wrap = el("div", {});
@@ -3388,11 +4271,18 @@ function nestedPanel(title, trigger, body) {
   return wrap;
 }
 function closeDetail(button2) {
-  if (button2._detailRow && button2._detailRow.isConnected) {
-    button2._detailRow.remove();
-  }
-  button2._detailRow = null;
+  els.detailDrawer.hidden = true;
+  els.detailContent.innerHTML = "";
   button2.dataset.open = "";
+  detailTrigger = void 0;
+  button2.focus();
+}
+function closeOpenDetail() {
+  if (!detailTrigger) {
+    return false;
+  }
+  closeDetail(detailTrigger);
+  return true;
 }
 function onRelated(message) {
   const pending = pendingRelated.get(message.requestId);
@@ -3414,31 +4304,10 @@ function onRelated(message) {
   }
   container.appendChild(buildEditableRelatedTable(result, { el, post: (message2) => vscode.postMessage(message2), renderValue }));
 }
-function detailAnchor(tr) {
-  let anchor = tr;
-  while (anchor.nextElementSibling && anchor.nextElementSibling.classList.contains("detail")) {
-    anchor = anchor.nextElementSibling;
-  }
-  return anchor;
-}
-function totalColumnCount() {
-  return 1 + state.columns.length + state.relations.length;
-}
-function insertDetailRow(afterRow, content) {
-  const tr = el("tr", { className: "detail" });
-  const td = el("td", { colSpan: totalColumnCount() });
-  const box = el("div", { className: "nested" });
-  box.appendChild(content);
-  td.appendChild(box);
-  tr.appendChild(td);
-  afterRow.parentNode.insertBefore(tr, afterRow.nextElementSibling);
-  return tr;
-}
 function renderError(messageText) {
   stopProgress();
-  els.gridwrap.innerHTML = "";
-  els.gridwrap.appendChild(el("div", { className: "err" }, messageText || "Error"));
-  els.status.textContent = "";
+  const detail = renderBrowserError({ create: el, grid: els.gridwrap, message: messageText, onOpenConsole: () => send({ type: "openConsole" }), onRetry: () => send({ type: "reload" }), status: els.status });
+  announcer.announceError(detail);
   els.more.disabled = true;
 }
 function logSql(action, sql, orm) {
@@ -3455,45 +4324,6 @@ function coerce(text) {
     return Number(text);
   }
   return text;
-}
-function setupLogResize() {
-  const handle = els.logresize;
-  const panel = els.logpanel;
-  if (!handle || !panel) {
-    return;
-  }
-  const saved = (vscode.getState() || {}).logHeight;
-  if (saved) {
-    document.documentElement.style.setProperty("--log-h", `${clampLogHeight(saved)}px`);
-  }
-  handle.addEventListener("mousedown", (event) => {
-    event.preventDefault();
-    const startY = event.clientY;
-    const startHeight = panel.offsetHeight;
-    handle.classList.add("dragging");
-    document.body.style.cursor = "row-resize";
-    document.body.style.userSelect = "none";
-    const move = (moveEvent) => {
-      const next = clampLogHeight(startHeight + (startY - moveEvent.clientY));
-      document.documentElement.style.setProperty("--log-h", `${next}px`);
-    };
-    const up = () => {
-      document.removeEventListener("mousemove", move);
-      document.removeEventListener("mouseup", up);
-      handle.classList.remove("dragging");
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      persistLogHeight(panel.offsetHeight);
-    };
-    document.addEventListener("mousemove", move);
-    document.addEventListener("mouseup", up);
-  });
-}
-function clampLogHeight(value) {
-  return Math.max(72, Math.min(value, Math.max(120, window.innerHeight - 160)));
-}
-function persistLogHeight(height) {
-  vscode.setState({ ...vscode.getState() || {}, logHeight: Math.round(height) });
 }
 function toggleFieldFinder() {
   if (els.fieldfinder.hidden) {
@@ -3525,13 +4355,34 @@ function scrollToField(key) {
   if (!key) {
     return;
   }
+  if (gridViewport.scrollToKey(key)) {
+    requestAnimationFrame(() => focusFoundField(key));
+    return;
+  }
+  focusFoundField(key);
+}
+function focusFoundField(key) {
   const th = els.gridwrap.querySelector(`thead th[data-key="${key}"]`);
   if (!th) {
     return;
   }
-  th.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+  th.querySelector("button")?.focus();
   th.classList.add("colfound");
   setTimeout(() => th.classList.remove("colfound"), 1200);
+}
+function revealGridCell(rowIndex, key) {
+  els.gridwrap.scrollTop = Math.max(0, rowIndex * 24);
+  gridViewport.scrollToKey(key);
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const cell = els.gridwrap.querySelector(`tr[data-row-index="${rowIndex}"] [role="gridcell"][data-key="${key}"]`);
+    if (cell) {
+      for (const peer of els.gridwrap.querySelectorAll('[role="gridcell"][tabindex="0"]')) {
+        peer.tabIndex = -1;
+      }
+      cell.tabIndex = 0;
+      cell.focus();
+    }
+  }));
 }
 function el(tag, props, ...children) {
   const node = document.createElement(tag);

@@ -5,18 +5,20 @@
 // blurring without a pick reverts to the current selection, keeping every value within the option allowlist.
 
 const NONE = -1;
+let comboboxSequence = 0;
 
 /** Creates a searchable combobox. Returns { node, getValue, setValue, setOptions, focus }. */
 export function createCombobox(deps) {
-  const { el, options = [], value = "", placeholder = "", onChange, title = "", dataset } = deps;
+  const { ariaLabel = "", el, options = [], value = "", placeholder = "", onChange, title = "", dataset } = deps;
   let items = normalize(options);
   let current = value == null ? "" : value;
   let activeIndex = NONE;
   let open = false;
   let visible = [];
 
-  const input = el("input", { className: "cbx-input", placeholder, spellcheck: false, title, type: "text" });
-  const list = el("div", { className: "cbx-list" });
+  const listId = `cbx-list-${comboboxSequence += 1}`;
+  const input = el("input", { ariaAutocomplete: "list", ariaControls: listId, ariaExpanded: "false", ariaLabel: ariaLabel || title || placeholder || "Choose option", className: "cbx-input", placeholder, role: "combobox", spellcheck: false, title, type: "text" });
+  const list = el("div", { className: "cbx-list", id: listId, role: "listbox" });
   list.hidden = true;
   const node = el("span", { className: "combobox" }, input, list);
   if (dataset) {
@@ -54,16 +56,17 @@ export function createCombobox(deps) {
     visible.forEach((option, index) => {
       if (option.group && option.group !== group) {
         group = option.group;
-        list.appendChild(el("div", { className: "cbx-group" }, group));
+        list.appendChild(el("div", { ariaHidden: "true", className: "cbx-group", role: "presentation" }, group));
       }
-      const optionNode = el("div", { className: index === activeIndex ? "cbx-opt active" : "cbx-opt", title: option.title }, option.label);
+      const optionNode = el("div", { ariaSelected: String(index === activeIndex), className: index === activeIndex ? "cbx-opt active" : "cbx-opt", id: `${listId}-option-${index}`, role: "option", title: option.title }, option.label);
       optionNode.addEventListener("click", () => choose(option));
       optionNode.addEventListener("mouseenter", () => { activeIndex = index; highlight(); });
       list.appendChild(optionNode);
     });
     if (!visible.length) {
-      list.appendChild(el("div", { className: "cbx-empty" }, "no matches"));
+      list.appendChild(el("div", { className: "cbx-empty", role: "status" }, "No matches"));
     }
+    syncAria();
   }
 
   /** Repaints only the active-option styling without rebuilding the list. */
@@ -74,7 +77,19 @@ export function createCombobox(deps) {
         continue;
       }
       child.className = index === activeIndex ? "cbx-opt active" : "cbx-opt";
+      child.setAttribute?.("aria-selected", String(index === activeIndex));
       index += 1;
+    }
+    syncAria();
+  }
+
+  /** Synchronizes combobox expanded and active-descendant state for assistive technology. */
+  function syncAria() {
+    input.setAttribute?.("aria-expanded", String(open));
+    if (open && activeIndex !== NONE && visible[activeIndex]) {
+      input.setAttribute?.("aria-activedescendant", `${listId}-option-${activeIndex}`);
+    } else {
+      input.removeAttribute?.("aria-activedescendant");
     }
   }
 
@@ -82,6 +97,8 @@ export function createCombobox(deps) {
   function show() {
     open = true;
     list.hidden = false;
+    const selected = matches().findIndex((option) => option.value === current);
+    activeIndex = selected === NONE ? 0 : selected;
     render();
   }
 
@@ -90,6 +107,7 @@ export function createCombobox(deps) {
     open = false;
     list.hidden = true;
     input.value = labelFor(current);
+    syncAria();
   }
 
   /** Commits a chosen option, firing change only when the value actually differs. */
@@ -99,6 +117,7 @@ export function createCombobox(deps) {
     input.value = option.label;
     open = false;
     list.hidden = true;
+    syncAria();
     if (changed) {
       if (onChange) {
         onChange(current);
@@ -127,7 +146,7 @@ export function createCombobox(deps) {
     }
   }
 
-  /** Handles arrow/enter/escape keyboard navigation. */
+  /** Handles arrow, home/end, enter, and escape keyboard navigation. */
   function onKey(event) {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
@@ -139,6 +158,13 @@ export function createCombobox(deps) {
         return;
       }
       activeIndex = activeIndex === NONE ? 0 : (activeIndex + (event.key === "ArrowDown" ? 1 : -1) + visible.length) % visible.length;
+      highlight();
+    } else if (event.key === "Home" || event.key === "End") {
+      if (!open) {
+        return;
+      }
+      event.preventDefault();
+      activeIndex = visible.length ? (event.key === "Home" ? 0 : visible.length - 1) : NONE;
       highlight();
     } else if (event.key === "Enter") {
       if (open && visible[activeIndex]) {

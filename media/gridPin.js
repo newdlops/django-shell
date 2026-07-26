@@ -21,25 +21,26 @@ export function repaintPins(gridwrap, state) {
   if (!headRow) {
     return;
   }
-  const lead = headRow.children[0] && headRow.children[0].classList.contains("rownum") ? 1 : 0;
   const lefts = {};
-  let offset = lead && headRow.children[0] ? headRow.children[0].offsetWidth : 0;
-  for (let i = 0; i < state.columns.length; i += 1) {
-    if (state.pinned.has(state.columns[i].attname)) {
-      lefts[i] = offset;
-      offset += headRow.children[i + lead] ? headRow.children[i + lead].offsetWidth : 0;
+  let offset = headRow.querySelector(".rownum")?.offsetWidth || 0;
+  const headerCells = [...headRow.querySelectorAll("[data-key]")];
+  for (const cell of headerCells) {
+    const key = cell.dataset.key;
+    if (key && state.pinned.has(key)) {
+      lefts[key] = offset;
+      offset += cell.offsetWidth;
     }
   }
-  for (let i = 0; i < state.columns.length; i += 1) {
-    setPin(headRow.children[i + lead], lefts[i]);
+  for (const cell of headerCells) {
+    setPin(cell, lefts[cell.dataset.key]);
   }
   if (body) {
     for (const row of body.children) {
       if (!row.dataset.pk) {
         continue;
       }
-      for (let i = 0; i < state.columns.length; i += 1) {
-        setPin(row.children[i + lead], lefts[i]);
+      for (const cell of row.querySelectorAll("[data-key]")) {
+        setPin(cell, lefts[cell.dataset.key]);
       }
     }
   }

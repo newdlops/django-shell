@@ -120,6 +120,14 @@ function button(label, className, title) {
   return node;
 }
 
+/** Creates a decorative Codicon for a surrounding labeled control. */
+function icon(name) {
+  const node = document.createElement("span");
+  node.className = `codicon codicon-${name}`;
+  node.setAttribute("aria-hidden", "true");
+  return node;
+}
+
 /** Returns primitive suggestions already present in a scalar list for a browser-native combobox. */
 function scalarSuggestions(items) {
   const values = [];
@@ -220,7 +228,9 @@ export function openArrayEditor(td, column, start, host) {
   const items = JSON.parse(JSON.stringify(parsed.items));
   const shape = arrayShape(items);
   const suggestions = scalarSuggestions(items);
-  const suggestionsId = `arrayedit-values-${editorSequence += 1}`;
+  const editorId = editorSequence += 1;
+  const suggestionsId = `arrayedit-values-${editorId}`;
+  const previousFocus = document.activeElement;
   const backdrop = element("div", "arrayedit-backdrop");
   const panel = element("section", "arrayedit-panel");
   panel.setAttribute("role", "dialog");
@@ -228,12 +238,18 @@ export function openArrayEditor(td, column, start, host) {
   panel.setAttribute("aria-label", `Edit ${column.name || column.attname || "list"}`);
   const header = element("header", "arrayedit-head");
   const heading = element("div", "arrayedit-title", column.name || column.attname || "List");
+  heading.id = `arrayedit-title-${editorId}`;
+  panel.setAttribute("aria-labelledby", heading.id);
   const count = element("span", "arrayedit-count");
-  const closeButton = button("✕", "arrayedit-close", "Cancel list editing");
+  count.setAttribute("aria-live", "polite");
+  const closeButton = button("", "arrayedit-close", "Cancel list editing");
+  closeButton.appendChild(icon("close"));
+  closeButton.setAttribute("aria-label", "Cancel list editing");
   header.append(heading, count, closeButton);
   const note = element("div", "arrayedit-note");
   const scroll = element("div", "arrayedit-scroll");
   const table = element("table", "arrayedit-table");
+  table.setAttribute("aria-label", `${column.name || column.attname || "List"} items`);
   const footer = element("footer", "arrayedit-foot");
   const addButton = button("+ Add item", "secondary", "Append a list item");
   const nullButton = column.null ? button("Set null", "secondary", "Replace this list with null") : null;
@@ -277,6 +293,7 @@ export function openArrayEditor(td, column, start, host) {
     } else {
       host.stage(next);
     }
+    previousFocus?.focus?.();
   }
 
   /** Removes one row and redraws the mini-table. */
@@ -303,15 +320,25 @@ export function openArrayEditor(td, column, start, host) {
     table.textContent = "";
     const thead = element("thead");
     const headRow = element("tr");
-    headRow.appendChild(element("th", "arrayedit-index", "#"));
+    const indexHead = element("th", "arrayedit-index", "#");
+    indexHead.scope = "col";
+    indexHead.setAttribute("aria-label", "Item number");
+    headRow.appendChild(indexHead);
     if (shape.kind === "object") {
       for (const key of shape.keys) {
-        headRow.appendChild(element("th", "", key));
+        const keyHead = element("th", "", key);
+        keyHead.scope = "col";
+        headRow.appendChild(keyHead);
       }
     } else {
-      headRow.appendChild(element("th", "", "Value"));
+      const valueHead = element("th", "", "Value");
+      valueHead.scope = "col";
+      headRow.appendChild(valueHead);
     }
-    headRow.appendChild(element("th", "arrayedit-actions", ""));
+    const actionsHead = element("th", "arrayedit-actions", "");
+    actionsHead.scope = "col";
+    actionsHead.setAttribute("aria-label", "Row actions");
+    headRow.appendChild(actionsHead);
     thead.appendChild(headRow);
     table.appendChild(thead);
     const tbody = element("tbody");
@@ -327,6 +354,7 @@ export function openArrayEditor(td, column, start, host) {
       }
       const actions = element("td", "arrayedit-actions");
       const remove = button("−", "arrayedit-remove", `Delete row ${index + 1}`);
+      remove.setAttribute("aria-label", `Delete row ${index + 1}`);
       remove.addEventListener("click", () => removeRow(index));
       actions.appendChild(remove);
       tr.appendChild(actions);
@@ -347,9 +375,25 @@ export function openArrayEditor(td, column, start, host) {
     }
   }
 
-  /** Handles modal keyboard shortcuts without leaking them to the data grid. */
+  /** Handles the modal focus loop and keyboard shortcuts without leaking them to the data grid. */
   function onKey(event) {
-    if (event.key === "Escape") {
+    if (event.key === "Tab") {
+      const focusable = [...panel.querySelectorAll("button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled])")];
+      if (!focusable.length) {
+        event.preventDefault();
+        panel.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    } else if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
       finish(undefined);

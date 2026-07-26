@@ -143,7 +143,7 @@ export function createColumnBuilder(deps) {
   function addGroupBy() {
     const row = el("span", { className: "aggchip" });
     const picker = pathPicker(groupRootOptions, "field / fk →");
-    const remove = el("button", { className: "chipx", title: "Remove group-by field", type: "button" }, "✕");
+    const remove = el("button", { ariaLabel: "Remove group-by field", className: "chipx", title: "Remove group-by field", type: "button" }, el("span", { ariaHidden: "true", className: "codicon codicon-close" }));
     remove.addEventListener("click", () => row.remove());
     row._picker = picker;
     row.append(picker.node, remove);
@@ -155,7 +155,7 @@ export function createColumnBuilder(deps) {
     const chip = el("span", { className: "winchip" });
     const combo = createCombobox({ el, options: concreteFields(), placeholder: "field", value: value || "" });
     const dir = withDirection ? createCombobox({ el, options: ORDER_DIR, value: desc ? "desc" : "asc" }) : null;
-    const remove = el("button", { className: "chipx", title: "Remove", type: "button" }, "✕");
+    const remove = el("button", { ariaLabel: "Remove field", className: "chipx", title: "Remove", type: "button" }, el("span", { ariaHidden: "true", className: "codicon codicon-close" }));
     remove.addEventListener("click", () => chip.remove());
     chip.append(combo.node, ...(dir ? [dir.node] : []), remove);
     chip._read = () => (withDirection ? { desc: dir.node.value === "desc", field: combo.node.value } : combo.node.value);
@@ -389,7 +389,7 @@ export function createColumnBuilder(deps) {
     const kindCombo = createCombobox({ el, options: KINDS, value: seed.kind || "aggregate" });
     const body = el("span", { className: "termbody" });
     const alias = el("input", { className: "aggalias", placeholder: "as alias", spellcheck: false, type: "text", value: seed.alias || "" });
-    const remove = el("button", { className: "chipx", title: "Remove column", type: "button" }, "✕");
+    const remove = el("button", { ariaLabel: "Remove column", className: "chipx", title: "Remove column", type: "button" }, el("span", { ariaHidden: "true", className: "codicon codicon-close" }));
     remove.addEventListener("click", () => row.remove());
     let readBody = () => ({});
     const rebuild = () => {

@@ -185,14 +185,14 @@ export function createFilterBar(deps) {
 
   /** Appends one filter term row and wires its cascading selects, lookup, value, negate and remove controls. */
   async function addTerm(initial) {
-    const term = el("span", { className: "term" });
+    const term = el("span", { ariaLabel: "Filter condition", className: "term", role: "group" });
     term._segs = [];
     const path = el("span", { className: "path", dataset: { role: "path" } });
-    const lookupCombo = createCombobox({ dataset: { role: "lookup" }, el, onChange: () => rebuildValue(term), options: [], placeholder: "—" });
+    const lookupCombo = createCombobox({ ariaLabel: "Filter operator", dataset: { role: "lookup" }, el, onChange: () => rebuildValue(term), options: [], placeholder: "—" });
     term._lookupCombo = lookupCombo;
     const value = el("span", { className: "valwrap", dataset: { role: "value" } });
-    const negate = el("input", { checked: Boolean(initial && initial.negate), dataset: { role: "negate" }, type: "checkbox" });
-    const remove = el("button", { className: "linkbtn", dataset: { role: "remove" }, title: "Remove filter" }, "✕");
+    const negate = el("input", { ariaLabel: "Negate filter", checked: Boolean(initial && initial.negate), dataset: { role: "negate" }, type: "checkbox" });
+    const remove = el("button", { ariaLabel: "Remove filter condition", className: "linkbtn", dataset: { role: "remove" }, title: "Remove filter" }, el("span", { ariaHidden: "true", className: "codicon codicon-close" }));
     remove.addEventListener("click", () => term.remove());
     term.append(path, lookupCombo.node, value, el("label", { className: "neg" }, negate, "not"), remove);
     termsEl.appendChild(term);
@@ -221,7 +221,7 @@ export function createFilterBar(deps) {
     // An unmatched preset (e.g. saved path absent from a changed/flat-fallback option set) stays on the empty
     // placeholder rather than silently binding the first field, so collect() never emits the wrong field.
     const match = presetValue === undefined ? null : options.find((option) => option.value === `${REL}${presetValue}` || option.value === `${FIELD}${presetValue}`);
-    const combo = createCombobox({ dataset: { level: String(level), role: "seg" }, el, onChange: () => void onSegmentChange(term, level), options: comboOptions, placeholder: level === 0 ? "— pick field / relation —" : "— exists / pick field —", value: match ? match.value : "" });
+    const combo = createCombobox({ ariaLabel: level === 0 ? "Filter field or relation" : `Related filter field ${level + 1}`, dataset: { level: String(level), role: "seg" }, el, onChange: () => void onSegmentChange(term, level), options: comboOptions, placeholder: level === 0 ? "— pick field / relation —" : "— exists / pick field —", value: match ? match.value : "" });
     const select = combo.node;
     // currentOption()/terminalOf() read the ORIGINAL option objects (role/target/type/choices), not the trimmed combo records.
     select._options = options;
@@ -310,7 +310,7 @@ export function createFilterBar(deps) {
   /** Builds a value control (null toggle, choices/boolean select, range pair, in-chips, typed input) for a lookup. */
   function buildValueControl(terminal, lookup, presetValue) {
     if (lookup === "isnull") {
-      const select = el("select", {});
+      const select = el("select", { ariaLabel: "Null-value filter" });
       select.append(el("option", { value: "false" }, "has value"), el("option", { value: "true" }, "is null"));
       select.value = isTruthy(presetValue) ? "true" : "false";
       return { getValue: () => select.value, node: select };
@@ -324,7 +324,7 @@ export function createFilterBar(deps) {
     if ((lookup === "exact" || lookup === "iexact") && terminal && terminal.type === "BooleanField") {
       // Emit capitalized "True"/"False": Django's BooleanField.to_python accepts those (but NOT lowercase "true")
       // even when a relation-traversal path reaches it uncoerced in ORM/Terminal mode; the socket backend still coerces them.
-      const select = el("select", {});
+      const select = el("select", { ariaLabel: "Boolean filter value" });
       select.append(el("option", { value: "True" }, "true"), el("option", { value: "False" }, "false"));
       select.value = isTruthy(presetValue) ? "True" : "False";
       return { getValue: () => select.value, node: select };
@@ -335,13 +335,13 @@ export function createFilterBar(deps) {
       // combobox never renders blank and collect() never emits an empty value — matching a native <select>'s default.
       const carried = presetValue === undefined || presetValue === null ? "" : String(presetValue);
       const selected = choiceOptions.some((option) => option.value === carried) ? carried : (choiceOptions[0] ? choiceOptions[0].value : "");
-      const combo = createCombobox({ el, options: choiceOptions, placeholder: "— choose —", value: selected });
+      const combo = createCombobox({ ariaLabel: "Filter value", el, options: choiceOptions, placeholder: "— choose —", value: selected });
       return { getValue: () => combo.getValue(), node: combo.node };
     }
     // `date` compares only the date portion → force a plain date picker (a datetime-local value Django's __date rejects).
     // Length/extract operators (length*, year/month/day, week_day, quarter, hour/minute/second) compare against an integer → number box.
     const type = lookup === "date" ? "DateField" : (INT_LOOKUPS.has(lookup) || String(lookup).startsWith("length") ? "IntegerField" : (terminal ? terminal.type : ""));
-    const input = el("input", { type: inputTypeFor(type) });
+    const input = el("input", { ariaLabel: "Filter value", type: inputTypeFor(type) });
     if (presetValue !== undefined && presetValue !== null) { input.value = String(presetValue); }
     return { getValue: () => input.value, node: input };
   }
@@ -349,8 +349,8 @@ export function createFilterBar(deps) {
   /** Builds a two-input from/to control for a `range` lookup. */
   function rangePair(terminal, presetValue) {
     const type = inputTypeFor(terminal ? terminal.type : "");
-    const from = el("input", { className: "rangefrom", placeholder: "from", type });
-    const to = el("input", { className: "rangeto", placeholder: "to", type });
+    const from = el("input", { ariaLabel: "Range start", className: "rangefrom", placeholder: "from", type });
+    const to = el("input", { ariaLabel: "Range end", className: "rangeto", placeholder: "to", type });
     const parts = String(presetValue || "").split(",");
     from.value = (parts[0] || "").trim();
     to.value = (parts[1] || "").trim();
@@ -361,12 +361,12 @@ export function createFilterBar(deps) {
   /** Builds an add-on-Enter chip control for `in` (comma-separated) value lists. */
   function chips(presetValue) {
     const values = [];
-    const node = el("span", { className: "chips" });
-    const input = el("input", { className: "chipinput", placeholder: "value + Enter", type: "text" });
+    const node = el("span", { ariaLabel: "Filter values", ariaLive: "polite", className: "chips", role: "group" });
+    const input = el("input", { ariaLabel: "Add filter value", className: "chipinput", placeholder: "value + Enter", type: "text" });
     const render = () => {
       node.innerHTML = "";
       values.forEach((text, index) => {
-        const close = el("button", { className: "chipx", title: "Remove", type: "button" }, "✕");
+        const close = el("button", { ariaLabel: `Remove value ${text}`, className: "chipx", title: "Remove", type: "button" }, el("span", { ariaHidden: "true", className: "codicon codicon-close" }));
         close.addEventListener("click", () => { values.splice(index, 1); render(); });
         node.appendChild(el("span", { className: "filterchip" }, text, close));
       });
@@ -444,7 +444,7 @@ export function createFilterBar(deps) {
     termsEl.innerHTML = "";
   }
 
-  /** Renders the "applied filters" chip summary; each chip carries an ✕ that drops just that filter and re-applies. */
+  /** Renders the applied-filter chip summary; each chip has an independent remove control. */
   function renderSummary(filters) {
     if (!activeEl) { return; }
     activeEl.innerHTML = "";
@@ -454,10 +454,10 @@ export function createFilterBar(deps) {
     }
     activeEl.appendChild(el("span", { className: "tag" }, "Applied"));
     filters.forEach((filter, index) => {
-      const remove = el("button", { className: "chipx", title: "Remove this filter", type: "button" }, "✕");
+      const remove = el("button", { ariaLabel: `Remove filter ${describe(filter)}`, className: "chipx", title: "Remove this filter", type: "button" }, el("span", { ariaHidden: "true", className: "codicon codicon-close" }));
       // Drop only this chip's filter (by position) and re-apply the reduced set, leaving the other applied filters intact.
       remove.addEventListener("click", () => { if (onRemove) { onRemove(filters.filter((_, other) => other !== index)); } });
-      activeEl.appendChild(el("span", { className: "filterchip", title: "Applied filter — ✕ to remove" }, describe(filter), remove));
+      activeEl.appendChild(el("span", { className: "filterchip", title: "Applied filter — use Remove to clear" }, describe(filter), remove));
     });
   }
 

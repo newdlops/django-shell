@@ -2,7 +2,7 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
-import type { BackendTransport, BackendTransportMode } from "./backendClient";
+import type { BackendInterruptResult, BackendTransport, BackendTransportMode } from "./backendClient";
 import type { BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRelation, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { modelBrowserHtml } from "./modelBrowserHtml";
 import { DiagnosticLogger } from "./diagnostics";
@@ -17,6 +17,8 @@ export interface ModelDataSource {
   modelFilterFields(app: string, model: string): Promise<BackendFilterFieldTree>;
   modelLookup(query: ModelLookupQuery): Promise<BackendModelLookup>;
   modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery>;
+  /** Interrupts an active custom ORM query without queueing another shell request. */
+  interruptModelQuery(reason: string): Promise<BackendInterruptResult>;
   /** Returns hidden runtime imports used to analyze custom ORM query input. */
   modelQueryPrelude?(): Promise<string[]>;
   modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows>;
@@ -46,6 +48,7 @@ interface IncomingMessage {
   filterPk?: unknown;
   filters?: BackendModelFilter[];
   groupBy?: string[];
+  grid?: { logicalColumns: number; logicalRows: number; ms: number; renderedCells: number; renderedColumns: number; renderedRows: number };
   mode?: BackendTransportMode;
   model?: string;
   order?: BackendModelOrder[];
@@ -63,7 +66,7 @@ interface IncomingMessage {
 const VIEW_TYPE = "djangoShell.modelBrowser";
 const PAGE_SIZE = 50;
 const MODEL_REQUEST_TIMEOUT_MS = 8000;
-const MODEL_BUSY_MESSAGE = "Django shell is busy running or debugging Python. Try again after the current cell continues or finishes.";
+const MODEL_BUSY_MESSAGE = "Django shell is busy. Retry when the current execution finishes.";
 const MODEL_REQUEST_TIMEOUT = Symbol("modelRequestTimeout");
 
 /** Opens model-data browser tabs; each open creates an independent panel with its own state. */
@@ -157,7 +160,7 @@ class ModelBrowserPanel {
       localResourceRoots: [vscode.Uri.file(path.join(extensionPath, "media"))],
       retainContextWhenHidden: true
     });
-    this.panel.webview.html = modelBrowserHtml(this.panel.webview, extensionPath);
+    this.panel.webview.html = modelBrowserHtml(this.panel.webview, extensionPath, { mode: "model" });
     if (target.initialPk !== undefined && target.initialPk !== null) {
       // Opened by following a foreign-key link: pre-filter to that row's primary key. `pk` is allowlisted backend-side and resolves to the model's real primary key in every transport.
       this.filters = [{ field: "pk", lookup: "exact", value: target.initialPk }];
@@ -207,7 +210,7 @@ class ModelBrowserPanel {
     }
     const generation = this.nextLoadGeneration();
     this.panel.title = `${this.target.model} — data`;
-    this.post({ label: this.target.label, model: `${this.target.app}.${this.target.model}`, type: "loading" });
+    this.post({ label: this.target.label, model: `${this.target.app}.${this.target.model}`, phase: "schema", type: "loading" });
     if (this.reconstructsViaOrmCell()) {
       // ORM and Terminal modes type the read as a literal cell (no schema RPC); the head is synthesized from the first page.
       await this.loadPage(true, generation);
@@ -232,6 +235,7 @@ class ModelBrowserPanel {
 
   /** Loads one page of rows, resetting the grid or appending to it. */
   private async loadPage(reset: boolean, generation = this.nextLoadGeneration()): Promise<void> {
+    this.post({ phase: reset ? "rows" : "more", type: "loading" });
     const query: ModelRowsQuery = { annotations: this.annotations, app: this.target.app, columns: this.columns, filters: this.filters, limit: this.pageSize, model: this.target.model, order: this.order, relations: this.relations };
     if (!reset && this.nextCursor !== undefined && this.nextCursor !== null) {
       query.cursor = this.nextCursor;
@@ -293,6 +297,7 @@ class ModelBrowserPanel {
       this.filters = Array.isArray(message.filters) ? message.filters : [];
       this.order = Array.isArray(message.order) ? message.order : [];
       this.annotations = Array.isArray(message.annotations) ? message.annotations : [];
+      this.post({ phase: "filters", type: "loading" });
       await this.loadPage(true);
     } else if (message.type === "requestCount") {
       await this.requestCount();
@@ -315,6 +320,10 @@ class ModelBrowserPanel {
       await this.sendFilterFields(message);
     } else if (message.type === "modelList") {
       await this.sendModelList(message);
+    } else if (message.type === "gridRendered" && message.grid) {
+      this.logger?.log("model.grid.render", message.grid);
+    } else if (message.type === "openConsole") {
+      await vscode.commands.executeCommand("djangoShell.openConsole");
     } else if (message.type === "openModel" && message.app && message.model) {
       this.openAnother({ app: message.app, initialPk: message.filterPk, model: message.model });
     }
@@ -358,6 +367,7 @@ class ModelBrowserPanel {
   private async requestAggregate(message: IncomingMessage): Promise<void> {
     const filters = Array.isArray(message.filters) ? message.filters : this.filters;
     this.filters = filters;
+    this.post({ phase: "aggregate", type: "loading" });
     const result = await this.source.modelAggregate({
       aggregates: Array.isArray(message.aggregates) ? message.aggregates : [],
       app: this.target.app,

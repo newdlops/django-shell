@@ -218,7 +218,7 @@ export function createColumnConditionBuilder(deps) {
     const rhsKind = createCombobox({ dataset: { role: "condition-rhs-kind" }, el, onChange: () => rebuildRhs(row), options: [{ label: "value", value: "value" }], value: "value" });
     const rhsSlot = el("span", { className: "condition-rhs", dataset: { role: "condition-rhs" } });
     const negate = el("input", { checked: Boolean(initial && initial.negate), dataset: { role: "condition-negate" }, type: "checkbox" });
-    const remove = el("button", { className: "chipx", dataset: { role: "condition-remove" }, title: "Remove condition", type: "button" }, "✕");
+    const remove = el("button", { ariaLabel: "Remove condition", className: "chipx", dataset: { role: "condition-remove" }, title: "Remove condition", type: "button" }, el("span", { ariaHidden: "true", className: "codicon codicon-close" }));
     remove.addEventListener("click", () => { row.remove(); refreshGroupUi(); });
     row._field = field;
     row._lookup = lookup;

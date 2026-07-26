@@ -19,7 +19,7 @@ function stubEl(tag, attrs = {}, ...kids) {
   };
 }
 
-test("each applied-filter chip carries an ✕ that removes only that filter", () => {
+test("each applied-filter chip has a remove control that removes only that filter", () => {
   let removed;
   const activeEl = stubEl("span");
   const bar = createFilterBar({ el: stubEl, termsEl: stubEl("span"), activeEl, getState: () => ({ columns: [], relations: [] }), postRaw: () => {}, lookups: new Set(), onRemove: (next) => { removed = next; } });

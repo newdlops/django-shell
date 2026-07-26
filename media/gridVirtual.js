@@ -5,23 +5,25 @@
 // row height drives the window math. Detail (relation-expansion) rows live only inside the current
 // window: any window change rebuilds tbody from row data, which closes open expansions cleanly.
 
-const OVERSCAN = 12;
+import { calculateRowWindow, DEFAULT_ROW_HEIGHT } from "./gridViewport.js";
+
 const RENDER_ALL_MAX = 80;
-const DEFAULT_ROW_H = 24;
 
 /** Creates a row-windowing controller bound to a scroll container; it owns the tbody's row rendering. */
 export function createVirtualRows(ctx) {
   // ctx: { scroller, getBody(), columnSpan(), buildRow(row, index), onRender() }
   let rows = [];
-  let rowH = DEFAULT_ROW_H;
+  let rowH = DEFAULT_ROW_HEIGHT;
   let measured = false;
   let renderedFirst = 0;
   let renderedEnd = 0;
 
-  /** True while a cell editor input/select is focused, so a scroll re-render won't discard the edit. */
-  function isEditing() {
+  /** Commits a focused inline edit before rebuilding its row outside the current virtual window. */
+  function settleActiveEditor() {
     const active = document.activeElement;
-    return Boolean(active && ctx.scroller.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
+    if (active && ctx.scroller.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) {
+      active.blur();
+    }
   }
 
   /** Builds a full-width zero-padding spacer row of the given pixel height (stands in for off-window rows). */
@@ -37,11 +39,7 @@ export function createVirtualRows(ctx) {
 
   /** Computes the [first, end) row window for the current scroll position, padded by overscan. */
   function windowRange() {
-    const top = ctx.scroller.scrollTop;
-    const viewH = ctx.scroller.clientHeight || 0;
-    const first = Math.max(0, Math.floor(top / rowH) - OVERSCAN);
-    const count = Math.ceil(viewH / rowH) + OVERSCAN * 2;
-    return { end: Math.min(rows.length, first + count), first };
+    return calculateRowWindow({ maxRows: ctx.maxRows?.(), rowCount: rows.length, rowHeight: rowH, scrollTop: ctx.scroller.scrollTop, viewportHeight: ctx.scroller.clientHeight || 0 });
   }
 
   /** Replaces tbody with the [first, end) window of rows, bracketed by spacer rows. */
@@ -103,9 +101,14 @@ export function createVirtualRows(ctx) {
     }
   }
 
-  /** Renders all rows when the set is small, otherwise the current viewport window. */
+  /** Returns whether the current data shape must use a bounded viewport rather than an all-row render. */
+  function needsWindowing() {
+    return rows.length > RENDER_ALL_MAX || Boolean(ctx.shouldWindow?.(rows.length));
+  }
+
+  /** Renders all rows when the data shape is small, otherwise the current viewport window. */
   function render() {
-    if (rows.length <= RENDER_ALL_MAX) {
+    if (!needsWindowing()) {
       paintAll();
     } else {
       const range = windowRange();
@@ -115,7 +118,7 @@ export function createVirtualRows(ctx) {
 
   /** Re-renders only once the visible band has scrolled past the rendered (overscanned) range. */
   function onScroll() {
-    if (rows.length <= RENDER_ALL_MAX || isEditing()) {
+    if (!needsWindowing()) {
       return;
     }
     const top = ctx.scroller.scrollTop;
@@ -123,6 +126,9 @@ export function createVirtualRows(ctx) {
     const needFirst = Math.floor(top / rowH);
     const needEnd = Math.ceil((top + viewH) / rowH);
     if (needFirst < renderedFirst || needEnd > renderedEnd) {
+      // Do not indefinitely freeze the DOM while an editor is focused. Blurring stages its current value through the
+      // normal editor contract, then the fresh window can contain the rows at the requested scroll position.
+      settleActiveEditor();
       const range = windowRange();
       paintWindow(range.first, range.end);
     }
@@ -134,7 +140,7 @@ export function createVirtualRows(ctx) {
   // taller viewport would show blank space below the last rendered row until the next scroll. Rendering rows does
   // not change the scroller's own box size (it is sized by the grid track, not by tbody content), so no loop.
   if (typeof ResizeObserver !== "undefined") {
-    new ResizeObserver(() => { if (rows.length > RENDER_ALL_MAX) { render(); } }).observe(ctx.scroller);
+    new ResizeObserver(() => { if (needsWindowing()) { render(); } }).observe(ctx.scroller);
   }
 
   return {

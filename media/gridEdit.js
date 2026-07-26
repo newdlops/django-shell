@@ -249,6 +249,7 @@ export function createEditor(ctx) {
     if (!pendingCount()) {
       return;
     }
+    ctx.onCommitStart?.(pendingCount());
     ctx.post({ changes: [...pending.values()], type: "commitEdits" });
   }
 
@@ -270,11 +271,13 @@ export function createEditor(ctx) {
       activeArrayEditor?.cancel();
       pending.clear();
       ctx.onChange(0);
-      ctx.notify(`Committed ${data.saved} row${data.saved === 1 ? "" : "s"}.`);
+      ctx.onCommitEnd?.();
+      ctx.notify(`Saved ${data.saved} changes.`);
       ctx.reload();
       return;
     }
-    ctx.notify(`Commit failed (nothing saved): ${summarize(data)}`);
+    ctx.onCommitEnd?.();
+    ctx.notify(`Commit failed: ${summarize(data)}`);
   }
 
   /** Builds a short human summary of commit errors. */
