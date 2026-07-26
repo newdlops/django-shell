@@ -1,0 +1,275 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-26T04:40:58Z",
+  "title": "Design System: Django Shell",
+  "extensions": {
+    "colorMeta": {
+      "editor-surface": {
+        "role": "neutral",
+        "displayName": "Editor Plane"
+      },
+      "workbench-surface": {
+        "role": "neutral",
+        "displayName": "Workbench Plane"
+      },
+      "widget-surface": {
+        "role": "neutral",
+        "displayName": "Floating Widget Plane"
+      },
+      "primary-text": {
+        "role": "neutral",
+        "displayName": "Primary Text"
+      },
+      "secondary-text": {
+        "role": "neutral",
+        "displayName": "Secondary Text"
+      },
+      "structural-border": {
+        "role": "neutral",
+        "displayName": "Structural Border"
+      },
+      "focus-ring": {
+        "role": "primary",
+        "displayName": "Workbench Focus"
+      },
+      "action-fill": {
+        "role": "primary",
+        "displayName": "Workbench Action"
+      },
+      "action-text": {
+        "role": "primary",
+        "displayName": "Action Text"
+      },
+      "secondary-action-fill": {
+        "role": "neutral",
+        "displayName": "Secondary Action"
+      },
+      "hover-fill": {
+        "role": "neutral",
+        "displayName": "List Hover"
+      },
+      "selected-fill": {
+        "role": "primary",
+        "displayName": "Active Selection"
+      },
+      "selected-text": {
+        "role": "primary",
+        "displayName": "Selected Text"
+      },
+      "error-text": {
+        "role": "tertiary",
+        "displayName": "Error Signal"
+      },
+      "warning-surface": {
+        "role": "tertiary",
+        "displayName": "Staged Change"
+      },
+      "warning-border": {
+        "role": "tertiary",
+        "displayName": "Staged Change Border"
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Workbench Title",
+        "purpose": "Compact surface and section identity."
+      },
+      "body": {
+        "displayName": "VS Code UI",
+        "purpose": "Controls, labels, instructions, and tree rows."
+      },
+      "label": {
+        "displayName": "Workbench Metadata",
+        "purpose": "Types, counts, transport detail, timestamps, and secondary state."
+      },
+      "code": {
+        "displayName": "VS Code Editor",
+        "purpose": "Python, SQL, model data, field paths, and results."
+      }
+    },
+    "shadows": [
+      {
+        "name": "floating-widget",
+        "value": "0 2px 8px rgba(0, 0, 0, 0.35)",
+        "purpose": "Combobox lists, field finders, and other small transient overlays."
+      },
+      {
+        "name": "modal-editor",
+        "value": "0 8px 30px rgba(0, 0, 0, 0.45)",
+        "purpose": "Blocking array and structured-value editors."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-fast",
+        "value": "80ms ease-out",
+        "purpose": "Hover, focus, and compact disclosure feedback when motion is allowed."
+      },
+      {
+        "name": "state-standard",
+        "value": "120ms ease-out",
+        "purpose": "Drawer and transient-widget state changes when motion is allowed."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "0ms linear",
+        "purpose": "Required replacement for nonessential animation under prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "narrow-editor",
+        "value": "640px"
+      },
+      {
+        "name": "wide-editor",
+        "value": "960px"
+      },
+      {
+        "name": "sidebar-minimum",
+        "value": "200px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single current-context action such as Run or Commit.",
+      "html": "<button class=\"ds-button-primary\" type=\"button\">Run query</button>",
+      "css": ".ds-button-primary { min-height: 24px; padding: 3px 9px; border: 0; border-radius: 4px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); font: inherit; cursor: pointer; transition: background 80ms ease-out; } .ds-button-primary:hover { background: var(--vscode-button-hoverBackground); } .ds-button-primary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; } .ds-button-primary:active { transform: translateY(1px); } .ds-button-primary:disabled { opacity: .5; cursor: default; transform: none; } @media (prefers-reduced-motion: reduce) { .ds-button-primary { transition: none; } .ds-button-primary:active { transform: none; } }"
+    },
+    {
+      "name": "Secondary Action",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A supporting action that does not compete with the current primary operation.",
+      "html": "<button class=\"ds-button-secondary\" type=\"button\">Reload</button>",
+      "css": ".ds-button-secondary { min-height: 24px; padding: 3px 9px; border: 0; border-radius: 4px; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground); font: inherit; cursor: pointer; } .ds-button-secondary:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); } .ds-button-secondary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; } .ds-button-secondary:active { transform: translateY(1px); } @media (prefers-reduced-motion: reduce) { .ds-button-secondary:active { transform: none; } }"
+    },
+    {
+      "name": "Icon Action",
+      "kind": "button",
+      "refersTo": "icon-button",
+      "description": "A compact Codicon action with an accessible name and tooltip.",
+      "html": "<button class=\"ds-icon-button\" type=\"button\" aria-label=\"Refresh model data\" title=\"Refresh model data\"><svg viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M13.5 2v4h-4l1.47-1.47A4.5 4.5 0 1 0 12.4 9h1.02A5.5 5.5 0 1 1 11.7 3.8L13.5 2Z\" /></svg></button>",
+      "css": ".ds-icon-button { display: inline-grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px; color: var(--vscode-foreground); background: transparent; font: inherit; cursor: pointer; } .ds-icon-button svg { width: 16px; height: 16px; } .ds-icon-button:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); } .ds-icon-button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; } .ds-icon-button:active { background: var(--vscode-toolbar-activeBackground, var(--vscode-list-activeSelectionBackground)); }"
+    },
+    {
+      "name": "Search Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "A labeled compact search field for models, fields, and foreign-key values.",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">Search models</span><input class=\"ds-input\" type=\"search\" placeholder=\"App, model, or table\" /></label>",
+      "css": ".ds-field { display: grid; gap: 4px; color: var(--vscode-foreground); font: inherit; } .ds-field-label { color: var(--vscode-descriptionForeground); font-size: 11px; } .ds-input { min-height: 24px; padding: 3px 6px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); font: inherit; } .ds-input::placeholder { color: var(--vscode-input-placeholderForeground); } .ds-input:focus-visible { border-color: var(--vscode-focusBorder); outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }"
+    },
+    {
+      "name": "Active Filter Chip",
+      "kind": "chip",
+      "refersTo": "filter-chip",
+      "description": "A removable summary of one applied model filter.",
+      "html": "<span class=\"ds-filter-chip\"><span>company_type = client</span><button type=\"button\" aria-label=\"Remove company_type equals client filter\"><svg viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"m4.35 3.65 4 4 4-4 .7.7-4 4 4 4-.7.7-4-4-4 4-.7-.7 4-4-4-4 .7-.7Z\" /></svg></button></span>",
+      "css": ".ds-filter-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 280px; padding: 1px 6px; border: 1px solid var(--vscode-panel-border); border-radius: 999px; color: var(--vscode-foreground); background: var(--vscode-editor-inactiveSelectionBackground, transparent); font: 11px/1.35 var(--vscode-font-family); } .ds-filter-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-filter-chip button { display: inline-grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; } .ds-filter-chip button svg { width: 12px; height: 12px; } .ds-filter-chip button:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); } .ds-filter-chip button:focus-visible { outline: 1px solid var(--vscode-focusBorder); }"
+    },
+    {
+      "name": "Model Tree Row",
+      "kind": "nav",
+      "description": "A keyboard-operable model entry in the Models sidebar.",
+      "html": "<button class=\"ds-tree-row\" type=\"button\"><svg class=\"ds-tree-icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M2 2h12v12H2V2Zm1 1v3h4V3H3Zm5 0v3h5V3H8ZM3 7v6h4V7H3Zm5 0v6h5V7H8Z\" /></svg><span class=\"ds-tree-label\">db.Company</span><span class=\"ds-tree-meta\">db_company</span></button>",
+      "css": ".ds-tree-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 6px; width: 100%; min-height: 22px; padding: 2px 6px; border: 0; border-radius: 0; color: var(--vscode-foreground); background: transparent; font: inherit; text-align: left; cursor: pointer; } .ds-tree-icon { width: 16px; height: 16px; } .ds-tree-row:hover { background: var(--vscode-list-hoverBackground); } .ds-tree-row:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; } .ds-tree-row:active { color: var(--vscode-list-activeSelectionForeground); background: var(--vscode-list-activeSelectionBackground); } .ds-tree-label, .ds-tree-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-tree-meta { color: var(--vscode-descriptionForeground); font-size: 11px; }"
+    },
+    {
+      "name": "Dirty Data Cell",
+      "kind": "custom",
+      "refersTo": "data-cell",
+      "description": "A model value changed locally but not yet committed to Django.",
+      "html": "<div class=\"ds-grid-cell\" role=\"gridcell\" aria-label=\"name, Acme, modified and not committed\" tabindex=\"0\"><span>Acme</span><span class=\"ds-dirty-label\">Modified</span></div>",
+      "css": ".ds-grid-cell { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 160px; min-height: 24px; padding: 3px 8px; border-right: 1px solid var(--vscode-panel-border); border-bottom: 1px solid var(--vscode-panel-border); box-shadow: inset 2px 0 0 var(--vscode-inputValidation-warningBorder, var(--vscode-charts-yellow)); color: var(--vscode-foreground); background: var(--vscode-inputValidation-warningBackground, var(--vscode-editor-background)); font: 12px/1.45 var(--vscode-editor-font-family); } .ds-grid-cell:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; } .ds-dirty-label { color: var(--vscode-descriptionForeground); font: 11px/1.35 var(--vscode-font-family); }"
+    },
+    {
+      "name": "Operation Status",
+      "kind": "custom",
+      "description": "A stable text-and-icon status for running, cancelling, failed, or completed work.",
+      "html": "<div class=\"ds-operation-status\" role=\"status\" aria-live=\"polite\"><svg viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M8 2a6 6 0 1 0 6 6h-1a5 5 0 1 1-5-5V2Z\" /></svg><span>Running query · 12s</span><button type=\"button\">Interrupt</button></div>",
+      "css": ".ds-operation-status { display: inline-flex; align-items: center; gap: 6px; min-height: 24px; color: var(--vscode-descriptionForeground); font: 11px/1.35 var(--vscode-font-family); font-variant-numeric: tabular-nums; } .ds-operation-status svg { width: 14px; height: 14px; } .ds-operation-status button { min-height: 22px; padding: 2px 7px; border: 0; border-radius: 4px; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground); font: inherit; cursor: pointer; } .ds-operation-status button:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); } .ds-operation-status button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Live Django Workbench",
+    "overview": "Django Shell should feel like a precise instrument built into VS Code, not a separate web application placed inside it. The visual system is calm, compact, and operational: it makes the live shell, current model, transport, execution state, staged changes, and recovery actions easy to scan without competing with the developer's code.\n\nDensity is deliberate because the primary users are experienced Django developers working with large namespaces and wide schemas. That density must remain ordered rather than cramped. Stable regions, consistent alignment, semantic hierarchy, and progressive disclosure carry the complexity; decoration does not.\n\nThe extension inherits its identity from the active VS Code theme. It does not introduce a fixed brand palette, custom typeface, card-heavy dashboard language, oversized headings, gradients, or consumer-product illustration. Color is reserved for platform-defined actions, focus, selection, validation, and status.",
+    "keyCharacteristics": [
+      "Native to the current VS Code theme and interaction vocabulary.",
+      "Dense, keyboard-efficient, and optimized for expert scanning.",
+      "Stable under long-running, remote, empty, error, and partially loaded states.",
+      "Explicit about execution context, transport, staged edits, and destructive boundaries.",
+      "Flat and structural, using borders and tonal surfaces before shadows.",
+      "Responsive to editor-group width rather than assuming a full-window page."
+    ],
+    "rules": [
+      {
+        "name": "The Theme Is the Brand Rule",
+        "body": "Never replace semantic VS Code color variables with a fixed product palette in a user-visible surface.",
+        "section": "colors"
+      },
+      {
+        "name": "The State Before Accent Rule",
+        "body": "Use accent color only to communicate an action, focus, selection, validation, or status; never as ambient decoration.",
+        "section": "colors"
+      },
+      {
+        "name": "The Text Plus Signal Rule",
+        "body": "Connection, execution, warning, and error states always include readable text or an accessible name and never rely on color alone.",
+        "section": "colors"
+      },
+      {
+        "name": "The Code Is Data Rule",
+        "body": "Python, SQL, field paths, values, and results use the editor font; control labels and explanatory text use the UI font.",
+        "section": "typography"
+      },
+      {
+        "name": "The No Hero Type Rule",
+        "body": "No active extension surface uses marketing-scale typography. A user should see more useful state, not a larger heading, when space increases.",
+        "section": "typography"
+      },
+      {
+        "name": "The Workbench Geometry Rule",
+        "body": "Layout decisions respond to editor-group and sidebar width, not the overall VS Code window width.",
+        "section": "layout"
+      },
+      {
+        "name": "The Context Never Disappears Rule",
+        "body": "Narrow layouts may shorten or move controls, but the active model or query, runtime state, primary action, transport, dirty state, and failure state remain available.",
+        "section": "layout"
+      },
+      {
+        "name": "The Bounded DOM Rule",
+        "body": "A large Django schema must not produce a DOM or accessibility tree proportional to every row multiplied by every column.",
+        "section": "layout"
+      },
+      {
+        "name": "The Quiet Plane Rule",
+        "body": "Persistent regions use tonal surfaces and borders; only transient overlapping regions cast shadows.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do inherit every surface, text, border, focus, action, selection, warning, and error color from semantic VS Code variables.",
+      "Do keep live execution context, transport, progress, dirty state, and recovery actions visible.",
+      "Do use Codicons and semantic platform controls before creating a custom icon or interaction.",
+      "Do provide keyboard operation, visible focus, accessible names, and live status announcements for every workflow.",
+      "Do design and verify wide, split-editor, narrow-sidebar, dark, light, high-contrast, and 200% zoom states.",
+      "Do keep the model grid's rendered DOM and accessibility tree bounded for wide real-world schemas.",
+      "Do separate functional verification from rendered visual verification."
+    ],
+    "donts": [
+      "Don't introduce a fixed brand palette, custom font, gradient, illustration, oversized heading, glass effect, or card-dashboard motif.",
+      "Don't use color, a dot, an arrow glyph, or placeholder text as the only meaning-bearing signal.",
+      "Don't hide the active model, query, runtime state, primary action, transport, staged-change count, or error recovery to make a narrow layout look cleaner.",
+      "Don't leave long-running operations without duplicate-submit prevention, elapsed status, timeout behavior, and an Interrupt or Cancel path.",
+      "Don't render every row multiplied by every field for a wide Django model.",
+      "Don't make resizing, sorting, expanding, selecting, or opening a model dependent on a pointer.",
+      "Don't imply that a staged model edit has been saved before an explicit successful Commit response."
+    ]
+  }
+}
