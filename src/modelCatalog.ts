@@ -77,6 +77,10 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
       this.refresh();
     } else if (message.type === "open" && message.app && message.model) {
       await vscode.commands.executeCommand("djangoShell.openModelData", { app: message.app, model: message.model });
+    } else if (message.type === "openConsole") {
+      await vscode.commands.executeCommand("djangoShell.openConsole");
+    } else if (message.type === "retry") {
+      this.refresh(true);
     }
   }
 
@@ -92,6 +96,7 @@ export class ModelCatalog implements vscode.WebviewViewProvider, vscode.Disposab
     if (!this.view || token !== this.loadToken) {
       return;
     }
+    void this.view.webview.postMessage({ type: "loading" });
     const started = Date.now();
     let list: BackendModelList;
     try {
