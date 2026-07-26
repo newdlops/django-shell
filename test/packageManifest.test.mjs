@@ -87,14 +87,14 @@ test("contributes a command for debugging the active Django shell", () => {
   const commands = manifest.contributes.commands.map((item) => item.command);
   const palette = manifest.contributes.menus.commandPalette.map((item) => item.command);
   const runtimeTitle = manifest.contributes.menus["view/title"].find((item) => item.command === "djangoShell.debugShell");
-  const debugAnalysisTitle = manifest.contributes.menus["view/title"].find((item) => item.command === "djangoShell.debugShell" && item.when === "view == djangoShell.debugAnalysis");
+  const debugAnalysisTitle = manifest.contributes.menus["view/title"].find((item) => item.command === "djangoShell.debugShell" && item.when.includes("view == djangoShell.debugAnalysis"));
   const editorTitle = manifest.contributes.menus["editor/title"].find((item) => item.command === "djangoShell.debugShell");
 
   assert.ok(commands.includes("djangoShell.debugShell"));
   assert.ok(manifest.activationEvents.includes("onCommand:djangoShell.debugShell"));
   assert.ok(palette.includes("djangoShell.debugShell"));
   assert.equal(runtimeTitle?.when, "view == djangoShell.runtimeInspector");
-  assert.equal(debugAnalysisTitle?.when, "view == djangoShell.debugAnalysis");
+  assert.equal(debugAnalysisTitle?.when, "view == djangoShell.debugAnalysis && !djangoShell.debugAnalysisActive && !djangoShell.debugAnalysisStarting");
   assert.equal(editorTitle?.when, "resourceFilename == 'debug-cell.py'");
 });
 
@@ -132,7 +132,8 @@ test("ships the built-in tracer with its third-party license notice", () => {
 test("contributes basic debugger control commands for the custom console", () => {
   const commands = manifest.contributes.commands.map((item) => item.command);
   const controls = ["continue", "pause", "stepOver", "stepInto", "stepOut", "restart", "stop"];
-  const debugAnalysisTitleCommands = manifest.contributes.menus["view/title"].filter((item) => item.when === "view == djangoShell.debugAnalysis").map((item) => item.command);
+  const debugAnalysisTitleItems = manifest.contributes.menus["view/title"].filter((item) => item.when.includes("view == djangoShell.debugAnalysis"));
+  const debugAnalysisTitleCommands = debugAnalysisTitleItems.map((item) => item.command);
   const externalEditorTitleCommands = manifest.contributes.menus["editor/title"].filter((item) => item.when === "djangoShell.externalDebugFrame").map((item) => item.command);
   const externalKeys = manifest.contributes.keybindings.filter((item) => item.when === "djangoShell.externalDebugFrame").map((item) => `${item.key}:${item.command}`);
 
@@ -143,6 +144,10 @@ test("contributes basic debugger control commands for the custom console", () =>
   for (const control of ["continue", "pause", "stepOver", "stepInto", "stepOut", "stop"]) {
     assert.ok(debugAnalysisTitleCommands.includes(`djangoShell.debug.${control}`));
   }
+  assert.match(debugAnalysisTitleItems.find((item) => item.command === "djangoShell.debugShell")?.when ?? "", /!djangoShell\.debugAnalysisActive.*!djangoShell\.debugAnalysisStarting/);
+  assert.match(debugAnalysisTitleItems.find((item) => item.command === "djangoShell.debug\.continue")?.when ?? "", /djangoShell\.debugAnalysisPaused/);
+  assert.match(debugAnalysisTitleItems.find((item) => item.command === "djangoShell.debug\.pause")?.when ?? "", /djangoShell\.debugAnalysisRunning/);
+  assert.match(debugAnalysisTitleItems.find((item) => item.command === "djangoShell.debug\.stop")?.when ?? "", /djangoShell\.debugAnalysisActive/);
   for (const control of ["continue", "stepOver", "stepInto", "stepOut", "stop"]) {
     assert.ok(externalEditorTitleCommands.includes(`djangoShell.debug.${control}`));
   }

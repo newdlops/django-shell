@@ -2,7 +2,7 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "1.1.1000025",
+  "version": "1.1.1000028",
   "publisher": "newdlops",
   "license": "UNLICENSED",
   "icon": "media/icon.png",
@@ -401,37 +401,37 @@
         {
           "command": "djangoShell.debugShell",
           "group": "navigation@1",
-          "when": "view == djangoShell.debugAnalysis"
+          "when": "view == djangoShell.debugAnalysis && !djangoShell.debugAnalysisActive && !djangoShell.debugAnalysisStarting"
         },
         {
           "command": "djangoShell.debug.continue",
           "group": "navigation@2",
-          "when": "view == djangoShell.debugAnalysis"
+          "when": "view == djangoShell.debugAnalysis && djangoShell.debugAnalysisPaused"
         },
         {
           "command": "djangoShell.debug.pause",
           "group": "navigation@3",
-          "when": "view == djangoShell.debugAnalysis"
+          "when": "view == djangoShell.debugAnalysis && djangoShell.debugAnalysisRunning"
         },
         {
           "command": "djangoShell.debug.stepOver",
           "group": "navigation@4",
-          "when": "view == djangoShell.debugAnalysis"
+          "when": "view == djangoShell.debugAnalysis && djangoShell.debugAnalysisPaused"
         },
         {
           "command": "djangoShell.debug.stepInto",
           "group": "navigation@5",
-          "when": "view == djangoShell.debugAnalysis"
+          "when": "view == djangoShell.debugAnalysis && djangoShell.debugAnalysisPaused"
         },
         {
           "command": "djangoShell.debug.stepOut",
           "group": "navigation@6",
-          "when": "view == djangoShell.debugAnalysis"
+          "when": "view == djangoShell.debugAnalysis && djangoShell.debugAnalysisPaused"
         },
         {
           "command": "djangoShell.debug.stop",
           "group": "navigation@7",
-          "when": "view == djangoShell.debugAnalysis"
+          "when": "view == djangoShell.debugAnalysis && djangoShell.debugAnalysisActive"
         },
         {
           "command": "djangoShell.refreshInspector",
@@ -615,6 +615,12 @@
           },
           "default": [],
           "markdownDescription": "Field-name substrings to hide from the model browser's foreign-key picker search and labels (case-insensitive, e.g. `password`, `token`). By default every text field is shown; add entries here to keep sensitive values out of the picker."
+        },
+        "djangoShell.modelBrowser.queryTimeoutMs": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 0,
+          "markdownDescription": "Hard timeout for custom ORM queries in milliseconds. Django Shell interrupts the query when this limit is reached. Set to `0` to disable the automatic timeout."
         },
         "djangoShell.modelBrowser.transport": {
           "type": "string",
