@@ -60,6 +60,21 @@ test("does not send native debugger activation over the PTY fallback", async () 
   assert.equal(fallbackCalled, false);
 });
 
+test("routes ORM Query through the interruptible backend query request instead of a literal terminal cell", async () => {
+  let payload;
+  const client = new BackendClient({ host: "127.0.0.1", port: 9, token: "secret" }, undefined, async (request) => {
+    payload = request;
+    return `${JSON.stringify({ columns: [], editable: false, hasMore: false, ok: true, relations: [], rows: [], sql: [] })}\n`;
+  });
+  client.markSocketUnavailable();
+  client.setTransportMode("orm");
+
+  const result = await client.modelQuery({ code: "Company.objects.all()", limit: 50, offset: 0 });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(payload, { code: "Company.objects.all()", kind: "query", limit: 25, offset: 0 });
+});
+
 test("sends built-in hot reload over the authenticated backend socket", async () => {
   let request;
   const server = net.createServer((socket) => {

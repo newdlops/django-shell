@@ -718,10 +718,12 @@ test("overlay debug analysis renders in the Django Shell Activity Bar panel", ()
   assert.ok(debugAnalysisPanelSource.includes("this.refreshTimer = setTimeout("), "per-stop refresh bursts are coalesced");
   assert.ok(debugAnalysisPanelSource.includes('label: "Trace"'));
   assert.ok(debugAnalysisPanelSource.includes("traceTreeItem"));
+  assert.ok(['label: "Start Django Shell debugging"', 'description: "Inspect paused frames and variables"', 'command: "djangoShell.debugShell"', 'icon: "loading~spin"', "debugErrorStatusNode"].every((expected) => debugAnalysisPanelSource.includes(expected)), "idle/error actions and attaching state stay actionable and accessible");
   assert.ok(debugAnalysisStoreSource.includes("setDebugAnalysisInfo(info: DebugFrameInfo)"));
   assert.ok(debugAnalysisStoreSource.includes("setDebugAnalysisVariableResolver"));
   assert.ok(debugAnalysisStoreSource.includes("trace: DebugTraceEntry[]"));
   assert.ok(debugAnalysisStoreSource.includes("debugTraceEntry(info)"));
+  assert.ok(debugAnalysisStoreSource.includes("syncActionContext()"), "title controls follow the active debug state");
   assert.ok(debugInspectorSource.includes(`customRequest("variables"`));
   assert.ok(debugInspectorSource.includes(`customRequest("scopes"`));
   assert.ok(debugInspectorSource.includes("debugScopeCandidates"));

@@ -21,6 +21,7 @@ interface ModuleNode {
 }
 
 interface StatusNode {
+  command?: vscode.Command;
   description?: string;
   icon: string;
   kind: "status";
@@ -46,6 +47,7 @@ export class RuntimeInspector implements vscode.TreeDataProvider<RuntimeNode>, v
   private readonly changeEmitter = new vscode.EventEmitter<RuntimeNode | undefined>();
   private readonly disposables: vscode.Disposable[] = [];
   private inspection: BackendRuntimeInspection | undefined;
+  private readonly childStates = new Map<string, RuntimeChildrenState>();
   private refreshInFlight: Promise<void> | undefined;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private runtimeVersion = 0;
@@ -140,6 +142,7 @@ export class RuntimeInspector implements vscode.TreeDataProvider<RuntimeNode>, v
   private handleRuntimeChange(): void {
     this.runtimeVersion += 1;
     this.inspection = undefined;
+    this.childStates.clear();
     if (this.visible) {
       this.scheduleRefresh(150);
     }
@@ -177,6 +180,7 @@ export class RuntimeInspector implements vscode.TreeDataProvider<RuntimeNode>, v
     }
     if (node.kind === "status") {
       const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
+      item.command = node.command;
       item.description = node.description;
       item.iconPath = new vscode.ThemeIcon(node.icon);
       item.tooltip = node.tooltip;
@@ -199,22 +203,17 @@ export class RuntimeInspector implements vscode.TreeDataProvider<RuntimeNode>, v
     if (node) {
       return [];
     }
-    const inspection = await this.currentInspection();
+    const inspection = this.inspection;
+    if (!inspection) {
+      if (this.visible && !this.refreshTimer && !this.refreshInFlight) {
+        this.scheduleRefresh(0);
+      }
+      return [loadingStatusNode()];
+    }
     if (!inspection.ok) {
       return [inspectionStatusNode(inspection)];
     }
     return inspectionGroups(inspection);
-  }
-
-  /** Returns cached runtime inspection data or loads it on first render. */
-  private async currentInspection(): Promise<BackendRuntimeInspection> {
-    if (!this.inspection) {
-      if (this.visible && !this.refreshTimer && !this.refreshInFlight) {
-        this.scheduleRefresh(0);
-      }
-      return { error: "Loading runtime data...", modules: [], ok: false, variables: [] };
-    }
-    return this.inspection;
   }
 
   /** Loads child nodes for an expandable runtime variable. */
@@ -222,22 +221,55 @@ export class RuntimeInspector implements vscode.TreeDataProvider<RuntimeNode>, v
     if (!variable.path || !variable.hasChildren) {
       return [];
     }
-    const result = await this.source.inspectRuntimeChildren(variable.path, variable.kind);
-    this.logger?.log("runtime.inspector.children", {
-      children: result.children.length,
-      ok: result.ok,
-      variable: variable.name
-    });
-    if (!result.ok) {
-      return [childrenStatusNode(result)];
+    const key = runtimeChildrenKey(variable);
+    const existing = this.childStates.get(key);
+    if (!existing) {
+      const state: RuntimeChildrenState = { state: "loading" };
+      this.childStates.set(key, state);
+      const version = this.runtimeVersion;
+      void this.source.inspectRuntimeChildren(variable.path, variable.kind).then((result) => {
+        if (version !== this.runtimeVersion || this.childStates.get(key) !== state) {
+          return;
+        }
+        state.result = result;
+        state.state = "ready";
+        this.logger?.log("runtime.inspector.children", { children: result.children.length, ok: result.ok, variable: variable.name });
+        this.changeEmitter.fire(undefined);
+      }).catch((error) => {
+        if (version !== this.runtimeVersion || this.childStates.get(key) !== state) {
+          return;
+        }
+        state.result = { children: [], error: runtimeErrorMessage(error), ok: false };
+        state.state = "ready";
+        this.changeEmitter.fire(undefined);
+      });
+      return [loadingChildrenStatusNode()];
     }
-    return result.children.map(variableNode);
+    if (existing.state === "loading" || !existing.result) {
+      return [loadingChildrenStatusNode()];
+    }
+    return existing.result.ok ? existing.result.children.map(variableNode) : [childrenStatusNode(existing.result)];
   }
+}
+
+interface RuntimeChildrenState {
+  result?: BackendRuntimeChildren;
+  state: "loading" | "ready";
 }
 
 /** Builds a compact root status node for unavailable runtime inspection. */
 function inspectionStatusNode(inspection: BackendRuntimeInspection): StatusNode {
   const fallback = "No Django shell runtime attached.";
+  if (isShellUnavailable(inspection.error)) {
+    return {
+      command: openConsoleCommand(),
+      description: "Open a shell to inspect variables",
+      icon: "terminal",
+      kind: "status",
+      label: "Open Django Shell to inspect runtime variables.",
+      tooltip: inspection.error
+    };
+  }
   if (isRemoteInspectionDisabled(inspection.error)) {
     return {
       description: "terminal transport",
@@ -247,7 +279,17 @@ function inspectionStatusNode(inspection: BackendRuntimeInspection): StatusNode 
       tooltip: inspection.error
     };
   }
-  return { icon: "warning", kind: "status", label: inspection.error ?? fallback };
+  return { icon: "warning", kind: "status", label: conciseRuntimeError(inspection.error ?? fallback), tooltip: inspection.error };
+}
+
+/** Builds the visible root loading state before the first inspection completes. */
+function loadingStatusNode(): StatusNode {
+  return { icon: "loading~spin", kind: "status", label: "Loading runtime variables…" };
+}
+
+/** Builds an inline loading state while an expandable value is inspected. */
+function loadingChildrenStatusNode(): StatusNode {
+  return { icon: "loading~spin", kind: "status", label: "Loading children…" };
 }
 
 /** Builds a compact child status node for unavailable nested inspection. */
@@ -262,12 +304,27 @@ function childrenStatusNode(result: BackendRuntimeChildren): StatusNode {
       tooltip: result.error
     };
   }
-  return { icon: "warning", kind: "status", label: result.error ?? fallback };
+  return { icon: "warning", kind: "status", label: conciseRuntimeError(result.error ?? fallback), tooltip: result.error };
 }
 
 /** Returns whether the backend is in the expected remote terminal fallback mode. */
 function isRemoteInspectionDisabled(error: string | undefined): boolean {
   return Boolean(error?.startsWith("Remote runtime inspection is disabled"));
+}
+
+/** Returns whether the inspector has no console/runtime to read yet. */
+function isShellUnavailable(error: string | undefined): boolean {
+  return Boolean(error?.startsWith("Open the Django Shell console"));
+}
+
+/** Builds the reusable command that opens the Django Shell console. */
+function openConsoleCommand(): vscode.Command {
+  return { command: "djangoShell.openConsole", title: "Open Django Shell" };
+}
+
+/** Keeps an error label scannable while retaining the complete message in its tooltip. */
+function conciseRuntimeError(message: string): string {
+  return shorten(message.replace(/\s+/g, " ").trim(), 96);
 }
 
 /** Builds top-level tree groups for runtime variables and modules. */
@@ -277,13 +334,21 @@ function inspectionGroups(inspection: BackendRuntimeInspection): RuntimeNode[] {
   const last = variablesByOrigin(inspection.variables, "last");
   const initial = variablesByOrigin(inspection.variables, "initial");
   const internal = inspection.variables.filter((variable) => ["bootstrap", "private"].includes(variable.origin ?? ""));
-  return compactGroups([
-    groupNode(`User Session (${user.length})`, "account", variableKindGroups(user)),
+  const variables = compactGroups([
+    groupNode(`User Session (${user.length})`, "account", user.length ? variableKindGroups(user) : [noUserVariablesStatusNode()]),
     groupNode(`Last Result (${last.length})`, "debug-console", last.map((variable) => ({ kind: "variable", variable }))),
     groupNode(`Initial Shell Namespace (${initial.length})`, "symbol-namespace", variableKindGroups(initial), true),
-    groupNode(`Bootstrap / Private (${internal.length})`, "shield", variableKindGroups(internal), true),
+    groupNode(`Bootstrap / Private (${internal.length})`, "shield", variableKindGroups(internal), true)
+  ]);
+  return compactGroups([
+    groupNode(`Variables (${inspection.variables.length})`, "symbol-namespace", variables),
     groupNode(`Loaded Modules (${inspection.modules.length}/${totalModules})`, "package", moduleHierarchy(inspection.modules), true)
   ]);
+}
+
+/** Builds the explicit empty state for a shell with no user-defined variables. */
+function noUserVariablesStatusNode(): StatusNode {
+  return { icon: "info", kind: "status", label: "No user variables yet." };
 }
 
 /** Builds a display group node. */
@@ -314,6 +379,11 @@ function variableKindGroups(variables: BackendRuntimeVariable[]): RuntimeNode[] 
 /** Converts one variable summary into a tree node. */
 function variableNode(variable: BackendRuntimeVariable): VariableNode {
   return { kind: "variable", variable };
+}
+
+/** Builds a stable cache key for one backend child-inspection request. */
+function runtimeChildrenKey(variable: BackendRuntimeVariable): string {
+  return JSON.stringify([variable.kind ?? "", variable.path]);
 }
 
 /** Returns the backend kind or an inference for older inspection payloads. */

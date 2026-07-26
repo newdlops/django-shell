@@ -27,6 +27,7 @@ interface StackFrameNode {
 }
 
 interface StatusNode {
+  command?: vscode.Command;
   description?: string;
   icon: string;
   kind: "status";
@@ -117,6 +118,7 @@ export class DebugAnalysisPanel implements vscode.TreeDataProvider<DebugAnalysis
       return variableTreeItem(node);
     }
     const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
+    item.command = node.command;
     item.description = node.description;
     item.iconPath = new vscode.ThemeIcon(node.icon);
     item.tooltip = node.tooltip;
@@ -172,10 +174,10 @@ function rootNodes(snapshot: DebugAnalysisSnapshot): DebugAnalysisNode[] {
     return pausedNodes(snapshot);
   }
   if (info.state === "error" || snapshot.state === "error") {
-    return [{ icon: "warning", kind: "status", label: info.error || snapshot.detail || "Debug inspection failed" }];
+    return [debugErrorStatusNode(info.error || snapshot.detail || "Debug inspection failed")];
   }
   if (snapshot.state === "starting") {
-    return [{ description: snapshot.detail, icon: "debug-start", kind: "status", label: "Debugger attaching" }];
+    return [{ description: snapshot.detail, icon: "loading~spin", kind: "status", label: "Debugger attaching" }];
   }
   if (snapshot.state === "attached") {
     return [{ description: snapshot.detail, icon: "debug-alt", kind: "status", label: "Debugger attached" }];
@@ -186,7 +188,42 @@ function rootNodes(snapshot: DebugAnalysisSnapshot): DebugAnalysisNode[] {
   if (snapshot.state === "paused") {
     return [{ description: snapshot.detail, icon: "debug-pause", kind: "status", label: "Debugger paused" }];
   }
-  return [{ icon: "debug-alt", kind: "status", label: "Start Django Shell debugging to inspect paused frames." }];
+  return [debugStartStatusNode()];
+}
+
+/** Builds the actionable idle state instead of a passive debugger instruction. */
+function debugStartStatusNode(): StatusNode {
+  return {
+    command: debugShellCommand(),
+    description: "Inspect paused frames and variables",
+    icon: "debug-start",
+    kind: "status",
+    label: "Start Django Shell debugging",
+    tooltip: "Start Django Shell debugging to inspect paused frames and variables."
+  };
+}
+
+/** Builds a concise retryable error state while preserving full diagnostics in the tooltip. */
+function debugErrorStatusNode(detail: string): StatusNode {
+  return {
+    command: debugShellCommand(),
+    description: "Retry debugging",
+    icon: "warning",
+    kind: "status",
+    label: conciseDebugError(detail),
+    tooltip: detail
+  };
+}
+
+/** Builds the command shared by idle start and error retry tree items. */
+function debugShellCommand(): vscode.Command {
+  return { command: "djangoShell.debugShell", title: "Start Django Shell debugging" };
+}
+
+/** Keeps one-line tree status labels readable without dropping the full error tooltip. */
+function conciseDebugError(detail: string): string {
+  const normalized = detail.replace(/\s+/g, " ").trim();
+  return normalized.length <= 96 ? normalized : `${normalized.slice(0, 93)}...`;
 }
 
 /** Builds tree sections for a paused debug frame. Group and variable nodes carry stable path-based ids so VS Code keeps their expansion across the frequent whole-tree refreshes a stop produces (fresh node objects otherwise reset it). */

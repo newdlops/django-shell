@@ -10,7 +10,7 @@ import {
   ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery, modelUnsupportedFallback,
   parseFilterFieldsResponse, parseModelAggregateResponse, parseModelCommitResponse, parseModelComputedResponse, parseModelCountResponse, parseModelListResponse, parseModelLookupResponse, parseModelQueryResponse,
   parseModelRelatedResponse, parseModelRowsResponse, parseModelSchemaResponse, parseOrmAggregateResponse, parseOrmCommitResponse, parseOrmComputedResponse, parseOrmCountResponse,
-  parseOrmGridResponse, parseOrmLookupResponse, parseOrmModelsResponse, parseOrmQueryResponse, parseOrmRelatedResponse
+  parseOrmGridResponse, parseOrmLookupResponse, parseOrmModelsResponse, parseOrmRelatedResponse
 } from "./modelBackend";
 import { aggregatesNeedPython, buildAggregateOrm, buildCommitOrm, buildComputedOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, buildRowsOrm } from "./modelOrm";
 
@@ -589,12 +589,9 @@ export class BackendClient {
   /** Evaluates user-written ORM code and returns its tabulated result for the grid. */
   async modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery> {
     await this.ensureModelBrowserFeature();
-    if (this.reconstructsViaOrmCell) {
-      // Terminal/ORM mode types the user's ORM as a literal cell (no `_djs_rpc`); the capture hook tabulates it and we window the grid client-side to the requested page.
-      const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
-      const offset = typeof query.offset === "number" && query.offset > 0 ? query.offset : 0;
-      return this.ormCell(query.code, (buffer) => parseOrmQueryResponse(buffer, limit, offset));
-    }
+    // Unlike model reads, a user query must always use the backend request channel. A literal terminal cell depends on
+    // an IPython post-execute marker and cannot be interrupted by the backend while that marker is missing; routing it
+    // through `query` keeps Run/Interrupt/timeout lifecycle ownership in one observable execution thread.
     return this.request({ ...query, kind: "query" }, parseModelQueryResponse);
   }
 

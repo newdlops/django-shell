@@ -65,9 +65,10 @@ export class DebugAnalysisStore implements DebugAnalysisSink, DebugAnalysisSourc
     if (state === "idle" || state === "starting") {
       this.trace = [];
     }
-    if (state !== "starting" && state !== "paused") {
-      this.info = { state };
+    if (state !== "paused") {
+      this.info = { state: state === "starting" ? "idle" : state };
     }
+    this.syncActionContext();
     this.changeEmitter.fire();
   }
 
@@ -76,6 +77,7 @@ export class DebugAnalysisStore implements DebugAnalysisSink, DebugAnalysisSourc
     this.info = info;
     this.state = info.state;
     this.appendDebugTrace(info);
+    this.syncActionContext();
     this.changeEmitter.fire();
   }
 
@@ -102,6 +104,18 @@ export class DebugAnalysisStore implements DebugAnalysisSink, DebugAnalysisSourc
       return;
     }
     this.trace = [...this.trace, entry].slice(-MAX_DEBUG_TRACE_ENTRIES);
+  }
+
+  /** Keeps Debug Analysis title actions limited to controls valid for the latest state. */
+  private syncActionContext(): void {
+    const active = ["attached", "paused", "running"].includes(this.state);
+    const paused = this.state === "paused";
+    const running = this.state === "attached" || this.state === "running";
+    const starting = this.state === "starting";
+    void vscode.commands.executeCommand("setContext", "djangoShell.debugAnalysisActive", active);
+    void vscode.commands.executeCommand("setContext", "djangoShell.debugAnalysisPaused", paused);
+    void vscode.commands.executeCommand("setContext", "djangoShell.debugAnalysisRunning", running);
+    void vscode.commands.executeCommand("setContext", "djangoShell.debugAnalysisStarting", starting);
   }
 }
 

@@ -1,7 +1,7 @@
 // VS Code extension entrypoint for the Django shell custom console.
 
 import * as vscode from "vscode";
-import type { BackendClient, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransport, BackendTransportMode } from "./backendClient";
+import type { BackendClient, BackendInterruptResult, BackendRuntimeChildren, BackendRuntimeInspection, BackendRuntimePathSegment, BackendTransport, BackendTransportMode } from "./backendClient";
 import type { CustomDjangoConsole } from "./customConsole";
 import { DebugAnalysisPanel } from "./debugAnalysisPanel";
 import { DebugAnalysisStore } from "./debugAnalysisStore";
@@ -105,6 +105,11 @@ class LazyRuntimeSource implements vscode.Disposable {
   /** Runs a custom ORM query or returns an idle status without starting a shell. */
   modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery> {
     return this.console?.activeBackend?.modelQuery(query) ?? Promise.resolve({ columns: [], editable: false, error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, orm: "", relations: [], rows: [], sql: [] });
+  }
+
+  /** Interrupts the active custom ORM query or reports that no Django Shell runtime is available. */
+  interruptModelQuery(reason: string): Promise<BackendInterruptResult> {
+    return this.console?.activeBackend?.interrupt(reason) ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, interrupted: false, ok: false, reason });
   }
 
   /** Returns imports/declarations that expose the live shell namespace to query IntelliSense. */
