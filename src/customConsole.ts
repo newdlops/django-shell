@@ -237,7 +237,7 @@ export class CustomDjangoConsole implements vscode.Disposable {
       hasPythonDisabledState: html.includes("inputCell disabled") && html.includes("editorLock"),
       hasPythonIcon: html.includes("pythonIcon"),
       hasPythonRunButton: html.includes("id=\"showEditor\"") || html.includes("runGlyph"),
-      hasSetupAutoMinimize: html.includes("id=\"setupCell\"") && html.includes("setupCell.minimized"),
+      hasSetupAutoMinimize: html.includes("id=\"setupCell\"") && html.includes("data-auto-minimize=\"true\""),
       executionCount: this.executionCount,
       lastPythonResult: this.lastPythonResult,
       lastRenderedOutput: this.lastRenderedOutput,

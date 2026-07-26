@@ -9466,6 +9466,7 @@ var currentOutput = document.getElementById("currentOutput");
 var currentOutputLabel = document.getElementById("currentOutputLabel");
 var debugButtons = Array.from(document.querySelectorAll("[data-action=debug-shell]"));
 var debugControlButtons = Array.from(document.querySelectorAll("[data-debug-control]"));
+var debugControls = document.querySelector(".debugControls");
 var debugMode = document.getElementById("debugMode");
 var newOverlayTabButtons = Array.from(document.querySelectorAll("[data-action=new-overlay-tab]"));
 var outputList = document.getElementById("outputList");
@@ -9763,6 +9764,9 @@ function setDebugStatus(state, detail) {
   updateDebugControls();
 }
 function updateDebugControls() {
+  if (debugControls) {
+    debugControls.hidden = !debugAttached;
+  }
   for (const button of debugButtons) {
     button.disabled = false;
     button.dataset.state = debugBusy ? "starting" : debugAttached ? "attached" : "idle";
@@ -9890,7 +9894,7 @@ function showRunningOutput(count, code) {
   if (body) {
     body.className = "result pending";
     delete body.dataset.streamed;
-    body.textContent = "Running...";
+    body.textContent = "Running\u2026";
   }
   stopOutputTimer(count);
   runningOutputs.set(count, window.setInterval(() => updateRunningOutput(count), 1e3));
@@ -9969,7 +9973,7 @@ function appendLiveOutput(body, text) {
       next += char;
     }
   }
-  body.textContent = next.slice(-LIVE_OUTPUT_LIMIT) || "Running...";
+  body.textContent = next.slice(-LIVE_OUTPUT_LIMIT) || "Running\u2026";
   currentOutput.scrollTop = currentOutput.scrollHeight;
 }
 function createOutputItem(count, code) {

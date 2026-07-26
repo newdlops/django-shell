@@ -28,6 +28,22 @@ try {
 
 const { runtimePreludeLines } = require("../out/runtimePrelude.js");
 
+test("custom console keeps compact controls accessible at narrow editor widths", () => {
+  const htmlSource = fs.readFileSync(new URL("../src/customConsoleHtml.ts", import.meta.url), "utf8");
+  const consoleCss = fs.readFileSync(new URL("../media/customConsole.css", import.meta.url), "utf8");
+  const clientSource = fs.readFileSync(new URL("../media/customConsoleSource.js", import.meta.url), "utf8");
+  const setupToolbar = htmlSource.slice(htmlSource.indexOf('id="focusTerminal"'), htmlSource.indexOf('id="terminal"'));
+
+  assert.ok(setupToolbar.includes('codicon codicon-terminal'), "setup focus uses the VS Code terminal Codicon");
+  assert.ok(setupToolbar.includes('aria-label="Focus setup input"'), "setup focus has an accessible name");
+  assert.ok(htmlSource.includes('role="status" aria-live="polite" aria-atomic="true"'), "runtime changes announce politely");
+  assert.ok(consoleCss.includes('button:focus-visible,select:focus-visible'), "keyboard focus remains visible");
+  assert.ok(consoleCss.includes('@media (prefers-reduced-motion:reduce)'), "reduced-motion users receive a motion-free view");
+  assert.ok(consoleCss.includes('@media (max-width:640px){.topbar'), "narrow editor groups wrap controls instead of clipping them");
+  assert.ok(htmlSource.includes('role="toolbar" aria-label="Active debugger controls" hidden'), "inactive debugger controls begin hidden");
+  assert.ok(clientSource.includes('debugControls.hidden = !debugAttached'), "debugger controls appear only for an active session");
+});
+
 test("console overlaps shell startup with backing reset but gates overlay construction", () => {
   const source = fs.readFileSync(new URL("../src/customConsole.ts", import.meta.url), "utf8");
   const start = source.indexOf("async openConsole(): Promise<void>");
@@ -134,6 +150,40 @@ test("runtime inspector stays idle while hidden and coalesces visible invalidati
   runtimeEvents.fire();
   await delay(220);
   assert.equal(inspections, 2, "bursty runtime changes collapse into one visible refresh");
+  inspector.dispose();
+});
+
+test("runtime inspector distinguishes loading, shell guidance, empty variables, and lazy child progress", async () => {
+  let childResolve;
+  const source = {
+    inspectActiveRuntime() { return Promise.resolve({ loadedModuleCount: 0, modules: [], ok: false, variables: [], error: "Open the Django Shell console to inspect runtime variables." }); },
+    inspectRuntimeChildren() { return new Promise((resolve) => { childResolve = resolve; }); },
+    onDidChangeRuntime: new MockEventEmitter().event
+  };
+  const inspector = new RuntimeInspector(source);
+
+  assert.equal((await inspector.getChildren())[0].label, "Loading runtime variables…");
+  await inspector.refresh();
+  const unavailable = (await inspector.getChildren())[0];
+  assert.equal(unavailable.label, "Open Django Shell to inspect runtime variables.");
+  assert.equal(unavailable.command.command, "djangoShell.openConsole");
+
+  source.inspectActiveRuntime = () => Promise.resolve({ loadedModuleCount: 0, modules: [], ok: true, variables: [] });
+  await inspector.refresh();
+  const emptyVariables = (await inspector.getChildren())[0];
+  const emptyUserSession = (await inspector.getChildren(emptyVariables))[0];
+  assert.equal((await inspector.getChildren(emptyUserSession))[0].label, "No user variables yet.");
+
+  source.inspectActiveRuntime = () => Promise.resolve({ loadedModuleCount: 0, modules: [], ok: true, variables: [{ hasChildren: true, kind: "collection", name: "items", origin: "user", path: [{ kind: "name", value: "items" }], preview: "[1]", type: "list" }] });
+  await inspector.refresh();
+  const variables = (await inspector.getChildren())[0];
+  const userSession = (await inspector.getChildren(variables))[0];
+  const kindGroup = (await inspector.getChildren(userSession))[0];
+  const variable = (await inspector.getChildren(kindGroup))[0];
+  assert.equal((await inspector.getChildren(variable))[0].label, "Loading children…");
+  childResolve({ children: [], ok: true });
+  await delay(0);
+  assert.deepEqual(await inspector.getChildren(variable), []);
   inspector.dispose();
 });
 

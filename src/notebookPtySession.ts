@@ -20,6 +20,7 @@ import { DjangoTerminalMode, InputLineTracker, detectPrimaryPythonPrompt, isDjan
 const KEEPALIVE_IDLE_MS = 45000; const KEEPALIVE_INTERVAL_MS = 30000; const KEEPALIVE_USER_IDLE_MS = 15000;
 const DEBUGPY_STAGE_TIMEOUT_MS = 90000;
 const FEATURE_LOAD_TIMEOUT_MS = 60000;
+const LITERAL_ORM_CELL_TIMEOUT_MS = 35000;
 
 export interface NotebookPtyOptions {
   autoActivateWorkspaceVenv: boolean;
@@ -546,7 +547,17 @@ export class NotebookPtySession implements vscode.Disposable {
       if ((payload.kind === "execute" || payload.kind === "ormcell") && typeof payload.code === "string" && this.cellCapture && (this.ipython || !payload.code.includes("\n")) && !wantsPtyProgress(payload) && !wantsPtyDebugWrapper(payload)) {
         this.ptyRequestBuffer = "";
         this.ptyProgressBuffer = "";
-        this.pendingCell = { reject, resolve };
+        const cell = { reject, resolve, timer: undefined as NodeJS.Timeout | undefined };
+        this.pendingCell = cell;
+        if (payload.kind === "ormcell") {
+          // A missing IPython capture marker used to leave this serialized queue occupied forever. Bound only ORM
+          // reconstruction cells: interactive Console execution remains user-controlled and may legitimately run long.
+          cell.timer = setTimeout(() => {
+            if (this.pendingCell !== cell) { return; }
+            this.pendingCell = undefined;
+            cell.reject(new Error(`Django Shell did not return an ORM cell result after ${LITERAL_ORM_CELL_TIMEOUT_MS}ms.`));
+          }, LITERAL_ORM_CELL_TIMEOUT_MS);
+        }
         this.options.diagnosticLogger?.log("backend.pty.request", { code: typeof payload.code === "string" ? payload.code.slice(0, 200) : undefined, kind: payload.kind, literalCell: true, queueMs: started - queuedAt, sessionId: this.options.sessionId });
         this.process.write(buildPtyExecuteCell(payload.code, this.ipython));
         return;

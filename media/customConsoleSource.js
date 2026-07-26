@@ -15,6 +15,7 @@ const currentOutput = document.getElementById("currentOutput");
 const currentOutputLabel = document.getElementById("currentOutputLabel");
 const debugButtons = Array.from(document.querySelectorAll("[data-action=debug-shell]"));
 const debugControlButtons = Array.from(document.querySelectorAll("[data-debug-control]"));
+const debugControls = document.querySelector(".debugControls");
 const debugMode = document.getElementById("debugMode");
 const newOverlayTabButtons = Array.from(document.querySelectorAll("[data-action=new-overlay-tab]"));
 const outputList = document.getElementById("outputList");
@@ -349,6 +350,9 @@ function setDebugStatus(state, detail) {
 
 /** Enables or disables debugger actions based on shell and attach state. */
 function updateDebugControls() {
+  if (debugControls) {
+    debugControls.hidden = !debugAttached;
+  }
   for (const button of debugButtons) {
     button.disabled = false;
     button.dataset.state = debugBusy ? "starting" : debugAttached ? "attached" : "idle";
@@ -501,7 +505,7 @@ function showRunningOutput(count, code) {
   if (body) {
     body.className = "result pending";
     delete body.dataset.streamed;
-    body.textContent = "Running...";
+    body.textContent = "Running…";
   }
   stopOutputTimer(count);
   runningOutputs.set(count, window.setInterval(() => updateRunningOutput(count), 1000));
@@ -586,7 +590,7 @@ function appendLiveOutput(body, text) {
       next += char;
     }
   }
-  body.textContent = next.slice(-LIVE_OUTPUT_LIMIT) || "Running...";
+  body.textContent = next.slice(-LIVE_OUTPUT_LIMIT) || "Running…";
   currentOutput.scrollTop = currentOutput.scrollHeight;
 }
 
