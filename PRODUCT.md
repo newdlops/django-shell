@@ -60,7 +60,7 @@ The product does not emulate a Django shell, spawn a separate analysis environme
 
 1. Keep the real execution context visible: users should always know which shell, transport, model, query, or debug state they are operating on.
 2. Make expert work faster without making destructive work casual: optimize scanability and keyboard flow while keeping staging, validation, commit, and error boundaries unmistakable.
-3. Use progressive disclosure for advanced power, not for essential state: complex filters, aggregates, and related data can expand on demand, but connection, execution, dirty, and failure states stay visible.
+3. Use progressive disclosure for advanced power, not for essential state: advanced query assembly (nested predicates, computed columns, subqueries, and summaries), complex filters, aggregates, and related data can expand on demand, but connection, execution, dirty, and failure states stay visible.
 4. Behave like a first-class part of VS Code: respect themes, density, focus behavior, command conventions, workbench geometry, and narrow layouts.
 5. Preserve trust under latency and failure: every asynchronous operation needs a stable pending state, a useful result or error, and a clear recovery action.
 

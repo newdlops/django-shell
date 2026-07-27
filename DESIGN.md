@@ -256,6 +256,7 @@ Borders communicate structure, focus, and validation. Decorative outlines, overs
 - **Sorting:** Sort headers are buttons with `aria-sort`. Sort order is communicated by text or accessible name as well as an icon.
 - **Editing:** Dirty cells use warning surface and border plus an accessible dirty description. Saving happens only from the explicit Commit action.
 - **Loading / Empty / Error:** The grid keeps its header and context stable, uses a status region for progress, and provides Retry after failure.
+- **Query-result continuity:** Applying a query never clears previously loaded rows until the matching Recipe revision succeeds. A rejected or stale response keeps the prior grid and directs attention to the query issue summary instead.
 - **Performance:** Visible rows and columns are windowed while semantic row and column counts describe the full dataset.
 
 ### Status Strip
@@ -267,7 +268,9 @@ Borders communicate structure, focus, and validation. Decorative outlines, overs
 ### Drawers and Floating Widgets
 
 - **Query Log:** Collapsed by default for a new panel, remembers the user's last explicit state, and opens as a bounded lower drawer.
-- **Filter Builder:** Appears in a stable second band or drawer; applying and clearing are explicit.
+- **Query Builder:** Model Data always shows a compact summary band with filter count, computed-column count, result mode, human summary, draft state, validation state, and the one Apply action. Its bounded drawer holds WHERE, computed columns, result filter, result settings, and ORM preview/validation in that order. The drawer uses semantic section labels, retains the draft when closed, and keeps actions reachable at narrow editor widths.
+- **Draft and applied state:** Editing changes only the draft. Reset restores the applied Recipe and Clear creates an empty draft; neither executes a query. Apply runs a revisioned snapshot. If the user edits during execution, the newer draft remains marked `Draft` while the grid reflects the successful snapshot.
+- **Validation and error:** Validation uses text plus a state signal (`Valid`, error count, warning count, or `Checking…`). Errors appear both beside the affected builder node and in a focusable summary; selecting a summary issue opens the drawer and targets the first invalid control. Warnings never use color alone and do not block Apply.
 - **Combobox / Field Finder:** Uses semantic combobox, listbox, and option roles with complete keyboard interaction and focus return.
 - **Resizable Sash:** Uses a focusable separator with orientation and keyboard increments, not pointer-only dragging.
 
