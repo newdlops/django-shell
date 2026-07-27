@@ -1,0 +1,486 @@
+# ModelQueryRecipeV2 computed-expression compilation and rows, summary, count execution for the composed backend.
+
+
+def _browse_recipe_output_field(output_type):
+    """Creates the deterministic Django output field used by structured computed expressions."""
+    from django.db import models
+
+    mapping = {"boolean": models.BooleanField, "integer": models.IntegerField, "float": models.FloatField,
+               "text": models.TextField, "date": models.DateField, "datetime": models.DateTimeField,
+               "time": models.TimeField, "duration": models.DurationField, "uuid": models.UUIDField}
+    if output_type == "decimal":
+        return models.DecimalField(max_digits=38, decimal_places=18)
+    builder = mapping.get(output_type)
+    return builder() if builder else None
+
+
+def _browse_recipe_validate_computed_shape(state, spec, path, model):
+    """Validates one ordered computed column and records its enabled alias in the sequential symbol table."""
+    if not isinstance(spec, dict):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path, "Computed column must be an object.", "Remove this column.")
+        return
+    node_id = _browse_recipe_validate_node_id(state, spec.get("nodeId"), path + "/nodeId")
+    alias = spec.get("alias")
+    import keyword
+    import re
+
+    if not isinstance(alias, str) or not re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$", alias):
+        _browse_recipe_issue(state, "ALIAS_INVALID", path + "/alias", "Alias must be a Python identifier up to 64 characters.", "Choose a simple alias.", node_id)
+    elif keyword.iskeyword(alias) or alias.startswith("djs_") or alias.startswith("__"):
+        _browse_recipe_issue(state, "ALIAS_RESERVED", path + "/alias", "Alias is reserved.", "Choose another alias.", node_id)
+    elif alias in {field.name for field in model._meta.get_fields()} | {field.attname for field in model._meta.concrete_fields}:
+        _browse_recipe_issue(state, "ALIAS_COLLISION", path + "/alias", "Alias conflicts with a model field or relation.", "Choose another alias.", node_id)
+    elif alias in state["aliases"]:
+        _browse_recipe_issue(state, "ALIAS_DUPLICATE", path + "/alias", "Enabled aliases must be unique.", "Choose another alias.", node_id)
+    enabled = spec.get("enabled")
+    if not isinstance(enabled, bool):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path + "/enabled", "Computed enabled must be boolean.", "Toggle this column again.", node_id)
+    kind = spec.get("kind")
+    if kind not in ("aggregate", "scalarSubquery", "exists", "formula", "window", "codeExpression"):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path + "/kind", "Unknown computed kind.", "Choose a supported column type.", node_id)
+        return
+    if kind == "aggregate":
+        _browse_recipe_validate_aggregate(state, spec, path, model)
+    elif kind in ("scalarSubquery", "exists"):
+        target = _browse_recipe_subquery_source(state, spec.get("source"), model, path + "/source")
+        if target is not None:
+            _browse_recipe_correlations(state, spec.get("source"), spec.get("correlations"), model, target, path + "/correlations")
+            _browse_recipe_validate_group(state, spec.get("where"), path + "/where", 1, True, target, {}, model)
+            if kind == "scalarSubquery":
+                _browse_recipe_validate_scalar_subquery(state, spec, path, target)
+        if kind == "exists" and state["recipe"].get("mode") != "rows":
+            _browse_recipe_issue(state, "COMPUTED_KIND_UNSUPPORTED_IN_SUMMARY", path, "Exists columns are available in Rows only.", "Switch to Rows.", node_id)
+    elif kind == "formula":
+        if state["recipe"].get("mode") != "rows":
+            _browse_recipe_issue(state, "COMPUTED_KIND_UNSUPPORTED_IN_SUMMARY", path, "Formula columns are available in Rows only.", "Switch to Rows.", node_id)
+        _browse_recipe_validate_formula(state, spec.get("expression"), path + "/expression", model, state["aliases"], 1, {"count": 0})
+    elif kind == "window":
+        _browse_recipe_validate_window(state, spec, path, model)
+    elif kind == "codeExpression":
+        expression = spec.get("expression")
+        if not isinstance(expression, str) or not expression.strip() or len(expression) > _BROWSE_RECIPE_LIMITS["rawExpressionCharacters"] or "\n" in expression or ";" in expression:
+            _browse_recipe_issue(state, "RAW_EXPRESSION_INVALID", path + "/expression", "Code expression is empty or contains forbidden syntax.", "Use one safe expression without a newline.", node_id)
+        _browse_recipe_validate_group(state, spec.get("when"), path + "/when", 1, True, model, state["aliases"])
+    if enabled is True and isinstance(alias, str) and alias not in state["aliases"]:
+        output = spec.get("outputType", "auto")
+        state["aliases"][alias] = _browse_recipe_output_field(output) or _browse_recipe_output_field("text")
+        if kind == "window":
+            state.setdefault("window_aliases", set()).add(alias)
+
+
+def _browse_recipe_validate_aggregate(state, spec, path, model):
+    """Validates aggregate function, scalar field/cardinality, and source-scoped condition group."""
+    function = spec.get("function")
+    field = spec.get("field")
+    if function not in ("count", "sum", "avg", "min", "max"):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path + "/function", "Aggregate function is invalid.", "Choose an aggregate.")
+    if isinstance(field, dict) and field.get("kind") == "all":
+        if function != "count":
+            _browse_recipe_issue(state, "AGGREGATE_FIELD_REQUIRED", path + "/field", "Only Count supports all rows.", "Choose a scalar field.")
+    else:
+        resolved = _browse_recipe_resolve_path(state, model, _browse_recipe_ref_path(field), path + "/field/path", False)
+        if resolved and function != "count" and resolved[1]:
+            _browse_recipe_issue(state, "AGGREGATE_FANOUT_UNSAFE", path + "/field", "Non-Count aggregate cannot cross a to-many relation.", "Choose a scalar path.")
+    if spec.get("distinct") not in ("auto", "always"):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path + "/distinct", "Distinct must be auto or always.", "Reset this aggregate.")
+    _browse_recipe_validate_group(state, spec.get("filter"), path + "/filter", 1, True, model, state["aliases"])
+
+
+def _browse_recipe_validate_scalar_subquery(state, spec, path, target):
+    """Validates scalar subquery selection, deterministic ordering, fallback, and output type contract."""
+    select = spec.get("select")
+    if not isinstance(select, dict) or select.get("kind") not in ("field", "aggregate"):
+        _browse_recipe_issue(state, "SUBQUERY_SELECT_INVALID", path + "/select", "Subquery select must be a field or aggregate.", "Choose a selection.")
+    elif select.get("kind") == "field":
+        _browse_recipe_resolve_path(state, target, _browse_recipe_ref_path(select.get("field")), path + "/select/field/path", False)
+    else:
+        function, field = select.get("function"), select.get("field")
+        if function not in ("count", "sum", "avg", "min", "max"):
+            _browse_recipe_issue(state, "SUBQUERY_SELECT_INVALID", path + "/select/function", "Subquery aggregate function is invalid.", "Choose an aggregate.")
+        if isinstance(field, dict) and field.get("kind") == "all":
+            if function != "count":
+                _browse_recipe_issue(state, "AGGREGATE_FIELD_REQUIRED", path + "/select/field", "Only Count supports all rows.", "Choose a scalar field.")
+        else:
+            resolved = _browse_recipe_resolve_path(state, target, _browse_recipe_ref_path(field), path + "/select/field/path", False)
+            if resolved and function != "count" and resolved[1]:
+                _browse_recipe_issue(state, "SUBQUERY_AGGREGATE_FANOUT_UNSAFE", path + "/select/field", "Non-Count subquery aggregate cannot cross a to-many relation.", "Choose a scalar path.")
+        if select.get("distinct") not in ("auto", "always"):
+            _browse_recipe_issue(state, "SUBQUERY_SELECT_INVALID", path + "/select/distinct", "Subquery aggregate distinct is invalid.", "Choose auto or always.")
+    order = spec.get("orderBy")
+    if not isinstance(order, list):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path + "/orderBy", "Subquery order must be an array.", "Reset ordering.")
+    elif len(order) > _BROWSE_RECIPE_LIMITS["subqueryOrderTerms"]:
+        _browse_recipe_issue(state, "SUBQUERY_ORDER_LIMIT", path + "/orderBy", "A subquery allows at most three sort terms.", "Remove sort terms.")
+    elif isinstance(select, dict) and select.get("kind") == "aggregate" and order:
+        _browse_recipe_issue(state, "SUBQUERY_SELECT_INVALID", path + "/orderBy", "Aggregate subqueries cannot have order terms.", "Remove sort terms.")
+    else:
+        _browse_recipe_validate_order(state, order or [], path + "/orderBy", target, {})
+    on_empty = spec.get("onEmpty")
+    if not isinstance(on_empty, dict) or on_empty.get("kind") != "literal":
+        _browse_recipe_issue(state, "RHS_KIND_UNSUPPORTED", path + "/onEmpty", "onEmpty must be a literal.", "Choose a literal fallback.")
+    elif on_empty.get("value") is not None and spec.get("outputType") == "auto":
+        _browse_recipe_issue(state, "OUTPUT_TYPE_REQUIRED", path + "/outputType", "Non-null fallback requires an output type.", "Choose an output type.")
+
+
+def _browse_recipe_validate_formula(state, node, path, model, aliases, depth, counter):
+    """Bounds and validates a Formula AST while only allowing earlier enabled aliases and live fields."""
+    if not isinstance(node, dict):
+        _browse_recipe_issue(state, "FORMULA_TYPE_MISMATCH", path, "Formula node must be an object.", "Choose a formula operand.")
+        return
+    counter["count"] += 1
+    if counter["count"] > _BROWSE_RECIPE_LIMITS["formulaNodes"]:
+        _browse_recipe_issue(state, "FORMULA_NODE_LIMIT", path, "Formula has too many nodes.", "Simplify the formula.")
+    if depth > _BROWSE_RECIPE_LIMITS["formulaDepth"]:
+        _browse_recipe_issue(state, "FORMULA_DEPTH_LIMIT", path, "Formula nesting is too deep.", "Flatten the formula.")
+    kind = node.get("kind")
+    if kind == "field":
+        _browse_recipe_resolve_path(state, model, node.get("path"), path + "/path", False)
+    elif kind == "computed":
+        if node.get("alias") not in aliases:
+            _browse_recipe_issue(state, "COMPUTED_REFERENCE_FORWARD", path + "/alias", "Formula can reference earlier enabled aliases only.", "Move this formula later or choose another alias.")
+    elif kind == "literal":
+        _browse_recipe_coerce_value(state, None, node.get("value"), path + "/value", None)
+    elif kind == "binary":
+        if node.get("operator") not in ("+", "-", "*", "/", "%"):
+            _browse_recipe_issue(state, "FORMULA_TYPE_MISMATCH", path + "/operator", "Binary operator is unsupported.", "Choose a supported operator.")
+        if node.get("operator") in ("/", "%") and isinstance(node.get("right"), dict) and node["right"].get("kind") == "literal" and node["right"].get("value") == 0:
+            _browse_recipe_issue(state, "FORMULA_DIVIDE_BY_ZERO", path + "/right", "Formula cannot divide by literal zero.", "Use a non-zero divisor.")
+        _browse_recipe_validate_formula(state, node.get("left"), path + "/left", model, aliases, depth + 1, counter)
+        _browse_recipe_validate_formula(state, node.get("right"), path + "/right", model, aliases, depth + 1, counter)
+    elif kind == "function":
+        function, args = node.get("function"), node.get("args")
+        arity = (2, 8) if function in ("coalesce", "concat", "greatest", "least") else (1, 1)
+        if function not in ("coalesce", "concat", "greatest", "least", "lower", "upper", "trim", "length") or not isinstance(args, list) or not arity[0] <= len(args) <= arity[1]:
+            _browse_recipe_issue(state, "FORMULA_TYPE_MISMATCH", path, "Formula function or arity is invalid.", "Choose a supported function and argument count.")
+            return
+        for index, arg in enumerate(args):
+            _browse_recipe_validate_formula(state, arg, f"{path}/args/{index}", model, aliases, depth + 1, counter)
+    elif kind == "cast":
+        if _browse_recipe_output_field(node.get("outputType")) is None:
+            _browse_recipe_issue(state, "OUTPUT_TYPE_REQUIRED", path + "/outputType", "Cast requires a concrete output type.", "Choose an output type.")
+        _browse_recipe_validate_formula(state, node.get("expression"), path + "/expression", model, aliases, depth + 1, counter)
+    elif kind == "case":
+        branches = node.get("branches")
+        if not isinstance(branches, list) or not 1 <= len(branches) <= _BROWSE_RECIPE_LIMITS["caseBranches"]:
+            _browse_recipe_issue(state, "FORMULA_TYPE_MISMATCH", path + "/branches", "Case requires one to eight branches.", "Add valid branches.")
+            return
+        for index, branch in enumerate(branches):
+            if not isinstance(branch, dict):
+                _browse_recipe_issue(state, "FORMULA_TYPE_MISMATCH", f"{path}/branches/{index}", "Case branch is invalid.", "Recreate this branch.")
+                continue
+            _browse_recipe_validate_group(state, branch.get("when"), f"{path}/branches/{index}/when", 1, True, model, aliases)
+            _browse_recipe_validate_formula(state, branch.get("then"), f"{path}/branches/{index}/then", model, aliases, depth + 1, counter)
+        _browse_recipe_validate_formula(state, node.get("else"), path + "/else", model, aliases, depth + 1, counter)
+    else:
+        _browse_recipe_issue(state, "FORMULA_TYPE_MISMATCH", path, "Unknown formula node.", "Choose a supported formula operand.")
+
+
+def _browse_recipe_validate_window(state, spec, path, model):
+    """Validates supported window functions, source scalar fields, partitions, and required ranking order."""
+    function = spec.get("function")
+    if function not in ("rank", "dense_rank", "row_number", "sum", "avg", "min", "max", "count"):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path + "/function", "Window function is invalid.", "Choose a window function.")
+    order = spec.get("orderBy")
+    if function in ("rank", "dense_rank", "row_number") and not order:
+        _browse_recipe_issue(state, "WINDOW_ORDER_REQUIRED", path + "/orderBy", "Ranking windows require sort order.", "Add an order term.")
+    _browse_recipe_validate_order(state, order, path + "/orderBy", model, {})
+    partitions = spec.get("partitionBy")
+    if not isinstance(partitions, list):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path + "/partitionBy", "Window partitions must be an array.", "Reset partitions.")
+    else:
+        for index, ref in enumerate(partitions):
+            _browse_recipe_resolve_path(state, model, _browse_recipe_ref_path(ref), f"{path}/partitionBy/{index}/path", False)
+    if function in ("sum", "avg", "min", "max", "count"):
+        ref = spec.get("field")
+        if function == "count" and (ref is None or ref.get("kind") == "all"):
+            return
+        _browse_recipe_resolve_path(state, model, _browse_recipe_ref_path(ref), path + "/field/path", False)
+
+
+def _browse_recipe_computed_specs(state, namespace):
+    """Compiles enabled computed columns in Recipe order; structured nodes never pass through eval."""
+    recipe, model = state["recipe"], state["model"]
+    specs, aliases = [], {}
+    for index, item in enumerate(recipe.get("computed", ())):
+        if not isinstance(item, dict) or item.get("enabled") is not True:
+            continue
+        path, kind, alias = f"/computed/{index}", item.get("kind"), item.get("alias")
+        built = None
+        if kind == "aggregate":
+            built = _browse_recipe_aggregate(state, item, model, aliases, path)
+        elif kind == "scalarSubquery":
+            built = _browse_recipe_scalar_subquery(state, item, model, aliases, path)
+        elif kind == "exists":
+            built = _browse_recipe_exists(state, item, model, aliases, path)
+        elif kind == "formula":
+            built = _browse_recipe_formula(state, item.get("expression"), model, aliases, path + "/expression")
+        elif kind == "window":
+            built = _browse_recipe_window(state, item, model, aliases, path)
+        elif kind == "codeExpression":
+            built = _browse_recipe_code_expression(state, item, model, aliases, path, namespace)
+        if built is not None:
+            specs.append({"alias": alias, "expr": built, "kind": kind, "output": _browse_recipe_output_field(item.get("outputType"))})
+            aliases[alias] = _browse_recipe_output_field(item.get("outputType")) or _browse_recipe_output_field("text")
+    state["compiled_aliases"] = aliases
+    return specs
+
+
+def _browse_recipe_aggregate(state, spec, model, aliases, path):
+    """Builds a live aggregate expression with source-scoped filter and forced distinct Count fan-out protection."""
+    from django.db.models import Avg, Count, Max, Min, Sum
+
+    functions = {"count": Count, "sum": Sum, "avg": Avg, "min": Min, "max": Max}
+    field = spec.get("field")
+    arg = model._meta.pk.attname if isinstance(field, dict) and field.get("kind") == "all" else _browse_recipe_ref_path(field)
+    filter_q = _browse_recipe_predicate(state, spec.get("filter"), model, aliases, None, "aggregate")
+    resolved = _browse_resolve_filter_path(model, arg) if isinstance(arg, str) else None
+    to_many = bool(resolved and resolved[1])
+    distinct = spec.get("distinct") == "always" or (spec.get("function") == "count" and to_many)
+    if distinct and spec.get("function") == "count" and to_many:
+        _browse_recipe_issue(state, "AUTO_DISTINCT_APPLIED", path + "/field", "Count uses distinct across a to-many path.", "Review the count semantics.", spec.get("nodeId"), "warning")
+    options = {"filter": filter_q} if _browse_recipe_group_has_children(spec.get("filter")) else {}
+    return functions[spec.get("function")](arg, distinct=distinct, **options) if spec.get("function") == "count" else functions[spec.get("function")](arg, **options)
+
+
+def _browse_recipe_scalar_subquery(state, spec, model, aliases, path):
+    """Builds a scalar field or aggregate Subquery with deterministic ordering and optional Coalesce fallback."""
+    from django.db.models import Subquery, Value
+    from django.db.models.functions import Coalesce
+
+    inner = _browse_recipe_inner_queryset(state, spec, model, path)
+    if inner is None:
+        return None
+    select = spec.get("select", {})
+    output = _browse_recipe_output_field(spec.get("outputType"))
+    if select.get("kind") == "field":
+        field_path = _browse_recipe_ref_path(select.get("field"))
+        order = _browse_recipe_order_terms(spec.get("orderBy"), inner.model, {})
+        if not order:
+            order = [inner.model._meta.pk.attname]
+            _browse_recipe_issue(state, "SUBQUERY_IMPLICIT_ORDER", path + "/orderBy", "Subquery uses target primary-key order.", "Add explicit order for deterministic intent.", spec.get("nodeId"), "warning")
+        expression = Subquery(inner.order_by(*order).values(field_path)[:1], output_field=output)
+    else:
+        aggregate = _browse_recipe_aggregate(state, {"function": select.get("function"), "field": select.get("field"), "filter": {"kind": "group", "children": [], "join": "and", "negated": False}}, inner.model, {}, path + "/select")
+        expression = Subquery(inner.order_by().annotate(__djs_scalar=aggregate).values("__djs_scalar")[:1], output_field=output)
+    fallback = spec.get("onEmpty", {}).get("value")
+    return expression if fallback is None else Coalesce(expression, Value(fallback), output_field=output)
+
+
+def _browse_recipe_exists(state, spec, model, aliases, path):
+    """Builds an exposed boolean Exists computed annotation in Rows mode."""
+    return _browse_recipe_exists_expression(_browse_recipe_inner_queryset(state, spec, model, path))
+
+
+def _browse_recipe_formula(state, node, model, aliases, path):
+    """Recursively converts a validated Formula AST to Django expressions without dynamic evaluation."""
+    from django.db.models import Case, F, Value, When
+    from django.db.models.functions import Cast, Coalesce, Concat, Greatest, Least, Length, Lower, Trim, Upper
+
+    kind = node.get("kind")
+    if kind == "field":
+        return F(node.get("path"))
+    if kind == "computed":
+        return F(node.get("alias"))
+    if kind == "literal":
+        return Value(node.get("value"))
+    if kind == "binary":
+        left, right = _browse_recipe_formula(state, node["left"], model, aliases, path + "/left"), _browse_recipe_formula(state, node["right"], model, aliases, path + "/right")
+        return {"+": left + right, "-": left - right, "*": left * right, "/": left / right, "%": left % right}[node["operator"]]
+    if kind == "function":
+        args = [_browse_recipe_formula(state, item, model, aliases, f"{path}/args/{index}") for index, item in enumerate(node["args"])]
+        builders = {"coalesce": Coalesce, "concat": Concat, "greatest": Greatest, "least": Least, "lower": Lower, "upper": Upper, "trim": Trim, "length": Length}
+        return builders[node["function"]](*args)
+    if kind == "cast":
+        return Cast(_browse_recipe_formula(state, node["expression"], model, aliases, path + "/expression"), output_field=_browse_recipe_output_field(node["outputType"]))
+    if kind == "case":
+        branches = [When(_browse_recipe_predicate(state, branch["when"], model, aliases, None, "case"), then=_browse_recipe_formula(state, branch["then"], model, aliases, f"{path}/branches/{index}/then")) for index, branch in enumerate(node["branches"])]
+        return Case(*branches, default=_browse_recipe_formula(state, node["else"], model, aliases, path + "/else"))
+    return None
+
+
+def _browse_recipe_window(state, spec, model, aliases, path):
+    """Builds one supported Django Window expression from concrete partitions and order terms."""
+    from django.db.models import Avg, Count, F, Max, Min, Sum, Window
+    from django.db.models.functions import DenseRank, Rank, RowNumber
+
+    function = spec.get("function")
+    if function in ("rank", "dense_rank", "row_number"):
+        inner = {"rank": Rank, "dense_rank": DenseRank, "row_number": RowNumber}[function]()
+    else:
+        field = model._meta.pk.attname if function == "count" and not spec.get("field") else _browse_recipe_ref_path(spec.get("field"))
+        inner = {"sum": Sum, "avg": Avg, "min": Min, "max": Max, "count": Count}[function](F(field))
+    partition = [F(_browse_recipe_ref_path(item)) for item in spec.get("partitionBy", ())]
+    return Window(expression=inner, partition_by=partition or None, order_by=_browse_recipe_order_terms(spec.get("orderBy"), model, {}))
+
+
+def _browse_recipe_code_expression(state, spec, model, aliases, path, namespace):
+    """Uses the existing restricted annotation evaluator only for explicitly requested raw code expressions."""
+    expression = _browse_eval_annotation_expression(spec.get("expression"), namespace)
+    if expression is None:
+        _browse_recipe_issue(state, "RAW_EXPRESSION_INVALID", path + "/expression", "Code expression is blocked by the restricted evaluator.", "Use structured Formula or a safe expression.", spec.get("nodeId"))
+        return None
+    if _browse_recipe_group_has_children(spec.get("when")):
+        from django.db.models import Case, Value, When
+
+        expression = Case(When(_browse_recipe_predicate(state, spec["when"], model, aliases, None, "code"), then=expression), default=Value(None))
+    return expression
+
+
+def _browse_recipe_order_terms(order, model, aliases):
+    """Returns safe Django order strings from validated Recipe terms, retaining client order exactly."""
+    result = []
+    for item in order if isinstance(order, list) else []:
+        ref = item.get("ref", {})
+        name = ref.get("path") if ref.get("kind") == "field" else ref.get("alias")
+        result.append(f"-{name}" if item.get("direction") == "desc" else name)
+    return result
+
+
+def _browse_recipe_prepare(request, namespace=None):
+    """Performs all validation and compilation before any endpoint opens capture or evaluates a QuerySet."""
+    state = _browse_recipe_validate(request)
+    if not state.get("ok"):
+        return state, []
+    specs = _browse_recipe_computed_specs(state, namespace)
+    state["ok"] = not any(item["severity"] == "error" for item in state["issues"])
+    return state, specs
+
+
+def _browse_recipe_base_queryset(state, specs, include_post=True):
+    """Reconstructs the Rows pipeline through WHERE, computed annotations, and optionally Result filter/order."""
+    recipe, model = state["recipe"], state["model"]
+    state["predicate_annotations"] = []
+    state["predicate_number"] = 0
+    where = _browse_recipe_predicate(state, recipe["where"], model, {}, None, "where")
+    queryset = model._base_manager.all()
+    if state["predicate_annotations"]:
+        queryset = queryset.annotate(**dict(state["predicate_annotations"]))
+    queryset = queryset.filter(where)
+    if _browse_recipe_needs_distinct(model, recipe["where"]):
+        queryset = queryset.distinct()
+        _browse_recipe_issue(state, "AUTO_DISTINCT_APPLIED", "/where", "WHERE crosses a to-many path; outer rows are distinct.", "Review relation filter semantics.", severity="warning")
+    for item in specs:
+        queryset = queryset.annotate(**{item["alias"]: item["expr"]})
+    if include_post:
+        state["predicate_annotations"] = []
+        post = _browse_recipe_predicate(state, recipe["postFilter"], model, state.get("compiled_aliases", {}), None, "postFilter")
+        if state["predicate_annotations"]:
+            queryset = queryset.annotate(**dict(state["predicate_annotations"]))
+        if _browse_recipe_group_has_children(recipe["postFilter"]):
+            queryset = queryset.filter(post)
+    order = _browse_recipe_order_terms(recipe.get("orderBy"), model, state.get("compiled_aliases", {})) or [model._meta.pk.attname]
+    return queryset.order_by(*order), order
+
+
+def _browse_recipe_needs_distinct(model, group):
+    """Returns whether any field comparison in a predicate group crosses a to-many path."""
+    if not isinstance(group, dict):
+        return False
+    for child in group.get("children", ()):
+        if child.get("kind") == "group" and _browse_recipe_needs_distinct(model, child):
+            return True
+        if child.get("kind") == "comparison" and child.get("lhs", {}).get("kind") == "field":
+            resolved = _browse_resolve_filter_path(model, child["lhs"].get("path", ""))
+            if resolved and resolved[1]:
+                return True
+    return False
+
+
+def _browse_recipe_rows(namespace, request):
+    """Executes an atomic Recipe v2 rows request and returns a bounded read-only grid with warnings and SQL capture."""
+    state, specs = _browse_recipe_prepare(request, namespace)
+    if not state.get("ok"):
+        return _browse_recipe_failure(state, True)
+    try:
+        queryset, order = _browse_recipe_base_queryset(state, specs)
+        if not state.get("ok"):
+            return _browse_recipe_failure(state, True)
+        model, limit = state["model"], _browse_limit(request.get("limit"), maximum=None)
+        offset = request.get("offset") if isinstance(request.get("offset"), int) and request.get("offset") > 0 else 0
+        # Only the completely default concrete-PK result shape can keyset safely. Computed values, windows, and any
+        # user ordering may alter row order or evaluation, so those paths intentionally retain offset pagination.
+        keyset_capable = not state["recipe"].get("orderBy") and not specs
+        cursor = request.get("cursor")
+        if keyset_capable and cursor is not None:
+            queryset = queryset.filter(**{f"{model._meta.pk.attname}__gt": cursor})
+        with _browse_capture() as ctx:
+            raw = list(queryset[offset:offset + limit + 1].values(*[field.attname for field in model._meta.concrete_fields], *[item["alias"] for item in specs]))
+        has_more, raw = len(raw) > limit, raw[:limit]
+        columns = _browse_columns(model) + [{"annotation": True, "attname": item["alias"], "editable": False, "name": item["alias"], "null": True, "pk": False, "type": item["kind"]} for item in specs]
+        next_cursor = raw[-1][model._meta.pk.attname] if keyset_capable and has_more and raw else None
+        next_offset = offset + limit if not keyset_capable and has_more else None
+        return {"columns": columns, "hasMore": has_more, "issues": state["issues"], "nextCursor": _browse_jsonable(next_cursor), "nextOffset": next_offset, "ok": True, "orm": _browse_recipe_orm_log(state, "rows", order), "pk": model._meta.pk.attname, "recipeVersion": 2, "rows": [_browse_serialize_row(row) for row in raw], "sql": _browse_sql(ctx)}
+    except Exception:
+        state["issues"].append({"code": "VALUE_INVALID", "fix": "Review the query and retry.", "message": "Recipe query could not be compiled by Django.", "path": "/recipe", "severity": "error"})
+        return _browse_recipe_failure(state, True)
+
+
+def _browse_recipe_summary(request):
+    """Executes aggregate-only Recipe v2 summary mode, including grouped HAVING and global one-row results."""
+    state, specs = _browse_recipe_prepare(request)
+    if not state.get("ok"):
+        return _browse_recipe_failure(state, True)
+    if state["recipe"].get("mode") != "summary":
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", "/mode", "Aggregate endpoint requires Summary mode.", "Switch to Summary.")
+        return _browse_recipe_failure(state, True)
+    try:
+        model, recipe = state["model"], state["recipe"]
+        queryset, _ = _browse_recipe_base_queryset(state, [], False)
+        aggregates = {item["alias"]: item["expr"] for item in specs if item["kind"] == "aggregate"}
+        group_by = [_browse_recipe_ref_path(item) for item in recipe.get("groupBy", ())]
+        with _browse_capture() as ctx:
+            if group_by:
+                query = queryset.values(*group_by).annotate(**aggregates)
+                if _browse_recipe_group_has_children(recipe["postFilter"]):
+                    query = query.filter(_browse_recipe_predicate(state, recipe["postFilter"], model, state.get("compiled_aliases", {}), None, "postFilter"))
+                rows = list(query.order_by(*group_by)[:_browse_limit(request.get("limit"), default=1000, maximum=None) + 1])
+                has_more, rows = len(rows) > _browse_limit(request.get("limit"), default=1000, maximum=None), rows[:_browse_limit(request.get("limit"), default=1000, maximum=None)]
+            else:
+                rows, has_more = [queryset.aggregate(**aggregates)], False
+        names = group_by + list(aggregates)
+        return {"columns": [_browse_agg_column(name, name in group_by) for name in names], "editable": False, "groupBy": group_by, "hasMore": has_more, "issues": state["issues"], "ok": True, "orm": _browse_recipe_orm_log(state, "summary", group_by), "pk": None, "recipeVersion": 2, "relations": [], "rows": [_browse_serialize_row(row) for row in rows], "sql": _browse_sql(ctx)}
+    except Exception:
+        return _browse_recipe_failure(state, True)
+
+
+def _browse_recipe_count(request):
+    """Counts final rows or summary groups using the entire applied Recipe rather than legacy base filters only."""
+    state, specs = _browse_recipe_prepare(request)
+    if not state.get("ok"):
+        return _browse_recipe_failure(state)
+    try:
+        recipe = state["recipe"]
+        if recipe.get("mode") == "summary" and not recipe.get("groupBy"):
+            return {"count": 1, "issues": state["issues"], "ok": True, "orm": _browse_recipe_orm_log(state, "count"), "recipeVersion": 2, "sql": []}
+        queryset, _ = _browse_recipe_base_queryset(state, specs if recipe.get("mode") == "rows" else [], recipe.get("mode") == "rows")
+        with _browse_capture() as ctx:
+            if recipe.get("mode") == "summary":
+                aggregate = {item["alias"]: item["expr"] for item in specs if item["kind"] == "aggregate"}
+                query = queryset.values(*[_browse_recipe_ref_path(item) for item in recipe.get("groupBy", ())]).annotate(**aggregate)
+                if _browse_recipe_group_has_children(recipe["postFilter"]):
+                    query = query.filter(_browse_recipe_predicate(state, recipe["postFilter"], state["model"], state.get("compiled_aliases", {}), None, "postFilter"))
+                count = query.count()
+            else:
+                count = queryset.count()
+        return {"count": count, "issues": state["issues"], "ok": True, "orm": _browse_recipe_orm_log(state, "count"), "recipeVersion": 2, "sql": _browse_sql(ctx)}
+    except Exception:
+        return _browse_recipe_failure(state)
+
+
+def _browse_recipe_computed(namespace, request):
+    """Rejects legacy lazy-property loading for Recipe v2 because computed columns are part of the applied query."""
+    state, _ = _browse_recipe_prepare(request, namespace)
+    if not state.get("ok"):
+        return _browse_recipe_failure(state)
+    _browse_recipe_issue(state, "TRANSPORT_CAPABILITY_UNSUPPORTED", "/field", "Recipe v2 computed values are returned by Rows, not lazy property loading.", "Reload the rows query.")
+    return _browse_recipe_failure(state)
+
+
+def _browse_recipe_orm_log(state, operation, order=()):
+    """Returns a readable, non-executable summary of the strict v2 pipeline without interpolating raw user code."""
+    source = state["recipe"]["source"]
+    base = f'apps.get_model({source["app"]!r}, {source["model"]!r})._base_manager'
+    details = [base, f"# Recipe v2 {operation}"]
+    if order:
+        details.append(".order_by(" + ", ".join(repr(item) for item in order) + ")")
+    return "\n".join(details)

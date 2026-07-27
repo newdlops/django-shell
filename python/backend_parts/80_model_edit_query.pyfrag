@@ -1,0 +1,527 @@
+# Model-browser editing, lookup, free-query, tabulation, filter, and coercion helpers for the composed Django shell backend.
+def _browse_commit(request):
+    """Applies staged cell edits in one atomic transaction; validates everything first (all-or-nothing)."""
+    with _EXECUTION_LOCK:
+        try:
+            from django.core.exceptions import ValidationError
+            from django.db import connection, transaction
+            from django.test.utils import CaptureQueriesContext
+
+            model = _browse_resolve_model(request)
+            changes = request.get("changes")
+            if not isinstance(changes, list) or not changes:
+                return {"error": "No changes to commit.", "ok": False, "results": []}
+            editable = {field.attname: field for field in model._meta.concrete_fields if getattr(field, "editable", False) and not field.primary_key and not _browse_is_auto(field)}
+            field_names = [field.name for field in model._meta.fields]
+            prepared, results, has_error = [], [], False
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                pk = change.get("pk")
+                fields = change.get("fields") if isinstance(change.get("fields"), dict) else {}
+                instance = model._base_manager.filter(pk=pk).first()
+                if instance is None:
+                    results.append({"error": "Row not found.", "ok": False, "pk": pk})
+                    has_error = True
+                    continue
+                applied = []
+                for attname, value in fields.items():
+                    field = editable.get(attname)
+                    if field is None:
+                        continue
+                    setattr(instance, attname, _browse_coerce_edit_value(field, value))
+                    applied.append(field.name)
+                if not applied:
+                    continue
+                try:
+                    instance.full_clean(exclude=[name for name in field_names if name not in applied])
+                except ValidationError as error:
+                    results.append({"fieldErrors": _browse_field_errors(error), "ok": False, "pk": pk})
+                    has_error = True
+                    continue
+                results.append({"ok": True, "pk": pk})
+                prepared.append((instance, applied))
+            if has_error:
+                return {"ok": False, "results": results, "saved": 0}
+            with CaptureQueriesContext(connection) as ctx:
+                with transaction.atomic():
+                    for instance, applied in prepared:
+                        instance.save(update_fields=applied)
+            return {"ok": True, "orm": _browse_orm_commit(model, prepared), "results": results, "saved": len(prepared), "sql": _browse_sql(ctx)}
+        except Exception:
+            return {"error": traceback.format_exc(), "ok": False, "results": []}
+
+
+def _browse_is_auto(field):
+    """Returns whether a field is auto-managed (auto_now/auto_now_add) and so not user-editable."""
+    return bool(getattr(field, "auto_now", False) or getattr(field, "auto_now_add", False))
+
+
+def _browse_coerce_edit_value(field, value):
+    """Coerces an edited cell value to the field's Python type, leaving validation to full_clean."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value == "" and getattr(field, "null", False):
+        return None
+    if field.is_relation:
+        return value if value not in ("", None) else None
+    field_type = field.get_internal_type()
+    if isinstance(value, str) and field_type == "BooleanField":
+        return value.strip().lower() in ("true", "1", "t", "yes", "on")
+    if isinstance(value, str) and field_type == "JSONField" and value.lstrip().startswith(("[", "{")):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    try:
+        return field.to_python(value)
+    except Exception:
+        return value
+
+
+def _browse_field_errors(error):
+    """Returns a JSON-safe {field: [messages]} mapping from a ValidationError."""
+    try:
+        return {key: [str(message) for message in messages] for key, messages in error.message_dict.items()}
+    except Exception:
+        return {"__all__": [str(message) for message in getattr(error, "messages", [str(error)])]}
+
+
+def _browse_orm_commit(model, prepared):
+    """Builds a readable ORM expression mirroring the committed saves."""
+    lines = ["with transaction.atomic():"]
+    for instance, applied in prepared:
+        lines.append(f"    {model.__name__}(pk={instance.pk!r}).save(update_fields={applied!r})")
+    return "\n".join(lines)
+
+
+_BROWSE_TEXT_TYPES = frozenset({"CharField", "TextField", "SlugField", "EmailField", "URLField", "FilePathField"})
+_BROWSE_INT_PK_TYPES = frozenset({"AutoField", "BigAutoField", "SmallAutoField", "IntegerField", "BigIntegerField", "SmallIntegerField", "PositiveIntegerField", "PositiveSmallIntegerField", "PositiveBigIntegerField"})
+
+
+def _browse_lookup(request):
+    """Searches a target model for foreign-key picker candidates: one bounded SELECT, no __str__/joins."""
+    with _browse_parallel_context():
+        try:
+            model = _browse_resolve_model(request)
+            if model is None:
+                return {"error": "Unknown model.", "ok": False, "rows": []}
+            pk_attname = model._meta.pk.attname
+            exclude = request.get("exclude") if isinstance(request.get("exclude"), list) else []
+            text_fields = _browse_text_fields(model, exclude)
+            label_fields = text_fields[:2]
+            value_fields = list(dict.fromkeys([pk_attname, *label_fields]))
+            limit = _browse_limit(request.get("limit"), default=20, maximum=50)
+            query = (request.get("q") or "").strip()
+            queryset = model._base_manager.all().order_by(pk_attname)
+            if query:
+                queryset = queryset.filter(_browse_lookup_filter(model, query, text_fields, pk_attname))
+            with _browse_capture() as ctx:
+                raw = list(queryset.values(*value_fields)[: limit + 1])
+            rows = [_browse_lookup_row(item, pk_attname, label_fields) for item in raw[:limit]]
+            return {"hasMore": len(raw) > limit, "ok": True, "rows": rows, "sql": _browse_sql(ctx)}
+        except Exception:
+            return {"error": traceback.format_exc(), "ok": False, "rows": []}
+
+
+def _browse_text_fields(model, exclude=()):
+    """Returns concrete text-field attnames for FK search and labels; every field is exposed unless its
+    name contains a caller-supplied exclude substring (default: none, so all are shown)."""
+    patterns = [str(item).lower() for item in exclude if item]
+    fields = []
+    for field in model._meta.concrete_fields:
+        if field.is_relation or field.get_internal_type() not in _BROWSE_TEXT_TYPES:
+            continue
+        lowered = field.attname.lower()
+        if any(pattern in lowered for pattern in patterns):
+            continue
+        fields.append(field.attname)
+    return fields
+
+
+def _browse_lookup_filter(model, query, text_fields, pk_attname):
+    """Builds an OR query across text fields (icontains) plus an exact primary-key match when applicable."""
+    from django.db.models import Q
+
+    condition = Q()
+    for attname in text_fields:
+        condition |= Q(**{f"{attname}__icontains": query})
+    if model._meta.pk.get_internal_type() in _BROWSE_INT_PK_TYPES:
+        if query.isdigit():
+            condition |= Q(**{pk_attname: int(query)})
+    else:
+        condition |= Q(**{f"{pk_attname}__icontains": query})
+    return condition
+
+
+def _browse_lookup_row(item, pk_attname, label_fields):
+    """Builds one {pk, label} candidate from a .values() dict without invoking __str__."""
+    pk = item.get(pk_attname)
+    parts = [_truncate(str(item.get(attname)), 80) for attname in label_fields if item.get(attname) not in (None, "")]
+    label = f"#{pk}" + (" · " + " · ".join(parts) if parts else "")
+    return {"label": label, "pk": _browse_jsonable(pk)}
+
+
+def _browse_query(namespace, request):
+    """Evaluates user-written ORM code in the live shell namespace and tabulates the final
+    expression's value into grid rows. Multi-line code is allowed (last expression is tabulated);
+    assignments/imports mutate the shell namespace, exactly like the interactive shell."""
+    code = request.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return {"columns": [], "editable": False, "error": "Query code must be a non-empty string.", "hasMore": False, "ok": False, "rows": []}
+    limit = _browse_limit(request.get("limit"), maximum=None)
+    offset = request.get("offset")
+    offset = offset if isinstance(offset, int) and offset > 0 else 0
+    with _EXECUTION_LOCK:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                value, expression = _browse_eval_last(namespace, code)
+                with _browse_capture() as ctx:
+                    payload = _browse_tabulate(value, offset, limit)
+                payload["result"] = _browse_query_result(value, code, expression)
+                payload.update({"ok": True, "orm": code, "sql": _browse_sql(ctx), "stderr": stderr.getvalue(), "stdout": stdout.getvalue()})
+                return payload
+            except Exception:
+                return {"columns": [], "editable": False, "error": traceback.format_exc(), "hasMore": False, "ok": False, "rows": [], "stderr": stderr.getvalue(), "stdout": stdout.getvalue()}
+
+
+def _browse_eval_last(namespace, code):
+    """Runs leading statements, then returns the final expression value and its AST node without evaluating twice."""
+    tree = ast.parse(code, filename="<django-shell-query>", mode="exec")
+    body, expression = _split_last_expression(tree)
+    if body:
+        tree.body = body
+        ast.fix_missing_locations(tree)
+        exec(compile(tree, "<django-shell-query>", "exec"), namespace)
+    if expression is None:
+        if not body:
+            exec(compile(tree, "<django-shell-query>", "exec"), namespace)
+        raise ValueError("The last line must be an expression to tabulate (for example a QuerySet).")
+    expr = ast.Expression(expression.value)
+    ast.fix_missing_locations(expr)
+    return eval(compile(expr, "<django-shell-query>", "eval"), namespace), expression
+
+
+def _browse_query_result(value, code, expression=None):
+    """Describes the exact final expression and its runtime result shape for ORM Query UI highlighting."""
+    from django.db.models import Model, QuerySet
+
+    if expression is None:
+        try:
+            _body, expression = _split_last_expression(ast.parse(code, filename="<django-shell-query>", mode="exec"))
+        except Exception:
+            expression = None
+    value_node = getattr(expression, "value", expression)
+    start_line = max(1, int(getattr(expression, "lineno", 1) or 1))
+    end_line = max(start_line, int(getattr(expression, "end_lineno", start_line) or start_line))
+    segment = ast.get_source_segment(code, value_node) if value_node is not None else None
+    expression_text = " ".join(str(segment or "").split())[:240]
+    if isinstance(value, QuerySet):
+        model = getattr(value, "model", None)
+        model_label = getattr(getattr(model, "_meta", None), "label", "") or ""
+        iterable_name = getattr(getattr(value, "_iterable_class", None), "__name__", "")
+        shape = "Values-list " if "ValuesList" in iterable_name else "Values " if "Values" in iterable_name else ""
+        kind, label = "queryset", f"{shape}QuerySet[{model_label}]" if model_label else f"{shape}QuerySet"
+    elif isinstance(value, Model):
+        model_label = getattr(getattr(value, "_meta", None), "label", "") or type(value).__name__
+        kind, label = "model", f"{model_label} instance"
+    elif not isinstance(value, (str, bytes)) and hasattr(value, "__iter__"):
+        kind, label = "iterable", type(value).__name__
+    else:
+        kind, label = "scalar", type(value).__name__
+    return {"endLine": end_line, "expression": expression_text, "kind": kind, "label": label, "startLine": start_line}
+
+
+def _browse_tabulate(value, offset, limit):
+    """Turns an evaluated value into {columns, rows, hasMore, pk?, editable, model?, app?}; bounded, no __str__."""
+    import itertools
+
+    from django.db.models import Model, QuerySet
+    from django.db.models.query import ModelIterable
+
+    if isinstance(value, QuerySet):
+        if value._iterable_class is ModelIterable and not value.query.values_select:
+            try:
+                return _browse_tabulate_instances(value, value.model, offset, limit)
+            except TypeError:
+                pass  # already-sliced / un-sliceable queryset → fall through to bounded read-only
+        else:
+            return _browse_tabulate_dicts(value, offset, limit)
+    if isinstance(value, Model):
+        return _browse_tabulate_single(value)
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__iter__"):
+        return {"columns": [{"attname": "value", "editable": False, "name": "value", "null": True, "pk": False, "type": ""}], "editable": False, "hasMore": False, "rows": [{"value": _browse_cell(value)}]}
+    items = list(itertools.islice(value, offset, offset + limit + 1))
+    return _browse_tabulate_items(items, limit)
+
+
+def _browse_tabulate_instances(queryset, model, offset, limit):
+    """Tabulates a model-instance QuerySet as editable rows via a single bounded .values() SELECT."""
+    columns = _browse_columns(model)
+    attnames = [column["attname"] for column in columns]
+    raw = list(queryset[offset:offset + limit + 1].values(*attnames))
+    return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": len(raw) > limit, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [_browse_serialize_row(row) for row in raw[:limit]]}
+
+
+def _browse_tabulate_dicts(queryset, offset, limit):
+    """Tabulates a .values()/.values_list() QuerySet as read-only rows."""
+    names = list(queryset.query.values_select) + list(getattr(queryset.query, "annotation_select", {}))
+    flat = queryset._iterable_class.__name__ == "FlatValuesListIterable"
+    valued = queryset._iterable_class.__name__ in ("ValuesListIterable", "FlatValuesListIterable")
+    raw = list(queryset[offset:offset + limit + 1])
+    if not names and raw:
+        names = list(raw[0].keys()) if isinstance(raw[0], dict) else [f"col{index}" for index in range(len(raw[0]))]
+    if flat:
+        names = names[:1] or ["value"]
+        rows = [{names[0]: _browse_cell(item)} for item in raw[:limit]]
+    elif valued:
+        rows = [_browse_serialize_row(dict(zip(names, item))) for item in raw[:limit]]
+    else:
+        rows = [_browse_serialize_row(item) for item in raw[:limit]]
+    return {"columns": [{"attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": ""} for name in names], "editable": False, "hasMore": len(raw) > limit, "rows": rows}
+
+
+def _browse_tabulate_single(instance):
+    """Tabulates one model instance as a single editable row (attname getattr, never __str__)."""
+    model = type(instance)
+    columns = _browse_columns(model)
+    row = {column["attname"]: _browse_cell(getattr(instance, column["attname"], None)) for column in columns}
+    return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": False, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [row]}
+
+
+def _browse_tabulate_items(items, limit):
+    """Tabulates a bounded plain list/iterable (read-only): instances by attname, dicts by key, else a value column."""
+    from django.db.models import Model
+
+    has_more = len(items) > limit
+    items = items[:limit]
+    if items and all(isinstance(item, Model) and type(item) is type(items[0]) for item in items):
+        model = type(items[0])
+        columns = _browse_columns(model)
+        concrete = {column["attname"] for column in columns}
+        # Surface per-row annotation values Django stored on the instance (e.g. an annotate() over a @property-filtered
+        # stream) — they live in __dict__ as non-underscore keys outside the concrete columns.
+        ann_names = [name for name in vars(items[0]) if isinstance(name, str) and not name.startswith("_") and name not in concrete]
+        rows = [_browse_serialize_row(dict({column["attname"]: getattr(item, column["attname"], None) for column in columns}, **{name: getattr(item, name, None) for name in ann_names})) for item in items]
+        ann_cols = [{"annotation": True, "attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "annotation"} for name in ann_names]
+        return {"app": model._meta.app_label, "columns": columns + ann_cols + _browse_computed_columns(model), "editable": True, "hasMore": has_more, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
+    if items and all(isinstance(item, dict) for item in items):
+        names = list(dict.fromkeys(key for item in items for key in item))
+        return {"columns": [{"attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": ""} for name in names], "editable": False, "hasMore": has_more, "rows": [_browse_serialize_row(item) for item in items]}
+    return {"columns": [{"attname": "value", "editable": False, "name": "value", "null": True, "pk": False, "type": ""}], "editable": False, "hasMore": has_more, "rows": [{"value": _browse_cell(item)} for item in items]}
+
+
+def _browse_build_filters(model, filters, attnames):
+    """Builds a safe Q filter; field and lookup are allowlisted and values stay ORM-parameterized (no injection)."""
+    return _browse_filter_parts(model, filters, attnames)[0]
+
+
+def _browse_apply_filters(queryset, model, filters, attnames):
+    """Applies safe concrete, annotated-property, and relation-existence filters to a queryset."""
+    queryset, property_terms = _browse_apply_db_filters(queryset, model, filters, attnames)
+    return _browse_python_filter_iter(queryset, property_terms) if property_terms else queryset
+
+
+def _browse_apply_db_filters(queryset, model, filters, attnames):
+    """Applies filters that can be represented by Django ORM and returns deferred Python property terms."""
+    query, annotations, distinct, property_terms = _browse_filter_parts(model, filters, attnames)
+    if annotations:
+        queryset = queryset.annotate(**annotations)
+    queryset = queryset.filter(query)
+    return (queryset.distinct() if distinct else queryset), property_terms
+
+
+def _browse_filter_parts(model, filters, attnames):
+    """Returns a Q object plus required annotations/distinct flag for safe table filters."""
+    from django.db.models import Q
+
+    query = Q()
+    annotations = {}
+    distinct = False
+    property_terms = []
+    if not isinstance(filters, list):
+        return query, annotations, distinct, property_terms
+    declared = _browse_declared_annotations(model)
+    for term in filters:
+        parsed = _browse_filter_term(model, term, set(attnames), declared)
+        if parsed is None:
+            continue
+        key, lookup, value, annotation, needs_distinct, property_name = parsed
+        if property_name is not None:
+            property_terms.append({"field": property_name, "lookup": lookup, "negate": bool(term.get("negate")), "value": value})
+            continue
+        if annotation is not None:
+            annotations[annotation[0]] = annotation[1]
+        distinct = distinct or needs_distinct
+        clause = Q(**{f"{key}__{lookup}": value})
+        query &= ~clause if term.get("negate") else clause
+    return query, annotations, distinct, property_terms
+
+
+def _browse_filter_term(model, term, attnames, declared):
+    """Parses one structured table filter term into a safe ORM lookup key."""
+    if not isinstance(term, dict):
+        return None
+    field = term.get("field")
+    lookup = term.get("lookup") or "exact"
+    if not isinstance(field, str) or lookup not in _BROWSE_LOOKUPS:
+        return None
+    fields = {field.attname: field for field in model._meta.concrete_fields}
+    annotation = None
+    needs_distinct = False
+    # `length`/`length__<cmp>` and `trim` are char/text transforms (Length/Trim, registered at startup).
+    is_text_transform = lookup == "trim" or lookup == "length" or lookup.startswith("length__")
+    if field == "pk":
+        # Must precede the @property branch: Django defines `pk` as a property on the base Model, so
+        # _pty_is_computed_field(model, "pk") is True and would otherwise misroute pk to a Python full-table scan.
+        if is_text_transform:
+            return None
+        key = "pk"
+        value = _browse_coerce_filter_value(lookup, term.get("value"), model._meta.pk)
+    elif field in attnames:
+        if is_text_transform and type(fields[field]).__name__ not in _BROWSE_TEXT_TYPES:
+            return None  # Length()/Trim() are only valid on char/text columns; drop the term rather than raise FieldError.
+        key = field
+        value = _browse_coerce_filter_value(lookup, term.get("value"), fields.get(field))
+    elif field in declared and field.isidentifier():
+        key = _browse_annotation_alias(field)
+        annotation = (key, declared[field])
+        value = _browse_coerce_filter_value(lookup, term.get("value"))
+    elif field.isidentifier() and _pty_is_computed_field(model, field):
+        return None, lookup, _browse_coerce_filter_value(lookup, term.get("value")), None, False, field
+    elif field.startswith("rel:") and lookup == "isnull":
+        relation = _browse_find_relation(model, field[4:])
+        name = _browse_relation_name(relation) if relation is not None else None
+        if not name:
+            return None
+        key = name
+        value = _browse_coerce_filter_value(lookup, term.get("value"))
+        needs_distinct = bool(relation.one_to_many or relation.many_to_many)
+    else:
+        # Relation-traversal path (e.g. author__profile__city): every segment is allowlisted against the live
+        # model graph, so an unknown field/relation is rejected (never injected) and values stay ORM-parameterized.
+        resolved = _browse_resolve_filter_path(model, field)
+        if resolved is None:
+            return None
+        leaf, needs_distinct, is_relation_leaf = resolved
+        if is_relation_leaf:
+            if lookup != "isnull":
+                return None
+            value = _browse_coerce_filter_value("isnull", term.get("value"))
+        else:
+            if is_text_transform and type(leaf).__name__ not in _BROWSE_TEXT_TYPES:
+                return None  # Length()/Trim() only on a char/text leaf (e.g. author__name), never a numeric/relation leaf.
+            value = _browse_coerce_filter_value(lookup, term.get("value"), leaf if getattr(leaf, "concrete", False) else None)
+        key = field
+    return key, lookup, value, annotation, needs_distinct, None
+
+
+def _browse_annotation_alias(field):
+    """Returns a safe annotation alias for one declared computed-property filter."""
+    return f"djs_{field}"
+
+
+def _browse_python_filter_iter(queryset, terms):
+    """Yields objects whose unannotated @property values match every Python-side filter term."""
+    if not terms:
+        return iter(queryset)
+    source = queryset.iterator(chunk_size=_PROPERTY_FILTER_CHUNK_SIZE) if callable(getattr(queryset, "iterator", None)) else queryset
+    return (obj for obj in source if all(_browse_property_filter_match(obj, term) for term in terms))
+
+
+def _browse_property_filter_match(obj, term):
+    """Returns whether one object matches one Python-side @property filter term."""
+    value = _pty_safe_getattr(obj, term.get("field"))
+    matched = _browse_property_lookup_match(value, term.get("lookup"), term.get("value"))
+    return not matched if term.get("negate") else matched
+
+
+def _browse_property_lookup_match(value, lookup, expected):
+    """Applies one supported lookup to a Python @property value."""
+    if lookup == "isnull":
+        return (value is None) == bool(expected)
+    if value is None:
+        return False
+    if lookup == "exact":
+        return value == expected
+    if lookup == "iexact":
+        return str(value).lower() == str(expected).lower()
+    if lookup == "contains":
+        return str(expected) in str(value)
+    if lookup == "icontains":
+        return str(expected).lower() in str(value).lower()
+    if lookup in ("gt", "gte", "lt", "lte"):
+        return _browse_compare(value, expected, lookup)
+    if lookup == "startswith":
+        return str(value).startswith(str(expected))
+    if lookup == "istartswith":
+        return str(value).lower().startswith(str(expected).lower())
+    if lookup == "endswith":
+        return str(value).endswith(str(expected))
+    if lookup == "iendswith":
+        return str(value).lower().endswith(str(expected).lower())
+    if lookup == "in":
+        return value in expected if isinstance(expected, (list, tuple, set, frozenset)) else False
+    if lookup == "range":
+        return isinstance(expected, (list, tuple)) and len(expected) >= 2 and _browse_compare(expected[0], value, "lte") and _browse_compare(value, expected[1], "lte")
+    if lookup == "date":
+        actual = value.date() if callable(getattr(value, "date", None)) else value
+        return str(actual) == str(expected)
+    if lookup in ("year", "month", "day"):
+        return getattr(value, lookup, None) == expected
+    return False
+
+
+def _browse_compare(left, right, lookup):
+    """Compares two property filter values, returning False on incompatible types."""
+    try:
+        if lookup == "gt":
+            return left > right
+        if lookup == "gte":
+            return left >= right
+        if lookup == "lt":
+            return left < right
+        if lookup == "lte":
+            return left <= right
+    except Exception:
+        return False
+    return False
+
+
+def _browse_islice(iterable, start, stop):
+    """Returns an iterator slice for querysets, lists, and generators."""
+    import itertools
+
+    return itertools.islice(iterable, start, stop)
+
+
+def _browse_coerce_filter_value(lookup, value, field=None, numeric=False):
+    """Coerces one filter value for lookups and field types that need a specific Python shape. `numeric` (used for
+    aggregate/annotation HAVING values) coerces a digit string to int/float BEFORE the boolean-string check, so a count
+    comparison like `>= 1` stays the int 1 rather than the bool True."""
+    if lookup == "isnull":
+        if isinstance(value, str):
+            return value.strip().lower() not in ("", "false", "0", "no")
+        return bool(value)
+    if isinstance(lookup, str) and (lookup.startswith("length") or lookup in ("week_day", "quarter", "hour", "minute", "second")):
+        numeric = True  # length and date/time extracts compare against an int, regardless of the underlying field type.
+    if lookup in ("in", "range"):
+        if isinstance(value, str):
+            parts = [_browse_coerce_filter_value("exact", part.strip(), field, numeric) for part in value.split(",") if part.strip() != ""]
+        elif isinstance(value, (list, tuple)):
+            parts = list(value)
+        else:
+            parts = [value]
+        return parts[:2] if lookup == "range" else parts
+    if numeric and isinstance(value, str) and value.strip().replace(".", "", 1).lstrip("-").isdigit():
+        return float(value.strip()) if "." in value.strip() else int(value.strip())
+    if isinstance(value, str) and field is not None and field.get_internal_type() == "BooleanField":
+        return value.strip().lower() in ("true", "1", "t", "yes", "on")
+    if isinstance(value, str) and field is None and value.strip().lower() in ("true", "false", "1", "0", "t", "yes", "no", "on", "off"):
+        return value.strip().lower() in ("true", "1", "t", "yes", "on")
+    if isinstance(value, str) and field is None and value.strip().replace(".", "", 1).lstrip("-").isdigit():
+        return float(value.strip()) if "." in value.strip() else int(value.strip())
+    return value
+

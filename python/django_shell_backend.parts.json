@@ -1,0 +1,13 @@
+[
+  "backend_parts/00_bootstrap.pyfrag",
+  "backend_parts/10_inspection.pyfrag",
+  "backend_parts/20_execution_hot_reload.pyfrag",
+  "backend_parts/30_debug_progress.pyfrag",
+  "backend_parts/40_pty_capture.pyfrag",
+  "backend_parts/50_model_core.pyfrag",
+  "backend_parts/60_model_aggregate.pyfrag",
+  "backend_parts/70_model_annotations.pyfrag",
+  "backend_parts/80_model_edit_query.pyfrag",
+  "backend_parts/90_model_query_recipe_predicate.pyfrag",
+  "backend_parts/91_model_query_recipe_computed.pyfrag"
+]

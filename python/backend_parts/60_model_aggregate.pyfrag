@@ -1,0 +1,317 @@
+# Model-browser aggregate and grouping helpers for the composed Django shell backend.
+def _browse_aggregate(request):
+    """Computes grouped or global aggregates (Count/Sum/Avg/Min/Max/Exists) for the current filter set. DB-aggregatable
+    args (concrete columns and Count over a reverse/M2M relation) run as one GROUP BY/aggregate query; @property args are
+    streamed object-by-object and aggregated in Python (a full scan), then merged with the DB results by group. Group-by
+    and DB args are allowlisted against the live model graph (no injection); the result is a read-only grid."""
+    with _browse_parallel_context():
+        try:
+            if "recipe" in request:
+                return _browse_recipe_summary(request)
+            from django.db.models import Avg, Count, Max, Min, Sum
+
+            model = _browse_resolve_model(request)
+            attnames = [field.attname for field in model._meta.concrete_fields]
+            attset = set(attnames)
+            pk_attname = model._meta.pk.attname
+            group_by = _browse_agg_group_by(request.get("groupBy"), attset, pk_attname, model)
+            specs = _browse_agg_specs(model, request.get("aggregates"), attset, pk_attname, bool(group_by))
+            if not specs and not group_by:
+                return {"columns": [], "error": "Add at least one aggregate, or a group-by field.", "ok": False, "rows": []}
+            if not specs:
+                return {"columns": [], "error": "Add at least one aggregate to compute per group.", "ok": False, "rows": []}
+            db_specs = [spec for spec in specs if spec["kind"] == "db"]
+            exists_specs = [spec for spec in specs if spec["kind"] == "exists"]
+            py_specs = [spec for spec in specs if spec["kind"] == "py"]
+            # A lookup on an aggregate column filters the groups AFTER aggregation (HAVING) — only DB aggregates support it
+            # (a Python-@property aggregate can't be a SQL HAVING). Such filters are split out of the WHERE clause.
+            having_aliases = {spec["alias"] for spec in db_specs} if group_by else set()
+            base_filters, having_filters = _browse_split_having(request.get("filters"), {spec["alias"] for spec in specs}, having_aliases)
+            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all(), model, base_filters, attnames)
+            if property_terms:
+                return {"columns": [], "error": "Aggregation cannot combine with Python @property filters; remove them first.", "ok": False, "rows": []}
+            limit = _browse_limit(request.get("limit"), default=1000, maximum=None)
+            builders = {"count": Count, "sum": Sum, "avg": Avg, "min": Min, "max": Max}
+
+            def _expr(spec):
+                """Builds one native conditional aggregate expression from a validated spec."""
+                options = {"filter": spec["condition"]} if spec.get("condition") is not None else {}
+                if spec["func"] == "count":
+                    return Count(spec["arg"], distinct=spec["distinct"], **options)
+                return builders[spec["func"]](spec["arg"], **options)
+
+            with _browse_capture() as ctx:
+                if group_by:
+                    by_group = {}
+                    order = []
+                    if db_specs:
+                        grouped_qs = queryset.values(*group_by).annotate(**{spec["alias"]: _expr(spec) for spec in db_specs})
+                        if having_filters:
+                            grouped_qs = grouped_qs.filter(_browse_having_q(having_filters, having_aliases))
+                    else:
+                        # No DB aggregate to define the GROUP BY — seed the ordered, bounded group set from a cheap distinct
+                        # query so a @property-only grouped aggregate matches the DB path's ordering and limit instead of
+                        # materializing every group in iteration order.
+                        grouped_qs = queryset.values(*group_by).distinct()
+                    for row in grouped_qs.order_by(*group_by)[: limit + 1]:
+                        key = tuple(row.get(name) for name in group_by)
+                        order.append(key)
+                        by_group[key] = dict(row)
+                    if py_specs:
+                        _browse_agg_python_grouped(queryset, group_by, py_specs, by_group, order)
+                    has_more = len(order) > limit
+                    order = order[:limit]
+                    names = list(group_by) + [spec["alias"] for spec in specs]
+                    rows = [_browse_serialize_row({name: by_group.get(key, {}).get(name) for name in names}) for key in order]
+                else:
+                    result = {}
+                    aggregate = {spec["alias"]: _expr(spec) for spec in db_specs}
+                    if aggregate:
+                        result.update(queryset.aggregate(**aggregate))
+                    for spec in exists_specs:
+                        source = queryset.filter(spec["condition"]) if spec.get("condition") is not None else queryset
+                        result[spec["alias"]] = source.exists()
+                    if py_specs:
+                        result.update(_browse_agg_python_global(queryset, py_specs))
+                    # Non-exists first, then exists, matching the ORM-mode cell's dict order so both transports agree.
+                    names = [spec["alias"] for spec in specs if spec["func"] != "exists"] + [spec["alias"] for spec in specs if spec["func"] == "exists"]
+                    rows = [_browse_serialize_row({name: result.get(name) for name in names})]
+                    has_more = False
+            columns = [_browse_agg_column(name, name in group_by) for name in names]
+            payload = {"columns": columns, "editable": False, "groupBy": group_by, "hasMore": has_more, "ok": True, "orm": _browse_orm_aggregate(model, base_filters, attset, group_by, specs, having_filters), "pk": None, "relations": [], "rows": rows, "sql": _browse_sql(ctx)}
+            if py_specs:
+                payload["pythonScan"] = True
+            return payload
+        except Exception:
+            return {"columns": [], "error": traceback.format_exc(), "ok": False, "rows": []}
+
+
+def _browse_agg_group_by(group_by, attset, pk_attname, model):
+    """Returns the safe, deduped group-by field names (concrete columns, `pk`→attname, or an FK-drill-in traversal path that
+    ends on a concrete field), bounded to 8."""
+    result = []
+    if isinstance(group_by, list):
+        for item in group_by:
+            name = item.get("field") if isinstance(item, dict) else item
+            if not isinstance(name, str):
+                continue
+            resolved = pk_attname if name == "pk" else name
+            if resolved in result:
+                continue
+            if resolved in attset:
+                result.append(resolved)
+            elif "__" in resolved:
+                # Group by a related concrete field (author__country); a path ending on a relation can't be a GROUP BY key.
+                path = _browse_resolve_filter_path(model, resolved)
+                if path is not None and not path[2]:
+                    result.append(resolved)
+            if len(result) >= 8:
+                break
+    return result
+
+
+def _browse_agg_specs(model, aggregates, attset, pk_attname, grouped):
+    """Parses aggregate terms into safe {func, arg, alias, distinct, kind, condition} specs. `kind` is `db` (concrete column, or
+    Count over a reverse/M2M relation query name), `py` (a @property computed object-by-object), or `exists` (global-only).
+    Functions/fields/conditions are allowlisted, aliases are sanitized, and `exists` is dropped when grouping."""
+    specs = []
+    used = set()
+    if not isinstance(aggregates, list):
+        return specs
+    relation_names = _browse_agg_relation_names(model)
+    for term in aggregates:
+        if not isinstance(term, dict):
+            continue
+        func = term.get("func")
+        if func not in _BROWSE_AGG_FUNCS:
+            continue
+        kind = "db"
+        to_many = False
+        if func == "exists":
+            if grouped:
+                continue
+            arg, kind = pk_attname, "exists"
+        elif func == "count":
+            raw = term.get("field")
+            if raw in (None, "", "*", "pk"):
+                arg = pk_attname
+            elif raw in attset:
+                arg = raw
+            elif raw in relation_names:
+                arg, to_many = raw, _browse_path_is_to_many(model, raw)
+            elif isinstance(raw, str) and "__" in raw and _browse_resolve_filter_path(model, raw) is not None:
+                # FK drill-in: count related rows / a related field across an allowlisted traversal path.
+                arg, to_many = raw, _browse_path_is_to_many(model, raw)
+            elif isinstance(raw, str) and raw not in attset and raw.isidentifier() and _pty_is_computed_field(model, raw):
+                arg, kind = raw, "py"
+            else:
+                continue
+        else:
+            raw = term.get("field")
+            arg = pk_attname if raw == "pk" else raw
+            if isinstance(arg, str) and arg in attset:
+                pass
+            elif isinstance(arg, str) and "__" in arg:
+                # FK drill-in for Sum/Avg/Min/Max: must end on a concrete field AND not cross a to-many relation — a join
+                # fan-out would silently inflate the sum/average and distinct can't fix it, so reject those paths.
+                resolved = _browse_resolve_filter_path(model, arg)
+                if resolved is None or resolved[2] or resolved[1]:
+                    continue
+            elif isinstance(arg, str) and arg not in attset and arg not in relation_names and arg.isidentifier() and _pty_is_computed_field(model, arg):
+                kind = "py"
+            else:
+                # Relations are only countable (Sum/Avg/… over a bare relation is invalid); unknown args are dropped.
+                continue
+        conditions = _browse_item_condition_group(model, term)
+        if not conditions["valid"]:
+            continue
+        # A Python @property has no SQL-side row on which a Q predicate can run. Never ignore a requested condition.
+        if kind == "py" and conditions["q"] is not None:
+            continue
+        # A to-many join in a non-count aggregate condition can multiply the value rows; distinct cannot repair Sum/Avg.
+        if func not in ("count", "exists") and conditions["to_many"]:
+            continue
+        alias = _browse_agg_alias(term.get("alias"), func, arg, used)
+        used.add(alias)
+        # Count over a to-many aggregate or condition path must be distinct, else sibling joins multiply the tally.
+        distinct = func == "count" and (bool(term.get("distinct")) or to_many or conditions["to_many"])
+        specs.append({"alias": alias, "arg": arg, "condition": conditions["q"], "condition_log": conditions["log"], "distinct": distinct, "func": func, "kind": kind})
+        if len(specs) >= 20:
+            break
+    return specs
+
+
+def _browse_path_is_to_many(model, name):
+    """Returns whether a relation name or traversal path crosses a to-many (reverse-FK / M2M) relation. Such an aggregate
+    must count distinct (a sibling to-many join would multiply the tally), and Sum/Avg over it is unreliable (fan-out)."""
+    if not isinstance(name, str):
+        return False
+    if "__" in name:
+        resolved = _browse_resolve_filter_path(model, name)
+        return bool(resolved and resolved[1])
+    field = _browse_match_segment(model, name)
+    return bool(field is not None and (getattr(field, "one_to_many", False) or getattr(field, "many_to_many", False)))
+
+
+def _browse_agg_relation_names(model):
+    """Returns the set of filter/aggregate query names for the model's relations (reverse uses related_query_name)."""
+    names = set()
+    for field in model._meta.get_fields():
+        if getattr(field, "is_relation", False) and getattr(field, "related_model", None) is not None:
+            name = _browse_relation_query_name(field)
+            if name:
+                names.add(name)
+    return names
+
+
+def _browse_agg_python_global(queryset, py_specs):
+    """Streams the filtered objects once and reduces each @property aggregate in Python (a full scan, bounded memory)."""
+    accumulators = {spec["alias"]: _browse_agg_py_init() for spec in py_specs}
+    for obj in queryset.iterator(chunk_size=_PROPERTY_FILTER_CHUNK_SIZE):
+        for spec in py_specs:
+            _browse_agg_py_update(accumulators[spec["alias"]], _pty_safe_getattr(obj, spec["arg"]))
+    return {spec["alias"]: _browse_agg_py_final(accumulators[spec["alias"]], spec["func"]) for spec in py_specs}
+
+
+def _browse_agg_python_grouped(queryset, group_by, py_specs, by_group, order):
+    """Streams the filtered objects once, buckets them by group key, and reduces each @property aggregate per group.
+    When `order` is already populated (a DB pass ran), only those groups are accumulated and the values merged in;
+    otherwise the buckets define the groups and their first-seen order."""
+    wanted = set(order) if order else None
+    accumulators = {}
+    group_values = {}
+    for obj in queryset.iterator(chunk_size=_PROPERTY_FILTER_CHUNK_SIZE):
+        key = tuple(_pty_safe_getattr(obj, name) for name in group_by)
+        if wanted is not None and key not in wanted:
+            continue
+        bucket = accumulators.get(key)
+        if bucket is None:
+            bucket = {spec["alias"]: _browse_agg_py_init() for spec in py_specs}
+            accumulators[key] = bucket
+            if wanted is None:
+                group_values[key] = {name: _pty_safe_getattr(obj, name) for name in group_by}
+        for spec in py_specs:
+            _browse_agg_py_update(bucket[spec["alias"]], _pty_safe_getattr(obj, spec["arg"]))
+    for key, bucket in accumulators.items():
+        if key not in by_group:
+            by_group[key] = dict(group_values.get(key, {}))
+            order.append(key)
+        by_group[key].update({spec["alias"]: _browse_agg_py_final(bucket[spec["alias"]], spec["func"]) for spec in py_specs})
+
+
+def _browse_agg_py_init():
+    """Returns a fresh streaming accumulator (count/summable-count/sum/min/max state) for one @property aggregate."""
+    return {"n": 0, "sum": 0, "sum_n": 0, "min": None, "max": None}
+
+
+def _browse_agg_py_update(accumulator, value):
+    """Folds one @property value into a streaming accumulator (None is ignored, like SQL aggregates). `n` counts every
+    non-None value (for Count); `sum`/`sum_n` track only the values that are actually addable, so a mixed-type property
+    averages over its numeric subset rather than dividing a partial sum by the full count."""
+    if value is None:
+        return
+    accumulator["n"] += 1
+    try:
+        accumulator["sum"] += value
+        accumulator["sum_n"] += 1
+    except Exception:
+        pass
+    if accumulator["min"] is None or _browse_agg_lt(value, accumulator["min"]):
+        accumulator["min"] = value
+    if accumulator["max"] is None or _browse_agg_lt(accumulator["max"], value):
+        accumulator["max"] = value
+
+
+def _browse_agg_py_final(accumulator, func):
+    """Finalizes a streaming accumulator into the aggregate value (None on empty, matching SQL aggregate semantics)."""
+    if func == "count":
+        return accumulator["n"]
+    if func == "sum":
+        return accumulator["sum"] if accumulator["sum_n"] else None
+    if func == "avg":
+        return accumulator["sum"] / accumulator["sum_n"] if accumulator["sum_n"] else None
+    if func == "min":
+        return accumulator["min"]
+    if func == "max":
+        return accumulator["max"]
+    return None
+
+
+def _browse_agg_lt(left, right):
+    """Returns left < right, or False when the values aren't orderable together."""
+    try:
+        return left < right
+    except Exception:
+        return False
+
+
+def _browse_agg_safe_alias(name):
+    """Returns whether a string is a safe column alias: an identifier, not a Python keyword, not an internal djs_/__ alias."""
+    return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name) and not name.startswith("djs_") and not name.startswith("__")
+
+
+def _browse_agg_alias(alias, func, arg, used):
+    """Returns a unique safe identifier alias for one aggregate/annotation column (used as an ORM keyword argument)."""
+    candidate = alias if _browse_agg_safe_alias(alias) else ("exists" if func == "exists" else f"{arg}_{func}")
+    if not _browse_agg_safe_alias(candidate):
+        candidate = f"agg_{func}"
+    base = candidate
+    suffix = 2
+    while candidate in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _browse_agg_column(name, is_group):
+    """Returns a read-only grid column descriptor for one group-by or aggregate result column."""
+    return {"attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "group" if is_group else "agg"}
+
+
+_BROWSE_WINDOW_RANK_FUNCS = frozenset({"rank", "dense_rank", "row_number"})
+_BROWSE_WINDOW_AGG_FUNCS = frozenset({"sum", "avg", "min", "max", "count"})
+_BROWSE_EXPR_OPS = frozenset({"+", "-", "*", "/"})
+_BROWSE_ANNOTATION_SAFE_METHODS = frozenset({"alias", "all", "annotate", "defer", "distinct", "exclude", "filter", "none", "only", "order_by", "prefetch_related", "select_related", "using", "values", "values_list"})
+_BROWSE_ANNOTATION_BLOCKED_ATTRS = frozenset({"bulk_create", "bulk_update", "create", "cursor", "delete", "execute", "executemany", "extra", "get_or_create", "raw", "save", "update", "update_or_create"})
+
+

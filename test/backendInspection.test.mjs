@@ -4,8 +4,10 @@ import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import path from "node:path";
 import test from "node:test";
+import { readComposedBackendSource } from "./backendComposedSourceHelper.mjs";
 
 const PYTHON = pythonExecutable();
+const COMPOSED_BACKEND_SOURCE = readComposedBackendSource();
 
 test("bounds hidden prelude inspection without scanning loaded modules", { skip: !PYTHON }, () => {
   const script = [
@@ -477,7 +479,7 @@ test("interrupt armed while paused prevents the remaining debug cell from runnin
 test("core backend defers the model browser until loadfeature installs it", { skip: !PYTHON }, () => {
   const script = [
     "import json, zlib, base64",
-    `src=open(${JSON.stringify(path.resolve("python/django_shell_backend.py"))},encoding='utf-8').read()`,
+    `src=${JSON.stringify(COMPOSED_BACKEND_SOURCE)}`,
     "idx=src.index('# --- Model data browser')",
     "core=src[:idx]; feature=src[idx:]",
     "g={}",
@@ -509,7 +511,7 @@ test("PTY models probe degrades to a still-loading catalog while the feature hal
   // "Error in callback" dump in the user's terminal.
   const script = [
     "import json, io, sys",
-    `src=open(${JSON.stringify(path.resolve("python/django_shell_backend.py"))},encoding='utf-8').read()`,
+    `src=${JSON.stringify(COMPOSED_BACKEND_SOURCE)}`,
     "g={}",
     "exec(compile(src[:src.index('# --- Model data browser')],'<core>','exec'), g)",
     "class Events:",
@@ -549,7 +551,7 @@ test("PTY models probe degrades to a still-loading catalog while the feature hal
 test("loadfeature consumes staged shell-namespace chunks via partsKey (typed PTY delivery)", { skip: !PYTHON }, () => {
   const script = [
     "import json, zlib, base64",
-    `src=open(${JSON.stringify(path.resolve("python/django_shell_backend.py"))},encoding='utf-8').read()`,
+    `src=${JSON.stringify(COMPOSED_BACKEND_SOURCE)}`,
     "idx=src.index('# --- Model data browser')",
     "core=src[:idx]; feature=src[idx:]",
     "g={}",

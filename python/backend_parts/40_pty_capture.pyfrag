@@ -1,0 +1,708 @@
+# PTY markers, probes, capture hooks, and history helpers for the composed Django shell backend.
+def _print_marker(prefix, payload):
+    """Prints a single backend marker line that the extension can parse from PTY output."""
+    print(prefix + json.dumps(payload), flush=True)
+
+
+def _pty_is_ipython():
+    """Returns whether the interactive shell is an IPython shell (exposes get_ipython)."""
+    import builtins
+
+    getter = getattr(builtins, "get_ipython", None)
+    try:
+        return bool(getter) and getter() is not None
+    except Exception:
+        return False
+
+
+# Keep a cell response marker under the extension's 1.25 MB PTY read buffer: a larger marker loses its prefix to the
+# buffer's tail-slice and never parses, hanging the serialized PTY request queue. Bounded reads pass through untouched.
+_PTY_MARKER_LIMIT = 1000000
+_PTY_CHUNK_LIMIT = 200000
+_PROPERTY_FILTER_CHUNK_SIZE = 1000
+
+
+def _pty_fit_response(response):
+    """Shrinks an oversized cell response so its marker fits the PTY read buffer (a huge stdout/grid would otherwise jam
+    the serialized PTY queue). Truncates the text fields, caps the SQL log, and KEEPS as many grid rows as fit (marking
+    `truncated`/`hasMore`) instead of dropping the whole table. Only triggers for genuinely huge output."""
+    notice = "\n... truncated by django-shell: output too large for the terminal transport — switch the link to Socket/Auto for large results ..."
+    fitted = dict(response)
+    # Cap the SQL log to 50 queries AND truncate each query's text: a single cell can run megabytes of SQL (e.g. a @property
+    # with deeply nested subqueries), which alone could overrun the marker and force stdout truncation that corrupts a read
+    # cell's parseable JSON. Bound it BEFORE the stdout/grid budget so the parseable payload survives.
+    fitted["sql"] = [dict(entry, sql=_truncate(str(entry.get("sql", "")), 2000)) if isinstance(entry, dict) else entry for entry in (fitted.get("sql") or [])[:50]]
+    for key in ("stdout", "stderr", "traceback"):
+        value = fitted.get(key)
+        if isinstance(value, str) and len(value) > 40000:
+            fitted[key] = value[:40000] + notice
+    grid = fitted.get("grid")
+    if isinstance(grid, dict) and isinstance(grid.get("rows"), list) and grid["rows"]:
+        rows = grid["rows"]
+        base = len(json.dumps(dict(fitted, grid=dict(grid, rows=[]))))
+        budget = _PTY_MARKER_LIMIT - base - 256
+        sample_count = min(len(rows), 200)
+        per_row = max(1, len(json.dumps(rows[:sample_count])) // sample_count)
+        keep = max(1, min(len(rows), budget // per_row))
+        fitted["grid"] = dict(grid, rows=rows[:keep], hasMore=True, truncated=True) if keep < len(rows) else grid
+    else:
+        fitted["grid"] = None
+    return fitted
+
+
+def _pty_cell_marker(cell_id, response):
+    """Builds one or more `_djs_cell` response marker lines, chunking oversized responses without dropping inspection data."""
+    payload = json.dumps({"id": cell_id, "response": response})
+    if len(payload) > _PTY_MARKER_LIMIT:
+        fitted_payload = json.dumps({"id": cell_id, "response": _pty_fit_response(response)})
+        if len(fitted_payload) <= _PTY_MARKER_LIMIT:
+            return _RESPONSE_PREFIX + fitted_payload
+        response_payload = json.dumps(response)
+        chunks = [response_payload[index:index + _PTY_CHUNK_LIMIT] for index in range(0, len(response_payload), _PTY_CHUNK_LIMIT)]
+        count = len(chunks)
+        return "\n".join(_RESPONSE_PREFIX + json.dumps({"chunk": {"count": count, "data": chunk, "index": index}, "id": cell_id}) for index, chunk in enumerate(chunks))
+    return _RESPONSE_PREFIX + payload
+
+
+def _pty_emit_cell(counter, ok, result_repr, out, err, tb, grid=None, sql=None, inspect=None):
+    """Prints one response marker for a literal code cell run in the interactive shell (grid = ORM-mode rows; inspect = pure-expression drill-down child summaries)."""
+    response = {"grid": grid, "inspect": inspect, "ok": ok, "result": result_repr, "sql": sql or [], "stderr": err, "stdout": out, "traceback": tb}
+    raw = _STATE.pop("pty_raw_metadata", None)
+    if isinstance(raw, dict):
+        response.update(raw)
+    print(_pty_cell_marker("_djs_cell-%d" % counter, response), flush=True)
+
+
+def _pty_orm_inspect(limit=None):
+    """Attaches runtime-variable metadata for ORM-mode inspection helper cells."""
+    _STATE["pty_raw_metadata"] = {"runtime": _pty_runtime_inspection(_STATE["server"].namespace, limit)}
+    return None
+
+
+def _pty_runtime_inspection(namespace, limit=None):
+    """Returns runtime-variable metadata for top-level namespace inspection."""
+    initial = namespace.get("_djs_initial_names", frozenset())
+    items = [(k, v) for k, v in sorted(namespace.items()) if not k.startswith("_")]
+    ordered = [kv for kv in items if kv[0] not in initial] + [kv for kv in items if kv[0] in initial]
+    variables = []
+    limit_value = None if limit is None else max(0, int(limit))
+    for name, value in (ordered if limit_value is None else ordered[:limit_value]):
+        try:
+            variables.append(_value_summary(name, value, [{"op": "name", "name": name}], _variable_origin(name, initial), detailed=False))
+        except Exception:
+            pass
+    return {"loadedModuleCount": len(sys.modules), "variables": variables}
+
+
+def _pty_is_models_probe(raw):
+    """Returns whether the cell is the pure Python model-catalog probe typed by the extension."""
+    return (raw or "").strip() == "len(apps.get_models())"
+
+
+def _pty_is_runtime_probe(raw):
+    """Returns whether the cell is the pure Python runtime-inspection probe typed by the extension."""
+    return (raw or "").strip() == "len(globals())"
+
+
+def _pty_looks_like_model_cell(raw):
+    """Returns whether a raw cell likely needs bare Django model names to be bound before execution."""
+    text = raw or ""
+    return "._base_manager" in text or "._meta" in text
+
+
+def _pty_inspect_probe_target(raw, namespace):
+    """Returns (matched, value, error) for pure `dir(expr)` / `len(expr)` inspection probe cells."""
+    try:
+        tree = ast.parse((raw or "").strip(), mode="eval")
+    except Exception:
+        return False, None, None
+    call = tree.body
+    if not isinstance(call, ast.Call) or len(call.args) != 1 or call.keywords:
+        return False, None, None
+    if not isinstance(call.func, ast.Name) or call.func.id not in ("dir", "len"):
+        return False, None, None
+    target = call.args[0]
+    if call.func.id == "len" and isinstance(target, ast.Call) and isinstance(target.func, ast.Name) and target.func.id == "globals":
+        return False, None, None
+    if not _pty_safe_inspect_expr(target):
+        return False, None, None
+    try:
+        return True, _pty_resolve_inspect_expr(target, namespace), None
+    except Exception as error:
+        return True, _InspectionError(error), None
+
+
+def _pty_resolve_inspect_expr(node, namespace):
+    """Resolves a safe inspector AST expression through the same lazy path rules as the structured helper."""
+    if isinstance(node, ast.Name):
+        return namespace[node.id]
+    if isinstance(node, ast.Attribute):
+        value = _pty_resolve_inspect_expr(node.value, namespace)
+        return value if isinstance(value, _InspectionError) else _resolve_child(value, {"op": "attr", "name": node.attr})
+    if isinstance(node, ast.Subscript):
+        value = _pty_resolve_inspect_expr(node.value, namespace)
+        return value if isinstance(value, _InspectionError) else _resolve_child(value, {"op": "index", "index": node.slice.value})
+    if isinstance(node, ast.Call):
+        return _pty_resolve_inspect_call(node, namespace)
+    raise ValueError("Unsupported runtime inspector expression.")
+
+
+def _pty_resolve_inspect_call(node, namespace):
+    """Resolves one safe inspector helper call without evaluating arbitrary functions."""
+    if isinstance(node.func, ast.Name) and node.func.id == "list":
+        value = _pty_resolve_inspect_expr(node.args[0], namespace)
+        return value if isinstance(value, _InspectionError) else list(value)
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "items":
+        value = _pty_resolve_inspect_expr(node.func.value, namespace)
+        return value if isinstance(value, _InspectionError) else value.items()
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "all":
+        value = _pty_resolve_inspect_expr(node.func.value, namespace)
+        return value if isinstance(value, _InspectionError) else value.all()
+    raise ValueError("Unsupported runtime inspector call.")
+
+
+def _pty_safe_inspect_expr(node):
+    """Returns whether an AST expression is a safe path expression generated by the inspector."""
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, ast.Attribute):
+        return _pty_safe_inspect_expr(node.value)
+    if isinstance(node, ast.Subscript):
+        return _pty_safe_inspect_expr(node.value) and _pty_safe_inspect_slice(node.slice)
+    if isinstance(node, ast.Call):
+        return _pty_safe_inspect_call(node)
+    return False
+
+
+def _pty_safe_inspect_slice(node):
+    """Returns whether an AST subscript slice is a non-negative integer index."""
+    return isinstance(node, ast.Constant) and isinstance(node.value, int) and node.value >= 0
+
+
+def _pty_safe_inspect_call(node):
+    """Returns whether an AST call is one of the path reconstruction helpers: list(x), x.items(), or x.all()."""
+    if node.keywords:
+        return False
+    if isinstance(node.func, ast.Name) and node.func.id == "list" and len(node.args) == 1:
+        return _pty_safe_inspect_expr(node.args[0])
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "items" and not node.args:
+        return _pty_safe_inspect_expr(node.func.value)
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "all" and not node.args:
+        return _pty_safe_inspect_expr(node.func.value)
+    return False
+
+
+def _pty_safe_getattr(obj, name):
+    """getattr that never raises (a Django RelatedObjectDoesNotExist subclasses AttributeError → None for missing relations)."""
+    try:
+        return getattr(obj, name)
+    except Exception:
+        return None
+
+
+def _pty_is_computed_field(owner, name):
+    """Returns whether owner.name is a computed-field descriptor: @property OR @cached_property (Django's `django.utils.functional.cached_property` and `functools.cached_property` both have type name 'cached_property') — so the drill-down shows computed/derived fields, not just DB columns."""
+    try:
+        descriptor = inspect.getattr_static(owner, name)
+    except Exception:
+        descriptor = getattr(owner, name, None)
+    return isinstance(descriptor, property) or type(descriptor).__name__ == "cached_property"
+
+
+def _browse_children_of(value, base_path, n=None):
+    """Builds child summaries for an ALREADY-RESOLVED object (rich drill-down: dict/sequence items, manager/queryset
+    rows, a Django model instance's fields + reverse relations + @property values, else __dict__ attrs). Each child's path is
+    base_path + [segment]; pass base_path=[] (relative) when the result object came from a bare expression typed by the
+    extension (which prepends the path it asked for), or the resolved path when called from the path-resolving helper."""
+    v = value
+    limit = None if n is None else max(0, int(n))
+    def bounded(items):
+        """Returns all items unless a legacy explicit limit was supplied."""
+        return list(items) if limit is None else list(items)[:limit]
+    if _inspection_value_leaf_needed(v):
+        src = [("value", v, {"op": "value"})]
+    elif isinstance(v, dict):
+        src = [("[" + repr(k)[:60] + "]", cv, {"op": "dict", "index": i}) for i, (k, cv) in enumerate(bounded(v.items()))]
+    elif isinstance(v, (list, tuple, set, frozenset)):
+        src = [("[" + str(i) + "]", cv, {"op": "index", "index": i}) for i, cv in enumerate(bounded(v))]
+    elif callable(getattr(v, "all", None)):
+        values = v.all() if limit is None else v.all()[:limit]
+        src = [("[" + str(i) + "]", cv, {"op": "all_index", "index": i}) for i, cv in enumerate(list(values))]
+    elif getattr(v, "_meta", None) is not None and not isinstance(v, type):
+        names = _model_instance_attribute_names(v) or []
+        mapping = _model_instance_attribute_mapping(v, evaluate_values=False) or {}
+        src = [(nm, mapping.get(nm), {"op": "attr", "name": nm}) for nm in bounded([name for name in names if name and not name.startswith("_")])]
+    else:
+        mapping = _attribute_mapping(v, evaluate_values=False) or {}
+        src = [(a, cv, {"op": "attr", "name": a}) for a, cv in bounded([(name, child) for name, child in sorted(mapping.items()) if not (name.startswith("__") and name.endswith("__"))])]
+    children = []
+    for nm, cv, seg in src:
+        try:
+            summary = _value_leaf_summary(nm, cv, base_path + [seg]) if seg.get("op") == "value" else _value_summary(nm, cv, base_path + [seg], None)
+            children.append(summary)
+        except Exception:
+            pass
+    return children
+
+
+def _pty_is_name_chain(raw):
+    """Returns whether a typed cell is a bare name or dotted attribute chain (`a`, `a.b.c`) — the cells the extension types for a pure-expression inspector drill-down. Used to gate the hook's inspect-children computation so heavy console/grid cells (calls/subscripts) are never inspected."""
+    stripped = (raw or "").strip()
+    parts = [part.strip() for part in stripped.split(".")]
+    return bool(stripped) and all(part.isidentifier() and not keyword.iskeyword(part) for part in parts)
+
+
+def _pty_orm_children(path_json, limit=None):
+    """Attaches child-summary metadata for ORM-mode inspection drill-down helper cells."""
+    namespace = _STATE["server"].namespace
+    try:
+        path = json.loads(path_json)
+        children = _browse_children_of(_resolve_path(namespace, path), [], limit)
+    except Exception:
+        _STATE["pty_raw_metadata"] = {"inspect": {"children": [], "error": traceback.format_exc()}}
+        return None
+    _STATE["pty_raw_metadata"] = {"inspect": {"children": children}}
+    return None
+
+
+def _pty_sql_begin(state):
+    """Forces a debug cursor and snapshots the query log so a cell's SQL can be captured under any DEBUG setting."""
+    try:
+        from django.db import connection
+
+        state["sql_force"] = connection.force_debug_cursor
+        connection.force_debug_cursor = True
+        state["sql0"] = len(connection.queries_log)
+    except Exception:
+        state["sql0"] = None
+
+
+def _pty_sql_end(state):
+    """Restores the debug-cursor flag and returns the SQL captured since _pty_sql_begin (bounded, best-effort)."""
+    try:
+        from django.db import connection
+
+        if "sql_force" in state:
+            connection.force_debug_cursor = state["sql_force"]
+        if state.get("sql0") is None:
+            return []
+        return [{"sql": query.get("sql", ""), "time": query.get("time", "")} for query in connection.queries[state["sql0"]:state["sql0"] + 200]]
+    except Exception:
+        return []
+
+
+def _pty_tabulate_result(value, code=None):
+    """Serializes a cell result into a rich grid for ORM mode (instance QuerySet/instance -> editable
+    columns/relations/rows), reusing the model-browser helpers; any other value (lists/dicts/scalars,
+    e.g. an ORM query console result) is tabulated read-only via _browse_tabulate so the Terminal-mode
+    query console matches the socket path; returns None only for None or on error."""
+    if value is None:
+        return None
+    try:
+        import itertools
+
+        from django.db.models import Model, QuerySet
+        from django.db.models.query import ModelIterable
+
+        if isinstance(value, QuerySet) and value._iterable_class is ModelIterable and not value.query.values_select:
+            model = value.model
+            concrete_names = [column["attname"] for column in _browse_columns(model)]
+            # Surface per-row annotation columns (e.g. annotate(Count('books')) / Window(...)) that Django sets on the
+            # instance, skipping the internal djs_/__ aliases used for declared-@property filters.
+            ann_names = [name for name in getattr(value.query, "annotation_select", {}) or {} if isinstance(name, str) and not name.startswith("djs_") and not name.startswith("__")]
+            rows = [_browse_serialize_row(dict({attname: getattr(instance, attname, None) for attname in concrete_names}, **{name: getattr(instance, name, None) for name in ann_names})) for instance in itertools.islice(value, _PTY_ORM_TABULATE_LIMIT + 1)]
+            has_more = len(rows) > _PTY_ORM_TABULATE_LIMIT
+            rows = rows[:_PTY_ORM_TABULATE_LIMIT]
+            columns = _browse_columns(model) + [{"annotation": True, "attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "annotation"} for name in ann_names] + _browse_computed_columns(model)
+            return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": has_more, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "result": _browse_query_result(value, code) if isinstance(code, str) else None, "rows": rows}
+        if isinstance(value, Model):
+            model = type(value)
+            concrete_names = [column["attname"] for column in _browse_columns(model)]
+            row = _browse_serialize_row({attname: getattr(value, attname, None) for attname in concrete_names})
+            return {"app": model._meta.app_label, "columns": _browse_columns(model) + _browse_computed_columns(model), "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "result": _browse_query_result(value, code) if isinstance(code, str) else None, "rows": [row]}
+        if isinstance(value, QuerySet):
+            payload = _browse_tabulate(list(itertools.islice(value, _PTY_ORM_TABULATE_LIMIT + 1)), 0, _PTY_ORM_TABULATE_LIMIT)
+            payload["ok"] = True
+            payload.setdefault("relations", [])
+            if isinstance(code, str):
+                payload["result"] = _browse_query_result(value, code)
+            return payload
+        payload = _browse_tabulate(value, 0, _PTY_ORM_TABULATE_LIMIT)
+        payload["ok"] = True
+        payload.setdefault("relations", [])
+        if isinstance(code, str):
+            payload["result"] = _browse_query_result(value, code)
+        return payload
+    except Exception:
+        return None
+    return None
+
+
+def _pty_install_capture(namespace):
+    """Installs a per-cell capture hook so the extension can type a user's literal code cell (keeping the
+    shell's raw_cell pure) while the cell's output is captured and emitted as a backend response marker.
+    Uses IPython run-cell events when available, otherwise a sys.ps1 hook for the plain Python REPL."""
+    import builtins
+    import sys
+
+    # Snapshot the shell-startup names so ORM-mode inspect cells can tell user variables from pre-existing ones.
+    try:
+        namespace.setdefault("_djs_initial_names", frozenset(namespace.keys()))
+    except Exception:
+        pass
+    getter = getattr(builtins, "get_ipython", None)
+    try:
+        shell = getter() if getter else None
+    except Exception:
+        shell = None
+    if shell is not None:
+        return _pty_install_ipython_capture(shell)
+    return _pty_install_plain_capture(sys, namespace)
+
+
+def _pty_install_ipython_capture(shell):
+    """Captures each IPython cell's output via run-cell events and emits a response marker."""
+    import io
+    import sys
+
+    if getattr(shell, "_djs_capture", False):
+        return True
+    try:
+        shell.user_ns.setdefault("_djs_initial_names", frozenset(shell.user_ns.keys()))
+    except Exception:
+        pass
+    state = {"counter": 0, "err": None, "out": None, "save": None, "skip": False, "scrub": False}
+
+    def _pre(info):
+        """Waits for backend warmup, then starts capturing one IPython cell."""
+        _wait_for_warmup()
+        if str(getattr(info, "raw_cell", "") or "").lstrip().startswith("_djs_rpc("):
+            state["skip"] = True  # plumbing cell: let its own marker print through untouched
+            return
+        state["skip"] = False
+        state["raw"] = str(getattr(info, "raw_cell", "") or "")
+        if _pty_looks_like_model_cell(state["raw"]):
+            _autoimport_registered_models(shell.user_ns)
+        # Introspection plumbing (inspect/children call a backend helper): capture+emit its marker like a normal cell, but drop it from history afterwards so it stays out of the interactive shell.
+        state["scrub"] = "_djs_backend_module._pty_orm_" in state["raw"]
+        state["out"], state["err"] = io.StringIO(), io.StringIO()
+        state["save"] = (sys.stdout, sys.stderr)
+        sys.stdout, sys.stderr = state["out"], state["err"]
+        _pty_sql_begin(state)
+
+    def _post(result):
+        """Restores streams and emits the captured IPython cell response."""
+        if state.get("skip"):
+            state["skip"] = False
+            return
+        if not state["save"]:
+            return  # _pre never ran: this is the bootstrap cell that registered the hook mid-execution; it captured nothing, and emitting an empty marker here would desync the FIFO response queue (the first ORM read would consume it instead of its own cell's output)
+        sys.stdout, sys.stderr = state["save"]
+        out = state["out"].getvalue() if state["out"] else ""
+        err = state["err"].getvalue() if state["err"] else ""
+        state["out"] = state["err"] = state["save"] = None
+        error = getattr(result, "error_in_exec", None) or getattr(result, "error_before_exec", None)
+        tb = "".join(traceback.format_exception(type(error), error, getattr(error, "__traceback__", None))) if error is not None else ""
+        value = getattr(result, "result", None)
+        inspect = None
+        matched_probe, probe_value, probe_error = _pty_inspect_probe_target(state.get("raw"), shell.user_ns)
+        inspection_probe = matched_probe or (error is None and (_pty_is_models_probe(state.get("raw")) or _pty_is_runtime_probe(state.get("raw"))))
+        if inspection_probe:
+            out = ""
+            err = ""
+        eval_tb = ""
+        result_repr = None
+        grid = None
+        if not inspection_probe and error is None:
+            try:
+                # The cell statement already ran; computing its repr/grid here forces any deferred work
+                # (e.g. a lazy QuerySet hitting the DB), which can raise. Catch it so the failure becomes
+                # this cell's error instead of escaping post_run_cell -- an escape skips _pty_emit_cell,
+                # leaving the ORM read with no marker (it hangs / desyncs the FIFO) and double-faults when
+                # IPython then reprs the ExecutionResult to build its "Error in callback" message.
+                if value is not None:
+                    result_repr = _truncate(repr(value), 4000)
+                grid = _pty_tabulate_result(value, state.get("raw"))
+            except Exception:
+                eval_tb = traceback.format_exc()
+                result_repr = None
+                grid = None
+        if matched_probe:
+            if probe_error:
+                inspect = {"children": [], "error": probe_error}
+            else:
+                try:
+                    inspect = {"children": _browse_children_of(probe_value, [])}
+                except Exception:
+                    inspect = {"children": [], "error": traceback.format_exc()}
+        raw_metadata = {}
+        if error is None and _pty_is_models_probe(state.get("raw")):
+            _autoimport_registered_models(shell.user_ns)
+            raw_metadata["models"] = _browse_models_or_loading()
+        if error is None and _pty_is_runtime_probe(state.get("raw")):
+            raw_metadata["runtime"] = _pty_runtime_inspection(shell.user_ns)
+        if raw_metadata:
+            _STATE["pty_raw_metadata"] = raw_metadata
+        sql = _pty_sql_end(state)
+        state["counter"] += 1
+        marker_ok = (error is None and not eval_tb) or matched_probe
+        _pty_emit_cell(state["counter"], marker_ok, result_repr, out, err, eval_tb or ("" if matched_probe else tb), grid, sql, inspect)
+        if state.get("scrub"):
+            state["scrub"] = False
+            try:
+                _pty_history_scrub(None)  # introspection plumbing: keep it out of the interactive shell history (counter/sqlite handled by the scrub)
+            except Exception:
+                pass
+
+    shell.events.register("pre_run_cell", _pre)
+    shell.events.register("post_run_cell", _post)
+    shell._djs_capture = True
+    return True
+
+
+def _pty_install_plain_capture(sys, namespace):
+    """Captures each plain-REPL cell's output by teeing stdout/stderr and emitting a marker on every prompt
+    (the REPL calls str(sys.ps1) once per cell boundary). raw_cell stays the user's literal command."""
+    if getattr(sys, "_djs_capture", False):
+        return True
+    real_out = sys.stdout
+    state = {"counter": 0, "first": True, "out": [], "err": [], "result": None}
+
+    class _Tee(object):
+        def __init__(self, real, buf):
+            self._real = real
+            self._buf = buf
+
+        def write(self, text):
+            try:
+                self._buf.append(text)
+            except Exception:
+                pass
+            return self._real.write(text)
+
+        def flush(self):
+            try:
+                self._real.flush()
+            except Exception:
+                pass
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    class _Ps1(object):
+        def __str__(self):
+            out = "".join(state["out"])
+            err = "".join(state["err"])
+            del state["out"][:]
+            del state["err"][:]
+            if state["first"]:
+                state["first"] = False
+                return ">>> "
+            value = state["result"]
+            state["result"] = None
+            if _RESPONSE_PREFIX in out:
+                return ">>> "  # plumbing cell (_djs_rpc): its marker already went through, don't double-emit
+            raw = _pty_plain_last_history()
+            ok = "Traceback (most recent call last)" not in err
+            inspect = None
+            matched_probe, probe_value, probe_error = _pty_inspect_probe_target(raw, namespace)
+            inspection_probe = matched_probe or (ok and (_pty_is_models_probe(raw) or _pty_is_runtime_probe(raw)))
+            if inspection_probe:
+                out = ""
+                err = ""
+            grid = None if inspection_probe or not ok else _pty_tabulate_result(value, raw)
+            raw_metadata = {}
+            if ok and _pty_is_models_probe(raw):
+                _autoimport_registered_models(namespace)
+                raw_metadata["models"] = _browse_models_or_loading()
+            if ok and _pty_is_runtime_probe(raw):
+                raw_metadata["runtime"] = _pty_runtime_inspection(namespace)
+            if matched_probe:
+                if probe_error:
+                    inspect = {"children": [], "error": probe_error}
+                else:
+                    try:
+                        inspect = {"children": _browse_children_of(probe_value, [])}
+                    except Exception:
+                        inspect = {"children": [], "error": traceback.format_exc()}
+            state["counter"] += 1
+            response = {"grid": grid, "inspect": inspect, "ok": ok or matched_probe, "result": None, "stderr": "" if ok else err, "stdout": out, "traceback": err if not ok else ""}
+            metadata = _STATE.pop("pty_raw_metadata", None)
+            if isinstance(metadata, dict):
+                response.update(metadata)
+            response.update(raw_metadata)
+            # Write straight to the real stream so the marker is not re-captured by the tee.
+            real_out.write(_pty_cell_marker("_djs_cell-%d" % state["counter"], response) + "\n")
+            real_out.flush()
+            return ">>> "
+
+    real_displayhook = sys.displayhook
+
+    def _display(value):
+        state["result"] = value  # capture this cell's expression result for ORM-mode grid serialization
+        real_displayhook(value)  # keep default behavior (repr to stdout, bind builtins._)
+
+    sys.stdout = _Tee(real_out, state["out"])
+    sys.stderr = _Tee(sys.stderr, state["err"])
+    sys.displayhook = _display
+    sys.ps1 = _Ps1()
+    sys._djs_capture = True
+    return True
+
+
+def _pty_plain_last_history():
+    """Returns the latest plain-REPL history item when readline exposes it."""
+    try:
+        import readline
+
+        return readline.get_history_item(readline.get_current_history_length()) or ""
+    except Exception:
+        return ""
+
+
+def _pty_serve(namespace, token, request_json, request_id, initial_names):
+    """Services one PTY-fallback request, prints the response marker, then keeps the interactive
+    shell history clean: the user's executed ORM (execute/query) stays as a tidy line, while the
+    extension's plumbing (grid/inspect/keepalive/bootstrap) is removed from history and the counter."""
+    try:
+        request = json.loads(request_json)
+    except Exception:
+        request = {}
+    _progress_begin(str(request.get("kind") or "request"), emit=True)
+    try:
+        response = _run_request(namespace, token, request, initial_names)
+        _progress_finish(bool(isinstance(response, dict) and response.get("ok", True)))
+    except Exception:
+        response = {"ok": False, "stdout": "", "stderr": "", "traceback": traceback.format_exc()}
+        _progress_finish(False)
+    _STATE["progress_emit"] = False
+    if isinstance(response, dict):
+        limit = 750000
+        for key in ("stdout", "stderr", "result", "traceback", "error"):
+            value = response.get(key)
+            if isinstance(value, str) and len(value) > limit:
+                response[key] = value[:limit] + "\n... truncated by django-shell PTY fallback ..."
+    print(_RESPONSE_PREFIX + json.dumps({"id": request_id, "response": response}), flush=True)
+    _pty_history_scrub(_pty_visible_command(request, response))
+
+
+def _pty_visible_command(request, response):
+    """Returns the clean command to leave in shell history for a PTY request: the user's code for
+    execute/query, the reconstructed Django ORM expression for grid reads (rows/related/count/commit),
+    or None for pure metadata/inspection plumbing (schema/models/lookup/inspect/...) which is dropped."""
+    kind = request.get("kind") if isinstance(request, dict) else None
+    if kind in ("execute", "query"):
+        candidate = request.get("code")
+    elif isinstance(response, dict):
+        candidate = response.get("orm")
+    else:
+        candidate = None
+    return candidate if isinstance(candidate, str) and candidate.strip() else None
+
+
+def _pty_history_scrub(visible):
+    """Replaces the just-run RPC line in shell history with the clean executed query, or drops it (best-effort)."""
+    import builtins
+
+    getter = getattr(builtins, "get_ipython", None)
+    try:
+        shell = getter() if getter else None
+    except Exception:
+        shell = None
+    if shell is not None:
+        _pty_scrub_ipython(shell, visible)
+    else:
+        _pty_scrub_readline(visible)
+
+
+def _pty_scrub_ipython(shell, visible):
+    """Scrubs the just-run RPC cell from IPython history. A kept command (visible) is relabelled to the
+    clean query in memory and on disk; pure plumbing is dropped from memory, the execution counter, and
+    the SQLite history so the freed (session, line) cannot later collide when the counter reuses it."""
+    try:
+        history = shell.history_manager
+        line_num = int(shell.execution_count)
+        last_is_rpc = bool(getattr(history, "input_hist_raw", None)) and _pty_is_rpc_line(history.input_hist_raw[-1])
+    except Exception:
+        return
+    if not last_is_rpc:
+        return
+    if visible:
+        for attr in ("input_hist_parsed", "input_hist_raw"):
+            sequence = getattr(history, attr, None)
+            if sequence:
+                sequence[-1] = visible
+        _pty_rewrite_ipython_db(history, line_num, visible)
+        return
+    # Dropping plumbing requires freeing its on-disk (session, line) first; if that fails, leave the line
+    # in place rather than rolling the counter back into a duplicate that corrupts IPython history logging.
+    if not _pty_forget_ipython_db(history, line_num):
+        return
+    for attr in ("input_hist_parsed", "input_hist_raw"):
+        sequence = getattr(history, attr, None)
+        if sequence and _pty_is_rpc_line(sequence[-1]):
+            sequence.pop()
+    try:
+        shell.execution_count = max(1, int(shell.execution_count) - 1)
+    except Exception:
+        pass
+
+
+def _pty_forget_ipython_db(history, line_num):
+    """Erases a dropped plumbing line from IPython's SQLite history (pending write caches plus the input
+    and output tables) so its (session, line) is free to reuse. Returns True only when the on-disk row is
+    gone, letting the caller roll the counter back without risking the unique-key clash that the
+    'Session/line number was not unique in database' error reports."""
+    try:
+        with history.db_input_cache_lock:
+            history.db_input_cache[:] = [row for row in history.db_input_cache if row[0] != line_num]
+        with history.db_output_cache_lock:
+            history.db_output_cache[:] = [row for row in history.db_output_cache if row[0] != line_num]
+        session = int(history.session_number)
+        connection = history.db
+        with connection:
+            connection.execute("DELETE FROM history WHERE session=? AND line=?", (session, line_num))
+            connection.execute("DELETE FROM output_history WHERE session=? AND line=?", (session, line_num))
+        return True
+    except Exception:
+        return False
+
+
+def _pty_rewrite_ipython_db(history, line_num, visible):
+    """Flushes pending history then rewrites a kept line's stored source to the clean query so a later
+    session's %history matches the in-memory display. The live pre_run_cell hook still sees the originally
+    typed cell, which is why ORM mode types real ORM instead of relying on this after-the-fact rewrite."""
+    try:
+        history.writeout_cache()
+    except Exception:
+        pass
+    try:
+        session = int(history.session_number)
+        connection = history.db
+        with connection:
+            connection.execute("UPDATE history SET source=?, source_raw=? WHERE session=? AND line=?", (visible, visible, session, line_num))
+    except Exception:
+        pass
+
+
+def _pty_scrub_readline(visible):
+    """Removes the RPC line from readline history; reinserts the clean query for the plain Python REPL."""
+    try:
+        import readline
+
+        count = readline.get_current_history_length()
+        if count > 0 and _pty_is_rpc_line(readline.get_history_item(count)):
+            readline.remove_history_item(count - 1)
+            if visible:
+                readline.add_history(visible)
+    except Exception:
+        pass
+
+
+def _pty_is_rpc_line(line):
+    """Returns whether a history line is django-shell RPC/bootstrap plumbing (never a user command)."""
+    text = str(line or "").lstrip()
+    return text.startswith("_djs_rpc(") or (text.startswith("exec(") and "_djs_" in text)
+
+
+

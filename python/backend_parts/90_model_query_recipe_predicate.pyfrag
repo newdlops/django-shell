@@ -1,0 +1,556 @@
+# Strict ModelQueryRecipeV2 validation, live-path resolution, and predicate compilation for the composed backend.
+
+_BROWSE_RECIPE_LIMITS = {
+    "aliasCharacters": 64,
+    "caseBranches": 8,
+    "computedColumns": 12,
+    "formulaDepth": 6,
+    "formulaNodes": 32,
+    "groupByFields": 8,
+    "groupChildren": 16,
+    "groupDepth": 5,
+    "inValues": 200,
+    "orderTerms": 8,
+    "pathCharacters": 240,
+    "pathSegments": 12,
+    "predicateNodes": 64,
+    "rawExpressionCharacters": 800,
+    "recipeBytes": 65536,
+    "stringCharacters": 4096,
+    "subqueryCorrelations": 4,
+    "subqueryOrderTerms": 3,
+}
+_BROWSE_RECIPE_LOOKUPS = frozenset({"exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "length", "length__gt", "length__gte", "length__lt", "length__lte", "trim", "blank", "not_blank"})
+_BROWSE_RECIPE_NUMERIC_TYPES = frozenset({"AutoField", "BigAutoField", "SmallAutoField", "IntegerField", "BigIntegerField", "SmallIntegerField", "PositiveIntegerField", "PositiveSmallIntegerField", "PositiveBigIntegerField", "FloatField", "DecimalField"})
+_BROWSE_RECIPE_TEXT_TYPES = frozenset({"CharField", "TextField", "SlugField", "EmailField", "URLField", "FilePathField"})
+
+
+def _browse_recipe_limits():
+    """Returns a copy of the public Recipe v2 hard-limit map for parity and diagnostics."""
+    return dict(_BROWSE_RECIPE_LIMITS)
+
+
+def _browse_recipe_issue(state, code, path, message, fix, node_id=None, severity="error"):
+    """Appends one stable, JSON-safe validation issue without ever silently discarding a v2 node."""
+    issue = {"code": code, "fix": fix, "message": message, "path": path, "severity": severity}
+    if isinstance(node_id, str):
+        issue["nodeId"] = node_id
+    state["issues"].append(issue)
+    if severity == "warning":
+        state["warnings"].append(issue)
+    return issue
+
+
+def _browse_recipe_state(request):
+    """Builds mutable validation state for one request before any QuerySet evaluation is allowed."""
+    return {"aliases": {}, "issues": [], "node_ids": set(), "predicate_annotations": [], "predicate_number": 0,
+            "recipe": request.get("recipe"), "request": request, "warnings": []}
+
+
+def _browse_recipe_failure(state, rows=False):
+    """Returns the atomic v2 failure payload used by rows, summary, count, and lazy computed endpoints."""
+    payload = {"issues": state["issues"], "ok": False, "orm": "", "recipeVersion": 2, "sql": []}
+    if rows:
+        payload.update({"columns": [], "rows": []})
+    return payload
+
+
+def _browse_recipe_validate(request):
+    """Strictly validates a complete version-2 recipe against its live source model without querying database rows."""
+    state = _browse_recipe_state(request)
+    recipe = state["recipe"]
+    if not isinstance(recipe, dict):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", "/recipe", "Recipe must be an object.", "Send a ModelQueryRecipeV2 object.")
+        return state
+    try:
+        encoded = json.dumps(recipe, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except Exception:
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", "/recipe", "Recipe must be JSON-serializable.", "Remove unsupported values.")
+        return state
+    if len(encoded) > _BROWSE_RECIPE_LIMITS["recipeBytes"]:
+        _browse_recipe_issue(state, "RECIPE_TOO_LARGE", "/recipe", "Recipe exceeds 64 KiB.", "Remove conditions or computed columns.")
+    if recipe.get("version") != 2:
+        _browse_recipe_issue(state, "RECIPE_VERSION_UNSUPPORTED", "/version", "Only Recipe version 2 is supported.", "Create a version 2 recipe.")
+    source = recipe.get("source")
+    if not isinstance(source, dict) or not isinstance(source.get("app"), str) or not isinstance(source.get("model"), str):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", "/source", "Recipe source must contain app and model strings.", "Select a model again.")
+        return state
+    if source.get("app") != request.get("app") or source.get("model") != request.get("model"):
+        _browse_recipe_issue(state, "RECIPE_SOURCE_MISMATCH", "/source", "Recipe source does not match the open model.", "Apply the recipe to its source model.")
+        return state
+    try:
+        state["model"] = _browse_resolve_model(request)
+    except Exception:
+        _browse_recipe_issue(state, "FIELD_METADATA_UNAVAILABLE", "/source", "Live Django metadata is unavailable for this model.", "Reconnect the Django shell and retry.")
+        return state
+    if recipe.get("mode") not in ("rows", "summary"):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", "/mode", "Mode must be rows or summary.", "Choose Rows or Summary.")
+    _browse_recipe_validate_group(state, recipe.get("where"), "/where", 1, True, state["model"], {})
+    computed = recipe.get("computed")
+    if not isinstance(computed, list):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", "/computed", "Computed must be an array.", "Reset computed columns.")
+        computed = []
+    if len(computed) > _BROWSE_RECIPE_LIMITS["computedColumns"]:
+        _browse_recipe_issue(state, "COMPUTED_COLUMN_LIMIT", "/computed", "At most 12 computed columns are allowed.", "Remove computed columns.")
+    for index, spec in enumerate(computed[:_BROWSE_RECIPE_LIMITS["computedColumns"]]):
+        _browse_recipe_validate_computed_shape(state, spec, f"/computed/{index}", state["model"])
+    group_by = recipe.get("groupBy")
+    if not isinstance(group_by, list):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", "/groupBy", "Group-by must be an array.", "Reset group-by fields.")
+        group_by = []
+    if len(group_by) > _BROWSE_RECIPE_LIMITS["groupByFields"]:
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", "/groupBy", "At most 8 group-by fields are allowed.", "Remove group-by fields.")
+    seen_groups = set()
+    for index, ref in enumerate(group_by[:_BROWSE_RECIPE_LIMITS["groupByFields"]]):
+        path = _browse_recipe_ref_path(ref)
+        resolved = _browse_recipe_resolve_path(state, state["model"], path, f"/groupBy/{index}", False)
+        if path in seen_groups and path is not None:
+            _browse_recipe_issue(state, "FIELD_PATH_INVALID", f"/groupBy/{index}", "Duplicate group-by fields are not allowed.", "Keep each group field once.")
+        seen_groups.add(path)
+        if resolved is not None and resolved[1]:
+            _browse_recipe_issue(state, "FIELD_PATH_TO_MANY_UNSAFE", f"/groupBy/{index}", "Group-by cannot cross a to-many relation.", "Use a scalar source field.")
+    _browse_recipe_validate_group(state, recipe.get("postFilter"), "/postFilter", 1, True, state["model"], state["aliases"])
+    _browse_recipe_validate_order(state, recipe.get("orderBy"), "/orderBy", state["model"], state["aliases"])
+    if recipe.get("mode") == "summary":
+        enabled = [item for item in computed if isinstance(item, dict) and item.get("enabled") is True]
+        if not enabled:
+            _browse_recipe_issue(state, "AGGREGATE_FIELD_REQUIRED", "/computed", "Summary mode requires at least one aggregate.", "Add an aggregate column.")
+        for index, spec in enumerate(enabled):
+            if spec.get("kind") != "aggregate":
+                _browse_recipe_issue(state, "COMPUTED_KIND_UNSUPPORTED_IN_SUMMARY", f"/computed/{index}", "Summary mode supports aggregate columns only.", "Remove this column or switch to Rows.", spec.get("nodeId"))
+        if not group_by and _browse_recipe_group_has_children(recipe.get("postFilter")):
+            _browse_recipe_issue(state, "GLOBAL_SUMMARY_POST_FILTER_UNSUPPORTED", "/postFilter", "Global summary cannot filter aggregate output.", "Add group-by fields or remove Result filter.")
+    state["ok"] = not any(item["severity"] == "error" for item in state["issues"])
+    return state
+
+
+def _browse_recipe_validate_node_id(state, value, path):
+    """Validates and de-duplicates an opaque client node identifier used for inline errors."""
+    import re
+
+    if not isinstance(value, str) or not re.match(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$", value):
+        _browse_recipe_issue(state, "NODE_ID_INVALID", path, "Node id is invalid.", "Recreate this query item.")
+        return None
+    if value in state["node_ids"]:
+        _browse_recipe_issue(state, "NODE_ID_DUPLICATE", path, "Node id is duplicated.", "Duplicate the item again to receive a new id.", value)
+    state["node_ids"].add(value)
+    return value
+
+
+def _browse_recipe_validate_group(state, group, path, depth, root, model, aliases, outer_model=None):
+    """Validates one recursive predicate group, its node budget, and every child in source order."""
+    if not isinstance(group, dict) or group.get("kind") != "group":
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path, "Predicate must be a group object.", "Use a condition group.")
+        return
+    node_id = _browse_recipe_validate_node_id(state, group.get("nodeId"), path + "/nodeId")
+    if group.get("join") not in ("and", "or") or not isinstance(group.get("negated"), bool):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path, "Group requires join and boolean negated fields.", "Choose AND or OR.", node_id)
+    children = group.get("children")
+    if not isinstance(children, list):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path + "/children", "Group children must be an array.", "Reset this group.", node_id)
+        return
+    if depth > _BROWSE_RECIPE_LIMITS["groupDepth"]:
+        _browse_recipe_issue(state, "PREDICATE_GROUP_DEPTH_LIMIT", path, "Predicate nesting is too deep.", "Flatten a nested group.", node_id)
+    if len(children) > _BROWSE_RECIPE_LIMITS["groupChildren"]:
+        _browse_recipe_issue(state, "PREDICATE_GROUP_CHILD_LIMIT", path, "A group can contain at most 16 children.", "Split this group.", node_id)
+    if not root and not children:
+        _browse_recipe_issue(state, "EMPTY_NESTED_GROUP", path, "Nested groups cannot be empty.", "Add a condition or remove the group.", node_id)
+    state["predicate_count"] = state.get("predicate_count", 0) + 1
+    for index, child in enumerate(children[:_BROWSE_RECIPE_LIMITS["groupChildren"]]):
+        child_path = f"{path}/children/{index}"
+        if not isinstance(child, dict):
+            _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", child_path, "Predicate child must be an object.", "Remove this item.")
+            continue
+        if child.get("kind") == "group":
+            _browse_recipe_validate_group(state, child, child_path, depth + 1, False, model, aliases, outer_model)
+        elif child.get("kind") == "comparison":
+            _browse_recipe_validate_comparison(state, child, child_path, model, aliases, outer_model)
+        elif child.get("kind") == "existsPredicate":
+            _browse_recipe_validate_exists_predicate(state, child, child_path, model, aliases, outer_model)
+        else:
+            _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", child_path, "Unknown predicate kind.", "Choose a condition or Exists.")
+    if state.get("predicate_count", 0) > _BROWSE_RECIPE_LIMITS["predicateNodes"]:
+        _browse_recipe_issue(state, "PREDICATE_NODE_LIMIT", path, "At most 64 predicate nodes are allowed.", "Remove conditions.", node_id)
+
+
+def _browse_recipe_validate_comparison(state, node, path, model, aliases, outer_model=None):
+    """Validates one typed field-or-computed comparison before it is compiled to Django Q."""
+    node_id = _browse_recipe_validate_node_id(state, node.get("nodeId"), path + "/nodeId")
+    if not isinstance(node.get("negated"), bool):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path + "/negated", "Comparison negated must be boolean.", "Reset this condition.", node_id)
+    lhs = node.get("lhs")
+    lookup = node.get("lookup")
+    if not isinstance(lhs, dict) or lookup not in _BROWSE_RECIPE_LOOKUPS:
+        _browse_recipe_issue(state, "LOOKUP_UNSUPPORTED", path + "/lookup", "Lookup is not supported.", "Choose a supported lookup.", node_id)
+        return
+    if lhs.get("kind") == "field":
+        resolved = _browse_recipe_resolve_path(state, model, lhs.get("path"), path + "/lhs/path", lookup == "isnull")
+        field = resolved[0] if resolved else None
+    elif lhs.get("kind") == "computed":
+        field = aliases.get(lhs.get("alias"))
+        if field is None:
+            _browse_recipe_issue(state, "COMPUTED_REFERENCE_UNKNOWN", path + "/lhs/alias", "Computed alias is unavailable here.", "Reference an earlier enabled computed column.", node_id)
+        elif lhs.get("alias") in state.get("window_aliases", set()):
+            _browse_recipe_issue(state, "WINDOW_FILTER_UNSUPPORTED", path + "/lhs/alias", "Window aliases cannot be used in Result filter.", "Order by the window alias or remove this filter.", node_id)
+    else:
+        field = None
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path + "/lhs", "Comparison lhs must be a field or computed alias.", "Choose a field.", node_id)
+    _browse_recipe_validate_rhs(state, node.get("rhs"), lookup, field, path + "/rhs", node_id, model, outer_model)
+
+
+def _browse_recipe_validate_rhs(state, rhs, lookup, field, path, node_id, model, outer_model):
+    """Validates RHS shape, lookup compatibility, and live coercion without trusting UI type metadata."""
+    if not isinstance(rhs, dict):
+        _browse_recipe_issue(state, "RHS_KIND_UNSUPPORTED", path, "Comparison RHS must be an object.", "Choose a value.", node_id)
+        return
+    kind = rhs.get("kind")
+    if lookup in ("blank", "not_blank"):
+        if _browse_recipe_field_category(field) != "text":
+            _browse_recipe_issue(state, "LOOKUP_TYPE_MISMATCH", path, "Blank lookup requires a text field.", "Choose a text field.", node_id)
+        return
+    if lookup == "in":
+        if kind != "list" or not isinstance(rhs.get("values"), list):
+            _browse_recipe_issue(state, "RHS_KIND_UNSUPPORTED", path, "IN requires a list RHS.", "Enter one or more values.", node_id)
+            return
+        if not rhs["values"] or len(rhs["values"]) > _BROWSE_RECIPE_LIMITS["inValues"]:
+            _browse_recipe_issue(state, "IN_LIST_LIMIT", path, "IN accepts 1 to 200 values.", "Reduce the list.", node_id)
+        for index, value in enumerate(rhs["values"][:_BROWSE_RECIPE_LIMITS["inValues"]]):
+            _browse_recipe_coerce_value(state, field, value, f"{path}/values/{index}", node_id)
+        return
+    if lookup == "range":
+        values = [rhs.get("lower"), rhs.get("upper")] if kind == "range" else []
+        if kind != "range":
+            _browse_recipe_issue(state, "RHS_KIND_UNSUPPORTED", path, "Range requires lower and upper values.", "Enter both bounds.", node_id)
+            return
+        for index, value in enumerate(values):
+            _browse_recipe_coerce_value(state, field, value, f"{path}/{('lower', 'upper')[index]}", node_id)
+        return
+    if lookup == "isnull":
+        if kind != "literal" or not isinstance(rhs.get("value"), bool):
+            _browse_recipe_issue(state, "RHS_TYPE_MISMATCH", path, "isnull requires a boolean literal.", "Choose true or false.", node_id)
+        return
+    if kind == "literal":
+        _browse_recipe_coerce_value(state, field, rhs.get("value"), path + "/value", node_id)
+    elif kind == "field":
+        right = _browse_recipe_resolve_path(state, model, rhs.get("path"), path + "/path", False)
+        if right is not None and not _browse_recipe_categories_compatible(field, right[0]):
+            _browse_recipe_issue(state, "RHS_TYPE_MISMATCH", path, "Field comparison types are incompatible.", "Choose a compatible field.", node_id)
+    elif kind == "outerField" and outer_model is not None:
+        right = _browse_recipe_resolve_path(state, outer_model, rhs.get("path"), path + "/path", False)
+        if right is not None and not _browse_recipe_categories_compatible(field, right[0]):
+            _browse_recipe_issue(state, "RHS_TYPE_MISMATCH", path, "Outer field type is incompatible.", "Choose a compatible outer field.", node_id)
+    elif kind == "relativeTime":
+        valid = isinstance(rhs.get("amount"), int) and not isinstance(rhs.get("amount"), bool) and 1 <= rhs["amount"] <= 10000 and rhs.get("anchor") in ("now", "today") and rhs.get("direction") in ("past", "future") and rhs.get("unit") in ("minutes", "hours", "days", "weeks")
+        if not valid:
+            _browse_recipe_issue(state, "RELATIVE_TIME_INVALID", path, "Relative time is invalid.", "Use a value from 1 to 10000 and a supported unit.", node_id)
+    else:
+        _browse_recipe_issue(state, "RHS_KIND_UNSUPPORTED", path, "This RHS kind is not valid here.", "Choose a literal or compatible field.", node_id)
+
+
+def _browse_recipe_ref_path(ref):
+    """Returns a field reference path or None without accepting shorthand client payloads."""
+    return ref.get("path") if isinstance(ref, dict) and ref.get("kind") == "field" else None
+
+
+def _browse_recipe_resolve_path(state, model, path, pointer, allow_relation=False):
+    """Resolves a bounded scalar Recipe path through the live Django model graph and records precise failures."""
+    if not isinstance(path, str) or not path.strip():
+        _browse_recipe_issue(state, "FIELD_PATH_INVALID", pointer, "Field path is required.", "Choose a field.")
+        return None
+    path = path.strip()
+    if len(path) > _BROWSE_RECIPE_LIMITS["pathCharacters"] or len(path.split("__")) > _BROWSE_RECIPE_LIMITS["pathSegments"]:
+        _browse_recipe_issue(state, "FIELD_PATH_TOO_LONG", pointer, "Field path exceeds the supported limit.", "Choose a shorter path.")
+        return None
+    resolved = _browse_resolve_filter_path(model, path)
+    if resolved is None:
+        _browse_recipe_issue(state, "FIELD_PATH_INVALID", pointer, "Field path is not present on the live model.", "Refresh metadata and choose a field.")
+        return None
+    if resolved[2] and not allow_relation:
+        _browse_recipe_issue(state, "FIELD_PATH_RELATION_TERMINAL", pointer, "A relation must end in a scalar field.", "Choose a field inside the relation.")
+        return None
+    return resolved
+
+
+def _browse_recipe_field_category(field):
+    """Returns the small type category used for strict lookup and field-to-field compatibility checks."""
+    if field is None:
+        return "unknown"
+    name = type(field).__name__
+    if name in _BROWSE_RECIPE_TEXT_TYPES:
+        return "text"
+    if name in _BROWSE_RECIPE_NUMERIC_TYPES:
+        return "numeric"
+    if name == "BooleanField":
+        return "boolean"
+    if name in ("DateField", "DateTimeField", "TimeField"):
+        return name.lower().replace("field", "")
+    if name == "UUIDField":
+        return "uuid"
+    return "unknown"
+
+
+def _browse_recipe_categories_compatible(left, right):
+    """Returns whether two live fields may safely participate in a structured field comparison."""
+    a, b = _browse_recipe_field_category(left), _browse_recipe_field_category(right)
+    return a != "unknown" and a == b
+
+
+def _browse_recipe_coerce_value(state, field, value, pointer, node_id):
+    """Uses Django field conversion for literals and reports errors instead of widening a query on bad input."""
+    if isinstance(value, str) and len(value) > _BROWSE_RECIPE_LIMITS["stringCharacters"]:
+        _browse_recipe_issue(state, "VALUE_INVALID", pointer, "String value is too long.", "Shorten the value.", node_id)
+        return None
+    if isinstance(value, (dict, list)):
+        _browse_recipe_issue(state, "VALUE_INVALID", pointer, "Literal must be a scalar JSON value.", "Choose a scalar value.", node_id)
+        return None
+    if field is None:
+        return value
+    if _browse_recipe_field_category(field) == "boolean" and not isinstance(value, (bool, type(None))):
+        _browse_recipe_issue(state, "RHS_TYPE_MISMATCH", pointer, "Boolean values must be JSON booleans.", "Choose true or false.", node_id)
+        return None
+    try:
+        return field.to_python(value) if value is not None and getattr(field, "concrete", False) else value
+    except Exception:
+        _browse_recipe_issue(state, "VALUE_INVALID", pointer, "Value cannot be converted for this field.", "Enter a value matching the field type.", node_id)
+        return None
+
+
+def _browse_recipe_validate_exists_predicate(state, node, path, model, aliases, outer_model=None):
+    """Validates an Exists predicate source, correlations, and recursively scoped inner WHERE group."""
+    node_id = _browse_recipe_validate_node_id(state, node.get("nodeId"), path + "/nodeId")
+    if not isinstance(node.get("negated"), bool):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path + "/negated", "Exists negated must be boolean.", "Reset this predicate.", node_id)
+    target = _browse_recipe_subquery_source(state, node.get("source"), model, path + "/source")
+    if target is not None:
+        _browse_recipe_correlations(state, node.get("source"), node.get("correlations"), model, target, path + "/correlations")
+        _browse_recipe_validate_group(state, node.get("where"), path + "/where", 1, True, target, {}, model)
+
+
+def _browse_recipe_subquery_source(state, source, outer_model, path):
+    """Resolves a direct relation source or installed app/model source for a structured subquery."""
+    if not isinstance(source, dict):
+        _browse_recipe_issue(state, "SUBQUERY_SOURCE_INVALID", path, "Subquery source is required.", "Choose a relation or model.")
+        return None
+    if source.get("kind") == "relation":
+        name = source.get("relation")
+        if not isinstance(name, str) or "__" in name:
+            _browse_recipe_issue(state, "SUBQUERY_RELATION_INVALID", path, "Relation source must be one direct relation.", "Choose a direct relation.")
+            return None
+        relation = _browse_find_subquery_relation(outer_model, name)
+        if relation is None:
+            _browse_recipe_issue(state, "SUBQUERY_RELATION_INVALID", path, "Relation is not available on this model.", "Refresh metadata and choose a relation.")
+            return None
+        return relation.related_model
+    if source.get("kind") == "model" and isinstance(source.get("target"), dict):
+        target = source["target"]
+        try:
+            from django.apps import apps
+
+            return apps.get_model(target.get("app"), target.get("model"))
+        except Exception:
+            _browse_recipe_issue(state, "SUBQUERY_SOURCE_INVALID", path, "Target model is not installed.", "Choose an installed model.")
+            return None
+    _browse_recipe_issue(state, "SUBQUERY_SOURCE_INVALID", path, "Unknown subquery source kind.", "Choose a relation or model.")
+    return None
+
+
+def _browse_recipe_correlations(state, source, correlations, outer_model, target_model, path):
+    """Validates required model-source equality correlations and forbids client-supplied relation correlations."""
+    relation_source = isinstance(source, dict) and source.get("kind") == "relation"
+    if relation_source:
+        if correlations != []:
+            _browse_recipe_issue(state, "SUBQUERY_CORRELATION_INVALID", path, "Relation sources generate their own correlation.", "Remove manual correlations.")
+        return
+    if not isinstance(correlations, list) or not correlations:
+        _browse_recipe_issue(state, "SUBQUERY_CORRELATION_REQUIRED", path, "Model source requires one or more correlations.", "Add a target-to-outer equality.")
+        return
+    if len(correlations) > _BROWSE_RECIPE_LIMITS["subqueryCorrelations"]:
+        _browse_recipe_issue(state, "SUBQUERY_CORRELATION_LIMIT", path, "At most four correlations are allowed.", "Remove correlations.")
+    for index, item in enumerate(correlations[:_BROWSE_RECIPE_LIMITS["subqueryCorrelations"]]):
+        item_path = f"{path}/{index}"
+        if not isinstance(item, dict):
+            _browse_recipe_issue(state, "SUBQUERY_CORRELATION_INVALID", item_path, "Correlation must be an object.", "Recreate this correlation.")
+            continue
+        _browse_recipe_validate_node_id(state, item.get("nodeId"), item_path + "/nodeId")
+        target = _browse_recipe_resolve_path(state, target_model, item.get("targetPath"), item_path + "/targetPath", False)
+        outer = _browse_recipe_resolve_path(state, outer_model, item.get("outerPath"), item_path + "/outerPath", False)
+        if target and outer and (target[1] or outer[1] or not _browse_recipe_categories_compatible(target[0], outer[0])):
+            _browse_recipe_issue(state, "SUBQUERY_CORRELATION_INVALID", item_path, "Correlation paths must be compatible scalar paths without fan-out.", "Choose compatible scalar fields.")
+
+
+def _browse_recipe_validate_order(state, order, path, model, aliases):
+    """Validates bounded explicit order terms and keeps duplicate order fields as errors rather than normalizing them."""
+    if not isinstance(order, list):
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path, "Order must be an array.", "Reset sort order.")
+        return
+    if len(order) > _BROWSE_RECIPE_LIMITS["orderTerms"]:
+        _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", path, "At most eight order terms are allowed.", "Remove sort terms.")
+    seen = set()
+    for index, item in enumerate(order[:_BROWSE_RECIPE_LIMITS["orderTerms"]]):
+        item_path = f"{path}/{index}"
+        if not isinstance(item, dict) or item.get("direction") not in ("asc", "desc"):
+            _browse_recipe_issue(state, "RECIPE_SHAPE_INVALID", item_path, "Order term is invalid.", "Choose a field and direction.")
+            continue
+        _browse_recipe_validate_node_id(state, item.get("nodeId"), item_path + "/nodeId")
+        ref = item.get("ref")
+        key = None
+        if isinstance(ref, dict) and ref.get("kind") == "field":
+            key = "field:" + str(ref.get("path"))
+            _browse_recipe_resolve_path(state, model, ref.get("path"), item_path + "/ref/path", False)
+        elif isinstance(ref, dict) and ref.get("kind") == "computed" and ref.get("alias") in aliases:
+            key = "computed:" + ref["alias"]
+        else:
+            _browse_recipe_issue(state, "COMPUTED_REFERENCE_UNKNOWN", item_path + "/ref", "Order reference is unavailable.", "Choose a source field or enabled computed alias.")
+        if key in seen:
+            _browse_recipe_issue(state, "FIELD_PATH_INVALID", item_path, "Duplicate order terms are not allowed.", "Keep each sort field once.")
+        seen.add(key)
+
+
+def _browse_recipe_group_has_children(group):
+    """Returns whether a syntactically valid predicate group contains at least one child."""
+    return isinstance(group, dict) and isinstance(group.get("children"), list) and bool(group["children"])
+
+
+def _browse_recipe_predicate(state, group, model, aliases=None, outer_model=None, phase="where"):
+    """Compiles one already-validated recursive predicate group to Q plus registered internal Exists annotations."""
+    from django.db.models import Q
+
+    aliases = aliases or {}
+    if not isinstance(group, dict) or group.get("kind") != "group":
+        return Q()
+    clauses = []
+    for index, child in enumerate(group.get("children", ())):
+        path = f"/{phase}/children/{index}"
+        if child.get("kind") == "group":
+            clauses.append(_browse_recipe_predicate(state, child, model, aliases, outer_model, phase))
+        elif child.get("kind") == "comparison":
+            clause = _browse_recipe_comparison_q(state, child, model, aliases, outer_model, path)
+            if clause is not None:
+                clauses.append(clause)
+        elif child.get("kind") == "existsPredicate":
+            clause = _browse_recipe_exists_inner(state, child, model, aliases, path)
+            if clause is not None:
+                clauses.append(clause)
+    query = Q()
+    if clauses:
+        query = clauses[0]
+        for clause in clauses[1:]:
+            query = query & clause if group.get("join") == "and" else query | clause
+    return ~query if group.get("negated") else query
+
+
+def _browse_recipe_comparison_q(state, node, model, aliases, outer_model, path):
+    """Builds one parameterized Q comparison after strict validation has established its live operand types."""
+    from django.db.models import F, OuterRef, Q
+
+    lhs = node.get("lhs", {})
+    lookup = node.get("lookup")
+    if lhs.get("kind") == "field":
+        key = lhs.get("path", "").strip()
+        resolved = _browse_resolve_filter_path(model, key)
+        field = resolved[0] if resolved else None
+    else:
+        key = lhs.get("alias")
+        field = aliases.get(key)
+    rhs = node.get("rhs", {})
+    if lookup == "blank":
+        clause = Q(**{f"{key}__isnull": True}) | Q(**{f"{key}__exact": ""})
+    elif lookup == "not_blank":
+        clause = ~(Q(**{f"{key}__isnull": True}) | Q(**{f"{key}__exact": ""}))
+    else:
+        value = _browse_recipe_value(state, rhs, lookup, field, model, outer_model, path + "/rhs")
+        if value is _MISSING:
+            return None
+        clause = Q(**{f"{key}__{lookup}": value})
+    return ~clause if node.get("negated") else clause
+
+
+def _browse_recipe_value(state, rhs, lookup, field, model, outer_model, path):
+    """Converts a validated Recipe RHS into a Django literal, F, OuterRef, or relative-time expression."""
+    from django.db.models import F, OuterRef, Value
+    from django.db.models.functions import Now
+    import datetime
+
+    kind = rhs.get("kind") if isinstance(rhs, dict) else None
+    if kind == "literal":
+        return _browse_recipe_coerce_value(state, field, rhs.get("value"), path + "/value", None)
+    if kind == "list":
+        return [_browse_recipe_coerce_value(state, field, value, f"{path}/values/{index}", None) for index, value in enumerate(rhs.get("values", ()))]
+    if kind == "range":
+        return [_browse_recipe_coerce_value(state, field, rhs.get("lower"), path + "/lower", None), _browse_recipe_coerce_value(state, field, rhs.get("upper"), path + "/upper", None)]
+    if kind == "field":
+        return F(rhs.get("path"))
+    if kind == "outerField" and outer_model is not None:
+        return OuterRef(rhs.get("path"))
+    if kind == "relativeTime":
+        amount = rhs.get("amount")
+        delta = datetime.timedelta(**{rhs.get("unit"): amount})
+        if rhs.get("anchor") == "now":
+            anchor = Now()
+        else:
+            from django.utils import timezone
+
+            today = timezone.localdate()
+            category = _browse_recipe_field_category(field)
+            anchor = today if category == "date" else timezone.make_aware(datetime.datetime.combine(today, datetime.time.min), timezone.get_current_timezone())
+        return anchor - Value(delta) if rhs.get("direction") == "past" else anchor + Value(delta)
+    _browse_recipe_issue(state, "RHS_KIND_UNSUPPORTED", path, "RHS cannot be compiled.", "Choose a supported value.")
+    return _MISSING
+
+
+def _browse_recipe_exists_inner(state, node, outer_model, aliases, path):
+    """Registers an internal Exists annotation and returns its Q reference, preserving boolean nesting semantics."""
+    from django.db.models import Q
+
+    inner = _browse_recipe_inner_queryset(state, node, outer_model, path)
+    if inner is None:
+        return None
+    state["predicate_number"] += 1
+    alias = f"__djs_pred_{state['predicate_number']}"
+    state["predicate_annotations"].append((alias, _browse_recipe_exists_expression(inner)))
+    clause = Q(**{alias: True})
+    return ~clause if node.get("negated") else clause
+
+
+def _browse_recipe_exists_expression(inner):
+    """Wraps an inner QuerySet as Django Exists in a tiny separable helper for focused security tests."""
+    from django.db.models import Exists
+
+    return Exists(inner)
+
+
+def _browse_recipe_inner_queryset(state, spec, outer_model, path):
+    """Builds correlated inner base queryset and applies its independent WHERE predicate before selection."""
+    target = _browse_recipe_subquery_source(state, spec.get("source"), outer_model, path + "/source")
+    if target is None:
+        return None
+    inner = target._base_manager.all()
+    correlation = _browse_recipe_compile_correlations(state, spec.get("source"), spec.get("correlations"), outer_model, target, path + "/correlations")
+    if correlation is None:
+        return None
+    inner = inner.filter(**correlation) if correlation else inner
+    where = _browse_recipe_predicate(state, spec.get("where"), target, {}, outer_model, "inner")
+    return inner.filter(where)
+
+
+def _browse_recipe_compile_correlations(state, source, correlations, outer_model, target, path):
+    """Compiles relation-generated or model-supplied correlations to exact target=OuterRef predicates."""
+    from django.db.models import OuterRef
+
+    if isinstance(source, dict) and source.get("kind") == "model":
+        return {item.get("targetPath"): OuterRef(item.get("outerPath")) for item in correlations}
+    relation = _browse_find_subquery_relation(outer_model, source.get("relation")) if isinstance(source, dict) else None
+    if relation is None:
+        _browse_recipe_issue(state, "SUBQUERY_RELATION_INVALID", path, "Relation is unavailable.", "Choose a direct relation.")
+        return None
+    if getattr(relation, "auto_created", False) and not getattr(relation, "concrete", False):
+        forward = getattr(relation, "field", None)
+        return {getattr(forward, "attname", "pk"): OuterRef("pk")}
+    if getattr(relation, "many_to_one", False) or getattr(relation, "one_to_one", False):
+        return {target._meta.pk.attname: OuterRef(relation.attname)}
+    # An M2M target queryset can safely use its direct reverse query name; Django expands the through join parametrically.
+    reverse_name = _browse_relation_query_name(relation)
+    if reverse_name:
+        return {reverse_name: OuterRef("pk")}
+    _browse_recipe_issue(state, "SUBQUERY_CORRELATION_INVALID", path, "Could not generate relation correlation.", "Use a custom model source.")
+    return None
