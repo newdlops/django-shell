@@ -1,9 +1,9 @@
 // Unit tests for workbench overlay shutdown lifecycle source guards.
-
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import test from "node:test";
+import { readComposedBackendSource } from "./backendComposedSourceHelper.mjs";
 
 const require = createRequire(import.meta.url);
 const { overlayPreludeText } = require("../out/overlayPrelude.js");
@@ -966,7 +966,7 @@ test("direct continued invalidates pending paused-frame inspection before postin
 });
 
 test("backend only traces the request thread for debug runs so warm connections stay fast", () => {
-  const backendSource = fs.readFileSync(new URL("../python/django_shell_backend.py", import.meta.url), "utf8");
+  const backendSource = readComposedBackendSource();
   assert.ok(backendSource.includes("_debug_current_thread(breakpoint_lines is not None)"), "tracing is gated on a debug run");
   assert.ok(backendSource.includes("def _debug_current_thread(active):"));
   assert.ok(backendSource.includes("debugpy.trace_this_thread(False)"), "normal runs disable leftover tracing");

@@ -23,7 +23,7 @@ test("webview builders use CSP-compatible external shared and surface stylesheet
     ["src/modelBrowserHtml.ts", "modelBrowser.css"]
   ]) {
     const source = read(file);
-    assert.ok(source.includes('["uiFoundation.css", "' + surface + '"]'), `${file} links the shared and surface styles`);
+    assert.ok(source.includes('"uiFoundation.css"') && source.includes('"' + surface + '"'), `${file} links the shared and surface styles`);
     assert.equal(source.includes("<style>"), false, `${file} has no inline style block`);
     assert.ok(source.includes('id="politeAnnouncements"'), `${file} has a polite live region`);
     assert.ok(source.includes('id="assertiveAnnouncements"'), `${file} has an assertive live region`);
@@ -73,9 +73,13 @@ test("shared foundation keeps focus, reduced motion, and theme-native status uti
 test("wide model grids preserve virtual-column geometry and reset model-specific scroll coordinates", () => {
   const css = read("media/modelBrowser.css");
   const source = read("media/modelBrowserSource.js");
+  const html = read("src/modelBrowserHtml.ts");
 
   assert.match(css, /th,td\{box-sizing:border-box[^}]*max-width:480px/, "cell boxes match the viewport's 480px width ceiling");
   assert.match(css, /\.gridspacer\{[^}]*max-width:none!important/, "virtual spacers are not capped like data cells");
   assert.match(css, /th\.rownum,td\.rownum\{[^}]*width:46px;min-width:46px;max-width:46px/, "the sticky row gutter has one exact geometry");
+  assert.match(css, /\.pinned\{[^}]*background-clip:padding-box[^}]*box-shadow:inset -1px 0 0 var\(--vscode-panel-border\)/, "pinned columns paint an opaque boundary over scrolling cells");
+  assert.match(css, /th\.rownum,td\.rownum\{[^}]*background-clip:padding-box[^}]*box-shadow:inset -1px 0 0 var\(--vscode-panel-border\)/, "the row-number gutter retains its boundary while scrolling");
   assert.match(source, /if \(!sameModel\) \{[\s\S]*?els\.gridwrap\.scrollLeft = 0;/, "a new model starts at its first field");
+  assert.ok(html.includes("font-src data:"), "the webview CSP permits the embedded Codicon font");
 });

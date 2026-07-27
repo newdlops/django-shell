@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runTests } from "@vscode/test-electron";
 import { prepareDevelopmentExtension } from "./developmentExtension.mjs";
+import { findAvailableInspectorPort } from "./inspectorPort.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -16,6 +17,7 @@ async function main() {
   const extensionPath = prepareDevelopmentExtension(ROOT);
   const nativeProviderFixturePath = path.join(ROOT, "test", "e2e", "fixtures", "native-provider");
   const python = pythonExecutablePath();
+  const inspectorPort = await findAvailableInspectorPort();
   const testShell = process.platform === "win32" ? process.env.SHELL : "/bin/sh";
   copyInstalledExtension("ms-python.python-");
   copyInstalledExtension("ms-python.vscode-pylance-");
@@ -40,7 +42,7 @@ async function main() {
     extensionDevelopmentPath: [extensionPath, nativeProviderFixturePath],
     extensionTestsEnv: { DJANGO_SHELL_E2E: "1", DJANGO_SHELL_E2E_EXTENSION_ID: `${manifest.publisher}.${manifest.name}`, ...(process.env.DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY === "1" ? { DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_HOVER_ONLY === "1" ? { DJANGO_SHELL_E2E_HOVER_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_THEME_ONLY === "1" ? { DJANGO_SHELL_E2E_THEME_ONLY: "1" } : {}), ...(python ? { DJANGO_SHELL_E2E_PYTHON: python } : {}), ...(testShell ? { SHELL: testShell } : {}) },
     extensionTestsPath: path.join(ROOT, "test", "e2e", "suite", "index.js"),
-    launchArgs: ["--inspect=9239", "--force-disable-user-env", `--user-data-dir=${userData}`, workspace],
+    launchArgs: [`--inspect=${inspectorPort}`, "--force-disable-user-env", `--user-data-dir=${userData}`, workspace],
     reuseMachineInstall: Boolean(process.env.VSCODE_E2E_EXECUTABLE),
     vscodeExecutablePath: vscodeExecutablePath()
   });

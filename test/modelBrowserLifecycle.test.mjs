@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import { readComposedBackendSource } from "./backendComposedSourceHelper.mjs";
 
 const customConsoleSource = fs.readFileSync(new URL("../src/customConsole.ts", import.meta.url), "utf8");
 const customConsoleClientSource = fs.readFileSync(new URL("../media/customConsoleSource.js", import.meta.url), "utf8");
@@ -12,7 +13,7 @@ const modelBrowserClientSource = fs.readFileSync(new URL("../media/modelBrowserS
 const modelCatalogSource = fs.readFileSync(new URL("../src/modelCatalog.ts", import.meta.url), "utf8");
 const notebookPtySessionSource = fs.readFileSync(new URL("../src/notebookPtySession.ts", import.meta.url), "utf8");
 const overlaySource = fs.readFileSync(new URL("../src/workbenchOverlay.ts", import.meta.url), "utf8");
-const pythonBackendSource = fs.readFileSync(new URL("../python/django_shell_backend.py", import.meta.url), "utf8");
+const pythonBackendSource = readComposedBackendSource();
 
 test("debug session restart does not automatically rerun the current cell", () => {
   assert.ok(customConsoleSource.includes("runOnNextDebugSessionStart"));
