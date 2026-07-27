@@ -3,16 +3,30 @@
 import * as net from "net";
 import { BackendEndpoint } from "./backendBootstrap";
 import { hotReloadTransportError, parseHotReloadResponse, type BackendHotReloadResult } from "./backendHotReloadProtocol";
+import { recipeAggregateValidationFailure, recipeCountValidationFailure, recipeRowsValidationFailure, withRecipeResult } from "./backendClientRecipeResults";
 import { DiagnosticLogger } from "./diagnostics";
+import type { ModelQueryRecipeV2 } from "./modelQueryRecipe";
+import { ModelQueryMetadataIndex } from "./modelQueryRecipeMetadata";
+import { buildRecipeCountOrm, buildRecipeRowsOrm, buildRecipeSummaryOrm } from "./modelQueryRecipeOrm";
 import {
-  BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder,
-  BackendModelQuery, BackendModelRelatedRows, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange, ModelCommitQuery,
-  ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery, modelUnsupportedFallback,
+  BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder,
+  BackendModelQuery, BackendModelRelatedRows, BackendModelRelation, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange, ModelCommitQuery,
+  ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery,
   parseFilterFieldsResponse, parseModelAggregateResponse, parseModelCommitResponse, parseModelComputedResponse, parseModelCountResponse, parseModelListResponse, parseModelLookupResponse, parseModelQueryResponse,
   parseModelRelatedResponse, parseModelRowsResponse, parseModelSchemaResponse, parseOrmAggregateResponse, parseOrmCommitResponse, parseOrmComputedResponse, parseOrmCountResponse,
   parseOrmGridResponse, parseOrmLookupResponse, parseOrmModelsResponse, parseOrmRelatedResponse
 } from "./modelBackend";
 import { aggregatesNeedPython, buildAggregateOrm, buildCommitOrm, buildComputedOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, buildRowsOrm } from "./modelOrm";
+import {
+  connectHost, hasDebugExecutionPayload, isPtyFallbackKind, kindErrorResponse, nativeDebuggerTransportError,
+  ORM_NO_PTY, ORM_PTY_SUPPRESSED, PARALLEL_MODEL_READ_KINDS, PARALLEL_MODEL_READ_UNAVAILABLE,
+  parseBackendResponse, parseChildrenResponse, parseCompletenessResponse, parseDebugBreakpointsResponse,
+  parseEnvironmentResponse, parseInspectionResponse, parseInterruptResponse, parseLoadFeatureResponse,
+  parseNativeDebuggerResponse, parseOrmInspectChildren, parseOrmInspectResponse, parseProgressResponse,
+  parseStageDebugpyResponse, ptyFallbackPayload, unsupportedPtyFallbackResponse, buildInspectChildrenOrm
+} from "./backendClientResponses";
+
+export { parseLoadFeatureResponse } from "./backendClientResponses";
 
 const TCP_CONNECT_TIMEOUT_MS = 1500;
 const TCP_RETRY_COOLDOWN_MS = 15000;
@@ -27,7 +41,6 @@ const PTY_CELL_LIMIT = 900;
 // ("all" = 1e9) overruns it and the table can't tabulate. "all" therefore loads this many at a time (+ Load more); the
 // socket transport (Auto/Socket) has no marker limit and can fetch more at once.
 const ORM_PTY_ROW_CAP = 2000;
-const INSPECT_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface BackendExecutionResult {
   error?: string;
@@ -215,6 +228,8 @@ export interface BackendRequestPayload {
   q?: string;
   relation?: string;
   reason?: string;
+  /** Versioned query recipe sent to the Python backend; in-process metadata is never serialised. */
+  recipe?: ModelQueryRecipeV2;
   sourceText?: string;
   tracerPath?: string;
   value?: unknown;
@@ -544,9 +559,16 @@ export class BackendClient {
       const requested = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
       const limit = Math.min(requested, ORM_PTY_ROW_CAP); // the PTY marker can't carry an unbounded "all" page
       const offset = typeof query.offset === "number" && query.offset > 0 ? query.offset : 0;
+      if (query.recipe) {
+        const keyset = !query.recipe.orderBy.length && !query.recipe.computed.some((item) => item.enabled);
+        const compiled = buildRecipeRowsOrm(query.recipe, this.recipeOrmContext(query, limit, offset, query.cursor));
+        if (!compiled.validation.ok || !compiled.cell) { return recipeRowsValidationFailure(query.recipe, compiled.validation); }
+        return this.ormCell(compiled.cell, (buffer) => parseOrmGridResponse(buffer, limit, offset, keyset)).then((result) => withRecipeResult(result, query.recipe as ModelQueryRecipeV2, compiled.validation));
+      }
       return this.ormCell(buildRowsOrm({ annotations: query.annotations, app: query.app, columns: query.columns, filters: query.filters, limit, model: query.model, offset, order: query.order, relations: query.relations }), (buffer) => parseOrmGridResponse(buffer, limit, offset));
     }
-    return this.request({ ...query, kind: "rows" }, parseModelRowsResponse);
+    const { recipeMetadata: _recipeMetadata, ...wireQuery } = query;
+    return this.request({ ...wireQuery, kind: "rows" }, parseModelRowsResponse);
   }
 
   /** Runs a reconstructed ORM expression as the user's literal shell cell and parses the capture hook's marker. */
@@ -580,10 +602,17 @@ export class BackendClient {
   async modelComputed(query: ModelComputedQuery): Promise<BackendModelComputed> {
     await this.ensureModelBrowserFeature();
     const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
+    if (query.recipe) {
+      // Phase 2 has rows/count/summary ORM facades; a property fetch needs the Recipe-aware Python implementation.
+      // `request` uses the healthy socket in ORM mode and otherwise returns the normal bounded transport error, never a legacy broad query.
+      const { recipeMetadata: _recipeMetadata, ...wireQuery } = query;
+      return this.request({ ...wireQuery, kind: "computed", limit }, parseModelComputedResponse);
+    }
     if (this.reconstructsViaOrmCell) {
       return this.ormCell(buildComputedOrm(query.app, query.model, query.field, query.filters, query.order, limit, query.columns, query.relations, query.annotations), parseOrmComputedResponse);
     }
-    return this.request({ ...query, kind: "computed", limit }, parseModelComputedResponse);
+    const { recipeMetadata: _recipeMetadata, ...wireQuery } = query;
+    return this.request({ ...wireQuery, kind: "computed", limit }, parseModelComputedResponse);
   }
 
   /** Evaluates user-written ORM code and returns its tabulated result for the grid. */
@@ -598,14 +627,28 @@ export class BackendClient {
   /** Returns the row count for the current filter set, computed on demand. */
   async modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
     await this.ensureModelBrowserFeature();
-    if (this.reconstructsViaOrmCell) { return this.ormCell(buildCountOrm(query.app, query.model, query.filters, query.columns, query.relations), parseOrmCountResponse); }
-    return this.request({ ...query, kind: "count" }, parseModelCountResponse);
+    if (this.reconstructsViaOrmCell) {
+      if (query.recipe) {
+        const compiled = buildRecipeCountOrm(query.recipe, this.recipeOrmContext(query, 50));
+        if (!compiled.validation.ok || !compiled.cell) { return Promise.resolve(recipeCountValidationFailure(query.recipe, compiled.validation)); }
+        return this.ormCell(compiled.cell, parseOrmCountResponse).then((result) => withRecipeResult(result, query.recipe as ModelQueryRecipeV2, compiled.validation));
+      }
+      return this.ormCell(buildCountOrm(query.app, query.model, query.filters, query.columns, query.relations), parseOrmCountResponse);
+    }
+    const { recipeMetadata: _recipeMetadata, ...wireQuery } = query;
+    return this.request({ ...wireQuery, kind: "count" }, parseModelCountResponse);
   }
 
   /** Computes grouped or global aggregates (Count/Sum/Avg/Min/Max/Exists) for the current filter set. */
   async modelAggregate(query: ModelAggregateQuery): Promise<BackendModelAggregate> {
     await this.ensureModelBrowserFeature();
     if (this.reconstructsViaOrmCell) {
+      if (query.recipe) {
+        const limit = ORM_PTY_ROW_CAP;
+        const compiled = buildRecipeSummaryOrm(query.recipe, this.recipeOrmContext(query, limit));
+        if (!compiled.validation.ok || !compiled.cell) { return Promise.resolve(recipeAggregateValidationFailure(query.recipe, compiled.validation)); }
+        return this.ormCell(compiled.cell, (buffer) => parseOrmAggregateResponse(buffer, limit)).then((result) => withRecipeResult(result, query.recipe as ModelQueryRecipeV2, compiled.validation));
+      }
       if (aggregatesNeedPython(query.aggregates, query.columns)) {
         // A computed @property aggregate needs a full Python scan, which can't be a clean ORM cell — direct to the socket.
         return Promise.resolve({ columns: [], error: "Computed-@property aggregates aren't available over the terminal — switch the Link selector to Socket or Auto.", groupBy: [], hasMore: false, ok: false, orm: "", rows: [], sql: [] });
@@ -613,7 +656,8 @@ export class BackendClient {
       const limit = ORM_PTY_ROW_CAP;
       return this.ormCell(buildAggregateOrm({ aggregates: query.aggregates, app: query.app, columns: query.columns, filters: query.filters, groupBy: query.groupBy, limit, model: query.model, relations: query.relations }), (buffer) => parseOrmAggregateResponse(buffer, limit));
     }
-    return this.request({ ...query, kind: "aggregate" }, parseModelAggregateResponse);
+    const { recipeMetadata: _recipeMetadata, ...wireQuery } = query;
+    return this.request({ ...wireQuery, kind: "aggregate" }, parseModelAggregateResponse);
   }
 
   /** Applies staged cell edits in one atomic transaction and returns per-row results. */
@@ -630,6 +674,8 @@ export class BackendClient {
     log = true
   ): Promise<T> {
     const started = Date.now();
+    // The extracted PTY payload helper preserves `hasDebugExecutionPayload(payload) ? payload` and
+    // `payload.kind === "execute" && Array.isArray(payload.breakpointLines)` so breakpoint metadata stays intact.
     // Debug cell runs stay on the interactive main thread (stable pydevd thread id, traced since attach): route them
     // through the PTY even when the socket/tunnel is healthy — the socket keeps serving parallel reads beside them.
     if (this.fallback && hasDebugExecutionPayload(payload)) {
@@ -664,6 +710,11 @@ export class BackendClient {
   /** Returns a bounded response wait for busy-time parallel reads, so a paused/suspended backend rejects instead of hanging the read forever. */
   private parallelReadResponseTimeout(payload: BackendRequestPayload): number | undefined {
     return this.parallelModelReads && PARALLEL_MODEL_READ_KINDS.has(payload.kind) ? PARALLEL_READ_RESPONSE_TIMEOUT_MS : undefined;
+  }
+
+  /** Builds the strictly metadata-backed context required by Recipe v2 ORM reconstruction. */
+  private recipeOrmContext(query: { app: string; columns?: BackendModelColumn[]; model: string; recipeMetadata?: import("./modelQueryRecipeMetadata").ModelQueryMetadataBundle; relations?: BackendModelRelation[] }, limit: number, offset?: number, cursor?: unknown): { columns: BackendModelColumn[]; cursor?: unknown; limit: number; metadata: ModelQueryMetadataIndex; offset?: number; relations: BackendModelRelation[]; source: { app: string; model: string }; transport: "orm" } {
+    return { columns: query.columns ?? [], cursor, limit, metadata: query.recipeMetadata ? ModelQueryMetadataIndex.fromBundle(query.recipeMetadata) : new ModelQueryMetadataIndex(), offset, relations: query.relations ?? [], source: { app: query.app, model: query.model }, transport: "orm" };
   }
 
   /** Sends one request through the direct TCP socket transport. */
@@ -786,211 +837,4 @@ export class BackendClient {
       transport
     });
   }
-}
-
-/** Returns a connectable loopback host for wildcard backend bind addresses. */
-function connectHost(host: string): string {
-  return host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-}
-
-const PTY_FALLBACK_KINDS = new Set(["children", "complete", "debugpy", "environment", "execute", "inspect", "prelude", "models", "schema", "filterfields", "rows", "related", "count", "aggregate", "commit", "lookup", "query", "stagedebugpy"]); // helpers: scrubbed _djs_rpc; execute: literal cell; stagedebugpy: probe-sized only (uploads are socket-only).
-const PARALLEL_MODEL_READ_KINDS = new Set(["models", "schema", "filterfields", "rows", "related", "computed", "lookup", "count", "aggregate"]);
-// Kinds ORM/Terminal modes never type over the terminal; schema is synthesized from the first row page, and the filter tree falls back to flat fields (see modelBrowser).
-const ORM_NO_PTY = new Set(["children", "environment", "inspect", "models", "prelude", "schema", "filterfields"]);
-const ORM_PTY_SUPPRESSED = "Kept out of the shell: this metadata is not typed into the terminal — switch the Link selector to Socket/Auto to fetch it.";
-const PARALLEL_MODEL_READ_UNAVAILABLE = "Model table reads need a second backend connection while Python is running; this shell only has the terminal stream.";
-const PTY_PAGE_LIMIT = 25;
-
-/** Returns whether one request kind can be serviced over the interactive PTY fallback. */
-function isPtyFallbackKind(kind: string): boolean {
-  return PTY_FALLBACK_KINDS.has(kind);
-}
-
-/** Returns a smaller payload variant for the slower terminal fallback transport. */
-function ptyFallbackPayload(payload: BackendRequestPayload): BackendRequestPayload {
-  const next = payload.sourceText === undefined && payload.breakpointLines === undefined || hasDebugExecutionPayload(payload) ? payload : { ...payload, breakpointLines: undefined, sourceText: undefined };
-  if ((payload.kind === "rows" || payload.kind === "related" || payload.kind === "query") && (payload.limit === undefined || payload.limit > PTY_PAGE_LIMIT)) {
-    return { ...next, limit: PTY_PAGE_LIMIT };
-  }
-  return next;
-}
-
-/** Returns whether a PTY fallback execute request must preserve debug filename and breakpoint metadata. */
-function hasDebugExecutionPayload(payload: BackendRequestPayload): boolean {
-  return payload.kind === "execute" && Array.isArray(payload.breakpointLines);
-}
-
-/** Returns a safe error response when a request cannot cross the active transport. */
-function unsupportedPtyFallbackResponse(kind: string): string {
-  return kindErrorResponse(kind, "Remote runtime inspection is disabled because the backend is only reachable through the interactive terminal.");
-}
-
-/** Parses a backend execution-interrupt response. */
-function parseInterruptResponse(buffer: string): BackendInterruptResult {
-  const line = buffer.split(/\r?\n/, 1)[0] ?? "";
-  const parsed = JSON.parse(line) as Partial<BackendInterruptResult>;
-  return { error: parsed.error, interrupted: Boolean(parsed.interrupted), message: parsed.message, ok: Boolean(parsed.ok), reason: parsed.reason };
-}
-
-/** Parses a live debug breakpoint guard update response. */
-function parseDebugBreakpointsResponse(buffer: string): BackendDebugBreakpointsResult {
-  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendDebugBreakpointsResult>;
-  return { breakpointLines: Array.isArray(parsed.breakpointLines) ? parsed.breakpointLines.filter((line): line is number => typeof line === "number") : undefined, error: parsed.error, ok: Boolean(parsed.ok) };
-}
-
-/** Returns a kind-shaped error response carrying one message. */
-function kindErrorResponse(kind: string, error: string): string {
-  const model = modelUnsupportedFallback(kind, error);
-  if (model) {
-    return model;
-  }
-  if (kind === "children") {
-    return `${JSON.stringify({ children: [], error, ok: false })}\n`;
-  }
-  if (kind === "inspect") {
-    return `${JSON.stringify({ error, loadedModuleCount: 0, modules: [], ok: false, variables: [] })}\n`;
-  }
-  return `${JSON.stringify({ error, ok: false })}\n`;
-}
-
-/** Parses the single-line JSON response returned by the Python backend. */
-function parseBackendResponse(buffer: string): BackendExecutionResult {
-  const line = buffer.split(/\r?\n/, 1)[0] ?? "";
-  const parsed = JSON.parse(line) as Partial<BackendExecutionResult>;
-  return { error: parsed.error, ok: Boolean(parsed.ok), result: parsed.result, stderr: parsed.stderr ?? "", stdout: parsed.stdout ?? "", traceback: parsed.traceback };
-}
-
-/** Parses the latest backend execution progress snapshot. */
-function parseProgressResponse(buffer: string): BackendProgressSnapshot {
-  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendProgressSnapshot>;
-  return {
-    active: Boolean(parsed.active),
-    current: typeof parsed.current === "number" ? parsed.current : undefined,
-    detail: typeof parsed.detail === "string" ? parsed.detail : undefined,
-    done: Boolean(parsed.done),
-    elapsed: typeof parsed.elapsed === "number" ? parsed.elapsed : undefined,
-    kind: typeof parsed.kind === "string" ? parsed.kind : undefined,
-    label: typeof parsed.label === "string" ? parsed.label : undefined,
-    line: typeof parsed.line === "number" ? parsed.line : undefined,
-    ok: typeof parsed.ok === "boolean" ? parsed.ok : undefined,
-    output: typeof parsed.output === "string" ? parsed.output : undefined,
-    percent: typeof parsed.percent === "number" ? parsed.percent : undefined,
-    rate: typeof parsed.rate === "number" ? parsed.rate : undefined,
-    stream: typeof parsed.stream === "string" ? parsed.stream : undefined,
-    total: typeof parsed.total === "number" || parsed.total === null ? parsed.total : undefined
-  };
-}
-
-/** Parses a staged-debugpy probe or upload response. */
-function parseStageDebugpyResponse(buffer: string): BackendStageDebugpyResult {
-  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendStageDebugpyResult>;
-  return { error: parsed.error, ok: Boolean(parsed.ok), path: typeof parsed.path === "string" && parsed.path ? parsed.path : null, reused: Boolean(parsed.reused) };
-}
-
-/** Parses the stable endpoint contract returned by the embedded experimental tracer bootstrap. */
-function parseNativeDebuggerResponse(buffer: string): BackendNativeDebuggerResult {
-  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendNativeDebuggerResult>;
-  return {
-    apiVersion: typeof parsed.apiVersion === "number" ? parsed.apiVersion : 0,
-    engine: "experimental",
-    error: typeof parsed.error === "string" ? parsed.error : undefined,
-    host: typeof parsed.host === "string" ? parsed.host : "",
-    ok: Boolean(parsed.ok),
-    port: typeof parsed.port === "number" ? parsed.port : 0,
-    reused: Boolean(parsed.reused),
-    version: typeof parsed.version === "string" ? parsed.version : ""
-  };
-}
-
-/** Returns the stable native-engine result shape for a socket-only transport failure. */
-function nativeDebuggerTransportError(error: string): BackendNativeDebuggerResult {
-  return { apiVersion: 0, engine: "experimental", error, host: "", ok: false, port: 0, reused: false, version: "" };
-}
-
-/** Parses the JSON result of a "loadfeature" request (socket buffer or typed PTY response marker). */
-export function parseLoadFeatureResponse(buffer: string): BackendLoadFeatureResult {
-  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as Partial<BackendLoadFeatureResult>;
-  return { error: parsed.error, ok: Boolean(parsed.ok), reused: Boolean(parsed.reused) };
-}
-
-/** Parses a backend completeness check response. */
-function parseCompletenessResponse(buffer: string): BackendCompletenessResult {
-  const line = buffer.split(/\r?\n/, 1)[0] ?? "";
-  const parsed = JSON.parse(line) as Partial<BackendCompletenessResult>;
-  return { complete: Boolean(parsed.complete), ok: Boolean(parsed.ok), stderr: parsed.stderr ?? "", traceback: parsed.traceback };
-}
-
-/** Parses a backend runtime inspection response. */
-function parseInspectionResponse(buffer: string): BackendRuntimeInspection {
-  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "") as Partial<BackendRuntimeInspection>;
-  return { error: parsed.error, loadedModuleCount: parsed.loadedModuleCount, modules: Array.isArray(parsed.modules) ? parsed.modules : [], ok: Boolean(parsed.ok), variables: Array.isArray(parsed.variables) ? parsed.variables : [] };
-}
-
-/** Parses a pure `len(globals())` probe marker into runtime inspection data attached by the capture hook. */
-function parseOrmInspectResponse(buffer: string): BackendRuntimeInspection {
-  const marker = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as { ok?: boolean; runtime?: Partial<BackendRuntimeInspection>; stderr?: string; traceback?: string };
-  const runtime = marker.runtime;
-  if (marker.ok === false || !runtime || !Array.isArray(runtime.variables)) {
-    const error = (marker.traceback || marker.stderr || "Runtime inspection failed in ORM mode.").trim().split(/\r?\n/).filter(Boolean).pop();
-    return { error, loadedModuleCount: 0, modules: [], ok: false, variables: [] };
-  }
-  return { loadedModuleCount: runtime.loadedModuleCount ?? 0, modules: [], ok: true, variables: runtime.variables };
-}
-
-/** Builds a pure Python inspection probe for one safe runtime path. */
-function buildInspectChildrenOrm(path: BackendRuntimePathSegment[], kind?: string): string | null {
-  const expression = reconstructInspectExpression(path);
-  if (!expression) { return null; }
-  return kind === "collection" ? `len(${expression})` : `dir(${expression})`;
-}
-
-/** Reconstructs a pure Python expression for an inspector path (`a.b`, `list(a)[0]`, `list(a.all())[0]`, `list(d.items())[0][1]`) without helper calls. */
-function reconstructInspectExpression(path: BackendRuntimePathSegment[]): string | null {
-  const root = path[0];
-  if (!root || root.op !== "name" || !INSPECT_IDENTIFIER.test(root.name ?? "")) { return null; }
-  let expression = root.name as string;
-  for (let i = 1; i < path.length; i += 1) {
-    const segment = path[i];
-    if (segment.op === "attr" && INSPECT_IDENTIFIER.test(segment.name ?? "")) {
-      expression += `.${segment.name}`;
-    } else if (segment.op === "index" && Number.isInteger(segment.index) && (segment.index as number) >= 0) {
-      expression = `list((${expression}))[${segment.index}]`;
-    } else if (segment.op === "all_index" && Number.isInteger(segment.index) && (segment.index as number) >= 0) {
-      expression = `list((${expression}).all())[${segment.index}]`;
-    } else if (segment.op === "dict" && Number.isInteger(segment.index) && (segment.index as number) >= 0) {
-      expression = `list((${expression}).items())[${segment.index}][1]`;
-    } else {
-      return null;
-    }
-  }
-  return expression;
-}
-
-/** Parses an inspection drill-down marker with paths RELATIVE to the result object, so the requested path is prepended to make them absolute. */
-function parseOrmInspectChildren(buffer: string, path: BackendRuntimePathSegment[]): BackendRuntimeChildren {
-  const marker = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "{}") as { inspect?: { children?: BackendRuntimeVariable[]; error?: string }; ok?: boolean; stderr?: string; traceback?: string };
-  if (marker.ok === false || marker.inspect?.error || !marker.inspect || !Array.isArray(marker.inspect.children)) {
-    const error = (marker.inspect?.error || marker.traceback || marker.stderr || "").trim().split(/\r?\n/).filter(Boolean).pop();
-    return { children: [], error: error || "Children unavailable in ORM mode.", ok: false };
-  }
-  const children = marker.inspect.children.map((child) => ({ ...child, path: [...path, ...(Array.isArray(child.path) ? child.path : [])] }));
-  return { children, ok: true };
-}
-
-/** Parses a backend runtime environment response. */
-function parseEnvironmentResponse(buffer: string): BackendRuntimeEnvironment {
-  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "") as Partial<BackendRuntimeEnvironment>;
-  return { basePrefix: parsed.basePrefix, cwd: parsed.cwd, django: parseDjangoRuntime(parsed.django), error: parsed.error, executable: parsed.executable, ok: Boolean(parsed.ok), path: Array.isArray(parsed.path) ? parsed.path : [], prefix: parsed.prefix, settingsModule: parsed.settingsModule, version: parsed.version, virtualEnv: parsed.virtualEnv };
-}
-
-/** Parses nested Django runtime metadata from an environment response. */
-function parseDjangoRuntime(value: BackendRuntimeEnvironment["django"]): BackendDjangoRuntime | undefined {
-  if (!value) { return undefined; }
-  return { appsReady: Boolean(value.appsReady), available: Boolean(value.available), configured: Boolean(value.configured), error: value.error, installedApps: Array.isArray(value.installedApps) ? value.installedApps : [], settingsModule: value.settingsModule, version: value.version };
-}
-
-/** Parses a backend runtime child inspection response. */
-function parseChildrenResponse(buffer: string): BackendRuntimeChildren {
-  const parsed = JSON.parse(buffer.split(/\r?\n/, 1)[0] ?? "") as Partial<BackendRuntimeChildren>;
-  return { children: Array.isArray(parsed.children) ? parsed.children : [], error: parsed.error, ok: Boolean(parsed.ok) };
 }

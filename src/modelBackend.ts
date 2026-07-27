@@ -1,5 +1,9 @@
 // Types and response parsers for the additive Django model data-browser backend kinds.
 
+import type { ModelQueryRecipeV2 } from "./modelQueryRecipe";
+import type { ModelQueryMetadataBundle } from "./modelQueryRecipeMetadata";
+import type { ModelQueryIssue } from "./modelQueryRecipeValidation";
+
 /** Idle status shared by model-browser data sources while no Django shell runtime is attached; consumers treat it as deterministic (no retry) rather than transient. */
 export const MODEL_IDLE_MESSAGE = "Open the Django Shell console first.";
 
@@ -48,6 +52,8 @@ export interface BackendModelColumn {
   choices?: Array<[unknown, string]>;
   computed?: boolean;
   editable: boolean;
+  helpText?: string;
+  label?: string;
   name: string;
   null: boolean;
   pk: boolean;
@@ -100,11 +106,13 @@ export interface BackendModelRows {
   columns: BackendModelColumn[];
   error?: string;
   hasMore: boolean;
+  issues?: ModelQueryIssue[];
   nextCursor?: unknown;
   nextOffset: number | null;
   ok: boolean;
   orm: string;
   pk?: string;
+  recipeVersion?: number;
   relations?: BackendModelRelation[];
   rows: BackendModelRow[];
   sql: BackendSqlEntry[];
@@ -143,6 +151,8 @@ export interface BackendModelFilter {
 export interface BackendFilterField {
   attname: string;
   choices?: Array<[unknown, string]>;
+  helpText?: string;
+  label?: string;
   name: string;
   null: boolean;
   pk: boolean;
@@ -153,6 +163,7 @@ export interface BackendFilterField {
 export interface BackendFilterRelation {
   filterField?: string;
   kind: string;
+  label?: string;
   name: string;
   outerField?: string;
   single: boolean;
@@ -176,8 +187,10 @@ export interface BackendFilterFieldTree {
 export interface BackendModelCount {
   count: number | null;
   error?: string;
+  issues?: ModelQueryIssue[];
   ok: boolean;
   orm: string;
+  recipeVersion?: number;
   sql: BackendSqlEntry[];
 }
 
@@ -245,6 +258,10 @@ export interface ModelRowsQuery {
   model: string;
   offset?: number;
   order?: BackendModelOrder[];
+  /** In-process ORM compiler metadata; stripped before any backend wire request. */
+  recipeMetadata?: ModelQueryMetadataBundle;
+  /** Versioned query recipe, which takes precedence over every legacy query field. */
+  recipe?: ModelQueryRecipeV2;
   relations?: BackendModelRelation[];
 }
 
@@ -254,6 +271,10 @@ export interface ModelCountQuery {
   columns?: BackendModelColumn[];
   filters?: BackendModelFilter[];
   model: string;
+  /** In-process ORM compiler metadata; stripped before any backend wire request. */
+  recipeMetadata?: ModelQueryMetadataBundle;
+  /** Versioned query recipe, which takes precedence over legacy filters. */
+  recipe?: ModelQueryRecipeV2;
   relations?: BackendModelRelation[];
 }
 
@@ -274,6 +295,10 @@ export interface ModelAggregateQuery {
   filters?: BackendModelFilter[];
   groupBy?: string[];
   model: string;
+  /** In-process ORM compiler metadata; stripped before any backend wire request. */
+  recipeMetadata?: ModelQueryMetadataBundle;
+  /** Versioned query recipe, which takes precedence over legacy aggregate fields. */
+  recipe?: ModelQueryRecipeV2;
   relations?: BackendModelRelation[];
 }
 
@@ -283,9 +308,11 @@ export interface BackendModelAggregate {
   error?: string;
   groupBy?: string[];
   hasMore: boolean;
+  issues?: ModelQueryIssue[];
   ok: boolean;
   orm: string;
   pythonScan?: boolean;
+  recipeVersion?: number;
   rows: BackendModelRow[];
   sql: BackendSqlEntry[];
 }
@@ -402,6 +429,10 @@ export interface ModelComputedQuery {
   limit?: number;
   model: string;
   order?: BackendModelOrder[];
+  /** In-process ORM compiler metadata; stripped before any backend wire request. */
+  recipeMetadata?: ModelQueryMetadataBundle;
+  /** Versioned query recipe, which takes precedence over legacy annotations and filters. */
+  recipe?: ModelQueryRecipeV2;
   relations?: BackendModelRelation[];
 }
 
@@ -419,6 +450,11 @@ export interface BackendModelComputed {
 function parseLine<T>(buffer: string): T {
   const line = buffer.split(/\r?\n/, 1)[0] ?? "";
   return JSON.parse(line) as T;
+}
+
+/** Narrows an optional backend recipe-issue array without trusting arbitrary response values. */
+function parseRecipeIssues(value: unknown): ModelQueryIssue[] | undefined {
+  return Array.isArray(value) ? value as ModelQueryIssue[] : undefined;
 }
 
 /** Parses a backend model catalog response. */
@@ -462,19 +498,21 @@ export function parseModelRowsResponse(buffer: string): BackendModelRows {
     columns: Array.isArray(parsed.columns) ? parsed.columns : [],
     error: parsed.error,
     hasMore: Boolean(parsed.hasMore),
+    issues: parseRecipeIssues(parsed.issues),
     nextCursor: parsed.nextCursor,
     nextOffset: typeof parsed.nextOffset === "number" ? parsed.nextOffset : null,
     ok: Boolean(parsed.ok),
     orm: typeof parsed.orm === "string" ? parsed.orm : "",
     pk: parsed.pk,
+    recipeVersion: typeof parsed.recipeVersion === "number" ? parsed.recipeVersion : undefined,
     rows: Array.isArray(parsed.rows) ? parsed.rows : [],
     sql: Array.isArray(parsed.sql) ? parsed.sql : []
   };
 }
 
 /** Parses an ORM-mode literal-cell marker into a rows page from the capture hook's `grid` (trims limit+1, offset pagination). */
-export function parseOrmGridResponse(buffer: string, limit: number, offset: number): BackendModelRows {
-  const parsed = parseLine<{ grid?: Partial<BackendModelRows> & { relations?: BackendModelRelation[]; truncated?: boolean }; sql?: BackendSqlEntry[]; stderr?: string; traceback?: string }>(buffer);
+export function parseOrmGridResponse(buffer: string, limit: number, offset: number, keyset = false): BackendModelRows {
+  const parsed = parseLine<{ grid?: Partial<BackendModelRows> & { relations?: BackendModelRelation[]; truncated?: boolean }; issues?: unknown; recipeVersion?: unknown; sql?: BackendSqlEntry[]; stderr?: string; traceback?: string }>(buffer);
   const grid = parsed.grid;
   if (!grid || !Array.isArray(grid.columns)) {
     const detail = (parsed.traceback || parsed.stderr || "ORM mode could not tabulate this result; switch the Link selector to Socket/Auto.").trim().split(/\r?\n/).filter(Boolean).pop();
@@ -484,17 +522,27 @@ export function parseOrmGridResponse(buffer: string, limit: number, offset: numb
   const rows = all.slice(0, limit);
   // `grid.truncated` = the backend kept only the rows that fit the PTY marker (a large "all" page); there are more.
   const hasMore = all.length > limit || Boolean(grid.truncated);
+  const pk = typeof grid.pk === "string" ? grid.pk : "pk";
+  const last = rows[rows.length - 1]?.[pk];
   return {
     columns: grid.columns,
     hasMore,
-    nextOffset: hasMore ? offset + rows.length : null,
+    issues: parseRecipeIssues(grid.issues ?? parsed.issues),
+    nextCursor: keyset && hasMore ? ormCursorValue(last) : undefined,
+    nextOffset: !keyset && hasMore ? offset + rows.length : null,
     ok: true,
     orm: "",
     pk: grid.pk,
+    recipeVersion: typeof (grid.recipeVersion ?? parsed.recipeVersion) === "number" ? grid.recipeVersion ?? parsed.recipeVersion as number : undefined,
     relations: Array.isArray(grid.relations) ? grid.relations : [],
     rows,
     sql: Array.isArray(parsed.sql) ? parsed.sql : []
   };
+}
+
+/** Converts a serialized grid primary-key cell back to a JSON-safe cursor value. */
+function ormCursorValue(value: unknown): unknown {
+  return value && typeof value === "object" && "v" in value ? (value as { v: unknown }).v : value;
 }
 
 /** Returns the trimmed last non-empty traceback/stderr line for an ORM-mode failure message. */
@@ -541,9 +589,11 @@ export function parseModelAggregateResponse(buffer: string): BackendModelAggrega
     error: parsed.error,
     groupBy: Array.isArray(parsed.groupBy) ? parsed.groupBy : [],
     hasMore: Boolean(parsed.hasMore),
+    issues: parseRecipeIssues(parsed.issues),
     ok: Boolean(parsed.ok),
     orm: typeof parsed.orm === "string" ? parsed.orm : "",
     pythonScan: Boolean(parsed.pythonScan),
+    recipeVersion: typeof parsed.recipeVersion === "number" ? parsed.recipeVersion : undefined,
     rows: Array.isArray(parsed.rows) ? parsed.rows : [],
     sql: Array.isArray(parsed.sql) ? parsed.sql : []
   };
@@ -551,7 +601,7 @@ export function parseModelAggregateResponse(buffer: string): BackendModelAggrega
 
 /** Parses an ORM/Terminal-mode aggregate cell marker into a read-only grid from the capture hook's `grid`. */
 export function parseOrmAggregateResponse(buffer: string, limit: number): BackendModelAggregate {
-  const parsed = parseLine<{ grid?: Partial<BackendModelAggregate>; sql?: BackendSqlEntry[]; stderr?: string; traceback?: string }>(buffer);
+  const parsed = parseLine<{ grid?: Partial<BackendModelAggregate>; issues?: unknown; recipeVersion?: unknown; sql?: BackendSqlEntry[]; stderr?: string; traceback?: string }>(buffer);
   const grid = parsed.grid;
   if (!grid || !Array.isArray(grid.columns)) {
     return { columns: [], error: ormError(parsed, "Aggregation could not be tabulated in ORM mode; switch the Link selector to Socket/Auto."), groupBy: [], hasMore: false, ok: false, orm: "", rows: [], sql: [] };
@@ -561,7 +611,7 @@ export function parseOrmAggregateResponse(buffer: string, limit: number): Backen
     return { columns: [], error: "Add at least one aggregate, or a group-by field.", groupBy: [], hasMore: false, ok: false, orm: "", rows: [], sql: [] };
   }
   const all = Array.isArray(grid.rows) ? grid.rows : [];
-  return { columns: grid.columns, groupBy: Array.isArray(grid.groupBy) ? grid.groupBy : [], hasMore: all.length > limit, ok: true, orm: "", rows: all.slice(0, limit), sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
+  return { columns: grid.columns, groupBy: Array.isArray(grid.groupBy) ? grid.groupBy : [], hasMore: all.length > limit, issues: parseRecipeIssues(grid.issues ?? parsed.issues), ok: true, orm: "", recipeVersion: typeof (grid.recipeVersion ?? parsed.recipeVersion) === "number" ? grid.recipeVersion ?? parsed.recipeVersion as number : undefined, rows: all.slice(0, limit), sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
 }
 
 /** Parses an ORM-mode related cell marker into related rows from the capture hook's `grid`. */
@@ -602,7 +652,7 @@ export function parseModelRelatedResponse(buffer: string): BackendModelRelatedRo
 /** Parses a backend row count response. */
 export function parseModelCountResponse(buffer: string): BackendModelCount {
   const parsed = parseLine<Partial<BackendModelCount>>(buffer);
-  return { count: typeof parsed.count === "number" ? parsed.count : null, error: parsed.error, ok: Boolean(parsed.ok), orm: typeof parsed.orm === "string" ? parsed.orm : "", sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
+  return { count: typeof parsed.count === "number" ? parsed.count : null, error: parsed.error, issues: parseRecipeIssues(parsed.issues), ok: Boolean(parsed.ok), orm: typeof parsed.orm === "string" ? parsed.orm : "", recipeVersion: typeof parsed.recipeVersion === "number" ? parsed.recipeVersion : undefined, sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
 }
 
 /** Parses a backend staged-edit commit response. */

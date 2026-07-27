@@ -1,5 +1,6 @@
 // Backend bootstrap command builder and marker parser for in-process Django shell attachment.
 import * as fs from "fs";
+import * as path from "path";
 import { deflateSync } from "zlib";
 
 export const BACKEND_READY_PREFIX = "__DJANGO_SHELL_BACKEND_READY__";
@@ -65,9 +66,27 @@ export const BACKEND_AUTOIMPORT_ENV = "DJANGO_SHELL_AUTOIMPORT_MODELS";
 // bootstrap carries ~half the bytes. Local (env/disk) delivery still ships the whole source, so nothing splits there.
 export const BACKEND_FEATURE_MARKER = "# --- Model data browser";
 
-/** Reads the backend source file, returning undefined when unreadable. */
+/** Reads the backend source, composing an ordered sibling fragment manifest when one is present. */
 function readBackendSource(runtimePath: string): string | undefined {
+  const runtimeDirectory = path.dirname(runtimePath);
+  const manifestPath = path.join(runtimeDirectory, "django_shell_backend.parts.json");
   try {
+    if (fs.existsSync(manifestPath)) {
+      const fragments = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as unknown;
+      if (!Array.isArray(fragments) || !fragments.length || !fragments.every((fragment) => typeof fragment === "string")) {
+        return undefined;
+      }
+      const root = path.resolve(runtimeDirectory);
+      const sources = fragments.map((fragment) => {
+        const fragmentPath = path.resolve(root, fragment);
+        const relative = path.relative(root, fragmentPath);
+        if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+          throw new Error("Backend fragment path escapes runtime directory");
+        }
+        return fs.readFileSync(fragmentPath, "utf8");
+      });
+      return sources.join("\n\n");
+    }
     return fs.readFileSync(runtimePath, "utf8");
   } catch {
     return undefined;
