@@ -12,10 +12,9 @@ export function installModelBrowserChrome(root = document) {
     return { dispose() {}, refresh() {} };
   }
   const actions = [
-    { element: root.getElementById("groupToggle"), priority: "secondary" },
+    { element: root.getElementById("queryDrawerToggle") || root.getElementById("groupToggle"), priority: "secondary" },
     { element: root.getElementById("logToggle"), priority: "secondary" },
     { element: root.getElementById("reload"), priority: "context" }
   ].filter((action) => action.element);
   return createOverflowMenu({ actions, compactContainer, menu, trigger, wideContainer });
 }
-

@@ -17,24 +17,54 @@ import { createQueryRunUi } from "./queryRunUi.js";
 import { createAnnouncer } from "./uiAnnouncer.js";
 import { installModelBrowserChrome } from "./modelBrowserChrome.js";
 import { isQuerySurface, renderBrowserError } from "./modelBrowserSurface.js";
-import { createFilterBar } from "./gridFilter.js";
-import { createColumnBuilder, renderAggregateResult } from "./gridAggregate.js";
 import { createCombobox } from "./gridCombobox.js";
+import { createQueryController } from "./gridQueryController.js";
+import { recipeLogLabel, resultCountLabel } from "./gridQueryResultBuilder.js";
+import { renderQuerySummaryTable } from "./gridQuerySummaryTable.js";
 const vscode = acquireVsCodeApi();
 const els = {};
-for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "addFilter", "filterterms", "activefilters", "applyFilter", "clearFilter", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode", "groupToggle", "aggregatebar", "aggregateGroupBy", "aggregateTerms", "addGroupBy", "addAggregate", "runAggregate", "aggregateOff", "fieldfinder", "fieldfindslot", "fieldfindClose", "interruptQuery", "openQueryConsole", "detailDrawer", "detailContent"]) {
+for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode", "fieldfinder", "fieldfindslot", "fieldfindClose", "interruptQuery", "openQueryConsole", "detailDrawer", "detailContent"]) {
   els[id] = document.getElementById(id);
 }
 const announcer = createAnnouncer(); installModelBrowserChrome(document);
-const LOOKUPS = ["exact", "iexact", "contains", "icontains", "gt", "gte", "lt", "lte", "startswith", "istartswith", "endswith", "iendswith", "in", "isnull", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "length", "length__gt", "length__gte", "length__lt", "length__lte", "trim"];
 const MAX_LOG_ENTRIES = 200;
 const ALL_PAGE_SIZE = 1000000000;
-const state = { columns: [], pk: "id", relations: [], rowCount: 0, totalCount: undefined, hasMore: false, filters: [], order: [], annotations: [], model: "", pinned: new Set(), widths: {}, computed: {}, computedActive: new Set(), aggregateActive: false, aggregateGroupBy: [], aggregateColumns: [] };
+const state = { columns: [], pk: "id", relations: [], rowCount: 0, totalCount: undefined, hasMore: false, order: [], model: "", pinned: new Set(), widths: {}, computed: {}, computedActive: new Set() };
+const queryController = createQueryController({ announcer, getPersisted: () => vscode.getState() || {}, gridAdapter: createQueryFocusGridAdapter(), onCount: onQueryCount, onRejected: onQueryRejected, onRows, onSummary: onQuerySummary, persist: (preferences) => vscode.setState({ ...(vscode.getState() || {}), ...preferences }), post: (message) => send(message), root: document, status: els.status });
+
+/** Captures and restores grid scroll plus active-cell navigation for Focus Builder mode. */
+function createQueryFocusGridAdapter() {
+  let saved;
+  return {
+    /** Temporarily removes the grid from keyboard traversal without requesting data. */
+    enterQueryFocusMode() {
+      const active = els.gridwrap.querySelector('[role="gridcell"][tabindex="0"]');
+      saved = { activeKey: active?.dataset.key || "", rowIndex: active?.closest("tr")?.dataset.rowIndex || "", scrollLeft: els.gridwrap.scrollLeft, scrollTop: els.gridwrap.scrollTop };
+      els.gridwrap.inert = true;
+      els.gridwrap.setAttribute("aria-hidden", "true");
+      els.gridwrap.hidden = true;
+    },
+    /** Restores the exact captured view state when query focus mode ends. */
+    exitQueryFocusMode() {
+      els.gridwrap.inert = false;
+      els.gridwrap.removeAttribute("aria-hidden");
+      els.gridwrap.hidden = false;
+      if (!saved) { return; }
+      els.gridwrap.scrollLeft = saved.scrollLeft;
+      els.gridwrap.scrollTop = saved.scrollTop;
+      const row = [...els.gridwrap.querySelectorAll("tr[data-row-index]")].find((node) => node.dataset.rowIndex === saved.rowIndex);
+      row?.querySelectorAll('[role="gridcell"]').forEach((cell) => { if (cell.dataset.key === saved.activeKey) { cell.focus(); } });
+      saved = undefined;
+    },
+    /** Returns the documented non-mutating grid view projection. */
+    getGridViewState() {
+      const active = els.gridwrap.querySelector('[role="gridcell"][tabindex="0"]');
+      return { activeGridFocusKey: active?.dataset.key || "", scrollLeft: els.gridwrap.scrollLeft, scrollTop: els.gridwrap.scrollTop, selectedRowKey: active?.closest("tr")?.dataset.rowIndex || "" };
+    }
+  };
+}
 const pendingRelated = new Map();
-let relRequestId = 0;
-let progressLabel = "";
-let progressStartedAt = 0;
-let progressTimer = 0;
+let relRequestId = 0; let progressLabel = ""; let progressStartedAt = 0; let progressTimer = 0;
 let gridSnapshot; let gridViewport;
 let detailTrigger;
 let commitInFlight = false;
@@ -64,36 +94,11 @@ gridViewport = createGridViewport({
 });
 const queryRunUi = createQueryRunUi({ announcer, post: (message) => vscode.postMessage(message), status: els.status });
 const gridHeader = createGridHeaderRenderer({ el, relationKindLabel, relationModelName, state });
-const filterBar = createFilterBar({
-  el,
-  termsEl: els.filterterms,
-  activeEl: els.activefilters,
-  getState: () => state,
-  postRaw: (message) => vscode.postMessage(message),
-  lookups: LOOKUPS,
-  onRemove: removeFilter
-});
-const columnBuilder = createColumnBuilder({
-  el,
-  groupEl: els.aggregateGroupBy,
-  termsEl: els.aggregateTerms,
-  getState: () => state,
-  lookups: LOOKUPS,
-  postRaw: (message) => vscode.postMessage(message)
-});
 window.addEventListener("message", (event) => handleMessage(event.data));
 els.reload.addEventListener("click", () => send({ type: "reload" }));
 els.more.addEventListener("click", () => send({ type: "loadMore" }));
 if (els.pageSize) { els.pageSize.addEventListener("change", () => send({ type: "reload" })); }
-els.addFilter.addEventListener("click", () => filterBar.addTerm());
-els.applyFilter.addEventListener("click", () => applyQuery());
-els.clearFilter.addEventListener("click", () => clearQuery());
 els.count.addEventListener("click", () => send({ type: "requestCount" }));
-els.groupToggle.addEventListener("click", () => toggleColumnPanel());
-els.addGroupBy.addEventListener("click", () => columnBuilder.addGroupBy());
-els.addAggregate.addEventListener("click", () => columnBuilder.addTerm());
-els.runAggregate.addEventListener("click", () => applyColumns());
-els.aggregateOff.addEventListener("click", () => clearColumns());
 els.commit.addEventListener("click", () => editor.commitEdits());
 els.discard.addEventListener("click", () => editor.discardEdits());
 els.transport.addEventListener("change", () => vscode.postMessage({ type: "setTransport", mode: els.transport.value }));
@@ -118,6 +123,9 @@ function handleMessage(message) {
   if (!message || typeof message.type !== "string") {
     return;
   }
+  if (queryController.onMessage(message)) {
+    return;
+  }
   if (message.type === "loading") {
     renderLoading(message);
   } else if (message.type === "schema") {
@@ -129,20 +137,11 @@ function handleMessage(message) {
   } else if (message.type === "lookup") {
     editor.onLookup(message);
   } else if (message.type === "filterFields") {
-    filterBar.onTreeResponse(message);
-    columnBuilder.onTreeResponse(message);
-  } else if (message.type === "modelList") {
-    columnBuilder.onModelListResponse(message);
+    // Recipe metadata editor requests are introduced by the next builder phase.
   } else if (message.type === "computed") {
     onComputed(message);
   } else if (message.type === "count") {
-    stopProgress();
-    els.countinfo.textContent = message.ok ? `· total ${message.count}` : `· count failed`;
-    state.totalCount = message.ok && Number.isFinite(Number(message.count)) ? Number(message.count) : undefined;
-    els.gridwrap.querySelector("table")?.setAttribute("aria-rowcount", state.totalCount === undefined ? "-1" : String(state.totalCount + 1));
-    logSql(`count ${state.model}`, message.sql, message.orm);
-  } else if (message.type === "aggregate") {
-    onAggregate(message);
+    onQueryCount(message, queryController.getSnapshot());
   } else if (message.type === "commit") {
     logSql(`commit ${state.model}`, message.result && message.result.sql, message.result && message.result.orm);
     editor.handleResult(message.result);
@@ -212,12 +211,10 @@ function onSchema(schema) {
     els.gridwrap.scrollLeft = 0;
     els.gridwrap.scrollTop = 0;
   }
-  exitAggregateView();
   state.model = model;
+  queryController.setSource({ app: schema.app, columns: state.columns, model: schema.model, relations: state.relations });
   els.title.textContent = isQuerySurface() ? "ORM Query" : model;
   els.subtitle.textContent = `${schema.label || ""} · ${schema.table || ""}`;
-  filterBar.sync(state.filters);
-  filterBar.renderSummary(state.filters);
   els.countinfo.textContent = "";
   installGridTable();
   if (!sameModel) {
@@ -259,7 +256,7 @@ function updateEditButtons(count) {
 }
 /** Disables actions that could race an atomic staged-edit commit, preserving their prior disabled state. */
 function setCommitBlocked(blocked) {
-  for (const control of [els.reload, els.more, els.pageSize, els.addFilter, els.applyFilter, els.clearFilter, els.count, els.groupToggle, els.runAggregate, els.aggregateOff, els.transport]) {
+  for (const control of [els.reload, els.more, els.pageSize, els.count, els.transport, document.getElementById("queryApply"), document.getElementById("queryDrawerApply")]) {
     if (!control) { continue; }
     if (blocked) {
       control.dataset.commitDisabled = control.disabled ? "preserve" : "restore";
@@ -315,30 +312,15 @@ function onRows(message) {
     // response loses schema metadata, infer a read-only column set from its own rows rather than rendering blank lines.
     state.columns = responseColumns;
   }
-  if (state.aggregateActive || !document.getElementById("tbody") || columnsChanged) {
-    // Rows arrived over the read-only aggregate table (or an error view), or the column set changed — rebuild the grid skeleton.
-    exitAggregateView();
+  if (!document.getElementById("tbody") || columnsChanged) {
+    // Rows arrived over an error view, or the column set changed — rebuild the grid skeleton.
     installGridTable();
   }
-  logSql(`rows ${state.model}`, rows.sql, rows.orm);
-  if (Array.isArray(message.filters)) {
-    state.filters = message.filters;
-  }
-  if (Array.isArray(message.order)) {
-    state.order = message.order;
-  }
+  logSql(recipeLogLabel(`rows ${state.model}`, message.queryLog), rows.sql, rows.orm);
   if (!message.append) {
     state.totalCount = undefined;
-    // When `+ Column` added/removed annotation columns, refresh the open filter terms IN PLACE so the new aliases
-    // become searchable while keeping any in-progress edit; on a fresh load (no terms yet) build from the applied filters.
-    if (columnsChanged && els.filterterms.querySelector(".term")) {
-      filterBar.refresh();
-    } else {
-      filterBar.sync(state.filters);
-    }
   }
   updateSortArrows();
-  filterBar.renderSummary(state.filters);
   state.rowCount = virtual.setRows(rows.rows || [], Boolean(message.append));
   if (message.append) {
     for (const field of state.computedActive) {
@@ -347,8 +329,7 @@ function onRows(message) {
   }
   state.hasMore = Boolean(rows.hasMore);
   els.more.disabled = !state.hasMore;
-  const filterText = state.filters.length ? ` · ${state.filters.length} filter${state.filters.length === 1 ? "" : "s"}` : "";
-  const loaded = state.rowCount ? `${state.rowCount} row${state.rowCount === 1 ? "" : "s"} loaded${state.hasMore ? " · more available" : ""}${filterText}` : `No rows${filterText}.`;
+  const loaded = state.rowCount ? `${state.rowCount} row${state.rowCount === 1 ? "" : "s"} loaded${state.hasMore ? " · more available" : ""}` : "No rows.";
   if (isQuerySurface() && !message.append) {
     const queryStatus = queryRunUi.successText(state.rowCount);
     els.status.textContent = queryStatus;
@@ -356,6 +337,37 @@ function onRows(message) {
   } else {
     els.status.textContent = loaded;
   }
+}
+/** Updates count text for the exact applied Recipe revision, including summary semantics. */
+function onQueryCount(message, snapshot) {
+  stopProgress();
+  const summary = snapshot?.applied?.mode === "summary";
+  const global = summary && !(snapshot.applied.groupBy || []).length;
+  els.countinfo.textContent = global ? "· 1 summary row" : message.ok ? `· ${resultCountLabel(snapshot?.applied, message.count)}` : "· count failed";
+  state.totalCount = message.ok && Number.isFinite(Number(message.count)) ? Number(message.count) : undefined;
+  els.gridwrap.querySelector("table")?.setAttribute("aria-rowcount", state.totalCount === undefined ? "-1" : String(state.totalCount + 1));
+  logSql(recipeLogLabel(`count ${state.model}`, message.queryLog), message.sql, message.orm);
+}
+/** Renders a v2 summary Recipe response as a read-only bounded result grid. */
+function onQuerySummary(message, snapshot) {
+  stopProgress();
+  const result = message.result || {};
+  logSql(recipeLogLabel(`summary ${state.model}`, message.queryLog), result.sql, result.orm);
+  if (!result.ok) {
+    renderError(result.error || "Summary query failed.");
+    return;
+  }
+  const groupBy = (snapshot?.applied?.groupBy || []).map((field) => field.path);
+  els.gridwrap.innerHTML = "";
+  els.gridwrap.appendChild(renderQuerySummaryTable(result, { el, groupBy, renderValue }));
+  const count = (result.rows || []).length;
+  els.status.textContent = `${resultCountLabel(snapshot?.applied, count)}${result.hasMore ? " · more available" : ""}`;
+  els.more.disabled = true;
+}
+/** Keeps the existing grid visible after an authoritative Recipe runtime rejection. */
+function onQueryRejected() {
+  stopProgress();
+  els.more.disabled = !state.hasMore;
 }
 /** Derives a safe read-only schema from one backend row when a degraded transport omitted column metadata. */
 function inferColumnsFromRows(rows) {
@@ -558,7 +570,7 @@ function toggleSort(col) {
     state.order = [{ field: col, desc: false }];
   }
   updateSortArrows();
-  applyQuery({ collectFilters: false });
+  queryController.toggleGridOrder(col, state.order[0]?.desc);
 }
 /** Activates (loads) or deactivates a lazy @property column, updating its header button in place and repainting cells. */
 function toggleComputed(field, button) {
@@ -607,20 +619,6 @@ function updateSortArrows() {
     span.setAttribute("aria-hidden", "true");
   }
 }
-/** Applies the current row query, optionally preserving the already-applied filters for sort-only changes. */
-function applyQuery(options = {}) {
-  const collectFilters = options.collectFilters !== false;
-  if (collectFilters) {
-    state.filters = filterBar.collect();
-  }
-  filterBar.renderSummary(state.filters);
-  if (state.aggregateActive) {
-    // A collapse summary is on screen — re-run it so a lookup on an aggregate column applies as HAVING.
-    applyColumns(collectFilters ? undefined : state.filters);
-    return;
-  }
-  send({ annotations: state.annotations, filters: state.filters, order: state.order, type: "applyQuery" });
-}
 function pageSizeValue() {
   const value = els.pageSize ? els.pageSize.value : "50";
   const parsed = Number(value);
@@ -631,7 +629,11 @@ function send(message) {
   if (label) {
     startProgress(label);
   }
-  vscode.postMessage({ ...message, pageSize: pageSizeValue() });
+  const applied = queryController.getSnapshot?.();
+  const revisioned = ["loadMore", "reload", "requestCount"].includes(message.type) && Number.isSafeInteger(applied?.appliedRevision)
+    ? { ...message, revision: applied.appliedRevision }
+    : message;
+  vscode.postMessage({ ...revisioned, pageSize: pageSizeValue() });
 }
 /** Returns the visible progress label for a request initiated from this webview. */
 function progressLabelForMessage(message) {
@@ -647,11 +649,8 @@ function progressLabelForMessage(message) {
   if (message.type === "requestCount") {
     return "Counting rows";
   }
-  if (message.type === "aggregate") {
-    return "Running aggregate…";
-  }
-  if (message.type === "applyQuery") {
-    return "Applying filters…";
+  if (message.type === "applyQueryRecipe") {
+    return "Applying query…";
   }
   return "";
 }
@@ -688,98 +687,6 @@ function durationText(startedAt) {
     return `${seconds}s`;
   }
   return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
-}
-function clearQuery() {
-  filterBar.clear();
-  state.filters = [];
-  state.order = [];
-  updateSortArrows();
-  filterBar.renderSummary(state.filters);
-  applyQuery();
-}
-/** Shows or hides the "+ Column" builder panel (seeding one term when first opened). */
-function toggleColumnPanel() {
-  const show = els.aggregatebar.hidden;
-  els.aggregatebar.hidden = !show;
-  els.groupToggle.classList.toggle("active", show);
-  if (show) {
-    columnBuilder.ensureRows();
-  }
-}
-/** Removes a single applied filter (the already-reduced set is passed in) and re-runs the current view with it, leaving the rest of the filters and the sort/columns intact. */
-function removeFilter(next) {
-  state.filters = next;
-  filterBar.sync(next);
-  if (state.aggregateActive) {
-    applyColumns(next);
-    return;
-  }
-  filterBar.renderSummary(next);
-  send({ annotations: state.annotations, filters: next, order: state.order, type: "applyQuery" });
-}
-/** Applies the builder: with group-by fields it collapses rows into per-group summaries; without, it adds the terms as per-row annotation columns to the grid. An explicit `filtersOverride` (from a chip removal) is used instead of re-collecting the builder, avoiding a race with the async term-row sync. */
-function applyColumns(filtersOverride) {
-  const { droppedToMany, groupBy, invalidConditions, terms } = columnBuilder.collect();
-  if (invalidConditions) {
-    els.status.textContent = "Complete or remove every column condition before applying.";
-    return;
-  }
-  state.filters = filtersOverride !== undefined ? filtersOverride : filterBar.collect();
-  filterBar.renderSummary(state.filters);
-  const drillNote = droppedToMany ? " · skipped Sum/Avg/Min/Max with a to-many path (use Count, or group by the related model)" : "";
-  if (groupBy.length) {
-    const aggregates = terms.filter((term) => term.kind === "aggregate").map((term) => ({ alias: term.alias, conditions: term.conditions, distinct: term.distinct, field: term.field, func: term.func }));
-    if (!aggregates.length) {
-      els.status.textContent = "Add at least one Aggregate column to summarize per group (Annotate/Window/Expr are per-row only).";
-      return;
-    }
-    state.aggregateActive = true;
-    state.aggregateGroupBy = groupBy;
-    state.annotations = [];
-    els.status.textContent = `Summarizing…${drillNote}`;
-    send({ type: "aggregate", aggregates, filters: state.filters, groupBy });
-  } else {
-    exitAggregateView();
-    state.annotations = terms;
-    applyQuery();
-    if (drillNote) {
-      els.status.textContent = `Loading…${drillNote}`;
-    }
-  }
-}
-/** Clears the builder and removes any per-row annotation columns / collapsed view, returning to the plain row grid. */
-function clearColumns() {
-  columnBuilder.clear();
-  state.annotations = [];
-  exitAggregateView();
-  applyQuery();
-}
-/** Resets the collapsed-summary view state (the panel and its terms persist across row reloads). */
-function exitAggregateView() {
-  state.aggregateActive = false;
-  state.aggregateGroupBy = [];
-  state.aggregateColumns = [];
-}
-/** Renders an aggregate response as a read-only result table in place of the row grid. */
-function onAggregate(message) {
-  stopProgress();
-  const result = message.result || {};
-  logSql(`aggregate ${state.model}`, result.sql, result.orm);
-  if (!result.ok) {
-    renderError(result.error || "Aggregation failed.");
-    return;
-  }
-  // Expose the aggregate (non-group) result columns so the filter bar can offer them as HAVING lookups.
-  state.aggregateColumns = (result.columns || []).map((column) => column.attname).filter((name) => !state.aggregateGroupBy.includes(name));
-  // Refresh the open filter terms so the just-created aggregate aliases become searchable (keeping in-progress edits).
-  filterBar.refresh();
-  els.gridwrap.innerHTML = "";
-  els.gridwrap.appendChild(renderAggregateResult(result, { el, groupBy: state.aggregateGroupBy, renderValue }));
-  const count = (result.rows || []).length;
-  const noun = state.aggregateGroupBy.length ? `group${count === 1 ? "" : "s"}` : "aggregate";
-  const scan = result.pythonScan ? " · @property computed in Python (full scan)" : "";
-  els.status.textContent = `${count} ${noun}${result.hasMore ? " · more available" : ""}${scan}`;
-  els.more.disabled = true;
 }
 function expandInto(button, request) {
   if (button.dataset.open === "1") {

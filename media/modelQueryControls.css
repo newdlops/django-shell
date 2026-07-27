@@ -1,0 +1,9 @@
+/* Dense Query Builder predicate, computed-value, result, and validation control refinements. */
+.query-predicate-row>label,.query-computed-body label{min-inline-size:0}
+.query-predicate-row input,.query-predicate-row select,.query-computed-input,.query-computed-select{max-inline-size:100%}
+.query-computed-item,.query-predicate-group,.query-result-row{min-inline-size:0}
+.query-kind-confirmation{border-color:var(--vscode-editorWarning-foreground,var(--vscode-panel-border))}
+.query-issue-item{border-color:var(--vscode-errorForeground)}
+.query-issue-item[data-severity="warning"]{border-color:var(--vscode-editorWarning-foreground,var(--vscode-panel-border))}
+@media (max-width:639px){.query-predicate-row>label,.query-computed-item-header label{flex:1 1 120px}}
+@media (forced-colors:active){.query-issue-item,.query-predicate-group,.query-computed-item{border-color:CanvasText}}

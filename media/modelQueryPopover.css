@@ -1,0 +1,5 @@
+/* Viewport-safe Query Builder popup and combobox portal layering. */
+.query-popover,.cbx-list-portal{z-index:20;max-inline-size:calc(100vw - 16px)}
+.query-popover[hidden],.cbx-list-portal[hidden]{display:none}
+.query-popover:focus-visible,.cbx-list-portal:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:1px}
+@media (forced-colors:active){.query-popover,.cbx-list-portal{border-color:CanvasText;box-shadow:none}}

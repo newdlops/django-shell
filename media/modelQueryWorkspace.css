@@ -1,0 +1,11 @@
+/* Responsive Query Builder workspace, stage navigation, drawer, and review-pane layout. */
+.query-drawer-resize{height:5px;cursor:ns-resize;background:transparent;outline:none}
+.query-drawer-resize:hover,.query-drawer-resize:focus-visible,.query-drawer-resize[data-dragging="true"]{background:var(--vscode-focusBorder)}
+.query-drawer-resize:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:-1px}
+.query-workspace{min-height:0;overscroll-behavior:contain}
+.query-stage-tabs,.query-review-tabs{scrollbar-width:thin}
+.query-editor-pane,.query-review-panel{overscroll-behavior:contain;touch-action:manipulation}
+.query-focus-mode .query-review-inspector{display:none}
+.query-focus-mode .query-workspace{grid-template-columns:minmax(0,1fr)}
+@media (forced-colors:active){.query-drawer-resize:focus-visible,.query-stage-tabs button:focus-visible,.query-review-tabs button:focus-visible{outline:2px solid Highlight}}
+@media (prefers-reduced-motion:reduce){.query-drawer,.query-editor-pane,.query-review-panel{scroll-behavior:auto}}

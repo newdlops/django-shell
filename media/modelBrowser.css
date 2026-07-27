@@ -43,6 +43,7 @@ button:disabled{opacity:.5;cursor:default}
 .cbx-input:focus{border-color:var(--vscode-focusBorder);outline:none}.cbx-input:focus-visible,.chipx:focus-visible,.linkbtn:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:2px}
 .term .cbx-input{width:auto;min-width:96px}
 .cbx-list{position:absolute;left:0;top:100%;z-index:40;min-width:140px;max-width:340px;max-height:248px;overflow-y:auto;background:var(--vscode-editorWidget-background,var(--vscode-editor-background));border:1px solid var(--vscode-editorWidget-border,var(--vscode-focusBorder));border-radius:3px;box-shadow:0 2px 8px var(--vscode-widget-shadow)}
+.cbx-list-portal{position:fixed;z-index:100;max-width:calc(100vw - 16px)}.query-popover-layer{position:fixed;z-index:100;inset:0;pointer-events:none}.query-popover-layer>*{pointer-events:auto}.query-popover{position:fixed;z-index:100;max-width:calc(100vw - 16px);overflow:auto}
 .cbx-opt{padding:2px 8px;white-space:nowrap;cursor:pointer}
 .cbx-opt.active,.cbx-opt:hover{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}
 .cbx-group{padding:3px 8px 1px;color:var(--vscode-descriptionForeground);font-size:10px;text-transform:uppercase;letter-spacing:.04em;cursor:default}
@@ -81,7 +82,7 @@ th.annotation{cursor:pointer;color:var(--vscode-charts-purple,var(--vscode-textL
 th.sortable:hover{color:var(--vscode-textLink-foreground)}
 th .sortarrow{margin-left:4px;color:var(--vscode-textLink-foreground)}
 .chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border:1px solid var(--vscode-panel-border);border-radius:12px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);font-size:11px;cursor:pointer}
-.gridwrap{grid-row:4;overflow:auto}
+.gridwrap{grid-row:4;min-height:144px;overflow:auto}
 table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;font-family:var(--vscode-editor-font-family);font-size:12px;border-left:1px solid var(--vscode-panel-border)}
 table[role=grid]{table-layout:fixed}
 th,td{box-sizing:border-box;border-right:1px solid var(--vscode-panel-border);border-bottom:1px solid var(--vscode-panel-border);padding:3px 8px;text-align:left;white-space:nowrap;max-width:480px;overflow:hidden;text-overflow:ellipsis;vertical-align:top}
@@ -90,13 +91,13 @@ th{position:sticky;top:0;background-color:var(--vscode-editorGroupHeader-tabsBac
 .sortbtn{margin:0;padding:0;border:0;border-radius:0;color:inherit;background:transparent;font:inherit;cursor:pointer;text-align:left}.sortbtn:hover{color:var(--vscode-textLink-foreground);background:transparent}.sortbtn:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:2px}
 .colresize{position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize;user-select:none;z-index:4}
 .colresize:hover{background:var(--vscode-focusBorder)}.colresize:focus-visible{outline:2px solid var(--vscode-focusBorder);outline-offset:-1px;background:var(--vscode-list-focusBackground,transparent)}
-.pinned{position:sticky;z-index:1;background-color:var(--vscode-editor-background)}
-th.pinned{z-index:3;background-color:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));box-shadow:1px 0 0 var(--vscode-panel-border)}
-td.pinned{background-color:var(--vscode-editor-background);box-shadow:1px 0 0 var(--vscode-panel-border)}
+.pinned{position:sticky;z-index:2;background-color:var(--vscode-editor-background);background-clip:padding-box;border-right:1px solid var(--vscode-panel-border);box-shadow:inset -1px 0 0 var(--vscode-panel-border)}
+th.pinned{z-index:4;background-color:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}
+td.pinned{z-index:2;background-color:var(--vscode-editor-background)}
 tr:hover td.pinned{background-color:var(--vscode-editor-background);background-image:linear-gradient(var(--vscode-list-hoverBackground),var(--vscode-list-hoverBackground))}
-th.rownum,td.rownum{position:sticky;left:0;width:46px;min-width:46px;max-width:46px;padding:3px 6px;text-align:right;color:var(--vscode-descriptionForeground);user-select:none;font-variant-numeric:tabular-nums;box-shadow:1px 0 0 var(--vscode-panel-border)}
-th.rownum{z-index:5;background-color:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));cursor:default}
-td.rownum{z-index:2;background-color:var(--vscode-editor-background);cursor:default}
+th.rownum,td.rownum{position:sticky;left:0;width:46px;min-width:46px;max-width:46px;padding:3px 6px;text-align:right;color:var(--vscode-descriptionForeground);user-select:none;font-variant-numeric:tabular-nums;background-clip:padding-box;border-right:1px solid var(--vscode-panel-border);box-shadow:inset -1px 0 0 var(--vscode-panel-border)}
+th.rownum{z-index:6;background-color:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));cursor:default}
+td.rownum{z-index:3;background-color:var(--vscode-editor-background);cursor:default}
 tr:hover td.rownum{background-image:linear-gradient(var(--vscode-list-hoverBackground),var(--vscode-list-hoverBackground))}
 .pinbtn{background:none;border:0;color:var(--vscode-descriptionForeground);cursor:pointer;padding:0 4px 0 0;margin:0;font:inherit;opacity:.45}
 .pinbtn:hover{opacity:1;color:var(--vscode-foreground)}

@@ -1,0 +1,21 @@
+/* Accessible guidance layout and state styling for the Model Query Builder. */
+.query-section-heading { align-items: baseline; display: flex; flex-wrap: wrap; gap: 6px; }
+.query-section-heading > span:first-child { font-size: 13px; font-weight: 600; }
+.query-section-technical-name, .query-technical-detail { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); font-size: 11px; }
+.query-section-intro, .query-control-help, .query-next-step, .query-meaning, .query-apply-help { color: var(--vscode-descriptionForeground); line-height: 1.4; margin: 5px 0; max-width: 72ch; overflow-wrap: anywhere; }
+.query-meaning { min-height: 1.4em; }
+.query-meaning[data-state="incomplete"]::first-letter, .query-meaning[data-state="warning"]::first-letter { color: var(--vscode-editorWarning-foreground); }
+.query-meaning[data-state="error"] { color: var(--vscode-errorForeground); }
+.query-concept-help { margin: 8px 0; max-width: 72ch; }
+.query-concept-help > summary { cursor: pointer; min-height: 24px; padding: 3px 0; }
+.query-concept-help-body { color: var(--vscode-descriptionForeground); }
+.query-example-list { margin: 4px 0; padding-left: 20px; }
+.query-field-picker-segments { align-items: flex-start; display: flex; flex-wrap: wrap; gap: 6px; }
+.query-option-description, .query-disabled-reason { color: var(--vscode-descriptionForeground); display: block; font-size: 11px; line-height: 1.3; white-space: normal; }
+.cbx-opt.disabled { cursor: not-allowed; opacity: .65; }
+.cbx-list { max-width: min(440px, calc(100vw - 16px)); }
+.query-plain-meaning > p { margin: 6px 0; max-width: 72ch; }
+.query-implicit-behavior { color: var(--vscode-descriptionForeground); margin: 6px 0; padding-left: 20px; }
+.query-issue-title { font-weight: 600; }
+.query-issue-fix { color: var(--vscode-descriptionForeground); }
+@media (max-width: 639px) { .query-section-intro, .query-control-help, .query-next-step, .query-meaning, .query-apply-help { max-width: 100%; } .query-field-picker-segments { align-items: stretch; flex-direction: column; } }
