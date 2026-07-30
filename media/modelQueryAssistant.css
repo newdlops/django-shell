@@ -1,0 +1,19 @@
+/* Query Builder AI Assist uses the existing dense workbench visual language. */
+.query-assistant-panel{display:grid;gap:7px;min-width:0;color:var(--vscode-foreground);font-size:var(--vscode-font-size);overflow-wrap:anywhere}
+.query-assistant-panel[hidden]{display:none}
+.query-assistant-panel label{font-weight:600}
+.query-assistant-settings{display:grid;gap:6px;min-width:0;margin:0;padding:7px;border:1px solid var(--vscode-panel-border)}
+.query-assistant-settings legend{padding:0 3px;font-weight:600}
+.query-assistant-panel select,.query-assistant-panel textarea{box-sizing:border-box;width:100%;min-width:0;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);font:inherit}
+.query-assistant-panel textarea{min-height:72px;resize:vertical}
+.query-assistant-disclosure,.query-assistant-status,.query-assistant-error,.query-assistant-summary,.query-assistant-warnings{margin:0}
+.query-assistant-counter{color:var(--vscode-descriptionForeground);font-size:11px}
+.query-assistant-actions{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+.query-assistant-status{border-left:2px solid var(--vscode-progressBar-background);padding-left:6px}
+.query-assistant-error{border-left:2px solid var(--vscode-inputValidation-errorBorder);color:var(--vscode-errorForeground);padding-left:6px}
+.query-assistant-generated{display:block;border-top:1px solid var(--vscode-panel-border);padding-top:7px}
+.query-assistant-orm{max-height:180px;margin:0;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:var(--vscode-editor-font-family)}
+.query-assistant-panel :focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:1px}
+@media (max-width:959px){.query-assistant-actions{align-items:stretch}.query-assistant-actions button{min-width:0}}
+@media (max-width:639px){.query-assistant-panel{gap:6px}.query-assistant-actions button{flex:1 1 auto}}
+@media (forced-colors:active){.query-assistant-status,.query-assistant-error,.query-assistant-generated{border-color:CanvasText}.query-assistant-panel :focus-visible{outline-color:Highlight}}
