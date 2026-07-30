@@ -8,6 +8,7 @@ import { overlayHoverRendererSource } from "./workbenchOverlayHoverRenderer";
 import { overlayNativeCompletionRendererSource } from "./workbenchOverlayNativeCompletionRenderer";
 import { overlayQueryResultRendererSource } from "./workbenchOverlayQueryResultRenderer";
 import { overlaySemanticRendererSource } from "./workbenchOverlaySemanticRenderer";
+import { overlayActivityRendererSource } from "./workbenchOverlayActivityRenderer";
 
 export interface OverlayRendererOptions {
   executionMode?: "shell" | "submit";
@@ -503,7 +504,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       }
       try { if (model && model.setLanguage) { model.setLanguage(__dsoOverlayLanguage()); } } catch (eSetLanguage) {}
       try { if (globalThis.monaco && globalThis.monaco.editor && globalThis.monaco.editor.setModelLanguage) { globalThis.monaco.editor.setModelLanguage(model, __dsoOverlayLanguageId); } } catch (eSetModelLanguage) {}
-      const options = { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
+      const options = { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, quickSuggestionsDelay: 0, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true };
       const widgetOptions = { isSimpleWidget: false };
       let editor = null;
       try { editor = factory.inst.createInstance(factory.ctor, host, options, widgetOptions); }
@@ -530,7 +531,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       const uri = monacoApi.Uri.parse(__dsoOverlayModelUri);
       let model = monacoApi.editor.getModel(uri); if (model && model.isDisposed && model.isDisposed()) { model = null; } if (model && model.getValue) { try { model.getValue(); } catch (eDisposedValue) { model = null; } } model = model || monacoApi.editor.createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : "", __dsoOverlayLanguageId, uri);
       try { monacoApi.editor.setModelLanguage && monacoApi.editor.setModelLanguage(model, __dsoOverlayLanguageId); } catch (eGlobalLanguage) {}
-      const editor = monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, isSimpleWidget: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, model: model, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
+      const editor = monacoApi.editor.create(host, { acceptSuggestionOnEnter: "on", automaticLayout: false, fixedOverflowWidgets: false, folding: true, formatOnPaste: false, formatOnType: false, glyphMargin: true, hover: { enabled: true }, isSimpleWidget: false, lineDecorationsWidth: 0, lineNumbers: "on", lineNumbersMinChars: 1, minimap: { enabled: false }, model: model, overflowWidgetsDomNode: overflowWidgetsNode, parameterHints: { enabled: true }, quickSuggestions: true, quickSuggestionsDelay: 0, scrollBeyondLastLine: false, suggestOnTriggerCharacters: true });
       try { editor.layout && editor.layout(__dsoLayoutSize(root, host)); } catch (eGlobalLayout) {}
       return editor;
     }
@@ -654,10 +655,12 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
         __dsoHandleGeometryMiss(root);
       } else {
         root.__dsoGeometryMissingSince = 0;
+        if (root.__dsoGeometryMissTimer) { window.clearTimeout(root.__dsoGeometryMissTimer); root.__dsoGeometryMissTimer = 0; }
         const restoreRoot = !!root.__dsoGeometryParked;
         const restoreWidgets = restoreRoot || !!root.__dsoGeometryWidgetParked;
         root.__dsoGeometryParked = false;
         root.__dsoGeometryWidgetParked = false;
+        if (restoreRoot) { try { window.__dsoResumeOverlayActivity && window.__dsoResumeOverlayActivity(root); } catch (eGeometryResumeActivity) {} }
         if (root.__djangoShellEditor && !root.__dsoExplicitlyParked && root.style.display !== "none") {
           if (restoreWidgets) { root.style.visibility = "visible"; }
           try { if (restoreWidgets && window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, true, false); } } catch (eRestoreWidgets) {}
@@ -678,7 +681,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     }
     /** Schedules one renderer-local geometry refresh for parent workbench scroll and resize. */
     function __dsoScheduleGeometrySync(root) {
-      if (!root || root.__dsoGeometrySyncFrame) { return; }
+      if (!root || root.__dsoOverlayActive === false || root.__dsoGeometrySyncFrame) { return; }
       root.__dsoGeometrySyncFrame = window.requestAnimationFrame(function () {
         root.__dsoGeometrySyncFrame = 0;
         if (!root.isConnected || root.style.display === "none") { return; }
@@ -701,17 +704,20 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     /** Parks a live editor only after the owning frame is absent long enough to rule out a transient tab transition. */
     function __dsoHandleGeometryMiss(root) {
       if (!root) { return; }
-      const now = Date.now();
       if (!root.__dsoGeometryMissingSince) {
-        root.__dsoGeometryMissingSince = now;
+        root.__dsoGeometryMissingSince = Date.now();
         root.__dsoGeometryWidgetParked = true;
         try { if (window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, false, true); } } catch (eParkTransientWidgets) {}
+        root.__dsoGeometryMissTimer = window.setTimeout(function () {
+          root.__dsoGeometryMissTimer = 0;
+          if (root.__dsoOverlayActive !== false && root.__dsoHasActiveConsoleGroup === false) {
+            root.__dsoGeometryParked = true;
+            root.style.visibility = "hidden";
+            try { window.__dsoPauseOverlayActivity && window.__dsoPauseOverlayActivity(root); } catch (eGeometryParkActivity) {}
+          }
+        }, 700);
         return;
       }
-      if (now - root.__dsoGeometryMissingSince < 700) { return; }
-      root.__dsoGeometryParked = true;
-      root.style.visibility = "hidden";
-      try { if (window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, false, true); } } catch (eParkWidgets) {}
     }
     /** Installs the overlay CSS once per workbench window. */
     function __dsoEnsureStyle() {
@@ -755,7 +761,8 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
     ${overlayNativeCompletionRendererSource(false)}
     ${overlaySemanticRendererSource(false)}
     ${overlayCleanupRendererSource()}
-    window.__djangoShellOverlayShow = function (geometry, ownerToken) {
+    ${overlayActivityRendererSource()}
+    window.__djangoShellOverlayShow = function (geometry, ownerToken, generation) {
       __dsoEnsureStyle();
       if (ownerToken && ownerToken !== String(__dsoOverlayBridge.token || "")) { return "owner-mismatch"; }
       const requestedOwner = String(ownerToken || window.__djangoShellOverlayOwnerToken || "");
@@ -775,6 +782,8 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
         });
       }
       root.__dsoOwnerToken = requestedOwner;
+      if (generation && root.__dsoVisibilityGeneration && generation < root.__dsoVisibilityGeneration) { return "stale-show"; }
+      root.__dsoVisibilityGeneration = generation || root.__dsoVisibilityGeneration || 0;
       root.__dsoExecutionMode = ${JSON.stringify(executionMode)};
       root.__dsoExplicitlyParked = false;
       try { root.dataset.djangoShellOverlayOwner = requestedOwner; } catch (eOwnerDataset) {}
@@ -783,7 +792,7 @@ export function overlayRendererSource(modelUri: string, options: OverlayRenderer
       root.__dsoUseVisiblePrelude = !!window.__djangoShellOverlayUseVisiblePrelude;
       root.style.removeProperty("display"); root.style.display = "block";
       if (!wasShown) { root.style.removeProperty("visibility"); root.style.visibility = "hidden"; try { if (window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, false, false); } } catch (eHoldWidgets) {} }
-      if (!root.__dsoGeometryTimer) { root.__dsoGeometryTimer = window.setInterval(function () { if (root.style.display !== "none" && !__dsoApplyGeometry(root, window.__djangoShellOverlayGeometry) && root.__dsoHadConsoleFrame) { __dsoHandleGeometryMiss(root); } }, 250); }
+      try { window.__dsoResumeOverlayActivity && window.__dsoResumeOverlayActivity(root); } catch (eResumeActivity) {}
       if (!__dsoApplyGeometry(root, geometry)) {
         root.__dsoGeometryWidgetParked = true;
         try { if (window.__dsoSetOverlayWidgetVisibility) { window.__dsoSetOverlayWidgetVisibility(root, false, true); } } catch (ePendingWidgets) {}

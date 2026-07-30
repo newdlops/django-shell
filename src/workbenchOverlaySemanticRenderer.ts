@@ -164,6 +164,7 @@ export function overlaySemanticRendererSource(includeExecutionUnitHelpers = true
     /** Debounces semantic decoration refreshes while the user is typing. */
     window.__dsoSchedulePreludeSemanticDecorations = function (root) {
       if (!root) { return; }
+      if (root.__dsoOverlayActive === false) { root.__dsoSemanticPending = true; return; }
       window.clearTimeout(root.__dsoSemanticTimer);
       root.__dsoSemanticTimer = window.setTimeout(function () {
         root.__dsoSemanticTimer = 0;
@@ -175,6 +176,7 @@ export function overlaySemanticRendererSource(includeExecutionUnitHelpers = true
     window.__dsoInstallPreludeSemanticDecorations = function (root, editor) {
       if (!root || !editor) { return; }
       if (root.__dsoSemanticEditor === editor) {
+        if (root.__dsoSemanticPending) { root.__dsoSemanticPending = false; }
         if (!root.__dsoSemanticTimer) { window.__dsoSchedulePreludeSemanticDecorations(root); }
         return;
       }
@@ -182,6 +184,7 @@ export function overlaySemanticRendererSource(includeExecutionUnitHelpers = true
       const model = editor.getModel && editor.getModel();
       const schedule = function () { window.__dsoSchedulePreludeSemanticDecorations(root); };
       try { root.__dsoSemanticDisposable = model && model.onDidChangeContent && model.onDidChangeContent(schedule); } catch (eSemanticListen) {}
+      if (root.__dsoSemanticPending) { root.__dsoSemanticPending = false; }
       schedule();
     };
   `;

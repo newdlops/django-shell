@@ -62,9 +62,12 @@ export function overlayCleanupRendererSource(): string {
 
     /** Disconnects DOM observers and timers owned by one overlay root. */
     function __dsoStopOverlayObservers(root) {
+      try { window.__dsoPauseOverlayActivity && window.__dsoPauseOverlayActivity(root); } catch (ePauseOverlayActivity) {}
       try { if (root.__dsoGeometryTimer) { window.clearInterval(root.__dsoGeometryTimer); root.__dsoGeometryTimer = 0; } } catch (eGeometryTimer) {}
       try { if (root.__dsoPendingRetryTimer) { window.clearTimeout(root.__dsoPendingRetryTimer); root.__dsoPendingRetryTimer = 0; } } catch (eRetryTimer) {}
       try { if (root.__dsoPreludeGuardTimer) { window.clearTimeout(root.__dsoPreludeGuardTimer); root.__dsoPreludeGuardTimer = 0; } } catch (ePreludeTimer) {}
+      try { if (root.__dsoPreludeGuardFrame) { window.cancelAnimationFrame(root.__dsoPreludeGuardFrame); root.__dsoPreludeGuardFrame = 0; } } catch (ePreludeFrame) {}
+      try { if (root.__dsoGeometryMissTimer) { window.clearTimeout(root.__dsoGeometryMissTimer); root.__dsoGeometryMissTimer = 0; } } catch (eGeometryMissTimer) {}
       try { if (root.__dsoSemanticTimer) { window.clearTimeout(root.__dsoSemanticTimer); root.__dsoSemanticTimer = 0; } } catch (eSemanticTimer) {}
       try { if (root.__dsoCursorRevealTimer) { window.clearTimeout(root.__dsoCursorRevealTimer); root.__dsoCursorRevealTimer = 0; } } catch (eCursorRevealTimer) {}
       try { if (root.__dsoWidgetClampFrame) { window.cancelAnimationFrame(root.__dsoWidgetClampFrame); root.__dsoWidgetClampFrame = 0; } } catch (eWidgetFrame) {}

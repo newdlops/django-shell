@@ -40,7 +40,7 @@ export function overlaySyncRendererSource(): string {
 
     /** Coalesces cursor reveal requests caused by typing, cursor movement, and decoration refreshes. */
     function __dsoScheduleCursorReveal(root, editor) {
-      if (!root || !editor) { return; }
+      if (!root || root.__dsoOverlayActive === false || !editor) { return; }
       try { if (root.__dsoCursorRevealTimer) { window.clearTimeout(root.__dsoCursorRevealTimer); } } catch (eClearCursorReveal) {}
       root.__dsoCursorRevealTimer = window.setTimeout(function () {
         root.__dsoCursorRevealTimer = 0;
@@ -51,7 +51,7 @@ export function overlaySyncRendererSource(): string {
     /** Sends the latest overlay editor text after a short idle window. */
     function __dsoScheduleModelSync(root, editor, readValue, post) {
       window.clearTimeout(root.__dsoSyncTimer);
-      if (root.__dsoSuppressModelSync || root.__dsoPreludeRepairing) { return; }
+      if (root.__dsoSuppressModelSync || root.__dsoPreludeRepairing || root.__dsoOverlayActive === false) { return; }
       __dsoScheduleCursorReveal(root, editor);
       root.__dsoSyncTimer = window.setTimeout(function () {
         if (root.__dsoSuppressModelSync || root.__dsoPreludeRepairing) { return; }
@@ -198,17 +198,16 @@ export function overlaySyncRendererSource(): string {
     }
 
     /** Reapplies hidden prelude state after editor transactions settle. */
-    function __dsoSchedulePreludeGuard(root, editor) {
+    window.__dsoSchedulePreludeGuard = function (root, editor) {
       if (!root) { return; }
-      if (root.__dsoPreludeGuardTimer) { window.clearTimeout(root.__dsoPreludeGuardTimer); }
+      if (root.__dsoOverlayActive === false) { root.__dsoPreludeGuardPending = true; return; }
+      if (root.__dsoPreludeGuardFrame) { return; }
       const apply = function () {
-        root.__dsoPreludeGuardTimer = 0;
-        try { window.__dsoApplyPreludeHiddenArea && window.__dsoApplyPreludeHiddenArea(root, editor); } catch (ePreludeLater) {}
+        root.__dsoPreludeGuardFrame = 0;
+        try { window.__dsoApplyPreludeHiddenArea && window.__dsoApplyPreludeHiddenArea(root, root.__djangoShellEditor || editor); } catch (ePreludeLater) {}
       };
-      root.__dsoPreludeGuardTimer = window.setTimeout(apply, 0);
-      window.setTimeout(apply, 32);
-      window.setTimeout(apply, 96);
-    }
+      root.__dsoPreludeGuardFrame = window.requestAnimationFrame(apply);
+    };
 
     /** Keeps the cursor and edits out of the generated prelude area. */
     function __dsoInstallPreludeGuard(root, editor, post) {
@@ -222,7 +221,7 @@ export function overlaySyncRendererSource(): string {
       };
       const repairPrefix = function () {
         if (__dsoRepairPrefix(root, editor, post)) { clampCursor(); }
-        __dsoSchedulePreludeGuard(root, editor);
+        window.__dsoSchedulePreludeGuard(root, editor);
       };
       root.__dsoPreludeGuardEditor = editor;
       try { root.__dsoPreludeCursorDisposable = editor.onDidChangeCursorPosition(clampCursor); } catch (eCursorGuard) {}
@@ -230,7 +229,9 @@ export function overlaySyncRendererSource(): string {
       try { root.__dsoPreludeKeyDisposable = editor.onKeyDown(function (event) {
         const raw = event.browserEvent || event;
         const pos = editor.getPosition && editor.getPosition();
-        if (pos && pos.lineNumber <= (root.__dsoUserStartLine || 1) && pos.column <= 1 && (raw.key === "Backspace" || raw.keyCode === 8)) {
+        const selection = editor.getSelection && editor.getSelection();
+        const selectionEmpty = !selection || (selection.isEmpty ? selection.isEmpty() : selection.startLineNumber === selection.endLineNumber && selection.startColumn === selection.endColumn);
+        if (selectionEmpty && pos && pos.lineNumber <= (root.__dsoUserStartLine || 1) && pos.column <= 1 && (raw.key === "Backspace" || raw.keyCode === 8)) {
           if (event.preventDefault) { event.preventDefault(); } if (event.stopPropagation) { event.stopPropagation(); } if (event.stopImmediatePropagation) { event.stopImmediatePropagation(); }
           if (raw.preventDefault) { raw.preventDefault(); } if (raw.stopPropagation) { raw.stopPropagation(); } if (raw.stopImmediatePropagation) { raw.stopImmediatePropagation(); }
         }

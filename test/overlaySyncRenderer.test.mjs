@@ -1,6 +1,7 @@
 // Unit tests for overlay renderer Enter event handling.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
 
@@ -128,7 +129,53 @@ test("uses native Python language features for shell and submit overlays", () =>
   assert.match(query, /const __dsoOverlayLanguageId = "python"/);
   assert.ok(shell.includes("setModelLanguage(model, __dsoOverlayLanguageId)"));
   assert.ok(shell.includes("createModel(window.__dsoInitialModelText ? window.__dsoInitialModelText() : \"\", __dsoOverlayLanguageId, uri)"));
-  assert.equal(shell.includes("quickSuggestionsDelay"), false, "the overlay inherits native editor suggestion timing");
+  assert.equal((shell.match(/quickSuggestionsDelay: 0/g) || []).length, 2, "both Monaco editor construction paths schedule automatic suggestions immediately");
+});
+
+test("uses Monaco's native type command for the automatic suggest E2E probe", () => {
+  const source = readFileSync(new URL("./e2e/suite/pythonCellBehavior.js", import.meta.url), "utf8");
+  assert.match(source, /editor\.trigger\("django-shell-e2e-suggest-burst","type",\{text\}\)/);
+  assert.equal(source.includes('editor.executeEdits("django-shell-e2e-suggest-burst"'), false);
+  assert.equal(source.includes("editor.action.triggerSuggest"), false);
+});
+
+test("blocks Backspace only for a collapsed selection at the protected boundary", () => {
+  const source = overlaySyncRendererSource();
+  const window = { __djangoShellOverlayPrelude: "", addEventListener() {}, removeEventListener() {}, requestAnimationFrame(callback) { callback(); return 0; } };
+  const document = { getElementById: () => undefined, querySelectorAll: () => [] };
+  const api = Function("window", "document", "__dsoPost", `${source}\nreturn { applyPrelude: window.__dsoApplyPreludeHiddenArea };`)(window, document, () => undefined);
+  let keyHandler;
+  const editor = fakeEditor(fakeModel("selected\ntext"));
+  editor.onKeyDown = (callback) => { keyHandler = callback; return { dispose() {} }; };
+  editor.getDomNode = () => ({ querySelector: () => undefined, querySelectorAll: () => [] });
+  editor.getVisibleRanges = () => [];
+  editor.setHiddenAreas = () => {};
+  const root = { __djangoShellEditor: editor, __dsoPreludeText: "", __dsoUserStartLine: 1 };
+  api.applyPrelude(root, editor);
+
+  const keyEvent = (key) => {
+    const calls = { prevented: 0, stopped: 0 };
+    const raw = { key, keyCode: key === "Backspace" ? 8 : 46, preventDefault() { calls.prevented += 1; }, stopImmediatePropagation() { calls.stopped += 1; }, stopPropagation() { calls.stopped += 1; } };
+    return { calls, browserEvent: raw, preventDefault() { calls.prevented += 1; }, stopImmediatePropagation() { calls.stopped += 1; }, stopPropagation() { calls.stopped += 1; } };
+  };
+
+  editor.setSelection({ endColumn: 1, endLineNumber: 1, startColumn: 1, startLineNumber: 1 });
+  const collapsedBackspace = keyEvent("Backspace");
+  keyHandler(collapsedBackspace);
+  assert.ok(collapsedBackspace.calls.prevented > 0);
+
+  for (const selection of [
+    { endColumn: 5, endLineNumber: 1, startColumn: 1, startLineNumber: 1 },
+    { endColumn: 1, endLineNumber: 1, startColumn: 5, startLineNumber: 1 }
+  ]) {
+    editor.setSelection(selection);
+    const backspace = keyEvent("Backspace");
+    keyHandler(backspace);
+    assert.equal(backspace.calls.prevented, 0, "a non-empty selection must use Monaco's native Backspace path");
+    const deleteEvent = keyEvent("Delete");
+    keyHandler(deleteEvent);
+    assert.equal(deleteEvent.calls.prevented, 0, "Delete must use Monaco's native edit path");
+  }
 });
 
 test("runs Python from lightweight Monaco Enter handling", async () => {
@@ -878,6 +925,7 @@ test("reveals the cursor after typing or moving inside a growing overlay input",
 });
 
 function fakeEditor(model, position = { column: 1, lineNumber: 1 }) {
+  let selection = { endColumn: position.column, endLineNumber: position.lineNumber, startColumn: position.column, startLineNumber: position.lineNumber };
   const editor = {
     addCommand: undefined,
     decorations: [],
@@ -889,7 +937,7 @@ function fakeEditor(model, position = { column: 1, lineNumber: 1 }) {
     getDomNode: () => ({ addEventListener() {}, classList: { contains: () => false }, contains: () => true, querySelectorAll: () => [], removeEventListener() {} }),
     getModel: () => model,
     getPosition: () => position,
-    getSelection: () => ({ endColumn: position.column, endLineNumber: position.lineNumber, startColumn: position.column, startLineNumber: position.lineNumber }),
+    getSelection: () => selection,
     onDidChangeCursorPosition(callback) { this.cursorListener = callback; return { dispose() {} }; },
     onKeyDown: () => ({ dispose() {} }),
     revealedLines: [],
@@ -897,6 +945,7 @@ function fakeEditor(model, position = { column: 1, lineNumber: 1 }) {
     revealLineInCenterIfOutsideViewport(lineNumber) { this.revealedLines.push(lineNumber); },
     revealPositionInCenterIfOutsideViewport(next) { this.revealedPositions.push(next); },
     setPosition(next) { position = next; if (this.cursorListener) { this.cursorListener(); } },
+    setSelection(next) { selection = next; },
     updateOptions(options) { this.options = { ...(this.options || {}), ...options }; }
   };
   return editor;

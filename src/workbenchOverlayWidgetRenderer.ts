@@ -196,7 +196,7 @@ export function overlayWidgetRendererSource(): string {
       if ((root.style && (root.style.display === "none" || root.style.visibility === "hidden")) || root.__dsoExplicitlyParked || root.__dsoGeometryParked || root.__dsoGeometryWidgetParked) {
         window.__dsoSetOverlayWidgetVisibility(root, false, false);
       }
-      __dsoInstallWidgetClamp(root);
+      window.__dsoInstallWidgetClamp(root);
       __dsoInstallWidgetLinkRouter(root);
       window.__dsoSyncOverlayWidgetLayer(root);
       return layer;
@@ -286,7 +286,7 @@ export function overlayWidgetRendererSource(): string {
 
     /** Schedules popup clamping after Monaco has placed its widgets. */
     window.__dsoScheduleWidgetClamp = function (root) {
-      if (!root || root.__dsoWidgetClampFrame) { return; }
+      if (!root || root.__dsoOverlayActive === false || root.__dsoWidgetClampFrame) { return; }
       root.__dsoWidgetClampFrame = window.requestAnimationFrame(function () {
         root.__dsoWidgetClampFrame = 0;
         try { window.__dsoSyncOverlayWidgetLayer(root); } catch (eWidgetLayerSync) {}
@@ -295,7 +295,7 @@ export function overlayWidgetRendererSource(): string {
     };
 
     /** Observes the tab-level popup layer so popup placement stays bounded. */
-    function __dsoInstallWidgetClamp(root) {
+    window.__dsoInstallWidgetClamp = function (root) {
       if (!root || root.__dsoWidgetClampInstalled || !root.__dsoWidgetLayer) { return; }
       const schedule = function () { window.__dsoScheduleWidgetClamp(root); };
       const observer = new MutationObserver(schedule);
@@ -313,6 +313,6 @@ export function overlayWidgetRendererSource(): string {
         root.__dsoWidgetClampObserver = null;
       };
       schedule();
-    }
+    };
   `;
 }

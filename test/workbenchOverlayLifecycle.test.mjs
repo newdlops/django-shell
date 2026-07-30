@@ -74,35 +74,26 @@ test("host park and disposal clean owner-matched body widget portals", () => {
   assert.ok(cleanupSource.includes("window.__dsoRemoveOverlayWidgetPortal(root"), "renderer cleanup uses the same owner-aware portal removal path");
 });
 
-test("overlay geometry coalesces scroll updates while keeping a settle pass", () => {
-  const updateGeometryBody = overlaySource.slice(overlaySource.indexOf("updateGeometry(geometry"), overlaySource.indexOf("private queueGeometryFlush"));
-  const queueGeometryBody = overlaySource.slice(overlaySource.indexOf("private queueGeometryFlush"), overlaySource.indexOf("private flushGeometry"));
-  const flushGeometryBody = overlaySource.slice(overlaySource.indexOf("private flushGeometry"), overlaySource.indexOf("async updatePrelude"));
+test("overlay geometry uses latest-value scheduling without settle timers", () => {
+  const updateGeometryBody = overlaySource.slice(overlaySource.indexOf("updateGeometry(geometry"), overlaySource.indexOf("private canDispatchGeometry"));
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
   const cleanupSource = fs.readFileSync(new URL("../src/workbenchOverlayCleanupRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const GEOMETRY_SETTLE_MS = 80"));
-  assert.ok(updateGeometryBody.includes("this.queueGeometryFlush(0);"), "scroll geometry should not wait until scrolling stops");
-  assert.ok(updateGeometryBody.includes("this.geometrySettleTimer = setTimeout"));
-  assert.ok(updateGeometryBody.includes("this.rendererTransactionPending()"), "geometry waits until show or injection completes");
-  assert.ok(queueGeometryBody.includes("this.geometryFlushInFlight || this.geometryTimer || this.rendererTransactionPending()"));
-  assert.ok(flushGeometryBody.includes("this.resumeHeldGeometry()"), "a completed request resumes only the latest held geometry");
-  assert.equal(flushGeometryBody.includes("if (this.geometryFlushPending) { this.queueGeometryFlush(0); }"), false, "timeout completion must not recurse immediately");
-  assert.ok(overlaySource.includes("const RENDERER_RECOVERY_DELAY_MS"));
-  assert.ok(overlaySource.includes("this.lastEvaluationTimeoutAt + RENDERER_RECOVERY_DELAY_MS - Date.now()"));
+  assert.ok(overlaySource.includes("OverlayGeometryScheduler"));
+  assert.ok(updateGeometryBody.includes("this.geometryScheduler.update(geometry)"));
+  assert.equal(overlaySource.includes("GEOMETRY_SETTLE_MS"), false);
   assert.ok(rendererSource.includes("function __dsoInstallGeometrySync(root)"));
   assert.ok(rendererSource.includes('document.addEventListener("scroll", schedule, true)'));
   assert.ok(rendererSource.includes("__dsoApplyGeometry(root, window.__djangoShellOverlayGeometry)"));
   assert.ok(cleanupSource.includes("__dsoGeometrySyncCleanup"));
-  assert.equal(overlaySource.includes("GEOMETRY_FRAME_MS"), false);
-  assert.equal(updateGeometryBody.includes("this.flushGeometry();"), false);
-  assert.equal(updateGeometryBody.includes("setTimeout(() => this.flushGeometry(), 80)"), false);
+  assert.ok(cleanupSource.includes("__dsoPauseOverlayActivity"));
+  assert.ok(rendererSource.includes("__dsoGeometryMissTimer"));
 });
 
 test("overlay geometry moves with transform to avoid relayouting editor lines", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
-  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 99"));
+  assert.ok(overlaySource.includes("const RENDERER_PATCH_VERSION = 100"));
   assert.ok(rendererSource.includes('root.style.left = "0px"; root.style.top = "0px"; root.style.transform = "translate3d("'));
   assert.ok(rendererSource.includes("will-change:transform"));
   assert.ok(rendererSource.includes("const left = Math.round(rect.left), top = Math.round(rect.top), width = Math.round(rect.width), height = Math.round(rect.height);"));
@@ -113,7 +104,7 @@ test("overlay Monaco layout clamps dimensions instead of trusting transient DOM 
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
 
   assert.ok(rendererSource.includes("automaticLayout: false"));
-  assert.equal(rendererSource.includes("quickSuggestionsDelay"), false, "native Python editor settings control automatic suggestion timing");
+  assert.equal((rendererSource.match(/quickSuggestionsDelay: 0/g) || []).length, 2, "both Monaco editor construction paths schedule automatic suggestions immediately");
   assert.ok(rendererSource.includes("function __dsoLayoutSize(root, host)"));
   assert.ok(rendererSource.includes("function __dsoMaxEditorHeight(viewportHeight)"));
   assert.ok(rendererSource.includes("availableHeight"));
@@ -448,7 +439,7 @@ test("overlay service capture keeps deep inspection outside its bounded temporar
 
 test("capture probes existing editors before a file-backed fallback and never opens Untitled", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
-  const showStart = overlaySource.indexOf("private async showNow()");
+  const showStart = overlaySource.indexOf("private async showNow(generation");
   const showEnd = overlaySource.indexOf("updateGeometry(geometry", showStart);
   const showBody = overlaySource.slice(showStart, showEnd);
   const fallbackStart = overlaySource.indexOf("private async openCaptureFallbackEditor()");
@@ -459,11 +450,12 @@ test("capture probes existing editors before a file-backed fallback and never op
   const armIndex = showBody.indexOf("await this.evalInWorkbench(captureArmExpression");
   const probeIndex = showBody.indexOf('executeCommand("vscode.getEditorLayout")', armIndex);
   const fallbackIndex = showBody.indexOf("openCaptureFallbackEditor()", probeIndex);
-  const rearmIndex = showBody.indexOf("captureRearmExpression(this.token, generation)", fallbackIndex), secondProbe = showBody.indexOf('executeCommand("vscode.getEditorLayout")', probeIndex + 1), earlyClose = showBody.indexOf("await closeFallback()", secondProbe);
-  const restoredPoll = showBody.indexOf("waitForOverlayCapture(CAPTURE_FALLBACK_TIMEOUT_MS, 75, true)", earlyClose);
-  const stopIndex = showBody.indexOf("captureStopExpression(this.token, generation)", restoredPoll), finalClose = showBody.indexOf("await closeFallback()", stopIndex);
+  const rearmIndex = showBody.indexOf("captureRearmExpression(this.token, captureGeneration)", fallbackIndex), secondProbe = showBody.indexOf('executeCommand("vscode.getEditorLayout")', probeIndex + 1), earlyClose = showBody.indexOf("await closeFallback()", secondProbe);
+  const restoredPoll = showBody.indexOf("waitForOverlayCapture(CAPTURE_FALLBACK_TIMEOUT_MS, 75, generation, true)", earlyClose);
+  const stopIndex = showBody.indexOf("captureStopExpression(this.token, captureGeneration)", restoredPoll), finalClose = showBody.indexOf("await closeFallback()", stopIndex);
   assert.ok(armIndex >= 0 && probeIndex > armIndex && fallbackIndex > probeIndex, "exact service lookup runs before the fallback editor");
   assert.ok(rearmIndex > fallbackIndex && secondProbe > rearmIndex && earlyClose > secondProbe && restoredPoll > earlyClose, "fallback rearms exact lookup, settles, and closes before restored-host polling");
+  assert.ok(showBody.includes("waitForOverlayCapture(CAPTURE_PROBE_TIMEOUT_MS, 50, generation)") && waitBody.includes("showExpression(this.geometry, this.token, visibilityGeneration)"), "capture polls retain their show visibility generation");
   assert.ok(stopIndex > restoredPoll && finalClose > stopIndex, "generation stop precedes bounded final tab cleanup");
   assert.equal(overlaySource.includes('openTextDocument({ content: ""'), false, "capture never creates an Untitled document");
   assert.ok(fallbackBody.includes("Promise.race") && fallbackBody.includes("void shown.then(close, close)") && fallbackBody.includes("scheduleGeneratedOverlayTabCleanup"));
@@ -472,7 +464,6 @@ test("capture probes existing editors before a file-backed fallback and never op
   assert.equal(waitBody.includes("ctorMatch") || waitBody.includes('report.includes("factory=true")'), false);
   assert.ok(rendererSource.includes("window.__dsoArmOverlayCapture") && rendererSource.includes('return "capture-armed:"') && rendererSource.includes("window.__dsoStopOverlayCapture"));
 });
-
 test("overlay status reporting never performs another editor factory scan", () => {
   const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8");
   const statusStart = rendererSource.indexOf("function __dsoStatus()");
@@ -489,21 +480,28 @@ test("transient owning-frame misses park the editor after a grace period instead
   const missStart = rendererSource.indexOf("function __dsoHandleGeometryMiss");
   const missEnd = rendererSource.indexOf("function __dsoEnsureStyle", missStart);
   const missBody = rendererSource.slice(missStart, missEnd);
-  const timerStart = rendererSource.indexOf("root.__dsoGeometryTimer = window.setInterval");
-  const timerEnd = rendererSource.indexOf("const editor = __dsoEnsureEditor", timerStart);
-  const timerBody = rendererSource.slice(timerStart, timerEnd);
+  const timerBody = rendererSource.slice(rendererSource.indexOf("function __dsoHandleGeometryMiss"), rendererSource.indexOf("function __dsoEnsureStyle"));
   const firstMissStart = missBody.indexOf("if (!root.__dsoGeometryMissingSince)");
-  const graceStart = missBody.indexOf("if (now - root.__dsoGeometryMissingSince < 700)", firstMissStart);
+  const graceStart = missBody.indexOf("root.__dsoGeometryMissTimer = window.setTimeout", firstMissStart);
   const firstMissBody = missBody.slice(firstMissStart, graceStart);
 
-  assert.ok(missBody.includes("now - root.__dsoGeometryMissingSince < 700"));
+  assert.ok(missBody.includes("root.__dsoGeometryMissTimer = window.setTimeout"));
   assert.ok(firstMissBody.includes("root.__dsoGeometryWidgetParked = true"));
   assert.ok(firstMissBody.includes("__dsoSetOverlayWidgetVisibility(root, false, true)"), "the first missing frame immediately hides body-level widgets");
   assert.ok(missBody.includes("root.__dsoGeometryParked = true"));
   assert.ok(missBody.includes('root.style.visibility = "hidden"'));
   assert.equal(missBody.includes("__dsoDisposeOverlay"), false, "a transient workbench layout gap never destroys the editor/model");
-  assert.ok(timerBody.includes("__dsoHandleGeometryMiss(root)"));
+  assert.ok(timerBody.includes("__dsoPauseOverlayActivity(root)"));
   assert.equal(timerBody.includes("__dsoDisposeOverlay(root)"), false);
+});
+
+test("parked overlay activity resumes once from valid geometry and preserves pending renderer work", () => { const rendererSource = fs.readFileSync(new URL("../src/workbenchOverlayRenderer.ts", import.meta.url), "utf8"), activitySource = fs.readFileSync(new URL("../src/workbenchOverlayActivityRenderer.ts", import.meta.url), "utf8"), syncSource = fs.readFileSync(new URL("../src/workbenchOverlaySyncRenderer.ts", import.meta.url), "utf8"), cleanupSource = fs.readFileSync(new URL("../src/workbenchOverlayCleanupRenderer.ts", import.meta.url), "utf8");
+  assert.ok(activitySource.includes("root.__dsoOverlayActive === true"), "resume is idempotent");
+  assert.ok(rendererSource.includes("if (restoreRoot) { try { window.__dsoResumeOverlayActivity"), "valid geometry reactivates a geometry-parked overlay");
+  assert.ok(activitySource.includes("root.__dsoPreludeGuardPending = true") && activitySource.includes("window.__dsoSchedulePreludeGuard(root, editor)"));
+  assert.ok(syncSource.includes("if (root.__dsoPreludeGuardFrame) { return; }") && syncSource.includes("root.__djangoShellEditor || editor") && syncSource.includes("root.__dsoPreludeGuardFrame = window.requestAnimationFrame(apply)"));
+  assert.equal((syncSource.match(/window\.setTimeout\(apply/g) ?? []).length, 0, "prelude guard has one RAF instead of timer bursts");
+  assert.ok(cleanupSource.includes("__dsoGeometryMissTimer") && cleanupSource.includes("__dsoPreludeGuardFrame"));
 });
 
 test("debugger controls live in the Python cell toolbar", () => {
@@ -684,7 +682,7 @@ test("overlay step-in can reveal external source frames", () => {
   assert.ok(customConsoleSource.includes("this.overlay?.park();"));
   assert.ok(customConsoleSource.includes('revealed && this.debugMode === "overlay" && !this.lastDebugFrameOverlay'));
   assert.ok(overlaySource.includes("park(): void"));
-  assert.ok(overlaySource.includes("parkExpression(this.token)"));
+  assert.ok(overlaySource.includes("parkExpression(this.token, generation)"));
   assert.ok(overlaySource.includes("overlay.park.renderer"));
   assert.equal(customConsoleSource.includes("if (revealed) { this.overlay?.hide(); }"), false);
   assert.equal(customConsoleSource.includes("switchExternalFrameToNativeDebug"), false);
@@ -926,12 +924,14 @@ test("overlay show and debug-line renderer traffic are single-flight and latest-
   const showBody = overlaySource.slice(overlaySource.indexOf("async show(): Promise<boolean>"), overlaySource.indexOf("/** Updates the workbench overlay position"));
   const debugBody = overlaySource.slice(overlaySource.indexOf("async updateDebugInfo"), overlaySource.indexOf("/** Mirrors the one-based lines"));
 
-  assert.ok(showBody.includes("if (this.showPromise)"));
-  assert.ok(showBody.includes("const pending = this.showNow()"));
+  assert.ok(showBody.includes("if (this.showPromise && this.geometryVisible)"));
+  assert.ok(showBody.includes("const previous = this.showPromise"));
+  assert.ok(showBody.includes("this.showPromise = pending"));
+  assert.ok(showBody.includes("previous ? previous.catch"), "new visibility generations chain behind the tracked show transaction");
   assert.equal(showBody.includes("rendererPatchVersion"), false, "warm show must not perform a renderer health/version probe");
   assert.ok(showBody.includes("void this.queueDebugLineFlush()"), "debug decoration delivery must not delay a visible overlay");
   assert.equal(showBody.includes("await this.queueDebugLineFlush()"), false);
-  assert.ok(showBody.includes("this.resumeHeldGeometry()"), "show completion releases the latest held geometry");
+  assert.ok(showBody.includes("this.geometryScheduler.resume()"), "show completion releases the latest held geometry");
   assert.ok(debugBody.includes("this.debugLineTarget = visibleLine >= 1 ? visibleLine : 0"));
   assert.ok(debugBody.includes("this.inlineValueText = visibleLine > 0 ? debugInlineValueText(info.scopes) : \"\""));
   assert.ok(debugBody.includes("if (this.debugLineFlushPromise)"));
