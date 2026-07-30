@@ -17,11 +17,14 @@ async function main() {
   const extensionPath = prepareDevelopmentExtension(ROOT);
   const nativeProviderFixturePath = path.join(ROOT, "test", "e2e", "fixtures", "native-provider");
   const python = pythonExecutablePath();
-  const inspectorPort = await findAvailableInspectorPort();
+  const modelBrowserOnly = process.env.DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY === "1";
+  const inspectorPort = modelBrowserOnly ? undefined : await findAvailableInspectorPort();
   const testShell = process.platform === "win32" ? process.env.SHELL : "/bin/sh";
-  copyInstalledExtension("ms-python.python-");
-  copyInstalledExtension("ms-python.vscode-pylance-");
-  copyInstalledExtension("newdlops.django-orm-intellisense-");
+  if (!modelBrowserOnly) {
+    copyInstalledExtension("ms-python.python-");
+    copyInstalledExtension("ms-python.vscode-pylance-");
+    copyInstalledExtension("newdlops.django-orm-intellisense-");
+  }
   const manifest = JSON.parse(fs.readFileSync(path.join(extensionPath, "package.json"), "utf8"));
   fs.mkdirSync(path.join(workspace, ".vscode"), { recursive: true });
   fs.writeFileSync(path.join(workspace, ".vscode", "settings.json"), JSON.stringify({
@@ -39,10 +42,10 @@ async function main() {
     "python.defaultInterpreterPath": python ?? ""
   }, null, 2));
   await runTests({
-    extensionDevelopmentPath: [extensionPath, nativeProviderFixturePath],
-    extensionTestsEnv: { DJANGO_SHELL_E2E: "1", DJANGO_SHELL_E2E_EXTENSION_ID: `${manifest.publisher}.${manifest.name}`, ...(process.env.DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY === "1" ? { DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_HOVER_ONLY === "1" ? { DJANGO_SHELL_E2E_HOVER_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_THEME_ONLY === "1" ? { DJANGO_SHELL_E2E_THEME_ONLY: "1" } : {}), ...(python ? { DJANGO_SHELL_E2E_PYTHON: python } : {}), ...(testShell ? { SHELL: testShell } : {}) },
+    extensionDevelopmentPath: modelBrowserOnly ? extensionPath : [extensionPath, nativeProviderFixturePath],
+    extensionTestsEnv: { DJANGO_SHELL_E2E: "1", DJANGO_SHELL_E2E_EXTENSION_ID: `${manifest.publisher}.${manifest.name}`, ...(process.env.DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY === "1" ? { DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_HOVER_ONLY === "1" ? { DJANGO_SHELL_E2E_HOVER_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY === "1" ? { DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_THEME_ONLY === "1" ? { DJANGO_SHELL_E2E_THEME_ONLY: "1" } : {}), ...(python ? { DJANGO_SHELL_E2E_PYTHON: python } : {}), ...(testShell ? { SHELL: testShell } : {}) },
     extensionTestsPath: path.join(ROOT, "test", "e2e", "suite", "index.js"),
-    launchArgs: [`--inspect=${inspectorPort}`, "--force-disable-user-env", `--user-data-dir=${userData}`, workspace],
+    launchArgs: [...(inspectorPort ? [`--inspect=${inspectorPort}`] : []), "--force-disable-user-env", `--user-data-dir=${userData}`, workspace],
     reuseMachineInstall: Boolean(process.env.VSCODE_E2E_EXECUTABLE),
     vscodeExecutablePath: vscodeExecutablePath()
   });

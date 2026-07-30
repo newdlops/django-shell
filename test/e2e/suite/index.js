@@ -5,6 +5,7 @@ const childProcess = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const vscode = require("vscode");
+const { assertModelQueryBuilderWebview } = require("./modelQueryBuilderWebview.js");
 const { assertPythonCellBehavior } = require("./pythonCellBehavior.js");
 const { assertWorkbenchModelLanguageSelection } = require("./workbenchOverlayModelLanguage.js");
 
@@ -14,6 +15,8 @@ async function run() {
   assert.ok(extension, "Django Shell extension should be loaded in the extension host.");
   await writePreActivationStaleOverlayFiles();
   await extension.activate();
+  await assertModelQueryBuilderWebview(extension);
+  if (process.env.DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY === "1") { return; }
   await vscode.commands.executeCommand("djangoShell.openConsole");
   const opened = await waitForSnapshot((snapshot) => snapshot.panelOpen && snapshot.hasEditorAnchor);
   assert.equal(opened.panelVisible, true);
