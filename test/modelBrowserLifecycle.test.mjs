@@ -1,6 +1,7 @@
 // Source guards for console progress and model browser lifecycle behavior.
 
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import test from "node:test";
 import { readComposedBackendSource } from "./backendComposedSourceHelper.mjs";
@@ -14,6 +15,170 @@ const modelCatalogSource = fs.readFileSync(new URL("../src/modelCatalog.ts", imp
 const notebookPtySessionSource = fs.readFileSync(new URL("../src/notebookPtySession.ts", import.meta.url), "utf8");
 const overlaySource = fs.readFileSync(new URL("../src/workbenchOverlay.ts", import.meta.url), "utf8");
 const pythonBackendSource = readComposedBackendSource();
+const require = createRequire(import.meta.url);
+
+/** Loads the compiled browser with a minimal Webview API fixture for lifecycle-only E2E harness tests. */
+function loadBrowserHarness() {
+  const Module = require("node:module");
+  const originalLoad = Module._load;
+  let receiveMessage;
+  const posted = [];
+  const panel = {
+    dispose() {},
+    onDidDispose() { return { dispose() {} }; },
+    title: "",
+    webview: {
+      asWebviewUri(value) { return value; },
+      cspSource: "vscode-webview:",
+      html: "",
+      onDidReceiveMessage(listener) { receiveMessage = listener; return { dispose() {} }; },
+      postMessage(message) { posted.push(message); return Promise.resolve(true); }
+    }
+  };
+  const vscode = {
+    EventEmitter: class { constructor() { this.event = () => ({ dispose() {} }); } dispose() {} },
+    Uri: { file: (fsPath) => ({ fsPath, scheme: "file", toString: () => `file://${fsPath}` }) },
+    ViewColumn: { Active: 1 },
+    commands: { executeCommand: async () => undefined, registerCommand: () => ({ dispose() {} }) },
+    window: { createWebviewPanel: () => panel, showQuickPick: async () => undefined, showWarningMessage: async () => undefined }
+  };
+  try {
+    Module._load = function load(request, parent, isMain) { return request === "vscode" ? vscode : originalLoad.call(this, request, parent, isMain); };
+    const modulePath = require.resolve("../out/modelBrowser.js");
+    delete require.cache[modulePath];
+    const browserModule = require(modulePath);
+    return { ModelBrowser: browserModule.ModelBrowser, posted, receive: (message) => receiveMessage(message) };
+  } finally {
+    Module._load = originalLoad;
+  }
+}
+
+/** Returns a read-only data source that lets the test harness reach the webview-ready handshake. */
+function harnessSource() {
+  return {
+    interruptModelQuery: async () => ({ interrupted: false, ok: true }),
+    listModels: async () => ({ models: [], ok: true }),
+    modelAggregate: async () => ({ columns: [], ok: true, orm: "", rows: [], sql: [] }),
+    modelCommit: async () => ({ ok: false }),
+    modelComputed: async () => ({ columns: [], ok: true, orm: "", rows: [], sql: [] }),
+    modelCount: async () => ({ count: 0, ok: true, orm: "", sql: [] }),
+    modelFilterFields: async () => ({ fields: [], ok: true, relations: [] }),
+    modelLookup: async () => ({ columns: [], ok: true, rows: [], sql: [] }),
+    modelQuery: async () => ({ columns: [], ok: true, orm: "", rows: [], sql: [] }),
+    modelRelated: async () => ({ columns: [], hasMore: false, ok: true, orm: "", rows: [], single: false, sql: [] }),
+    modelRows: async () => ({ columns: [], hasMore: false, nextOffset: null, ok: true, orm: "", pk: "id", relations: [], rows: [], sql: [] }),
+    modelSchema: async () => ({ app: "db", columns: [], label: "App user", model: "AppUser", ok: true, pk: "id", relations: [], table: "db_app_user" }),
+    modelTransportInfo: () => ({ active: "tcp", mode: "auto" }),
+    onDidChangeRuntime: () => ({ dispose() {} }),
+    setModelTransport() {}
+  };
+}
+
+/** Loads the DOM-only probe once so each test exercises its public message boundary. */
+async function loadProbe() {
+  return import(new URL("../media/modelQueryBuilderE2eProbe.js", import.meta.url));
+}
+
+/** Runs a probe with isolated global DOM shims and restores them after the assertion. */
+async function withProbeGlobals(overrides, run) {
+  const saved = new Map();
+  for (const [key, value] of Object.entries(overrides)) {
+    saved.set(key, globalThis[key]);
+    globalThis[key] = value;
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) { delete globalThis[key]; } else { globalThis[key] = value; }
+    }
+  }
+}
+
+/** Waits for an asynchronously routed fake-webview message without relying on the harness timeout. */
+async function waitForPosted(messages, type) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const message = messages.find((candidate) => candidate.type === type);
+    if (message) { return message; }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`Missing fake-webview message: ${type}`);
+}
+
+test("Query Builder probe reports bootstrap and wait failures as one correlated terminal result", async () => {
+  const { runModelQueryBuilderE2eProbe } = await loadProbe();
+  const bootstrapMessages = [];
+  await withProbeGlobals({ HTMLSelectElement: { get prototype() { throw new Error("bootstrap failed"); } } }, async () => {
+    await runModelQueryBuilderE2eProbe({ document: {}, postMessage: (message) => bootstrapMessages.push(message), requestId: "bootstrap-request" });
+  });
+  assert.deepEqual(bootstrapMessages, [{ requestId: "bootstrap-request", snapshot: { error: "bootstrap failed", showPickerCalls: 0 }, type: "e2eQueryBuilderProbeResult" }]);
+
+  const timeoutMessages = [];
+  let clock = 0;
+  const examples = ["Aggregate summary", "Correlated Exists", "Chained Formula", "Window RowNumber"].map((label) => ({ click() {}, getAttribute: () => label }));
+  const document = { getElementById: () => undefined, querySelectorAll: () => examples };
+  await withProbeGlobals({ HTMLSelectElement: { prototype: {} }, Date: { now: () => { clock += 1000; return clock; } }, setTimeout: (resolve) => { queueMicrotask(resolve); return 1; } }, async () => {
+    await runModelQueryBuilderE2eProbe({ document, postMessage: (message) => timeoutMessages.push(message), requestId: "wait-request" });
+  });
+  const terminal = timeoutMessages.filter((message) => message.type === "e2eQueryBuilderProbeResult");
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0].requestId, "wait-request");
+  assert.match(terminal[0].snapshot.error, /Timed out waiting for aggregate example controls/);
+});
+
+test("Query Builder probe survives restoration errors without duplicate terminal output", async () => {
+  const { runModelQueryBuilderE2eProbe } = await loadProbe();
+  const messages = [];
+  const selectPrototype = new Proxy({}, { deleteProperty: () => false });
+  await withProbeGlobals({ HTMLSelectElement: { prototype: selectPrototype } }, async () => {
+    await runModelQueryBuilderE2eProbe({ document: { getElementById: () => undefined, querySelectorAll: () => [] }, postMessage: (message) => messages.push(message), requestId: "cleanup-request" });
+  });
+  const terminal = messages.filter((message) => message.type === "e2eQueryBuilderProbeResult");
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0].requestId, "cleanup-request");
+  assert.match(terminal[0].snapshot.error, /Progressive examples are missing or unordered/);
+});
+
+test("Model Browser probe ignores stale and late results while preserving bounded correlated progress", async () => {
+  const harness = loadBrowserHarness();
+  const browser = new harness.ModelBrowser("/extension", harnessSource());
+  const probe = browser.e2eProbeQueryBuilder({ app: "db", model: "AppUser" });
+  await harness.receive({ type: "ready" });
+  const request = await waitForPosted(harness.posted, "e2eQueryBuilderProbe");
+  assert.ok(request.requestId);
+  await harness.receive({ requestId: "stale-request", stage: "ignored", type: "e2eQueryBuilderProbeProgress" });
+  await harness.receive({ requestId: request.requestId, stage: "x".repeat(120), type: "e2eQueryBuilderProbeProgress" });
+  await harness.receive({ requestId: "stale-request", snapshot: { stale: true }, type: "e2eQueryBuilderProbeResult" });
+  await harness.receive({ requestId: request.requestId, snapshot: { settled: true }, type: "e2eQueryBuilderProbeResult" });
+  await harness.receive({ requestId: request.requestId, snapshot: { late: true }, type: "e2eQueryBuilderProbeResult" });
+  assert.deepEqual(await probe, { settled: true });
+  browser.dispose();
+});
+
+test("Model Browser timeout reports the latest bounded stage and elapsed time", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers = [];
+  globalThis.setTimeout = (callback) => { const timer = { callback, cleared: false }; timers.push(timer); return timer; };
+  globalThis.clearTimeout = (timer) => { timer.cleared = true; };
+  try {
+    const harness = loadBrowserHarness();
+    const browser = new harness.ModelBrowser("/extension", harnessSource());
+    const probe = browser.e2eProbeQueryBuilder({ app: "db", model: "AppUser" });
+    await harness.receive({ type: "ready" });
+    const request = await waitForPosted(harness.posted, "e2eQueryBuilderProbe");
+    const latestStage = "assistant-generation-".repeat(6);
+    await harness.receive({ requestId: request.requestId, stage: latestStage, type: "e2eQueryBuilderProbeProgress" });
+    const timeout = timers.findLast((timer) => !timer.cleared);
+    timeout.callback();
+    await assert.rejects(probe, new RegExp(`${latestStage.slice(0, 80)} after \\d+ms`));
+    await harness.receive({ requestId: request.requestId, snapshot: { late: true }, type: "e2eQueryBuilderProbeResult" });
+    browser.dispose();
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
 
 test("debug session restart does not automatically rerun the current cell", () => {
   assert.ok(customConsoleSource.includes("runOnNextDebugSessionStart"));
@@ -43,6 +208,13 @@ test("model browser leaves loading state when the shell is busy or paused in deb
   assert.ok(modelBrowserClientSource.includes("function renderBusy"));
   assert.ok(modelCatalogSource.includes("CATALOG_REQUEST_TIMEOUT_MS"));
   assert.ok(modelCatalogSource.includes("model.catalog.timeout"));
+});
+
+test("strictly parsed assistant generation is the only path that adopts draft revision state", () => {
+  const handler = modelBrowserSource.slice(modelBrowserSource.indexOf("private async handleMessage"), modelBrowserSource.indexOf("if (typeof message.pageSize"));
+  assert.ok(handler.includes("const assistantMessage = parseQueryAssistantMessage(message)"));
+  assert.ok(handler.indexOf("assistantMessage?.type === \"generateQueryAssistantSuggestion\"") < handler.indexOf("this.acceptRecipeRevision(assistantMessage.revision)"));
+  assert.equal(handler.includes("this.acceptRecipeRevision(message.revision)"), false);
 });
 
 test("model catalog refresh survives busy shells and debug pauses", () => {

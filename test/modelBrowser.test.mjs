@@ -12,13 +12,27 @@ test("serializes non-primitive cells into JSON-safe tagged values", { skip: !PYT
   const payload = runBackend([
     "import datetime, decimal, uuid, json",
     "cell = mod._browse_cell",
+    "class LoadedPropertyValue:",
+    "    def __init__(self):",
+    "        self.z = [3, {'b': 2, 'a': 1}]",
+    "        self.a = 'x' * 200",
+    "        self._private = 'hidden'",
+    "        self.unsupported = object()",
+    "    @property",
+    "    def must_not_load(self):",
+    "        raise AssertionError('must not load')",
+    "class PropertyOwner:",
+    "    @property",
+    "    def loaded_value(self):",
+    "        return LoadedPropertyValue()",
     "out = {",
     "  'none': cell(None), 'int': cell(7), 'str': cell('x'), 'bool': cell(True),",
     "  'decimal': cell(decimal.Decimal('1.50')),",
     "  'date': cell(datetime.date(2026, 6, 3))['t'],",
     "  'uuid': cell(uuid.UUID('12345678123456781234567812345678'))['t'],",
     "  'bytes': cell(b'abcdef')['t'], 'bytes_len': cell(b'abcdef')['len'],",
-    "  'json': cell({'a': 1})['t'],",
+    "  'json': cell({'a': 1})['t'], 'object': cell(PropertyOwner().loaded_value),",
+    "  'fallback': cell(object()),",
     "  'order_default': mod._browse_order(None, ['id', 'name'], 'id'),",
     "  'order_desc': mod._browse_order([{'field': 'name', 'desc': True}], ['id', 'name'], 'id'),",
     "  'order_reject': mod._browse_order([{'field': 'evil; drop'}], ['id'], 'id'),",
@@ -34,6 +48,10 @@ test("serializes non-primitive cells into JSON-safe tagged values", { skip: !PYT
   assert.equal(payload.bytes, "bytes");
   assert.equal(payload.bytes_len, 6);
   assert.equal(payload.json, "json");
+  assert.equal(payload.object.t, "json");
+  assert.deepEqual(JSON.parse(payload.object.v), { a: `${"x".repeat(117)}...`, z: [3, { a: 1, b: 2 }] });
+  assert.ok(payload.object.v.length <= 400);
+  assert.equal(payload.fallback.t, "repr");
   assert.deepEqual(payload.order_default, ["id"]);
   assert.deepEqual(payload.order_desc, ["-name"]);
   assert.deepEqual(payload.order_reject, ["id"]);

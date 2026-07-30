@@ -2,7 +2,7 @@
   "name": "django-shell",
   "displayName": "Django Shell",
   "description": "A custom UI Django shell console for VS Code. The notebook frontend is deprecated.",
-  "version": "1.1.1000032",
+  "version": "1.1.1000047",
   "publisher": "newdlops",
   "license": "UNLICENSED",
   "icon": "media/icon.png",
@@ -622,6 +622,70 @@
           "minimum": 0,
           "markdownDescription": "Hard timeout for custom ORM queries in milliseconds. Django Shell interrupts the query when this limit is reached. Set to `0` to disable the automatic timeout."
         },
+        "djangoShell.queryAssistant.claudeCommand": {
+          "type": "string",
+          "default": "claude",
+          "markdownDescription": "Claude Code executable name or path. Its existing local CLI credentials and configuration are reused."
+        },
+        "djangoShell.queryAssistant.provider": {
+          "type": "string",
+          "scope": "resource",
+          "enum": ["claude", "codex"],
+          "default": "claude",
+          "markdownDescription": "Preferred local Query Builder AI Assist provider."
+        },
+        "djangoShell.queryAssistant.claudeAutoUpdateModel": {
+          "type": "boolean",
+          "scope": "resource",
+          "default": true,
+          "markdownDescription": "Follow Claude Code's effective default/latest model by omitting --model. The retained manual model is not cleared."
+        },
+        "djangoShell.queryAssistant.claudeModel": {
+          "type": "string",
+          "scope": "resource",
+          "default": "",
+          "maxLength": 160,
+          "markdownDescription": "Optional pinned Claude Code model when automatic model updates are off."
+        },
+        "djangoShell.queryAssistant.claudeReasoningEffort": {
+          "type": "string",
+          "scope": "resource",
+          "enum": ["", "low", "medium", "high", "xhigh", "max", "ultra"],
+          "default": "",
+          "markdownDescription": "Optional Claude Code reasoning effort. Empty uses the provider CLI default and omits the override."
+        },
+        "djangoShell.queryAssistant.codexCommand": {
+          "type": "string",
+          "default": "codex",
+          "markdownDescription": "Codex executable name or path. Codex runs read-only in the current workspace and reuses its local CLI credentials and configuration."
+        },
+        "djangoShell.queryAssistant.codexAutoUpdateModel": {
+          "type": "boolean",
+          "scope": "resource",
+          "default": true,
+          "markdownDescription": "Follow Codex's effective default/latest model by omitting --model. The retained manual model is not cleared."
+        },
+        "djangoShell.queryAssistant.codexModel": {
+          "type": "string",
+          "scope": "resource",
+          "default": "",
+          "maxLength": 160,
+          "markdownDescription": "Optional pinned Codex model when automatic model updates are off."
+        },
+        "djangoShell.queryAssistant.codexReasoningEffort": {
+          "type": "string",
+          "scope": "resource",
+          "enum": ["", "low", "medium", "high", "xhigh", "max", "ultra"],
+          "default": "",
+          "markdownDescription": "Optional Codex reasoning effort. Empty uses the provider CLI default and omits the override."
+        },
+        "djangoShell.queryAssistant.timeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 1000,
+          "maximum": 600000,
+          "markdownDescription": "Maximum local Query Builder assistant request duration in milliseconds."
+        },
         "djangoShell.modelBrowser.transport": {
           "type": "string",
           "enum": ["auto", "tcp", "pty", "orm"],
@@ -665,6 +729,7 @@
     "vscode:prepublish": "npm run compile",
     "test": "npm run compile && node --test test/*.test.mjs",
     "test:e2e": "npm run compile && node test/e2e/run.mjs",
+    "test:e2e:model-browser": "npm run compile && node test/e2e/modelBrowserRun.mjs",
     "check": "npm run check:guidelines && npm run test",
     "package": "npm run check && npx --yes @vscode/vsce package",
     "publish": "npm run check && npm run test:e2e && npx --yes @vscode/vsce publish"

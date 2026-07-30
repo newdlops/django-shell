@@ -59,9 +59,9 @@ var KEYWORDS = /* @__PURE__ */ new Set([
 var TOKEN = /('(?:[^']|'')*')|("(?:[^"]|"")*")|(\d+(?:\.\d+)?)|(%\(\w+\)s|%s|\$\d+|\?)|([A-Za-z_][A-Za-z0-9_$]*)|(\s+)|([^\s])/g;
 var CLAUSE = /\s+\b(FROM|WHERE|GROUP BY|HAVING|ORDER BY|LIMIT|OFFSET|UNION ALL|UNION|INNER JOIN|LEFT OUTER JOIN|LEFT JOIN|RIGHT JOIN|CROSS JOIN|JOIN|RETURNING)\b/gi;
 function formatSqlText(sql) {
-  let text = String(sql || "").replace(/\s+/g, " ").trim();
-  text = text.replace(CLAUSE, "\n$1");
-  const lines = text.split("\n");
+  let text2 = String(sql || "").replace(/\s+/g, " ").trim();
+  text2 = text2.replace(CLAUSE, "\n$1");
+  const lines = text2.split("\n");
   const head = lines[0].match(/^(SELECT(?:\s+DISTINCT)?)\s+([\s\S]*)$/i);
   if (head) {
     lines[0] = `${head[1]}
@@ -70,10 +70,10 @@ function formatSqlText(sql) {
   return lines.join("\n");
 }
 function highlightSqlInto(parent, sql) {
-  const text = formatSqlText(sql);
+  const text2 = formatSqlText(sql);
   let match;
   TOKEN.lastIndex = 0;
-  while ((match = TOKEN.exec(text)) !== null) {
+  while ((match = TOKEN.exec(text2)) !== null) {
     if (match[6]) {
       parent.appendChild(document.createTextNode(match[6]));
       continue;
@@ -147,11 +147,11 @@ var editorSequence = 0;
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-function parseEditableArray(column, text) {
+function parseEditableArray(column, text2) {
   if (!column || column.type !== "ArrayField" && column.type !== "JSONField") {
     return void 0;
   }
-  const source = String(text ?? "").trim();
+  const source = String(text2 ?? "").trim();
   if (!source && column.type === "ArrayField") {
     return { items: [], nullValue: true };
   }
@@ -187,22 +187,22 @@ function inputText(value) {
   }
   return String(value ?? "");
 }
-function coerceInput(text, sample, fieldType = "") {
+function coerceInput(text2, sample, fieldType = "") {
   if (fieldType === "BooleanField" || typeof sample === "boolean") {
-    return text === "" ? null : text === "true";
+    return text2 === "" ? null : text2 === "true";
   }
   if (NUMERIC_FIELD.test(fieldType) || typeof sample === "number") {
-    const numeric = Number(text);
-    return text.trim() !== "" && Number.isFinite(numeric) ? numeric : text;
+    const numeric = Number(text2);
+    return text2.trim() !== "" && Number.isFinite(numeric) ? numeric : text2;
   }
   if (sample === null || typeof sample === "object") {
     try {
-      return JSON.parse(text);
+      return JSON.parse(text2);
     } catch {
-      return text;
+      return text2;
     }
   }
-  return text;
+  return text2;
 }
 function defaultItem(column, shape, items) {
   if (shape.kind === "object") {
@@ -230,11 +230,11 @@ function defaultItem(column, shape, items) {
   }
   return "";
 }
-function element(tag, className = "", text = "") {
+function element(tag, className = "", text2 = "") {
   const node = document.createElement(tag);
   node.className = className;
-  if (text !== "") {
-    node.textContent = text;
+  if (text2 !== "") {
+    node.textContent = text2;
   }
   return node;
 }
@@ -257,10 +257,10 @@ function scalarSuggestions(items) {
     if (item === null || typeof item === "object" || typeof item === "boolean") {
       continue;
     }
-    const text = String(item);
-    if (text && !seen.has(text)) {
-      seen.add(text);
-      values.push(text);
+    const text2 = String(item);
+    if (text2 && !seen.has(text2)) {
+      seen.add(text2);
+      values.push(text2);
     }
     if (values.length >= 100) {
       break;
@@ -521,15 +521,15 @@ function openArrayEditor(td, column, start, host) {
 }
 
 // media/gridPin.js
-function togglePin(col, button2, state2, gridwrap) {
+function togglePin(col, button3, state2, gridwrap) {
   if (state2.pinned.has(col)) {
     state2.pinned.delete(col);
-    button2.classList.remove("active");
-    button2.title = "Pin column (freeze left)";
+    button3.classList.remove("active");
+    button3.title = "Pin column (freeze left)";
   } else {
     state2.pinned.add(col);
-    button2.classList.add("active");
-    button2.title = "Unpin column";
+    button3.classList.add("active");
+    button3.title = "Unpin column";
   }
   repaintPins(gridwrap, state2);
 }
@@ -1729,7 +1729,7 @@ function createQueryRunUi(ctx) {
       timer = 0;
     }
   }
-  function text() {
+  function text2() {
     if (!snapshot) {
       return "";
     }
@@ -1784,14 +1784,14 @@ function createQueryRunUi(ctx) {
       }
     } else {
       stop();
-      const message = text();
+      const message = text2();
       if (message) {
         ctx.status.textContent = message;
       }
     }
     if (next?.state && next.state !== announcedState) {
       announcedState = next.state;
-      (next.state === "failed" ? ctx.announcer?.announceError : ctx.announcer?.announceStatus)?.(text());
+      (next.state === "failed" ? ctx.announcer?.announceError : ctx.announcer?.announceStatus)?.(text2());
     }
   }
   function updateStatus() {
@@ -1800,7 +1800,7 @@ function createQueryRunUi(ctx) {
       return;
     }
     lastSecond = second;
-    ctx.status.textContent = text();
+    ctx.status.textContent = text2();
   }
   function successText(rowCount) {
     const seconds = Math.max(0, Number(snapshot?.elapsedMs) || 0) / 1e3;
@@ -1990,8 +1990,8 @@ function renderBrowserError({ create, grid, message, onOpenConsole, onRetry, sta
   return detail;
 }
 function conciseError(message) {
-  const text = String(message || "Django Shell could not load this result.").split(/\r?\n/)[0].replace(/^[\w.]+(?:Error|Exception):\s*/, "").trim();
-  return text.length <= 220 ? text || "Django Shell could not load this result." : `${text.slice(0, 217)}...`;
+  const text2 = String(message || "Django Shell could not load this result.").split(/\r?\n/)[0].replace(/^[\w.]+(?:Error|Exception):\s*/, "").trim();
+  return text2.length <= 220 ? text2 || "Django Shell could not load this result." : `${text2.slice(0, 217)}...`;
 }
 
 // media/gridQueryPopover.js
@@ -2559,9 +2559,9 @@ function createQueryRecipeStore(initialRecipe) {
   }
   function checkpoint(options = {}) {
     const group = options.group;
-    const text = options.mode === "text";
+    const text2 = options.mode === "text";
     const now = Date.now();
-    const coalesce = text && group && history.pendingGroup?.group === group && now - history.pendingGroup.at <= 600;
+    const coalesce = text2 && group && history.pendingGroup?.group === group && now - history.pendingGroup.at <= 600;
     if (!coalesce) {
       history.past.push(cloneQueryRecipe(snapshot.draft));
       if (history.past.length > historyLimit) {
@@ -2569,7 +2569,7 @@ function createQueryRecipeStore(initialRecipe) {
       }
       history.future = [];
     }
-    history.pendingGroup = text && group ? { at: now, group } : void 0;
+    history.pendingGroup = text2 && group ? { at: now, group } : void 0;
     setHistoryFlags();
   }
   function clearHistory() {
@@ -2696,6 +2696,93 @@ function createQueryRecipeStore(initialRecipe) {
   };
 }
 
+// media/gridQuerySelect.js
+function normalizeQuerySelectOptions(options, current, { unavailableLabel = "Unavailable field" } = {}) {
+  const normalizedCurrent = current == null ? "" : String(current);
+  const seen = /* @__PURE__ */ new Set();
+  const normalized = [];
+  for (const option of options || []) {
+    const value = option?.value == null ? "" : String(option.value);
+    if (seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    normalized.push({ description: option?.description == null ? "" : String(option.description), disabled: Boolean(option?.disabled), group: option?.group == null || option.group === "" ? "" : String(option.group), label: option?.label == null ? value : String(option.label), value });
+  }
+  if (normalizedCurrent && !seen.has(normalizedCurrent)) {
+    normalized.push({ description: "", disabled: true, group: "Unavailable", label: `${unavailableLabel}: ${normalizedCurrent}`, value: normalizedCurrent });
+  }
+  return normalized;
+}
+function createQuerySelect({ allowEmpty = false, ariaLabel, className = "", dataset, disabled = false, el: el2, onChange, options = [], unavailableLabel, value } = {}) {
+  const records = normalizeQuerySelectOptions(options, value, { unavailableLabel });
+  const node = el2("select", { ariaLabel, className: ["query-native-select", className].filter(Boolean).join(" ") });
+  node.disabled = Boolean(disabled);
+  Object.assign(node.dataset, dataset || {});
+  const allowlist = new Map(records.map((record) => [record.value, record]));
+  const groups = /* @__PURE__ */ new Map();
+  const ungrouped = [];
+  for (const record of records) {
+    if (!record.group) {
+      ungrouped.push(record);
+      continue;
+    }
+    if (!groups.has(record.group)) {
+      groups.set(record.group, []);
+    }
+    groups.get(record.group).push(record);
+  }
+  function appendOption(parent, record) {
+    const option = el2("option", { title: record.description, value: record.value }, record.label);
+    option.disabled = record.disabled;
+    parent.appendChild(option);
+  }
+  for (const record of ungrouped) {
+    appendOption(node, record);
+  }
+  for (const [group, groupRecords] of groups) {
+    const optgroup = el2("optgroup", { label: group });
+    for (const record of groupRecords) {
+      appendOption(optgroup, record);
+    }
+    node.appendChild(optgroup);
+  }
+  const current = value == null ? "" : String(value);
+  const initial = allowlist.has(current) ? current : allowlist.has("") ? "" : records.find((record) => !record.disabled)?.value;
+  node.value = initial === void 0 ? "" : initial;
+  let lastValidValue = node.value;
+  function updateTitle(selected) {
+    node.title = selected?.description || "";
+  }
+  updateTitle(allowlist.get(lastValidValue));
+  function handleChange() {
+    const selected = allowlist.get(node.value);
+    if (!selected || selected.disabled || !allowEmpty && selected.value === "") {
+      node.value = lastValidValue;
+      return;
+    }
+    lastValidValue = selected.value;
+    updateTitle(selected);
+    onChange?.(selected.value);
+  }
+  node.addEventListener("change", handleChange);
+  return {
+    /** Removes this select's owned event listener. */
+    destroy() {
+      node.removeEventListener("change", handleChange);
+    },
+    /** Focuses the native select. */
+    focus() {
+      node.focus?.();
+    },
+    node,
+    /** Returns the normalized active option record. */
+    selectedOption() {
+      return allowlist.get(node.value);
+    }
+  };
+}
+
 // media/gridQueryScalarEditor.js
 var NUMERIC_TYPES = /Integer|Float|Decimal|AutoField/;
 var EXTRACT_LOOKUPS = /* @__PURE__ */ new Set(["year", "quarter", "month", "week_day", "day", "hour", "minute", "second"]);
@@ -2791,6 +2878,10 @@ function lookupsForField(field, allowed = Object.keys(LOOKUP_LABELS)) {
   }
   return names.filter((name) => available.has(name));
 }
+function defaultLookup(field, allowed) {
+  const lookups = lookupsForField(field, allowed);
+  return TEXT_TYPES.test(String(field?.type || "")) && lookups.includes("icontains") ? "icontains" : lookups.includes("exact") ? "exact" : lookups[0] || "";
+}
 function rhsKindsFor({ context = "where", field, lookup } = {}) {
   if (!lookup || VALUE_ONLY_LOOKUPS.has(lookup)) {
     return ["literal"];
@@ -2832,7 +2923,7 @@ function createPredicateValueEditor({ context, el: el2, field, lookup, onChange,
     onChange?.(next);
   }
   function fieldReference(kindName, options) {
-    const picker = createGridCombobox({ el: el2, label: kindName === "outerField" ? "Outer field" : "Compare to field", onChange: (path) => emit({ kind: kindName, path }), options: [{ label: "Choose field", value: "" }, ...options.map((entry2) => ({ description: entry2.type || "", label: entry2.label || entry2.path, value: entry2.path }))], popoverLayer, value: rhs.path || "" });
+    const picker = createQuerySelect({ ariaLabel: kindName === "outerField" ? "Outer field" : "Compare to field", el: el2, onChange: (path) => emit({ kind: kindName, path }), options: [{ disabled: true, label: "Choose field", value: "" }, ...options.map((entry2) => ({ description: entry2.type || "", group: "Fields", label: entry2.label || entry2.path, value: entry2.path }))], value: rhs.path || "" });
     node.appendChild(picker.node);
     return picker;
   }
@@ -2973,29 +3064,29 @@ function createQueryMetadataService({ post, onChange } = {}) {
       publish(normalized);
       return Promise.reject(new Error(error));
     }
-    const requestId = `query-meta-${sequence += 1}`;
+    const requestId2 = `query-meta-${sequence += 1}`;
     let rejectRequest;
     let resolveRequest;
     const promise = new Promise((resolve, reject) => {
       resolveRequest = resolve;
       rejectRequest = reject;
     });
-    pending.set(requestId, { key, reject: rejectRequest, resolve: resolveRequest, target: normalized });
-    cache.set(key, { error: void 0, pending: true, promise, requestId, target: normalized, tree: void 0 });
-    post({ app: normalized.app, model: normalized.model, requestId, type: "filterFields" });
+    pending.set(requestId2, { key, reject: rejectRequest, resolve: resolveRequest, target: normalized });
+    cache.set(key, { error: void 0, pending: true, promise, requestId: requestId2, target: normalized, tree: void 0 });
+    post({ app: normalized.app, model: normalized.model, requestId: requestId2, type: "filterFields" });
     publish(normalized);
     return promise;
   }
   function onMessage(message) {
-    const requestId = message?.requestId;
-    if (typeof requestId !== "string" || !requestId.startsWith("query-meta-")) {
+    const requestId2 = message?.requestId;
+    if (typeof requestId2 !== "string" || !requestId2.startsWith("query-meta-")) {
       return false;
     }
-    const request = pending.get(requestId);
+    const request = pending.get(requestId2);
     if (!request) {
       return true;
     }
-    pending.delete(requestId);
+    pending.delete(requestId2);
     const tree = treeFromMessage(message);
     if (tree) {
       cache.set(request.key, { error: void 0, pending: false, target: request.target, tree });
@@ -3024,90 +3115,180 @@ function createQueryMetadataService({ post, onChange } = {}) {
 function fieldOption(field) {
   const name = String(field?.name || field?.path || "");
   const label = String(field?.label || "").trim();
-  return { description: [field?.type, field?.null ? "Nullable" : "Required", field?.helpText].filter(Boolean).join(" \xB7 "), group: "Fields", keywords: `${name} ${label}`, label: label && label !== name ? `${label} \u2014 ${name}` : name, value: `field:${name}` };
+  return { description: [field?.type, field?.null ? "Nullable" : "Required", field?.helpText].filter(Boolean).join(" \xB7 "), group: "Fields", label: label && label !== name ? `${label} \u2014 ${name}` : name, value: `field:${name}` };
 }
 function relationOption(relation) {
   const name = String(relation?.name || "");
   const target = String(relation?.target || "related model");
   const kind = String(relation?.kind || "relation").replace(/[_-]/g, " ");
-  return { description: `${kind}. Choose to continue into the related model.`, group: "Relations", keywords: `${name} ${relation?.label || ""} ${target}`, label: `${relation?.label || name} \u2192 ${target}`, value: `relation:${name}` };
+  return { description: `${kind}. Choose to continue into the related model.`, group: "Relations", label: `${relation?.label || name} \u2192 ${target}`, value: `relation:${name}` };
 }
-function createQueryFieldPicker({ ariaLabel = "Choose field", computed = [], current = "", el: el2, metadata, onChange, source, context = "where", allowRelationTerminal = false, popoverLayer } = {}) {
+function relationTerminalOption(relation) {
+  const name = String(relation?.name || "");
+  return { description: "Select this relationship itself for null or presence checking.", group: "Relationship checks", label: `Check relationship ${relation?.label || name}`, value: `relationTerminal:${name}` };
+}
+function targetFromLabel(label, source) {
+  const value = String(label || "");
+  const boundary = value.lastIndexOf(".");
+  return boundary > 0 ? { app: value.slice(0, boundary), model: value.slice(boundary + 1) } : { app: source?.app || "", model: value };
+}
+function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Choose field", computed = [], context = "where", controlKey = "", current = "", el: el2, metadata, onChange, source } = {}) {
   const node = el2("div", { className: "query-field-picker", dataset: { context } });
   const segments = el2("div", { className: "query-field-picker-segments" });
   const status = el2("p", { className: "query-control-help", role: "status" });
   node.append(segments, status);
   let disposed = false;
+  let generation = 0;
+  let drillPath = "";
   let path = String(current || "");
   let controllers = [];
-  let target = source;
   function disposeControllers() {
     for (const controller of controllers) {
-      controller.dispose?.();
+      controller.destroy?.();
     }
     controllers = [];
+  }
+  function currentGeneration(value) {
+    return !disposed && generation === value;
   }
   function loadTree(model, retry = false) {
     const state2 = metadata?.getState?.(model);
     if (state2?.tree) {
       return Promise.resolve(state2.tree);
     }
+    if (state2?.error && !retry) {
+      return Promise.reject(state2.error);
+    }
     return (retry ? metadata?.retry?.(model) : metadata?.loadTree?.(model)) || Promise.reject(new Error("Field metadata is unavailable."));
   }
-  function emit(next) {
+  function appendState(label, index) {
+    const picker = createQuerySelect({ ariaLabel: index === 0 ? ariaLabel : "Related field", disabled: true, el: el2, options: [{ disabled: true, label, value: "" }] });
+    controllers.push(picker);
+    segments.appendChild(picker.node);
+    return picker;
+  }
+  function emit(next, kind, descriptor) {
+    drillPath = "";
     path = String(next || "");
-    onChange?.(path);
+    onChange?.(path, kind, descriptor);
+  }
+  function selectionFor(selected, choices, terminal, traversing) {
+    if (!selected) {
+      return "";
+    }
+    const terminalValue = `relationTerminal:${selected}`;
+    if (terminal && !traversing && choices.some((choice) => choice.value === terminalValue)) {
+      return terminalValue;
+    }
+    return choices.some((choice) => choice.value === `relation:${selected}`) ? `relation:${selected}` : choices.some((choice) => choice.value.endsWith(`:${selected}`)) ? choices.find((choice) => choice.value.endsWith(`:${selected}`)).value : `unavailable:${selected}`;
+  }
+  function setTerminal(field) {
+    status.textContent = [field?.type, field?.null ? "Nullable" : "Required", field?.helpText].filter(Boolean).join(" \xB7 ");
   }
   async function render() {
+    const renderGeneration = ++generation;
     disposeControllers();
     segments.replaceChildren();
     status.textContent = "";
-    if (!target?.app || !target?.model) {
+    if (!source?.app || !source?.model) {
+      appendState("Fields unavailable", 0);
       status.textContent = "Field details are unavailable.";
       return;
     }
-    try {
-      const parts = path ? path.split("__") : [];
-      let model = target;
-      let prefix = [];
-      let index = 0;
-      while (!disposed) {
-        const tree = await loadTree(model);
-        if (disposed) {
+    const parts = path ? path.split("__") : [];
+    let model = source;
+    let prefix = [];
+    for (let index = 0; currentGeneration(renderGeneration); index += 1) {
+      const state2 = metadata?.getState?.(model);
+      const loading = !state2?.tree ? appendState("Loading fields\u2026", index) : void 0;
+      let tree = state2?.tree;
+      try {
+        if (!tree) {
+          tree = await loadTree(model);
+        }
+      } catch {
+        if (!currentGeneration(renderGeneration)) {
           return;
         }
-        const options = rootMetadataOptions(tree);
-        const choices = [...options.fields.map(fieldOption)];
-        if (index === 0) {
-          choices.push(...computed.filter((item) => item?.enabled !== false && item?.alias).map((item) => ({ description: "Calculated value available in this query.", group: "Calculated values", label: `calculated value ${item.alias}`, value: `computed:${item.alias}` })));
+        const errorGeneration = renderGeneration;
+        loading?.node?.remove?.();
+        if (loading) {
+          controllers = controllers.filter((controller) => controller !== loading);
+          loading.destroy?.();
         }
-        choices.push(...options.relations.map(relationOption));
-        const selected = parts[index] || "";
-        if (selected && !choices.some((choice) => choice.value.endsWith(`:${selected}`))) {
-          choices.unshift({ description: "This field is not present in the current model metadata. Choose a replacement.", disabled: true, disabledReason: "Unavailable field", group: "Unavailable", label: `Unavailable field: ${selected}`, value: `unavailable:${selected}` });
-        }
-        const picker = createCombobox({ ariaLabel: index === 0 ? ariaLabel : `Related field after ${prefix.join("__")}`, el: el2, options: [{ label: index === 0 ? "Choose field or calculated value" : "Choose related field", value: "" }, ...choices], popoverLayer, value: selected ? choices.find((choice) => choice.value.endsWith(`:${selected}`))?.value || `unavailable:${selected}` : "", onChange: (value) => select(value, index, model, prefix, options) });
-        controllers.push(picker);
-        segments.appendChild(picker.node);
-        if (!selected) {
-          return;
-        }
-        const relation = options.relations.find((item) => item.name === selected);
-        if (!relation) {
-          return;
-        }
-        prefix = [...prefix, selected];
-        model = targetFromLabel2(relation.target);
-        index += 1;
-      }
-    } catch {
-      if (disposed) {
+        appendState("Fields unavailable", index);
+        status.replaceChildren("Field details could not be loaded. ");
+        const retry = el2("button", { type: "button" }, "Retry");
+        retry.addEventListener("click", () => {
+          if (retry.disabled || !currentGeneration(errorGeneration)) {
+            return;
+          }
+          retry.disabled = true;
+          const retryGeneration = ++generation;
+          Promise.resolve(loadTree(model, true)).catch(() => void 0).then(() => {
+            if (currentGeneration(retryGeneration)) {
+              render();
+            }
+          });
+        });
+        status.appendChild(retry);
         return;
       }
-      status.replaceChildren("Field details could not be loaded. ");
-      const retry = el2("button", { type: "button" }, "Retry");
-      retry.addEventListener("click", () => render());
-      status.appendChild(retry);
+      if (!currentGeneration(renderGeneration)) {
+        return;
+      }
+      const options = rootMetadataOptions(tree);
+      const choices = [...options.fields.map(fieldOption)];
+      if (index === 0) {
+        choices.push(...computed.filter((item) => item?.enabled !== false && item?.alias).map((item) => ({ description: "Calculated value available in this query.", group: "Calculated values", label: `calculated value ${item.alias}`, value: `computed:${item.alias}` })));
+      }
+      choices.push(...options.relations.flatMap((relation2) => allowRelationTerminal ? [relationOption(relation2), relationTerminalOption(relation2)] : [relationOption(relation2)]));
+      if (!choices.length) {
+        loading?.node?.remove?.();
+        if (loading) {
+          controllers = controllers.filter((controller) => controller !== loading);
+          loading.destroy?.();
+        }
+        appendState("No selectable fields.", index);
+        return;
+      }
+      const selected = parts[index] || "";
+      if (selected && !choices.some((choice) => choice.value.endsWith(`:${selected}`))) {
+        choices.push({ disabled: true, group: "Unavailable", label: `Unavailable field: ${selected}`, value: `unavailable:${selected}` });
+      }
+      const picker = createQuerySelect({ ariaLabel: index === 0 ? ariaLabel : `Related field after ${prefix.join("__")}`, dataset: controlKey ? { queryControlKey: `${controlKey}-${index}` } : {}, el: el2, onChange: (value) => select(value, index, model, prefix, options), options: [{ disabled: true, label: index === 0 ? "Choose field or calculated value" : "Choose related field", value: "" }, ...choices], value: selectionFor(selected, choices, allowRelationTerminal && parts.length === index + 1, drillPath === [...prefix, selected].join("__")) });
+      if (loading) {
+        loading.node?.replaceWith?.(picker.node);
+        controllers = controllers.filter((controller) => controller !== loading);
+        loading.destroy?.();
+      } else {
+        segments.appendChild(picker.node);
+      }
+      controllers.push(picker);
+      if (!selected) {
+        return;
+      }
+      const relation = options.relations.find((item) => item.name === selected);
+      const field = drillPath === [...prefix, selected].join("__") ? void 0 : options.fields.find((item) => item.name === selected);
+      if (field) {
+        if (parts.length > index + 1) {
+          appendState(`Unavailable field: ${parts.slice(index + 1).join("__")}`, index + 1);
+          return;
+        }
+        setTerminal(field);
+        return;
+      }
+      if (!relation) {
+        if (parts.length > index + 1) {
+          appendState(`Unavailable field: ${parts.slice(index + 1).join("__")}`, index + 1);
+        }
+        return;
+      }
+      if (allowRelationTerminal && parts.length === index + 1 && drillPath !== parts.slice(0, index + 1).join("__")) {
+        return;
+      }
+      prefix = [...prefix, selected];
+      model = targetFromLabel(relation.target, source);
     }
   }
   function select(value, index, model, prefix, options) {
@@ -3116,40 +3297,133 @@ function createQueryFieldPicker({ ariaLabel = "Choose field", computed = [], cur
       return;
     }
     if (kind === "computed") {
-      emit(selected);
+      const descriptor = index === 0 ? computed.find((item) => item?.enabled !== false && item.alias === selected) : void 0;
+      if (descriptor) {
+        emit(selected, kind, descriptor);
+      }
+      return;
+    }
+    if (kind === "relationTerminal") {
+      const relation = options.relations.find((item) => item.name === selected);
+      if (relation) {
+        emit([...prefix, selected].join("__"), kind, relation);
+      }
       return;
     }
     if (kind === "relation") {
       const relation = options.relations.find((item) => item.name === selected);
-      if (allowRelationTerminal && relation) {
-        emit([...prefix, selected].join("__"));
-      } else {
+      if (relation) {
         path = [...prefix, selected].join("__");
+        drillPath = path;
         render();
       }
       return;
     }
-    emit([...prefix, selected].join("__"));
-  }
-  function targetFromLabel2(label) {
-    const value = String(label || "");
-    const index = value.lastIndexOf(".");
-    return index > 0 ? { app: value.slice(0, index), model: value.slice(index + 1) } : { app: source.app, model: value };
+    const field = options.fields.find((item) => item.name === selected);
+    if (kind === "field" && field) {
+      emit([...prefix, selected].join("__"), kind, field);
+    }
   }
   render();
-  return { dispose() {
-    disposed = true;
-    disposeControllers();
-  }, focus() {
-    controllers[0]?.focus?.();
-  }, getPath() {
-    return path;
-  }, getTerminal() {
-    return path.split("__").at(-1) || "";
-  }, node, setCurrent(next) {
-    path = String(next || "");
-    render();
-  } };
+  return {
+    /** Invalidates pending loads and releases native listeners. */
+    dispose() {
+      disposed = true;
+      generation += 1;
+      disposeControllers();
+    },
+    /** Focuses the first native select. */
+    focus() {
+      controllers[0]?.focus?.();
+    },
+    /** Returns the current internal cascade path. */
+    getPath() {
+      return path;
+    },
+    /** Returns the last selected path segment. */
+    getTerminal() {
+      return path.split("__").at(-1) || "";
+    },
+    node,
+    /** Replaces the persisted path and begins a new guarded render. */
+    setCurrent(next) {
+      drillPath = "";
+      path = String(next || "");
+      render();
+    }
+  };
+}
+
+// media/gridQueryRelations.js
+function text(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function parseQueryTarget(value) {
+  const target = text(value);
+  const index = target.lastIndexOf(".");
+  const app = text(target.slice(0, index));
+  const model = text(target.slice(index + 1));
+  return index > 0 && app && model ? { app, model } : void 0;
+}
+function modelTarget(source) {
+  const app = text(source?.target?.app);
+  const model = text(source?.target?.model);
+  return source?.kind === "model" && app && model ? { app, model } : void 0;
+}
+function normalizeRelation(relation) {
+  const name = text(relation?.name);
+  const target = parseQueryTarget(relation?.target);
+  return name && target ? { ...relation, filterField: text(relation?.filterField), name, outerField: text(relation?.outerField), target: `${target.app}.${target.model}` } : void 0;
+}
+function relationHasAutomaticConnection(relation) {
+  return Boolean(text(relation?.filterField) && text(relation?.outerField));
+}
+function relationSourceOption(relation) {
+  const item = normalizeRelation(relation);
+  if (!item) {
+    return void 0;
+  }
+  const kind = text(item.kind).replace(/[_-]/g, " ") || "relation";
+  const cardinality = item.toMany ? "many related rows" : "one related row";
+  const automatic = relationHasAutomaticConnection(item);
+  const label = text(item.label) || item.name;
+  return { description: `${kind}; ${cardinality}; ${item.target}; ${automatic ? "automatic connection" : "automatic connection unavailable"}`, disabled: !automatic, disabledReason: automatic ? "" : "This relation does not provide a safe automatic connection.", keywords: `${item.name} ${label} ${item.target} ${kind} ${cardinality}`, label: `${label} \u2192 ${item.target}`, value: item.name };
+}
+function unavailable(current) {
+  const value = text(current);
+  return value ? { description: "This persisted relation is unavailable from current metadata.", disabled: true, disabledReason: "Unavailable relation", keywords: value, label: `Unavailable relation: ${value}`, value } : void 0;
+}
+function relationSourceState({ current, metadata, owner } = {}) {
+  const state2 = metadata?.getState?.(owner);
+  const tree = state2?.tree;
+  const options = tree ? rootMetadataOptions(tree).relations.map(relationSourceOption).filter(Boolean).filter((option, index, list) => list.findIndex((item) => item.value === option.value) === index) : [];
+  const phase = tree ? options.length ? "ready" : "empty" : state2?.error ? "error" : "loading";
+  const stale = unavailable(current);
+  if (stale && !options.some((option) => option.value === stale.value)) {
+    options.push(stale);
+  }
+  return { error: state2?.error && !tree ? state2.error : "", options, phase };
+}
+function resolveQuerySourceTarget(source, owner, metadata) {
+  const direct = modelTarget(source);
+  if (direct) {
+    return direct;
+  }
+  if (source?.kind !== "relation" || !text(owner?.app) || !text(owner?.model)) {
+    return void 0;
+  }
+  const relationValue = text(source.relation);
+  const relation = rootMetadataOptions(metadata?.getState?.(owner)?.tree).relations.map(normalizeRelation).find((item) => item && (item.name === relationValue || item.filterField === relationValue));
+  return parseQueryTarget(relation?.target);
+}
+function createQuerySourceScope(source, ownerScope, metadata) {
+  const owner = ownerScope?.target || ownerScope?.source;
+  const target = resolveQuerySourceTarget(source, owner, metadata);
+  const fields3 = rootMetadataOptions(metadata?.getState?.(owner)?.tree).fields.map((field) => ({ ...field, path: field.name, role: "field" }));
+  const fallback = (ownerScope?.columns || []).map((field) => ({ ...field, path: field.attname || field.name, role: "field" }));
+  const seen = /* @__PURE__ */ new Set();
+  const outerFields = [...fields3, ...fallback].filter((field) => text(field.path) && !seen.has(field.path) && seen.add(field.path));
+  return { columns: [], computed: [], computedFields: [], outerFields, source: target, target };
 }
 
 // media/gridQueryGuidanceCopy.js
@@ -3246,18 +3520,18 @@ function guidanceForComputedKind(kind) {
 
 // media/gridQueryExplanation.js
 function queryExplanationTokens(value) {
-  const text = String(value || "");
+  const text2 = String(value || "");
   const tokens = [];
   let cursor = 0;
-  for (const match of text.matchAll(/`([^`]+)`/g)) {
+  for (const match of text2.matchAll(/`([^`]+)`/g)) {
     if (match.index > cursor) {
-      tokens.push({ kind: "text", value: text.slice(cursor, match.index) });
+      tokens.push({ kind: "text", value: text2.slice(cursor, match.index) });
     }
     tokens.push({ kind: "code", value: match[1] });
     cursor = match.index + match[0].length;
   }
-  if (cursor < text.length || !tokens.length) {
-    tokens.push({ kind: "text", value: text.slice(cursor) });
+  if (cursor < text2.length || !tokens.length) {
+    tokens.push({ kind: "text", value: text2.slice(cursor) });
   }
   return tokens;
 }
@@ -3265,8 +3539,8 @@ function formatQueryLiteral(value, limit = 80) {
   if (value === null || value === void 0) {
     return "null";
   }
-  const text = typeof value === "string" ? `\u201C${value.replace(/”/g, "\\\u201D").replace(/“/g, "\\\u201C")}\u201D` : String(value);
-  return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1))}\u2026` : text;
+  const text2 = typeof value === "string" ? `\u201C${value.replace(/”/g, "\\\u201D").replace(/“/g, "\\\u201C")}\u201D` : String(value);
+  return text2.length > limit ? `${text2.slice(0, Math.max(0, limit - 1))}\u2026` : text2;
 }
 function describeReference(reference, context = {}) {
   if (reference?.kind === "computed") {
@@ -3369,8 +3643,8 @@ function explainPredicateGroup(group, context = {}) {
     }
     return { state: "empty", text: context.root === false ? "This nested group has no conditions. Add a condition or remove the group." : "No source-row filter. Applying this draft would include every row." };
   }
-  const text = group?.join === "or" ? "At least one condition in this group must match." : "Every condition in this group must match.";
-  return { state: "complete", text: group?.negated ? "Rows that match this whole group will be excluded." : text };
+  const text2 = group?.join === "or" ? "At least one condition in this group must match." : "Every condition in this group must match.";
+  return { state: "complete", text: group?.negated ? "Rows that match this whole group will be excluded." : text2 };
 }
 function explainComputedColumn(item, context = {}) {
   if (!item?.kind) {
@@ -3437,8 +3711,8 @@ function appendDescribedBy(control, id) {
   tokens.add(id);
   control.setAttribute?.("aria-describedby", [...tokens].join(" "));
 }
-function createControlHelp({ control, el: el2, id, text, technical }) {
-  const help = el2("p", { className: "query-control-help", id }, text || "");
+function createControlHelp({ control, el: el2, id, text: text2, technical }) {
+  const help = el2("p", { className: "query-control-help", id }, text2 || "");
   if (technical) {
     help.appendChild(el2("span", { className: "query-technical-detail" }, ` ${technical}`));
   }
@@ -3527,17 +3801,69 @@ function findNode2(value, nodeId) {
   }
   return found;
 }
+function addedComparisonFocus(value, parentId, previousNodeIds) {
+  const group = findGroup2(value, parentId);
+  const added = [...group?.children || []].reverse().find((child) => child.kind === "comparison" && !previousNodeIds?.has(child.nodeId));
+  return added ? { nodeId: added.nodeId, role: "lhs-open" } : void 0;
+}
+function focusAndOpenSelect(select) {
+  if (!select || select.disabled) {
+    return false;
+  }
+  select.focus?.();
+  try {
+    select.showPicker?.();
+  } catch {
+  }
+  return true;
+}
 function fieldsFor(scope, metadata) {
   const target = scope?.target || scope?.source || scope?.modelRef;
   const tree = target ? metadata?.getState?.(target)?.tree : void 0;
   const fromTree = (tree?.fields || []).map((field) => ({ ...field, path: field.name, role: "field" }));
+  const fromRelations = (tree?.relations || []).map((relation) => ({ ...relation, path: relation.name, role: "relation", type: relation.kind || "relation" }));
   const fromColumns = (scope?.columns || []).map((field) => ({ ...field, path: field.attname || field.name, role: "field" }));
   const fromComputed = (scope?.computedFields || scope?.computed || []).filter((field) => field?.enabled !== false && (field?.alias || field?.path)).map((field) => ({ alias: field.alias || field.path, path: field.alias || field.path, role: "computed", type: field.outputType || "" }));
   const seen = /* @__PURE__ */ new Set();
-  return [...fromTree, ...fromColumns, ...fromComputed].filter((field) => field.path && !seen.has(`${field.role}:${field.path}`) && seen.add(`${field.role}:${field.path}`));
+  return [...fromTree, ...fromColumns, ...fromRelations, ...fromComputed].filter((field) => field.path && !seen.has(`${field.role}:${field.path}`) && seen.add(`${field.role}:${field.path}`));
+}
+function fieldSelectionChanges(comparison, field, selectedPath, context) {
+  const relation = field?.role === "relation";
+  const lhs = field?.role === "computed" ? { alias: selectedPath, kind: "computed" } : { kind: "field", path: selectedPath };
+  const previousLookup = comparison?.lookup;
+  const lookup = relation ? "isnull" : lookupsForField(field).includes(previousLookup) && rhsIsCompatible(comparison?.rhs, context, field, previousLookup) ? previousLookup : defaultLookup(field);
+  const rhs = relation ? { kind: "literal", value: previousLookup === "isnull" && typeof comparison?.rhs?.value === "boolean" ? comparison.rhs.value : true } : lookup === previousLookup && rhsIsCompatible(comparison?.rhs, context, field, lookup) ? comparison.rhs : starterRhs(rhsKindsFor({ context, field, lookup })[0] || "literal");
+  return { lhs, lookup, rhs };
 }
 function fieldForPath(path, fields3) {
   return fields3.find((field) => field.path === path) || { path, role: "field", type: "" };
+}
+function persistedFieldForPath(lhs, scope, metadata, fields3) {
+  if (lhs?.kind === "computed") {
+    return fields3.find((field) => field.role === "computed" && field.path === lhs.alias) || { path: lhs.alias, role: "computed", type: "" };
+  }
+  const path = lhs?.kind === "field" ? lhs.path : "";
+  const parts = String(path || "").split("__").filter(Boolean);
+  let target = scope?.target || scope?.source || scope?.modelRef;
+  let tree = metadata?.getState?.(target)?.tree;
+  for (let index = 0; tree && index < parts.length; index += 1) {
+    const segment = parts[index];
+    const field = (tree.fields || []).find((item) => item.name === segment);
+    if (field && index === parts.length - 1) {
+      return { ...field, path, role: "field" };
+    }
+    const relation = (tree.relations || []).find((item) => item.name === segment);
+    if (relation && index === parts.length - 1) {
+      return { ...relation, path, role: "relation", type: relation.kind || "relation" };
+    }
+    if (!relation) {
+      break;
+    }
+    const boundary = String(relation.target || "").lastIndexOf(".");
+    target = boundary > 0 ? { app: relation.target.slice(0, boundary), model: relation.target.slice(boundary + 1) } : void 0;
+    tree = metadata?.getState?.(target)?.tree;
+  }
+  return fieldForPath(path, fields3);
 }
 function issuesFor(validation, nodeId) {
   const source = typeof validation === "function" ? validation() : validation;
@@ -3567,8 +3893,12 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     return findGroup2(getRecipe?.(), rootNodeId) || (getRecipe?.()?.kind === "group" ? getRecipe() : void 0);
   }
   function act(action, focus) {
+    const previousNodeIds = action.type === "ADD_COMPARISON" ? new Set((findGroup2(getRecipe?.(), action.parentId)?.children || []).map((child) => child.nodeId)) : void 0;
     requestedFocus = focus;
     dispatch?.({ ...action, scope: action.scope || actionScope(context) });
+    if (previousNodeIds) {
+      requestedFocus = addedComparisonFocus(getRecipe?.(), action.parentId, previousNodeIds) || focus;
+    }
     const structural = action.type !== "UPDATE_NODE" || action.history?.mode !== "text";
     if (structural) {
       if (requestRender) {
@@ -3611,16 +3941,22 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     } else if (state2?.error && !state2.tree) {
       status.replaceChildren("Field metadata failed. ");
       const retry = el2("button", { type: "button" }, "Retry");
-      retry.addEventListener("click", () => metadata.retry?.(target).catch(() => {
-      }));
+      retry.addEventListener("click", () => {
+        if (retry.disabled) {
+          return;
+        }
+        retry.disabled = true;
+        metadata.retry?.(target).catch(() => {
+        });
+      });
       status.appendChild(retry);
     } else {
       status.textContent = "";
     }
-    renderGroup(group, body, 1);
+    renderGroup(group, body, 1, scope);
     restoreFocus();
   }
-  function renderGroup(group, container, depth) {
+  function renderGroup(group, container, depth, scope) {
     const section = el2("fieldset", { className: "query-predicate-group", dataset: { depth: String(depth), queryNodeId: group.nodeId, role: "predicate-group" } });
     const heading = el2("legend", {}, depth === 1 ? "Conditions" : "Nested conditions");
     const toolbar = el2("div", { className: "query-predicate-toolbar" });
@@ -3649,11 +3985,11 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     const children = el2("div", { className: "query-predicate-children" });
     for (const child of group.children || []) {
       if (child.kind === "group") {
-        renderGroup(child, children, depth + 1);
+        renderGroup(child, children, depth + 1, scope);
       } else if (child.kind === "comparison") {
-        renderComparison(child, children);
+        renderComparison(child, children, scope);
       } else if (child.kind === "existsPredicate") {
-        renderExists(child, children, depth);
+        renderExists(child, children, depth, scope);
       }
     }
     if (!(group.children || []).length) {
@@ -3665,16 +4001,18 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     }
     container.appendChild(section);
   }
-  function renderComparison(comparison, container) {
-    const scope = getScope?.() || {};
+  function renderComparison(comparison, container, scope) {
     const fields3 = fieldsFor(scope, metadata);
     const path = comparison.lhs?.kind === "computed" ? comparison.lhs.alias : comparison.lhs?.kind === "field" ? comparison.lhs.path : "";
-    const field = fieldForPath(path, fields3);
+    const field = persistedFieldForPath(comparison.lhs, scope, metadata, fields3);
     const row = el2("div", { className: "query-predicate-row", dataset: { queryNodeId: comparison.nodeId, role: "comparison" } });
-    const fieldPicker = trackPicker2(createQueryFieldPicker({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], current: path, el: el2, metadata, onChange: (selectedPath) => {
-      const computed = fields3.some((entry2) => entry2.role === "computed" && entry2.path === selectedPath);
-      act({ changes: { lhs: computed ? { alias: selectedPath, kind: "computed" } : { kind: "field", path: selectedPath } }, nodeId: comparison.nodeId, type: "UPDATE_NODE" });
-    }, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: comparison.lookup === "isnull" }));
+    const fieldPicker = trackPicker2(createQueryFieldPicker({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], controlKey: "predicate-lhs-" + comparison.nodeId, current: path, el: el2, metadata, onChange: (selectedPath, kind, descriptor) => {
+      const role = kind === "relationTerminal" ? "relation" : kind === "computed" ? "computed" : "field";
+      const selected = descriptor && (role === "computed" ? fields3.find((entry2) => entry2.role === role && entry2.path === descriptor.alias) : { ...descriptor, path: selectedPath, role });
+      if (selected) {
+        act({ changes: fieldSelectionChanges(comparison, selected, selectedPath, context), nodeId: comparison.nodeId, type: "UPDATE_NODE" });
+      }
+    }, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: true }));
     fieldPicker.node.dataset.focusRole = "lhs";
     const lookups = lookupsForField(field);
     const lookup = nativeSelect(lookups.map((value) => ({ label: LOOKUP_LABELS[value] || value, value })), comparison.lookup, "Comparison");
@@ -3699,17 +4037,38 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     row.appendChild(createMeaningLine({ el: el2, explanation: explainComparison(comparison, { fields: Object.fromEntries(fields3.map((item) => [item.path, item])), issues: issuesFor(validation, comparison.nodeId), metadataState: metadata?.getState?.(scope.target || scope.source)?.pending ? "pending" : "ready", postFilter: context === "postFilter" }), id: `query-meaning-${comparison.nodeId}` }));
     container.appendChild(row);
   }
-  function renderExists(exists, container, depth) {
-    const scope = getScope?.() || {};
+  function renderExists(exists, container, depth, scope) {
+    const owner = scope.target || scope.source;
+    const ownerState = metadata?.getState?.(owner);
+    if (owner && !ownerState?.tree && !ownerState?.pending && !ownerState?.error) {
+      metadata?.loadTree?.(owner).catch(() => {
+      });
+    }
     const row = el2("section", { ariaLabel: "Exists predicate", className: "query-predicate-exists", dataset: { queryNodeId: exists.nodeId, role: "exists" } });
     const source = exists.source || { kind: "relation", relation: "" };
     const type = nativeSelect([{ label: "Relation", value: "relation" }, { label: "Model", value: "model" }], source.kind, "Exists source type");
-    type.addEventListener("change", () => act({ changes: { correlations: [], source: type.value === "model" ? { kind: "model", target: { app: "", model: "" } } : { kind: "relation", relation: "" } }, nodeId: exists.nodeId, type: "UPDATE_NODE" }));
+    type.addEventListener("change", () => act({ changes: { source: type.value === "model" ? { kind: "model", target: { app: "", model: "" } } : { kind: "relation", relation: "" } }, nodeId: exists.nodeId, type: "UPDATE_NODE" }));
     row.append(el2("strong", {}, "Exists"), type);
     if (source.kind === "relation") {
-      const relations = scope.relations || [];
-      const relation = trackPicker2(createGridCombobox({ el: el2, label: "Exists relation", onChange: (value) => act({ changes: { source: { kind: "relation", relation: value } }, nodeId: exists.nodeId, type: "UPDATE_NODE" }), options: [{ label: "Choose relation", value: "" }, ...relations.map((item) => ({ description: `${item.kind || "relation"}. ${item.target || "related model"}`, label: `${item.label || item.name} \u2192 ${item.target || "related model"}`, value: item.queryName || item.name }))], popoverLayer, value: source.relation }));
+      const state2 = relationSourceState({ current: source.relation, metadata, owner: scope.target || scope.source });
+      const stateHelpId = state2.phase === "ready" ? "" : `query-exists-relation-${state2.phase}-${exists.nodeId}`;
+      const relation = trackPicker2(createGridCombobox({ describedBy: stateHelpId, el: el2, label: "Exists relation", onChange: (value) => act({ changes: { source: { kind: "relation", relation: value } }, nodeId: exists.nodeId, type: "UPDATE_NODE" }), options: [{ label: state2.phase === "loading" ? "Loading relations\u2026" : "Choose relation", value: "" }, ...state2.options], popoverLayer, value: source.relation }));
+      relation.setDisabled?.(state2.phase === "loading" || state2.phase === "error", state2.error || "Relation metadata is not ready.");
       row.appendChild(relation.node);
+      if (stateHelpId) {
+        row.appendChild(el2("p", { id: stateHelpId, className: "query-predicate-help", role: "note" }, state2.phase === "error" ? String(state2.error || "Relation metadata could not be loaded.") : state2.phase === "loading" ? "Loading related sources." : "No related sources are available for this model."));
+      }
+      if (state2.phase === "error") {
+        const retry = structuralButton("Retry", "Retry relation metadata", () => {
+          if (retry.disabled) {
+            return;
+          }
+          retry.disabled = true;
+          metadata.retry?.(scope.target || scope.source).catch(() => {
+          });
+        });
+        row.appendChild(retry);
+      }
       row.appendChild(el2("span", { className: "query-predicate-static", role: "note" }, source.relation ? "Correlation is generated from this relation." : "Choose a relation to show its generated correlation."));
     } else {
       const models = metadata?.getCatalog?.() || [];
@@ -3725,7 +4084,7 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     negated.addEventListener("change", () => act({ changes: { negated: negated.checked }, nodeId: exists.nodeId, type: "UPDATE_NODE" }));
     row.append(el2("label", {}, negated, "Not"), nodeActions(exists), inlineIssues(exists.nodeId));
     if (exists.where?.kind === "group") {
-      renderGroup(exists.where, row, depth + 1);
+      renderGroup(exists.where, row, depth + 1, createQuerySourceScope(source, scope, metadata));
     }
     container.appendChild(row);
   }
@@ -3744,7 +4103,7 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
       };
       var updateTarget = updateTarget2, updateOuter = updateOuter2, update = update2;
       const target = trackPicker2(createQueryFieldPicker({ ariaLabel: "Target field", current: correlation.targetPath || "", el: el2, metadata, onChange: updateTarget2, popoverLayer, source: exists.source?.target }));
-      const outer = trackPicker2(createQueryFieldPicker({ ariaLabel: "Current outer-row field", current: correlation.outerPath || "", el: el2, metadata, onChange: updateOuter2, popoverLayer, source: scope?.source || scope?.target }));
+      const outer = trackPicker2(createQueryFieldPicker({ ariaLabel: "Current outer-row field", current: correlation.outerPath || "", el: el2, metadata, onChange: updateOuter2, popoverLayer, source: scope?.target || scope?.source }));
       const remove = structuralButton("Remove", "Remove correlation", () => {
         const next = correlations.filter((_, itemIndex) => itemIndex !== index);
         act({ changes: { correlations: next }, nodeId: exists.nodeId, type: "UPDATE_NODE" });
@@ -3797,7 +4156,18 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     const request = requestedFocus;
     requestedFocus = void 0;
     const container = node.querySelector(`[data-query-node-id="${escapeSelector(request.nodeId)}"]`);
-    const selector = request.role === "add" ? "button" : "[data-focus-role=lhs], input, select, button";
+    if (request.role === "lhs-open") {
+      const select = container?.querySelector(".query-field-picker select:not(:disabled)");
+      if (!focusAndOpenSelect(select)) {
+        const scope = getScope?.() || {};
+        const target = scope.target || scope.source || scope.modelRef;
+        if (metadata?.getState?.(target)?.pending) {
+          requestedFocus = request;
+        }
+      }
+      return;
+    }
+    const selector = request.role === "add" ? "button" : ".query-field-picker select:not(:disabled), input, select, button";
     container?.querySelector(selector)?.focus();
   }
   function onKeydown(event) {
@@ -3843,12 +4213,12 @@ function nativeSelect(options, value, ariaLabel) {
   return select;
 }
 function structuralButton(label, ariaLabel, onClick) {
-  const button2 = document.createElement("button");
-  button2.type = "button";
-  button2.textContent = label;
-  button2.setAttribute("aria-label", ariaLabel);
-  button2.addEventListener("click", onClick);
-  return button2;
+  const button3 = document.createElement("button");
+  button3.type = "button";
+  button3.textContent = label;
+  button3.setAttribute("aria-label", ariaLabel);
+  button3.addEventListener("click", onClick);
+  return button3;
 }
 function starterRhs(kind) {
   if (kind === "list") {
@@ -3893,24 +4263,24 @@ function cloneComputedValue(value) {
 function emptyComputedGroup(nodeId) {
   return { children: [], join: "and", kind: "group", negated: false, nodeId };
 }
-function createComputedDraft(kind, nodeId, alias = "") {
+function createComputedDraft(kind, nodeId, alias2 = "") {
   const group = (suffix) => emptyComputedGroup(`${nodeId}-${suffix}`);
   if (kind === "aggregate") {
-    return { alias, distinct: "auto", enabled: true, field: { kind: "all" }, filter: group("filter"), function: "count", kind, nodeId };
+    return { alias: alias2, distinct: "auto", enabled: true, field: { kind: "all" }, filter: group("filter"), function: "count", kind, nodeId };
   }
   if (kind === "scalarSubquery") {
-    return { alias, correlations: [], enabled: true, kind, nodeId, onEmpty: { kind: "literal", value: null }, orderBy: [], outputType: "auto", select: { field: { kind: "field", path: "" }, kind: "field" }, source: { kind: "relation", relation: "" }, where: group("where") };
+    return { alias: alias2, correlations: [], enabled: true, kind, nodeId, onEmpty: { kind: "literal", value: null }, orderBy: [], outputType: "auto", select: { field: { kind: "field", path: "" }, kind: "field" }, source: { kind: "relation", relation: "" }, where: group("where") };
   }
   if (kind === "exists") {
-    return { alias, correlations: [], enabled: true, kind, nodeId, source: { kind: "relation", relation: "" }, where: group("where") };
+    return { alias: alias2, correlations: [], enabled: true, kind, nodeId, source: { kind: "relation", relation: "" }, where: group("where") };
   }
   if (kind === "window") {
-    return { alias, enabled: true, function: "row_number", kind, nodeId, orderBy: [], partitionBy: [] };
+    return { alias: alias2, enabled: true, function: "row_number", kind, nodeId, orderBy: [], partitionBy: [] };
   }
   if (kind === "codeExpression") {
-    return { alias, enabled: true, expression: "", kind, nodeId, outputType: "auto", when: group("when") };
+    return { alias: alias2, enabled: true, expression: "", kind, nodeId, outputType: "auto", when: group("when") };
   }
-  return { alias, enabled: true, expression: { kind: "literal", value: null }, kind: "formula", nodeId, outputType: "auto" };
+  return { alias: alias2, enabled: true, expression: { kind: "literal", value: null }, kind: "formula", nodeId, outputType: "auto" };
 }
 function suggestComputedAlias(kind, computed) {
   const base = { aggregate: "count", codeExpression: "expression", exists: "exists", formula: "value", scalarSubquery: "subquery", window: "row_number" }[kind] || "value";
@@ -4043,11 +4413,8 @@ var FUNCTIONS = ["count", "sum", "avg", "min", "max"];
 function fields(scope) {
   return (scope?.fields || scope?.columns || []).filter((field) => field?.path || field?.attname || field?.name).map((field) => ({ ...field, path: field.path || field.attname || field.name }));
 }
-function aggregateFieldOptions(candidates, current) {
-  const options = [{ label: "All rows", value: "*" }, ...(candidates || []).map((entry2) => ({ description: entry2.type || "", label: entry2.label || entry2.path, value: entry2.path }))];
-  if (current && current !== "*" && !options.some((option) => option.value === current)) {
-    options.splice(1, 0, { description: "Choose a supported replacement.", disabled: true, disabledReason: "Unavailable field", label: `Unavailable field: ${current}`, value: current });
-  }
+function aggregateFieldOptions(candidates) {
+  const options = [{ label: "All rows", value: "*" }, ...(candidates || []).map((entry2) => ({ description: entry2.type || "", group: "Fields", label: entry2.label || entry2.path, value: entry2.path }))];
   return options;
 }
 function renderAggregateBuilder({ dispatch, el: el2, getRecipe, getScope, item, metadata, popoverLayer, validation }) {
@@ -4056,7 +4423,8 @@ function renderAggregateBuilder({ dispatch, el: el2, getRecipe, getScope, item, 
   const field = item.field?.kind === "field" ? item.field.path : "*";
   const candidates = fields(scope);
   const functionSelect = computedSelect(el2, "Aggregate function", FUNCTIONS.map((value) => ({ label: value.toUpperCase(), value })), item.function, (functionName) => dispatch({ changes: { function: functionName, ...functionName !== "count" ? { distinct: "auto", field: field === "*" ? { kind: "field", path: "" } : item.field } : {} }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
-  const fieldPicker = createGridCombobox({ el: el2, label: "Aggregate field", onChange: (path) => dispatch({ changes: { field: path === "*" ? { kind: "all" } : { kind: "field", path } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: aggregateFieldOptions(candidates, field), popoverLayer, value: field });
+  const fieldOptions = field === "" ? [{ disabled: true, label: "Choose field", value: "" }, ...aggregateFieldOptions(candidates)] : aggregateFieldOptions(candidates);
+  const fieldPicker = createQuerySelect({ ariaLabel: "Aggregate field", el: el2, onChange: (path) => dispatch({ changes: { field: path === "*" ? { kind: "all" } : { kind: "field", path } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: fieldOptions, value: field });
   const distinct = computedSelect(el2, "Count distinct", [{ label: "Automatic", value: "auto" }, { label: "Always distinct", value: "always" }], item.distinct, (value) => dispatch({ changes: { distinct: value }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
   const nonCount = item.function !== "count";
   distinct.disabled = nonCount;
@@ -4224,20 +4592,6 @@ function renderFormulaBuilder({ dispatch, el: el2, getRecipe, getScope, item, me
 function catalog(metadata) {
   return metadata?.getCatalog?.() || [];
 }
-function targetFromLabel(label) {
-  const value = String(label || "");
-  const boundary = value.lastIndexOf(".");
-  return boundary > 0 ? { app: value.slice(0, boundary), model: value.slice(boundary + 1) } : void 0;
-}
-function sourceTarget(source, scope) {
-  if (source?.kind === "model") {
-    return source.target?.app && source.target?.model ? { app: source.target.app, model: source.target.model } : void 0;
-  }
-  return targetFromLabel((scope?.relations || []).find((relation) => relation?.name === source?.relation || relation?.queryName === source?.relation)?.target);
-}
-function relationValue(relation) {
-  return relation?.queryName || relation?.name || "";
-}
 function trackPicker(pickers, picker) {
   if (picker) {
     pickers?.push(() => {
@@ -4261,8 +4615,8 @@ function moveSubqueryOrder(entries2, index, delta) {
   [next[index], next[target]] = [next[target], next[index]];
   return next;
 }
-function sourceFieldPicker({ ariaLabel, computed, dispatch, el: el2, item, metadata, onChange, pickers, popoverLayer, scope, value }) {
-  const target = sourceTarget(item.source, scope);
+function sourceFieldPicker({ ariaLabel, computed, el: el2, metadata, onChange, pickers, popoverLayer, sourceScope, value }) {
+  const target = sourceScope?.target;
   if (!target) {
     return el2("p", { className: "query-control-help" }, "Choose a relation or model source before selecting a field.");
   }
@@ -4273,11 +4627,41 @@ function sourceControls({ dispatch, el: el2, item, metadata, pickers, popoverLay
   const wrap = el2("fieldset", { className: "query-subquery-source" });
   wrap.appendChild(el2("legend", {}, "1. Source"));
   const source = item.source || { kind: "relation", relation: "" };
+  const owner = scope?.target || scope?.source;
+  const ownerState = metadata?.getState?.(owner);
+  if (owner && !ownerState?.tree && !ownerState?.pending && !ownerState?.error) {
+    metadata?.loadTree?.(owner).catch(() => {
+    });
+  }
   const kind = computedSelect(el2, "Subquery source type", [{ label: "Relation", value: "relation" }, { label: "Model", value: "model" }], source.kind, (value) => dispatch({ changes: { source: value === "model" ? { kind: "model", target: { app: "", model: "" } } : { kind: "relation", relation: "" } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
   wrap.appendChild(el2("label", {}, "Source", kind));
   if (source.kind === "relation") {
-    const relation = trackPicker(pickers, createGridCombobox({ el: el2, label: "Relation", onChange: (value) => dispatch({ changes: { source: { kind: "relation", relation: value } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: [{ label: "Choose related rows", value: "" }, ...(scope?.relations || []).map((entry2) => ({ description: `${entry2.kind || "relation"}. ${entry2.target || "related model"}`, label: `${entry2.label || entry2.name} \u2192 ${entry2.target || "related model"}`, value: relationValue(entry2) }))], popoverLayer, value: source.relation }));
+    const state2 = relationSourceState({ current: source.relation, metadata, owner: scope?.target || scope?.source });
+    const errorHelpId = state2.phase === "error" ? `query-subquery-relation-error-${item.nodeId}` : "";
+    const relation = trackPicker(pickers, createGridCombobox({ describedBy: errorHelpId, el: el2, label: "Relation", onChange: (value) => dispatch({ changes: { source: { kind: "relation", relation: value } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: [{ label: state2.phase === "loading" ? "Loading relations\u2026" : "Choose related rows", value: "" }, ...state2.options], popoverLayer, value: source.relation }));
+    const input = relation.node.querySelector?.("input");
+    if (input) {
+      input.disabled = state2.phase === "loading" || state2.phase === "error";
+    }
     wrap.appendChild(el2("label", {}, "Relation", relation.node));
+    if (errorHelpId) {
+      wrap.appendChild(el2("p", { id: errorHelpId, className: "query-control-help", role: "note" }, String(state2.error || "Relation metadata could not be loaded.")));
+    }
+    if (state2.phase === "error") {
+      const retry = el2("button", { className: "secondary", type: "button" }, "Retry");
+      retry.addEventListener("click", () => {
+        if (retry.disabled) {
+          return;
+        }
+        retry.disabled = true;
+        metadata.retry?.(owner).catch(() => {
+        });
+      });
+      wrap.appendChild(retry);
+    }
+    if (state2.phase === "empty") {
+      wrap.appendChild(el2("p", { className: "query-builder-empty" }, "No related sources are available for this model."));
+    }
   } else {
     const target = `${source.target?.app || ""}.${source.target?.model || ""}`.replace(/^\.|\.$/g, "");
     const model = trackPicker(pickers, createGridCombobox({ el: el2, label: "Subquery model", onChange: (value) => {
@@ -4288,7 +4672,7 @@ function sourceControls({ dispatch, el: el2, item, metadata, pickers, popoverLay
   }
   return wrap;
 }
-function correlationControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope }) {
+function correlationControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope, sourceScope }) {
   const root = el2("fieldset", { className: "query-subquery-correlations" });
   root.appendChild(el2("legend", {}, "2. Connection"));
   if (item.source?.kind === "relation") {
@@ -4302,8 +4686,8 @@ function correlationControls({ dispatch, el: el2, item, metadata, pickers, popov
     };
     var change = change2;
     const row = el2("div", { className: "query-subquery-correlation", dataset: { queryNodeId: correlation.nodeId } });
-    const outer = trackPicker(pickers, createQueryFieldPicker({ ariaLabel: "Outer field", current: correlation.outerPath, el: el2, metadata, onChange: (value) => change2(index, { outerPath: value }), popoverLayer, source: scope?.source, context: "subquery" }));
-    const target = sourceFieldPicker({ ariaLabel: "Target field", dispatch, el: el2, item, metadata, onChange: (value) => change2(index, { targetPath: value }), pickers, popoverLayer, scope, value: correlation.targetPath });
+    const outer = trackPicker(pickers, createQueryFieldPicker({ ariaLabel: "Outer field", current: correlation.outerPath, el: el2, metadata, onChange: (value) => change2(index, { outerPath: value }), popoverLayer, source: scope?.target || scope?.source, context: "subquery" }));
+    const target = sourceFieldPicker({ ariaLabel: "Target field", el: el2, metadata, onChange: (value) => change2(index, { targetPath: value }), pickers, popoverLayer, sourceScope, value: correlation.targetPath });
     const remove = el2("button", { ariaLabel: "Remove correlation", className: "secondary", type: "button" }, "Remove");
     remove.addEventListener("click", () => dispatch({ changes: { correlations: entries2.filter((_, entryIndex) => entryIndex !== index) }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
     row.append(el2("label", {}, "Outer", outer.node), el2("label", {}, "Target", target), remove);
@@ -4315,7 +4699,7 @@ function correlationControls({ dispatch, el: el2, item, metadata, pickers, popov
   root.appendChild(add);
   return root;
 }
-function scalarControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope }) {
+function scalarControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, sourceScope }) {
   const root = el2("div", { className: "query-subquery-scalar" });
   const select = item.select || { field: { kind: "field", path: "" }, kind: "field" };
   const returned = el2("fieldset", { className: "query-subquery-returned" });
@@ -4323,7 +4707,7 @@ function scalarControls({ dispatch, el: el2, item, metadata, pickers, popoverLay
   const kind = computedSelect(el2, "Subquery select type", [{ label: "Field", value: "field" }, { label: "Aggregate", value: "aggregate" }], select.kind, (value) => dispatch({ changes: { select: value === "aggregate" ? { distinct: "auto", field: { kind: "all" }, function: "count", kind: "aggregate" } : { field: { kind: "field", path: "" }, kind: "field" } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
   returned.appendChild(el2("label", {}, "Select", kind));
   if (select.kind === "field") {
-    const field = sourceFieldPicker({ ariaLabel: "Subquery field", dispatch, el: el2, item, metadata, onChange: (value) => dispatch({ changes: { select: { field: { kind: "field", path: value }, kind: "field" } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), pickers, popoverLayer, scope, value: select.field?.path });
+    const field = sourceFieldPicker({ ariaLabel: "Subquery field", el: el2, metadata, onChange: (value) => dispatch({ changes: { select: { field: { kind: "field", path: value }, kind: "field" } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), pickers, popoverLayer, sourceScope, value: select.field?.path });
     returned.appendChild(el2("label", {}, "Field", field));
   } else {
     returned.appendChild(el2("label", {}, "Aggregate", computedSelect(el2, "Subquery aggregate", MODEL_QUERY_AGGREGATE_FUNCTIONS.map((value) => ({ label: value, value })), select.function, (value) => dispatch({ changes: { select: { ...select, function: value } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }))));
@@ -4335,7 +4719,7 @@ function scalarControls({ dispatch, el: el2, item, metadata, pickers, popoverLay
   orderGroup.appendChild(el2("p", { className: "query-control-help" }, `Order the matching rows before returning one value (up to ${MODEL_QUERY_RECIPE_LIMITS.subqueryOrderTerms}).`));
   for (const [index, entry2] of orders.entries()) {
     const row = el2("div", { className: "query-subquery-order", dataset: { queryNodeId: entry2.nodeId } });
-    const path = sourceFieldPicker({ ariaLabel: "Subquery order field", dispatch, el: el2, item, metadata, onChange: (value) => changeOrder(index, { ref: { kind: "field", path: value } }), pickers, popoverLayer, scope, value: entry2.ref?.path });
+    const path = sourceFieldPicker({ ariaLabel: "Subquery order field", el: el2, metadata, onChange: (value) => changeOrder(index, { ref: { kind: "field", path: value } }), pickers, popoverLayer, sourceScope, value: entry2.ref?.path });
     const direction = computedSelect(el2, "Subquery order direction", [{ label: "Ascending", value: "asc" }, { label: "Descending", value: "desc" }], entry2.direction, (value) => changeOrder(index, { direction: value }));
     const up = el2("button", { ariaLabel: "Move subquery order up", className: "secondary", type: "button" }, "Up");
     up.disabled = index === 0;
@@ -4367,10 +4751,11 @@ function scalarControls({ dispatch, el: el2, item, metadata, pickers, popoverLay
 function renderSubqueryBuilder({ dispatch, el: el2, getRecipe, getScope, item, metadata, popoverLayer, scope, validation }) {
   const root = el2("div", { className: "query-computed-body query-subquery-builder" });
   const pickers = [];
-  root.append(sourceControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope }), correlationControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope }));
+  const sourceScope = createQuerySourceScope(item.source, scope, metadata);
+  root.append(sourceControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope }), correlationControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope, sourceScope }));
   const targetFilter = el2("fieldset", { className: "query-subquery-target-filter" });
   targetFilter.appendChild(el2("legend", {}, "3. Target filter"));
-  const predicate = createComputedPredicateEditor({ context: "subquery", dispatch, el: el2, getRecipe, getScope: () => getScope?.(item) || {}, item, key: "where", metadata, validation });
+  const predicate = createComputedPredicateEditor({ context: "subquery", dispatch, el: el2, getRecipe, getScope: () => sourceScope, item, key: "where", metadata, validation });
   if (predicate) {
     pickers.push(() => predicate.destroy());
     targetFilter.appendChild(predicate.node);
@@ -4378,7 +4763,7 @@ function renderSubqueryBuilder({ dispatch, el: el2, getRecipe, getScope, item, m
   } else {
     targetFilter.appendChild(el2("p", { className: "query-builder-empty" }, "No target filter is configured."));
   }
-  root.append(targetFilter, scalarControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope }));
+  root.append(targetFilter, scalarControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, sourceScope }));
   const reset = el2("button", { className: "secondary", type: "button" }, "Reset incompatible fields");
   reset.addEventListener("click", () => dispatch({ changes: { orderBy: [], select: { field: { kind: "field", path: "" }, kind: "field" }, where: { ...item.where, children: [] } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
   root.appendChild(reset);
@@ -4388,8 +4773,9 @@ function renderSubqueryBuilder({ dispatch, el: el2, getRecipe, getScope, item, m
 function renderExistsComputedBuilder({ dispatch, el: el2, getRecipe, getScope, item, metadata, popoverLayer, scope, validation }) {
   const root = el2("div", { className: "query-computed-body query-exists-builder" });
   const pickers = [];
-  root.append(sourceControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope }), correlationControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope }));
-  const predicate = createComputedPredicateEditor({ context: "subquery", dispatch, el: el2, getRecipe, getScope: () => getScope?.(item) || {}, item, key: "where", metadata, validation });
+  const sourceScope = createQuerySourceScope(item.source, scope, metadata);
+  root.append(sourceControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope }), correlationControls({ dispatch, el: el2, item, metadata, pickers, popoverLayer, scope, sourceScope }));
+  const predicate = createComputedPredicateEditor({ context: "subquery", dispatch, el: el2, getRecipe, getScope: () => sourceScope, item, key: "where", metadata, validation });
   if (predicate) {
     pickers.push(() => predicate.destroy());
     root.appendChild(predicate.node);
@@ -4410,9 +4796,9 @@ function renderWindowBuilder({ dispatch, el: el2, getScope, item, popoverLayer }
   const root = el2("div", { className: "query-computed-body query-window-builder" });
   const available = fields2(getScope?.(item) || {});
   const functionSelect = computedSelect(el2, "Window function", MODEL_QUERY_WINDOW_FUNCTIONS.map((value) => ({ label: value, value })), item.function, (functionName) => dispatch({ changes: { function: functionName }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
-  const field = createGridCombobox({ el: el2, label: "Window field", onChange: (path) => dispatch({ changes: { field: path ? { kind: "field", path } : void 0 }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: windowFieldOptions(available, "No field"), popoverLayer, value: item.field?.path || "" });
-  const order = createGridCombobox({ el: el2, label: "Window order field", onChange: (path) => dispatch({ changes: { orderBy: path ? [{ direction: "asc", nodeId: `${item.nodeId}-order-1`, ref: { kind: "field", path } }] : [] }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: windowFieldOptions(available, "Choose order"), popoverLayer, value: item.orderBy?.[0]?.ref?.path || "" });
-  const partition = createGridCombobox({ el: el2, label: "Partition field", onChange: (path) => dispatch({ changes: { partitionBy: path ? [{ kind: "field", path }] : [] }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: windowFieldOptions(available, "No partition"), popoverLayer, value: item.partitionBy?.[0]?.path || "" });
+  const field = createQuerySelect({ allowEmpty: true, ariaLabel: "Window field", el: el2, onChange: (path) => dispatch({ changes: { field: path ? { kind: "field", path } : void 0 }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: windowFieldOptions(available, "No field"), value: item.field?.path || "" });
+  const order = createQuerySelect({ allowEmpty: true, ariaLabel: "Window order field", el: el2, onChange: (path) => dispatch({ changes: { orderBy: path ? [{ direction: "asc", nodeId: `${item.nodeId}-order-1`, ref: { kind: "field", path } }] : [] }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: windowFieldOptions(available, "Choose order"), value: item.orderBy?.[0]?.ref?.path || "" });
+  const partition = createQuerySelect({ allowEmpty: true, ariaLabel: "Partition field", el: el2, onChange: (path) => dispatch({ changes: { partitionBy: path ? [{ kind: "field", path }] : [] }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: windowFieldOptions(available, "No partition"), value: item.partitionBy?.[0]?.path || "" });
   root.append(el2("label", {}, "Function", functionSelect), el2("label", {}, "Field", field.node), el2("label", {}, "Order", order.node), el2("label", {}, "Partition", partition.node));
   root.__queryDestroy = () => {
     field.destroy();
@@ -4593,8 +4979,8 @@ function createComputedBuilder({ cancelKindChange, confirmKindChange, dispatch, 
     details.appendChild(summary);
     const content = el2("div", { className: "query-computed-item-content" });
     const header = el2("div", { className: "query-computed-item-header" });
-    const alias = el2("input", { ariaLabel: "Computed column alias", autocomplete: "off", className: "query-computed-input", dataset: { queryControlKey: `computed:${item.nodeId}:alias` }, maxLength: 64, name: `computed-${item.nodeId}-alias`, spellcheck: false, value: item.alias || "" });
-    alias.addEventListener("input", () => dispatch?.({ changes: { alias: alias.value }, history: { group: `computed:${item.nodeId}:alias`, mode: "text" }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
+    const alias2 = el2("input", { ariaLabel: "Computed column alias", autocomplete: "off", className: "query-computed-input", dataset: { queryControlKey: `computed:${item.nodeId}:alias` }, maxLength: 64, name: `computed-${item.nodeId}-alias`, spellcheck: false, value: item.alias || "" });
+    alias2.addEventListener("input", () => dispatch?.({ changes: { alias: alias2.value }, history: { group: `computed:${item.nodeId}:alias`, mode: "text" }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
     const type = el2("select", { ariaLabel: "Computed column type", className: "query-computed-select" });
     for (const option of COMPUTED_KINDS) {
       type.appendChild(el2("option", { value: option.value }, option.label));
@@ -4612,8 +4998,8 @@ function createComputedBuilder({ cancelKindChange, confirmKindChange, dispatch, 
         dispatch?.({ changes, nodeId: item.nodeId, type: "UPDATE_COMPUTED" });
       }
     });
-    header.append(el2("label", {}, "Alias", alias), el2("label", {}, "Type", type), structuralButton2(el2, "Up", "Move computed column up", () => dispatch?.({ nodeId: item.nodeId, type: "MOVE_COMPUTED_UP" }), index === 0), structuralButton2(el2, "Down", "Move computed column down", () => dispatch?.({ nodeId: item.nodeId, type: "MOVE_COMPUTED_DOWN" }), index === recipe.computed.length - 1), structuralButton2(el2, "Duplicate", "Duplicate computed column", () => dispatch?.({ nodeId: item.nodeId, type: "DUPLICATE_COMPUTED" })), structuralButton2(el2, "Remove", "Remove computed column", () => dispatch?.({ nodeId: item.nodeId, type: "REMOVE_COMPUTED" })));
-    content.appendChild(createControlHelp({ control: alias, el: el2, id: `query-alias-help-${item.nodeId}`, text: "Use a Python-style name. Later result filters, formulas, and ordering can refer to it." }));
+    header.append(el2("label", {}, "Alias", alias2), el2("label", {}, "Type", type), structuralButton2(el2, "Up", "Move computed column up", () => dispatch?.({ nodeId: item.nodeId, type: "MOVE_COMPUTED_UP" }), index === 0), structuralButton2(el2, "Down", "Move computed column down", () => dispatch?.({ nodeId: item.nodeId, type: "MOVE_COMPUTED_DOWN" }), index === recipe.computed.length - 1), structuralButton2(el2, "Duplicate", "Duplicate computed column", () => dispatch?.({ nodeId: item.nodeId, type: "DUPLICATE_COMPUTED" })), structuralButton2(el2, "Remove", "Remove computed column", () => dispatch?.({ nodeId: item.nodeId, type: "REMOVE_COMPUTED" })));
+    content.appendChild(createControlHelp({ control: alias2, el: el2, id: `query-alias-help-${item.nodeId}`, text: "Use a Python-style name. Later result filters, formulas, and ordering can refer to it." }));
     content.appendChild(createControlHelp({ control: type, el: el2, id: `query-computed-type-help-${item.nodeId}`, text: guidanceForComputedKind(item.kind).description, technical: guidanceForComputedKind(item.kind).limit }));
     content.appendChild(header);
     const pending = pendingKinds().find((entry2) => entry2.nodeId === item.nodeId);
@@ -4647,10 +5033,10 @@ function createComputedBuilder({ cancelKindChange, confirmKindChange, dispatch, 
   return { add, destroy: releaseBodies, node, render, updateValidation };
 }
 function structuralButton2(el2, label, ariaLabel, onClick, disabled = false) {
-  const button2 = el2("button", { ariaLabel, className: "secondary", type: "button" }, label);
-  button2.disabled = disabled;
-  button2.addEventListener("click", onClick);
-  return button2;
+  const button3 = el2("button", { ariaLabel, className: "secondary", type: "button" }, label);
+  button3.disabled = disabled;
+  button3.addEventListener("click", onClick);
+  return button3;
 }
 
 // media/gridQueryLifecycle.js
@@ -4769,28 +5155,48 @@ function createQueryFocusIntent() {
 }
 
 // media/gridQueryDrawerResize.js
+var QUERY_DRAWER_MINIMUM_HEIGHT = 220;
+var QUERY_DRAWER_PREFERRED_HEIGHT = 360;
+var QUERY_GRID_MINIMUM_HEIGHT = 144;
 function clampHeight(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, Math.round(Number(value) || minimum)));
 }
-function createQueryDrawerResize({ drawer, handle, onHeight, root = document } = {}) {
+function calculateDrawerBounds({ containerHeight, fixedHeight, gridHidden } = {}) {
+  const available = Math.floor((Number.isFinite(containerHeight) && containerHeight > 0 ? containerHeight : 0) - (Number.isFinite(fixedHeight) && fixedHeight > 0 ? fixedHeight : 0) - (gridHidden ? 0 : QUERY_GRID_MINIMUM_HEIGHT));
+  return { minimumHeight: QUERY_DRAWER_MINIMUM_HEIGHT, maximumHeight: Math.max(QUERY_DRAWER_MINIMUM_HEIGHT, available) };
+}
+function measureDrawerBounds({ container, drawer, grid, root }) {
+  const measuredHeight = container?.getBoundingClientRect?.().height;
+  const containerHeight = Number.isFinite(measuredHeight) && measuredHeight > 0 ? measuredHeight : root?.defaultView?.innerHeight || 0;
+  const fixedHeight = [...container?.children || []].filter((child) => child !== drawer && child !== grid && !child.hidden).reduce((total, child) => {
+    const height = child.getBoundingClientRect?.().height;
+    return total + (Number.isFinite(height) && height > 0 ? height : 0);
+  }, 0);
+  return calculateDrawerBounds({ containerHeight, fixedHeight, gridHidden: Boolean(grid?.hidden) });
+}
+function createQueryDrawerResize({ container, drawer, grid, handle, onHeight, root = document } = {}) {
   let dragging = false;
+  let pointerId;
   let startHeight = 0;
   let startY = 0;
-  function bounds() {
-    const viewport = Math.max(440, root.defaultView?.innerHeight || window.innerHeight || 800);
-    return { maximum: Math.max(320, Math.min(660, viewport - 180)), minimum: 220 };
+  let appliedHeight = QUERY_DRAWER_MINIMUM_HEIGHT;
+  let emitted = "";
+  function setHeight(value, draggingUpdate = false, forceEmit = false) {
+    const bounds = measureDrawerBounds({ container, drawer, grid, root });
+    appliedHeight = clampHeight(value, bounds.minimumHeight, bounds.maximumHeight);
+    drawer.style.height = `${appliedHeight}px`;
+    handle.setAttribute("aria-valuemin", String(bounds.minimumHeight));
+    handle.setAttribute("aria-valuemax", String(bounds.maximumHeight));
+    handle.setAttribute("aria-valuenow", String(appliedHeight));
+    handle.setAttribute("aria-valuetext", `${appliedHeight} pixels high`);
+    const next = `${appliedHeight}/${bounds.minimumHeight}/${bounds.maximumHeight}/${draggingUpdate}`;
+    if (forceEmit || next !== emitted) {
+      emitted = next;
+      onHeight?.(appliedHeight, draggingUpdate, bounds);
+    }
   }
-  function setHeight(value, draggingUpdate = false) {
-    const range = bounds();
-    const height = clampHeight(value, range.minimum, range.maximum);
-    drawer.style.height = `${height}px`;
-    handle.setAttribute("aria-valuemin", String(range.minimum));
-    handle.setAttribute("aria-valuemax", String(range.maximum));
-    handle.setAttribute("aria-valuenow", String(height));
-    onHeight?.(height, draggingUpdate, range);
-  }
-  function finishPointer() {
-    if (!dragging) {
+  function finishPointer(event) {
+    if (!dragging || event?.pointerId !== void 0 && event.pointerId !== pointerId) {
       return;
     }
     dragging = false;
@@ -4798,48 +5204,73 @@ function createQueryDrawerResize({ drawer, handle, onHeight, root = document } =
     root.removeEventListener("pointermove", movePointer);
     root.removeEventListener("pointerup", finishPointer);
     root.removeEventListener("pointercancel", finishPointer);
+    if (pointerId !== void 0 && handle.hasPointerCapture?.(pointerId)) {
+      handle.releasePointerCapture?.(pointerId);
+    }
+    pointerId = void 0;
+    setHeight(appliedHeight, false, true);
   }
   function movePointer(event) {
-    if (!dragging) {
-      return;
+    if (dragging && (event.pointerId === void 0 || event.pointerId === pointerId)) {
+      setHeight(startHeight + (event.clientY - startY), true);
     }
-    setHeight(startHeight + (startY - event.clientY), true);
   }
   function startPointer(event) {
-    if (event.button !== 0) {
+    if (dragging || event.button !== 0) {
       return;
     }
     event.preventDefault();
     dragging = true;
+    pointerId = event.pointerId;
     startY = event.clientY;
-    startHeight = drawer.getBoundingClientRect().height;
+    startHeight = appliedHeight = drawer.getBoundingClientRect().height;
     handle.dataset.dragging = "true";
-    handle.setPointerCapture?.(event.pointerId);
+    handle.setPointerCapture?.(pointerId);
     root.addEventListener("pointermove", movePointer);
     root.addEventListener("pointerup", finishPointer);
     root.addEventListener("pointercancel", finishPointer);
   }
   function onKeyDown(event) {
-    const current = drawer.getBoundingClientRect().height;
-    const range = bounds();
-    const increment = event.shiftKey ? 48 : 16;
-    const next = event.key === "ArrowUp" ? current + increment : event.key === "ArrowDown" ? current - increment : event.key === "Home" ? range.minimum : event.key === "End" ? range.maximum : void 0;
-    if (next === void 0) {
+    const bounds = measureDrawerBounds({ container, drawer, grid, root });
+    const current = appliedHeight || drawer.getBoundingClientRect().height;
+    const step = event.shiftKey ? 64 : 16;
+    const value = event.key === "ArrowUp" ? current - step : event.key === "ArrowDown" ? current + step : event.key === "Home" ? bounds.minimumHeight : event.key === "End" ? bounds.maximumHeight : void 0;
+    if (value === void 0) {
       return;
     }
     event.preventDefault();
-    setHeight(next);
+    setHeight(value);
   }
+  function refresh() {
+    if (!dragging && !drawer.hidden) {
+      setHeight(appliedHeight || drawer.getBoundingClientRect().height);
+    }
+  }
+  const ResizeObserverClass = root.defaultView?.ResizeObserver || globalThis.ResizeObserver;
+  const observer = typeof ResizeObserverClass === "function" ? new ResizeObserverClass(refresh) : void 0;
+  if (container) {
+    observer?.observe(container);
+  }
+  if (grid) {
+    observer?.observe(grid);
+  }
+  root.defaultView?.addEventListener("resize", refresh);
   handle.addEventListener("pointerdown", startPointer);
+  handle.addEventListener("lostpointercapture", finishPointer);
   handle.addEventListener("keydown", onKeyDown);
   return {
-    /** Removes all local and transient document listeners. */
+    /** Removes all installed pointer, keyboard, window, and observer behavior. */
     destroy() {
       finishPointer();
+      observer?.disconnect();
+      root.defaultView?.removeEventListener("resize", refresh);
       handle.removeEventListener("pointerdown", startPointer);
+      handle.removeEventListener("lostpointercapture", finishPointer);
       handle.removeEventListener("keydown", onKeyDown);
     },
-    /** Synchronizes a restored persisted height after the drawer opens. */
+    /** Recalculates bounds after a layout transition. */
+    refresh,
+    /** Synchronizes a restored height after the drawer opens. */
     setHeight(value) {
       setHeight(value);
     }
@@ -4902,7 +5333,8 @@ function createQueryRenderCoordinator({ captureFocus = () => void 0, getModel, r
 
 // media/gridQueryUiState.js
 var STAGES = /* @__PURE__ */ new Set(["filterRows", "calculatedValues", "filterResults", "result"]);
-var INSPECTOR_TABS = /* @__PURE__ */ new Set(["meaning", "problems", "orm"]);
+var INSPECTOR_TABS = /* @__PURE__ */ new Set(["meaning", "problems", "orm", "assistant"]);
+var QUERY_DRAWER_SIZE_VERSION = 2;
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, Number.isFinite(value) ? value : minimum));
 }
@@ -4915,50 +5347,29 @@ function inspectorTab(value) {
 function copy(value) {
   return JSON.parse(JSON.stringify(value));
 }
+function normalizeBounds(bounds = {}) {
+  const minimumHeight = Number.isFinite(bounds.minimumHeight) ? bounds.minimumHeight : QUERY_DRAWER_MINIMUM_HEIGHT;
+  const requestedMaximum = Number.isFinite(bounds.maximumHeight) ? bounds.maximumHeight : 620;
+  return { minimumHeight, maximumHeight: Math.max(minimumHeight, requestedMaximum) };
+}
+function migratedHeight(persisted, minimum, maximum) {
+  const stored = persisted.queryDrawerHeight;
+  const keep = persisted.queryDrawerSizeVersion === QUERY_DRAWER_SIZE_VERSION ? Number.isFinite(stored) : Number.isFinite(stored) && stored !== QUERY_DRAWER_MINIMUM_HEIGHT;
+  return clamp(keep ? stored : QUERY_DRAWER_PREFERRED_HEIGHT, minimum, maximum);
+}
 function initialState(persisted = {}, bounds = {}) {
-  const minimum = Number.isFinite(bounds.minimumHeight) ? bounds.minimumHeight : 220;
-  const maximum = Number.isFinite(bounds.maximumHeight) ? bounds.maximumHeight : 620;
-  const drawerHeight = clamp(persisted.queryDrawerHeight, minimum, maximum);
-  return {
-    activeStage: stage(persisted.queryActiveStage),
-    drawerHeight,
-    drawerOpen: Boolean(persisted.queryDrawerOpen),
-    focusMode: false,
-    inspectorScrollTops: { meaning: 0, orm: 0, problems: 0 },
-    inspectorTab: inspectorTab(persisted.queryInspectorTab),
-    lastFocusedControlKey: "",
-    mobilePane: "editor",
-    openComputedNodeIds: /* @__PURE__ */ new Set(),
-    openGroupNodeIds: /* @__PURE__ */ new Set(),
-    openHelpIds: /* @__PURE__ */ new Set(),
-    pendingComputedKinds: /* @__PURE__ */ new Map(),
-    pendingResultMode: "",
-    selectedNodeId: "",
-    stageScrollTops: { calculatedValues: 0, filterResults: 0, filterRows: 0, result: 0 }
-  };
+  const heightBounds = normalizeBounds(bounds);
+  return { activeStage: stage(persisted.queryActiveStage), drawerHeight: migratedHeight(persisted, heightBounds.minimumHeight, heightBounds.maximumHeight), drawerOpen: Boolean(persisted.queryDrawerOpen), focusMode: false, inspectorScrollTops: { assistant: 0, meaning: 0, orm: 0, problems: 0 }, inspectorTab: inspectorTab(persisted.queryInspectorTab), lastFocusedControlKey: "", mobilePane: "editor", openComputedNodeIds: /* @__PURE__ */ new Set(), openGroupNodeIds: /* @__PURE__ */ new Set(), openHelpIds: /* @__PURE__ */ new Set(), pendingComputedKinds: /* @__PURE__ */ new Map(), pendingResultMode: "", selectedNodeId: "", stageScrollTops: { calculatedValues: 0, filterResults: 0, filterRows: 0, result: 0 } };
 }
 function preferences(state2) {
-  return {
-    queryActiveStage: state2.activeStage,
-    queryDrawerHeight: state2.drawerHeight,
-    queryDrawerOpen: state2.drawerOpen,
-    queryInspectorTab: state2.inspectorTab
-  };
+  return { queryActiveStage: state2.activeStage, queryDrawerHeight: state2.drawerHeight, queryDrawerOpen: state2.drawerOpen, queryDrawerSizeVersion: QUERY_DRAWER_SIZE_VERSION, queryInspectorTab: state2.inspectorTab };
 }
 function snapshotOf(state2) {
-  return {
-    ...state2,
-    inspectorScrollTops: { ...state2.inspectorScrollTops },
-    openComputedNodeIds: [...state2.openComputedNodeIds].sort(),
-    openGroupNodeIds: [...state2.openGroupNodeIds].sort(),
-    openHelpIds: [...state2.openHelpIds].sort(),
-    pendingComputedKinds: [...state2.pendingComputedKinds].map(([nodeId, kind]) => ({ kind, nodeId })),
-    stageScrollTops: { ...state2.stageScrollTops }
-  };
+  return { ...state2, inspectorScrollTops: { ...state2.inspectorScrollTops }, openComputedNodeIds: [...state2.openComputedNodeIds].sort(), openGroupNodeIds: [...state2.openGroupNodeIds].sort(), openHelpIds: [...state2.openHelpIds].sort(), pendingComputedKinds: [...state2.pendingComputedKinds].map(([nodeId, kind]) => ({ kind, nodeId })), stageScrollTops: { ...state2.stageScrollTops } };
 }
 function createQueryUiState({ bounds, getPersisted = () => ({}), persist = () => {
 } } = {}) {
-  let heightBounds = { maximumHeight: 620, minimumHeight: 220, ...bounds };
+  let heightBounds = normalizeBounds(bounds);
   let state2 = initialState(getPersisted() || {}, heightBounds);
   const listeners = /* @__PURE__ */ new Set();
   let persistTimer = 0;
@@ -4975,12 +5386,13 @@ function createQueryUiState({ bounds, getPersisted = () => ({}), persist = () =>
   function schedulePersistence(delay = 0) {
     if (persistTimer) {
       clearTimeout(persistTimer);
+      persistTimer = 0;
     }
-    if (!delay) {
+    if (delay) {
+      persistTimer = setTimeout(writePreferences, delay);
+    } else {
       writePreferences();
-      return;
     }
-    persistTimer = setTimeout(writePreferences, delay);
   }
   function toggle(collection, nodeId, open) {
     if (!nodeId) {
@@ -5054,11 +5466,15 @@ function createQueryUiState({ bounds, getPersisted = () => ({}), persist = () =>
       }
       listeners.clear();
     },
-    /** Updates the current height clamp without changing the selected UI mode. */
-    setBounds(nextBounds = {}) {
-      heightBounds = { ...heightBounds, ...nextBounds };
+    /** Updates finite bounds, normalizes them, and reclamps the current height. */
+    setBounds(next = {}) {
+      const previousBounds = heightBounds;
+      heightBounds = normalizeBounds({ minimumHeight: Number.isFinite(next.minimumHeight) ? next.minimumHeight : previousBounds.minimumHeight, maximumHeight: Number.isFinite(next.maximumHeight) ? next.maximumHeight : previousBounds.maximumHeight });
+      const before = state2.drawerHeight;
       state2.drawerHeight = clamp(state2.drawerHeight, heightBounds.minimumHeight, heightBounds.maximumHeight);
-      publish();
+      if (before !== state2.drawerHeight || heightBounds.minimumHeight !== previousBounds.minimumHeight || heightBounds.maximumHeight !== previousBounds.maximumHeight) {
+        publish();
+      }
     },
     /** Returns a detached UI snapshot. */
     getSnapshot() {
@@ -5114,7 +5530,7 @@ function createQueryWorkspace({ drawerResize, element: element3, elements, root,
         tab.tabIndex = selected ? 0 : -1;
       }
     }
-    const reviewTabs = { meaning: elements.queryInspectorMeaning, orm: elements.queryInspectorOrm, problems: elements.queryInspectorProblems };
+    const reviewTabs = { assistant: elements.queryInspectorAssistant, meaning: elements.queryInspectorMeaning, orm: elements.queryInspectorOrm, problems: elements.queryInspectorProblems };
     for (const [name, tab] of Object.entries(reviewTabs)) {
       const selected = name === ui.inspectorTab;
       if (tab) {
@@ -5122,7 +5538,7 @@ function createQueryWorkspace({ drawerResize, element: element3, elements, root,
         tab.tabIndex = selected ? 0 : -1;
       }
     }
-    const reviewPanels = { meaning: elements.queryMeaningPanel, orm: elements.queryOrmPanel, problems: elements.queryProblemsPanel };
+    const reviewPanels = { assistant: elements.queryAssistantPanel, meaning: elements.queryMeaningPanel, orm: elements.queryOrmPanel, problems: elements.queryProblemsPanel };
     for (const [name, panel] of Object.entries(reviewPanels)) {
       if (!panel) {
         continue;
@@ -5150,9 +5566,9 @@ function createQueryWorkspace({ drawerResize, element: element3, elements, root,
     }
     switcher.hidden = false;
     switcher.replaceChildren(...["editor", "review"].map((pane) => {
-      const button2 = element3("button", { ariaPressed: String(ui.mobilePane === pane), className: "secondary", type: "button" }, pane === "editor" ? "Edit query" : "Review query");
-      button2.addEventListener("click", () => uiState.dispatch({ pane, type: "SET_MOBILE_PANE" }));
-      return button2;
+      const button3 = element3("button", { ariaPressed: String(ui.mobilePane === pane), className: "secondary", type: "button" }, pane === "editor" ? "Edit query" : "Review query");
+      button3.addEventListener("click", () => uiState.dispatch({ pane, type: "SET_MOBILE_PANE" }));
+      return button3;
     }));
     elements.queryWorkspace.dataset.mobilePane = ui.mobilePane;
   }
@@ -5231,24 +5647,24 @@ function renderQueryInspector({ element: element3, elements, recipe, root, scope
     paragraphs.push(post.text);
   }
   paragraphs.push(explainResult(recipe, { fields: Object.fromEntries(scope.columns.map((field) => [field.attname || field.name, field])) }).text);
-  elements.queryPlainMeaning.replaceChildren(...paragraphs.map((text) => explanationParagraph(element3, text)));
+  elements.queryPlainMeaning.replaceChildren(...paragraphs.map((text2) => explanationParagraph(element3, text2)));
   const transport = root.getElementById("transport")?.value || "auto";
   const implicit = explainImplicitBehavior(recipe, validation, { transport: transport === "orm" ? "the ORM link" : transport === "tcp" ? "the socket link" : "the active link" });
   elements.queryImplicitBehavior.replaceChildren();
   if (implicit.length) {
-    elements.queryImplicitBehavior.append(element3("h3", {}, "The builder will also"), element3("ul", { className: "query-implicit-behavior" }, ...implicit.map((text) => element3("li", {}, text))));
+    elements.queryImplicitBehavior.append(element3("h3", {}, "The builder will also"), element3("ul", { className: "query-implicit-behavior" }, ...implicit.map((text2) => element3("li", {}, text2))));
   }
 }
-function explanationParagraph(element3, text) {
+function explanationParagraph(element3, text2) {
   const paragraph = element3("p");
-  for (const token of queryExplanationTokens(text)) {
+  for (const token of queryExplanationTokens(text2)) {
     paragraph.appendChild(element3(token.kind === "code" ? "code" : "span", {}, token.value));
   }
   return paragraph;
 }
 async function copyQueryOrmPreview(root = document) {
-  const text = root.getElementById("queryOrmPreview")?.textContent || "";
-  const orm = text.includes("Django ORM\n") ? text.split("Django ORM\n").slice(1).join("Django ORM\n") : "";
+  const text2 = root.getElementById("queryOrmPreview")?.textContent || "";
+  const orm = text2.includes("Django ORM\n") ? text2.split("Django ORM\n").slice(1).join("Django ORM\n") : "";
   if (!orm || !navigator.clipboard?.writeText) {
     return false;
   }
@@ -5397,7 +5813,7 @@ function createStableListKeyReconciler(prefix = "entry") {
 function resultReferenceOptions(fields3 = [], computed = []) {
   return [...fields3.map((field) => ({ group: "Fields", label: field.label, value: field.path })), ...computed.filter((item) => item?.enabled).map((item) => ({ group: "Calculated values", label: `calculated value ${item.alias}`, value: `@${item.alias}` }))];
 }
-function createQueryResultControls({ dispatch, el: el2, groupByMount, orderByMount, popoverLayer, replaceGroupBy } = {}) {
+function createQueryResultControls({ dispatch, el: el2, groupByMount, orderByMount, replaceGroupBy } = {}) {
   let pickers = [];
   const groupByKeys = createStableListKeyReconciler("result-group");
   function dispose() {
@@ -5407,7 +5823,7 @@ function createQueryResultControls({ dispatch, el: el2, groupByMount, orderByMou
     pickers = [];
   }
   function picker(entries2, current, label, onChange, key) {
-    const control = createGridCombobox({ dataset: { queryControlKey: key }, el: el2, label, onChange, options: [{ label: "Choose field", value: "" }, ...entries2], popoverLayer, value: entries2.some((entry2) => entry2.value === current) ? current : "" });
+    const control = createQuerySelect({ ariaLabel: label, dataset: { queryControlKey: key }, el: el2, onChange, options: [{ disabled: true, label: "Choose field", value: "" }, ...entries2], value: current });
     pickers.push(control);
     return control.node;
   }
@@ -5460,15 +5876,664 @@ function createQueryResultControls({ dispatch, el: el2, groupByMount, orderByMou
   return { destroy: dispose, render };
 }
 
+// media/gridQueryExamples.js
+var CATEGORICAL_NAMES = ["status", "state", "category", "type", "kind", "role"];
+var TEXT_TYPES2 = /* @__PURE__ */ new Set(["CharField", "TextField", "SlugField", "EmailField", "URLField"]);
+var TEXT_NAMES = ["name", "title", "username", "email", "slug", "code"];
+var WINDOW_NUMERIC_TYPES = /* @__PURE__ */ new Set(["AutoField", "BigAutoField", "SmallAutoField", "IntegerField", "BigIntegerField", "SmallIntegerField", "PositiveIntegerField", "PositiveSmallIntegerField", "PositiveBigIntegerField", "DecimalField", "FloatField", "DurationField"]);
+function sourceIdentity(source) {
+  const app = String(source?.app || "").trim();
+  const model = String(source?.model || "").trim();
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(app) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(model) ? { app, model } : void 0;
+}
+function emptyGroup2(group) {
+  return Boolean(group) && group.kind === "group" && group.join === "and" && !group.negated && Array.isArray(group.children) && group.children.length === 0;
+}
+function isCanonicalEmptyQueryRecipe(recipe) {
+  return recipe?.version === 2 && recipe.mode === "rows" && Array.isArray(recipe.computed) && !recipe.computed.length && Array.isArray(recipe.groupBy) && !recipe.groupBy.length && Array.isArray(recipe.orderBy) && !recipe.orderBy.length && emptyGroup2(recipe.where) && emptyGroup2(recipe.postFilter);
+}
+function identifier(value) {
+  const text2 = typeof value === "string" ? value.trim() : "";
+  return text2.length <= 64 && !text2.includes("__") && /^[A-Za-z_][A-Za-z0-9_]*$/.test(text2) ? text2 : "";
+}
+function alias(base, occupied) {
+  const raw = String(base).replace(/[^A-Za-z0-9_]/g, "_").replace(/^_+/, "") || "value";
+  const stem = raw.toLowerCase().startsWith("djs_") ? `example_${raw}` : raw;
+  for (let index = 1; index <= 100; index += 1) {
+    const suffix = index === 1 ? "" : `_${index}`;
+    const value = `${stem.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
+    if (!occupied.has(value)) {
+      occupied.add(value);
+      return value;
+    }
+  }
+  return "";
+}
+function exampleId(kind, path) {
+  let hash = 2166136261;
+  for (const character of `${kind}:${path}`) {
+    hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+  }
+  const safe = String(path).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 20);
+  return `example-${kind}-${safe}-${(hash >>> 0).toString(36)}`;
+}
+function columnsFor(columns) {
+  const result = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const [index, column] of (Array.isArray(columns) ? columns : []).entries()) {
+    if (column?.computed || column?.annotation || column?.annotated || column?.relation) {
+      continue;
+    }
+    const rawPath = typeof column?.name === "string" && column.name.trim() ? column.name : column?.attname;
+    const path = identifier(rawPath);
+    if (typeof rawPath === "string" && !path) {
+      return [];
+    }
+    if (path && seen.has(path)) {
+      return [];
+    }
+    if (!path) {
+      continue;
+    }
+    seen.add(path);
+    result.push({ column, index, path });
+  }
+  return result;
+}
+function groupingColumn(columns) {
+  const named = (candidate) => CATEGORICAL_NAMES.indexOf(candidate.path);
+  let best;
+  for (const candidate of columns) {
+    if (candidate.column?.pk || !Array.isArray(candidate.column?.choices) || !candidate.column.choices.length || named(candidate) < 0) {
+      continue;
+    }
+    if (!best || named(candidate) < named(best)) {
+      best = candidate;
+    }
+  }
+  if (best) {
+    return best;
+  }
+  for (const candidate of columns) {
+    if (!candidate.column?.pk && Array.isArray(candidate.column?.choices) && candidate.column.choices.length) {
+      return candidate;
+    }
+  }
+  for (const candidate of columns) {
+    if (candidate.column?.pk || !TEXT_TYPES2.has(candidate.column?.type) || named(candidate) < 0) {
+      continue;
+    }
+    if (!best || named(candidate) < named(best)) {
+      best = candidate;
+    }
+  }
+  if (best) {
+    return best;
+  }
+  return columns.find((candidate) => !candidate.column?.pk && candidate.column?.type === "BooleanField");
+}
+function safeRelation(relations, columns) {
+  const paths = new Set(columns.map((candidate) => candidate.path));
+  const relationPaths = /* @__PURE__ */ new Set();
+  const candidates = [];
+  for (const [index, relation] of (Array.isArray(relations) ? relations : []).entries()) {
+    const path = identifier(relation?.queryName || relation?.name);
+    if (!path || relationPaths.has(path)) {
+      return void 0;
+    }
+    relationPaths.add(path);
+    if (!path || !identifier(relation?.filterField) || !identifier(relation?.outerField) || !paths.has(relation.outerField) || !/^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$/.test(String(relation?.target || ""))) {
+      continue;
+    }
+    candidates.push({ index, relation, path });
+  }
+  return candidates.find((candidate) => candidate.relation.single === false) || candidates[0];
+}
+function textColumn(columns) {
+  return [...columns].filter((candidate) => !candidate.column?.pk && TEXT_TYPES2.has(candidate.column?.type)).sort((left, right) => {
+    const leftIndex = TEXT_NAMES.indexOf(left.path);
+    const rightIndex = TEXT_NAMES.indexOf(right.path);
+    return (leftIndex < 0 ? Number.MAX_SAFE_INTEGER : leftIndex) - (rightIndex < 0 ? Number.MAX_SAFE_INTEGER : rightIndex) || left.index - right.index;
+  })[0];
+}
+function windowOrderColumn(columns, group) {
+  const temporalNames = ["created_at", "updated_at", "date", "timestamp"];
+  const temporalTypes = ["DateTimeField", "DateField", "TimeField"];
+  const candidates = columns.filter((candidate) => candidate.path !== group?.path).map((candidate) => ({ candidate, score: temporalNames.includes(candidate.path) && temporalTypes.includes(candidate.column?.type) ? temporalNames.indexOf(candidate.path) : temporalTypes.includes(candidate.column?.type) ? 10 : !candidate.column?.pk && WINDOW_NUMERIC_TYPES.has(candidate.column?.type) ? 20 : candidate.column?.pk ? 30 : void 0 })).filter((entry2) => entry2.score !== void 0);
+  return candidates.sort((left, right) => left.score - right.score || left.candidate.index - right.candidate.index)[0]?.candidate;
+}
+function aggregateExample(column, source, occupied) {
+  const id = exampleId("count", column.path);
+  const countAlias = alias("row_count", occupied);
+  if (!countAlias) {
+    return void 0;
+  }
+  const recipe = createEmptyQueryRecipe(source);
+  recipe.mode = "summary";
+  recipe.groupBy = [{ kind: "field", path: column.path }];
+  recipe.computed = [{ alias: countAlias, distinct: "auto", enabled: true, field: { kind: "all" }, filter: { children: [], join: "and", kind: "group", negated: false, nodeId: `${id}-filter` }, function: "count", kind: "aggregate", nodeId: id }];
+  recipe.postFilter.children = [{ kind: "comparison", lhs: { alias: countAlias, kind: "computed" }, lookup: "gte", negated: false, nodeId: `${id}-having`, rhs: { kind: "literal", value: 2 } }];
+  recipe.orderBy = [{ direction: "desc", nodeId: `${id}-order`, ref: { alias: countAlias, kind: "computed" } }];
+  const display = column.column.label && column.column.label !== column.path ? `${column.column.label} \u2014 ${column.path}` : column.path;
+  return { controlKey: `computed:${id}:alias`, description: "Aggregate summary: group rows, count each group, keep counts of at least 2, and order largest groups first.", fallbackId: "queryComputedLegend", id, label: `Group ${display}; Count \u2265 2`, recipe, source: { ...source }, stage: "calculatedValues" };
+}
+function existsExample(candidate, source, occupied) {
+  const id = exampleId("exists", candidate.path);
+  const existsAlias = alias(`has_${candidate.path}`, occupied);
+  if (!existsAlias) {
+    return void 0;
+  }
+  const recipe = createEmptyQueryRecipe(source);
+  recipe.computed = [{ alias: existsAlias, correlations: [], enabled: true, kind: "exists", nodeId: id, source: { kind: "relation", relation: candidate.path }, where: { children: [], join: "and", kind: "group", negated: false, nodeId: `${id}-where` } }];
+  recipe.postFilter.children = [{ kind: "comparison", lhs: { alias: existsAlias, kind: "computed" }, lookup: "exact", negated: false, nodeId: `${id}-filter`, rhs: { kind: "literal", value: true } }];
+  return { controlKey: `computed:${id}:alias`, description: "Correlated Exists annotation: calculate whether related rows exist, then filter by that result.", fallbackId: "queryComputedLegend", id, label: `Related ${candidate.path} via Exists`, recipe, source: { ...source }, stage: "calculatedValues" };
+}
+function formulaExample(column, source, occupied) {
+  const allocated = new Set(occupied);
+  const id = exampleId("formula", column.path);
+  const normalized = alias(`normalized_${column.path}`, allocated);
+  const length = alias(`${column.path}_length`, allocated);
+  if (!normalized || !length) {
+    return void 0;
+  }
+  allocated.forEach((value) => occupied.add(value));
+  const recipe = createEmptyQueryRecipe(source);
+  recipe.computed = [{ alias: normalized, enabled: true, expression: { args: [{ args: [{ kind: "field", path: column.path }], function: "trim", kind: "function" }], function: "lower", kind: "function" }, kind: "formula", nodeId: `${id}-normalized`, outputType: "text" }, { alias: length, enabled: true, expression: { args: [{ alias: normalized, kind: "computed" }], function: "length", kind: "function" }, kind: "formula", nodeId: `${id}-length`, outputType: "integer" }];
+  recipe.postFilter.children = [{ kind: "comparison", lhs: { alias: length, kind: "computed" }, lookup: "gte", negated: false, nodeId: `${id}-filter`, rhs: { kind: "literal", value: 8 } }];
+  recipe.orderBy = [{ direction: "desc", nodeId: `${id}-length-order`, ref: { alias: length, kind: "computed" } }, { direction: "asc", nodeId: `${id}-normalized-order`, ref: { alias: normalized, kind: "computed" } }];
+  const display = column.column.label || column.path;
+  return { controlKey: `computed:${id}-normalized:alias`, description: "Chained Formula annotations: trim and lowercase the field, calculate length from the earlier alias, keep values of at least 8 characters, and order longest first.", fallbackId: "queryComputedLegend", id, label: `Normalize ${display}; Length \u2265 8`, recipe, source: { ...source }, stage: "calculatedValues" };
+}
+function windowExample(group, order, source, occupied) {
+  const id = exampleId("window", group.path);
+  const rank = alias(`rank_within_${group.path}`, occupied);
+  if (!rank) {
+    return void 0;
+  }
+  const recipe = createEmptyQueryRecipe(source);
+  recipe.computed = [{ alias: rank, enabled: true, function: "row_number", kind: "window", nodeId: id, orderBy: [{ direction: "desc", nodeId: `${id}-inner-order`, ref: { kind: "field", path: order.path } }], partitionBy: [{ kind: "field", path: group.path }] }];
+  recipe.postFilter.children = [{ kind: "comparison", lhs: { alias: rank, kind: "computed" }, lookup: "lte", negated: false, nodeId: `${id}-filter`, rhs: { kind: "literal", value: 3 } }];
+  recipe.orderBy = [{ direction: "asc", nodeId: `${id}-group-order`, ref: { kind: "field", path: group.path } }, { direction: "asc", nodeId: `${id}-rank-order`, ref: { alias: rank, kind: "computed" } }];
+  return { controlKey: `computed:${id}:alias`, description: "Window RowNumber: partition rows by the category, order each partition descending, keep the first 3, and order the result by category and rank.", fallbackId: "queryComputedLegend", id, label: `Top 3 ${order.column.label || order.path} per ${group.column.label || group.path}`, recipe, source: { ...source }, stage: "calculatedValues" };
+}
+function buildQueryExamples({ columns, relations, source } = {}) {
+  const identity = sourceIdentity(source);
+  if (!identity) {
+    return [];
+  }
+  const concrete = columnsFor(columns);
+  const occupied = /* @__PURE__ */ new Set([...concrete.map((candidate) => candidate.path), ...Array.isArray(relations) ? relations.flatMap((relation2) => [relation2?.name, relation2?.queryName, relation2?.filterField].map(identifier)) : []]);
+  const examples = [];
+  const add = (candidate) => {
+    if (candidate) {
+      examples.push(candidate);
+    }
+  };
+  const grouping = groupingColumn(concrete);
+  if (grouping) {
+    add(aggregateExample(grouping, identity, occupied));
+  }
+  const relation = safeRelation(relations, concrete);
+  if (relation) {
+    add(existsExample(relation, identity, occupied));
+  }
+  const text2 = textColumn(concrete);
+  if (text2) {
+    add(formulaExample(text2, identity, occupied));
+  }
+  const order = windowOrderColumn(concrete, grouping);
+  if (grouping && order) {
+    add(windowExample(grouping, order, identity, occupied));
+  }
+  return examples.map((example, index) => ({ ...example, label: `${index + 1} \xB7 ${example.label}` }));
+}
+function clearAndHide(mount) {
+  mount?.replaceChildren?.();
+  if (mount) {
+    mount.hidden = true;
+  }
+}
+function createQueryExamplesView({ el: el2, mount, onChoose } = {}) {
+  let destroyed = false;
+  function action(actions, example) {
+    const button3 = el2("button", { ariaLabel: `${example.label}. ${example.description || ""}`, className: "secondary query-example-action", title: example.description || "", type: "button" }, example.label);
+    button3.addEventListener("click", () => onChoose?.(example));
+    actions.appendChild(button3);
+  }
+  return {
+    /** Permanently stops view rendering. */
+    destroy() {
+      destroyed = true;
+      clearAndHide(mount);
+    },
+    /** Renders only canonical-empty drafts and at most four candidate actions. */
+    render({ draft, examples, source } = {}) {
+      if (destroyed || !mount || !isCanonicalEmptyQueryRecipe(draft)) {
+        clearAndHide(mount);
+        return;
+      }
+      const actions = Array.isArray(examples) ? examples.slice(0, 4) : [];
+      mount.replaceChildren();
+      mount.hidden = false;
+      mount.appendChild(el2("strong", { className: "query-examples-title" }, `Progressive examples for ${source?.app || ""}.${source?.model || ""}`));
+      mount.appendChild(el2("p", { className: "query-examples-help" }, "Draft only\u2014Apply stays manual."));
+      if (!actions.length) {
+        mount.appendChild(el2("p", { className: "query-examples-empty" }, "No safe advanced example is available for this model."));
+        return;
+      }
+      const controls = el2("div", { className: "query-examples-actions" });
+      actions.forEach((example) => action(controls, example));
+      mount.appendChild(controls);
+    }
+  };
+}
+
+// media/gridQueryAssistant.js
+function requestId(sequence) {
+  return `query-assistant-${Date.now()}-${sequence}`;
+}
+function hasCodeExpression(recipe) {
+  return Array.isArray(recipe?.computed) && recipe.computed.some((item) => item?.kind === "codeExpression");
+}
+function errorCopy(category) {
+  return { authentication: "The provider needs authentication in its own CLI.", "context-too-large": "This draft and schema are too large to send.", cancelled: "Generation was cancelled.", "invalid-recipe": "The suggestion did not pass local Recipe validation.", "invalid-response": "The provider did not return the required Recipe JSON.", "output-too-large": "The provider response was too large.", "provider-unavailable": "That provider is not available on this machine.", "provider-failed": "The provider could not generate a suggestion.", "settings-busy": "Provider settings cannot change while generation is active.", "settings-overridden": "A workspace setting controls this value. Open Settings to change the active setting.", "settings-write-failed": "Provider settings could not be saved.", stale: "The draft or model changed. Generate a new suggestion.", "unsupported-settings": "This model or reasoning level is not supported." }[category] || "The suggestion could not be generated.";
+}
+function createQueryAssistant({ element: element3, getDraft, getRevision, mount, onAccepted, post }) {
+  let destroyed = false;
+  let instruction = "";
+  let snapshot = { preferredProvider: "claude", providers: [] };
+  let selected = "claude";
+  let activeId = "";
+  let acceptingId = "";
+  let cancellingId = "";
+  let generation;
+  let invalidated = false;
+  let pendingId = "";
+  let sequence = 0;
+  let suggestion;
+  let message = "Detecting local providers and model metadata\u2026";
+  let error = "";
+  let failedRequestId = "";
+  let focusId = "";
+  let receivedSnapshot = false;
+  function send2(value) {
+    if (!destroyed) {
+      post(value);
+    }
+  }
+  function detect() {
+    const id = requestId(++sequence);
+    pendingId = id;
+    send2({ requestId: id, type: "queryAssistantProviders" });
+  }
+  function provider() {
+    return snapshot.providers.find((entry2) => entry2?.provider === selected);
+  }
+  function settingsIdentity(providerId = selected, currentSnapshot = snapshot) {
+    const current = currentSnapshot.providers.find((entry2) => entry2?.provider === providerId);
+    return JSON.stringify({ provider: providerId, settings: current?.settings || {} });
+  }
+  function generationAvailable(current = provider()) {
+    return Boolean(current?.available) && Boolean(current?.generationAllowed);
+  }
+  function stale() {
+    return Boolean(suggestion) && (invalidated || suggestion.revision !== getRevision() || suggestion.source?.app !== getDraft()?.source?.app || suggestion.source?.model !== getDraft()?.source?.model);
+  }
+  function text2(tag, properties, value) {
+    return element3(tag, properties, value);
+  }
+  function save(current, next = {}, controlId = "") {
+    if (!current || activeId || pendingId) {
+      return;
+    }
+    const id = requestId(++sequence);
+    pendingId = id;
+    error = "";
+    focusId = controlId;
+    message = "Saving provider settings\u2026";
+    send2({ autoUpdateModel: next.autoUpdateModel ?? current.settings.autoUpdateModel, model: next.model ?? current.settings.model, provider: current.provider, reasoningEffort: next.reasoningEffort ?? current.settings.reasoningEffort, requestId: id, type: "updateQueryAssistantProviderSettings" });
+    render();
+  }
+  function render() {
+    if (destroyed || !mount) {
+      return;
+    }
+    const active = mount.ownerDocument?.activeElement;
+    if (active?.id?.startsWith?.("queryAssistant")) {
+      focusId = active.id;
+    }
+    const current = provider();
+    const running = Boolean(activeId);
+    const accepting = Boolean(acceptingId);
+    const pending = Boolean(pendingId);
+    const code = hasCodeExpression(getDraft());
+    const automatic = current?.settings?.autoUpdateModel !== false;
+    const blocked = current?.compatibility === "missing-model" || current?.compatibility === "retired-model" || current?.compatibility === "unsupported-reasoning" || current?.compatibility === "invalid-settings";
+    const disabled = running || accepting || pending;
+    const canGenerate = !disabled && generationAvailable(current) && !blocked && Boolean(instruction.trim()) && !code;
+    const children = [text2("p", { className: "query-assistant-disclosure" }, "The selected CLI receives your instructions, current draft including literal values, and model schema. Row data is excluded. Claude Code runs without tools or session persistence. Codex runs read-only and ephemeral in the current workspace. Model discovery uses local CLI help and catalog commands only."), text2("label", { for: "queryAssistantProvider" }, "Provider")];
+    const providerSelect = element3("select", { id: "queryAssistantProvider", disabled });
+    snapshot.providers.forEach((entry2) => providerSelect.appendChild(text2("option", { disabled: !entry2.available, value: entry2.provider }, `${entry2.label}${entry2.available ? "" : " (unavailable)"}`)));
+    providerSelect.value = selected;
+    providerSelect.addEventListener("change", () => {
+      const id = requestId(++sequence);
+      pendingId = id;
+      error = "";
+      focusId = "queryAssistantProvider";
+      message = "Saving provider settings\u2026";
+      selected = providerSelect.value;
+      send2({ provider: selected, requestId: id, type: "selectQueryAssistantProvider" });
+      render();
+    });
+    children.push(providerSelect);
+    const settings = element3("fieldset", { className: "query-assistant-settings" });
+    settings.appendChild(text2("legend", {}, "Provider settings"));
+    settings.appendChild(text2("label", { for: "queryAssistantModel" }, "Model"));
+    const model = element3("select", { disabled, id: "queryAssistantModel" });
+    model.appendChild(text2("option", { value: "" }, "Automatic \u2014 provider default/latest"));
+    (current?.models || []).forEach((entry2) => model.appendChild(text2("option", { disabled: Boolean(entry2.retired), value: entry2.model }, entry2.label || entry2.model)));
+    if (current?.settings?.model && !(current.models || []).some((entry2) => entry2.model === current.settings.model)) {
+      const retainedState = current.compatibility === "retired-model" ? "retired" : current.compatibility === "missing-model" ? "missing" : "unverified";
+      model.appendChild(text2("option", { disabled: current.compatibility === "retired-model", value: current.settings.model }, `${current.settings.model} (${retainedState})`));
+    }
+    model.value = automatic ? "" : current?.settings?.model || "";
+    model.addEventListener("change", () => save(current, model.value ? { autoUpdateModel: false, model: model.value } : { autoUpdateModel: true }, "queryAssistantModel"));
+    settings.appendChild(model);
+    settings.appendChild(text2("label", { for: "queryAssistantReasoning" }, "Reasoning"));
+    const selectedModel = !automatic && (current?.models || []).find((entry2) => entry2.model === current?.settings?.model);
+    const efforts = selectedModel?.supportedReasoningEfforts?.length ? selectedModel.supportedReasoningEfforts : current?.providerReasoningEfforts || [];
+    const reasoning = element3("select", { disabled, id: "queryAssistantReasoning" });
+    reasoning.appendChild(text2("option", { value: "" }, "Provider default"));
+    ["low", "medium", "high", "xhigh", "max", "ultra"].filter((effort) => !efforts.length || efforts.includes(effort) || effort === current?.settings?.reasoningEffort).forEach((effort) => reasoning.appendChild(text2("option", { disabled: Boolean(efforts.length && !efforts.includes(effort)), value: effort }, effort)));
+    reasoning.value = current?.settings?.reasoningEffort || "";
+    reasoning.addEventListener("change", () => save(current, { reasoningEffort: reasoning.value }, "queryAssistantReasoning"));
+    settings.appendChild(reasoning);
+    if (selectedModel?.defaultReasoningEffort) {
+      settings.appendChild(text2("p", { className: "query-assistant-status" }, `Provider default for this model is ${selectedModel.defaultReasoningEffort}.`));
+    }
+    children.push(settings);
+    const status = message || (!current?.available ? "That provider is not available on this machine." : current?.compatibility === "missing-model" ? "This model is not available in the provider catalog. Choose a model before generating." : current?.compatibility === "invalid-settings" ? "Saved provider settings are invalid. Open Settings to correct them." : current?.compatibility === "retired-model" ? `This model is no longer available.${current.detail ? ` Choose ${current.detail} or turn on automatic model updates.` : " Turn on automatic model updates or choose another model."}` : current?.compatibility === "unsupported-reasoning" ? "This model does not support the selected reasoning level. Choose a compatible level or Provider default." : current?.metadata?.state === "unavailable" ? "Model metadata is unavailable; automatic provider defaults remain usable and manual selections are unverified." : current?.compatibility === "unverified" ? "The CLI did not report compatibility for this selection; it will validate it when generation starts." : automatic ? current?.settings?.reasoningEffort ? `The provider CLI will choose its current default model with ${current.settings.reasoningEffort} reasoning.` : "The provider CLI will choose its current default model and reasoning." : "This manual model selection is ready.");
+    const statusProperties = { ariaLive: "polite", className: blocked || error ? "query-assistant-error" : "query-assistant-status", id: "queryAssistantStatus" };
+    if (blocked || error) {
+      statusProperties.role = "alert";
+    }
+    children.push(text2("p", statusProperties, error || status));
+    children.push(text2("label", { for: "queryAssistantInstructions" }, "Instructions"));
+    const input = element3("textarea", { id: "queryAssistantInstructions", maxLength: "12000", placeholder: "Describe the draft you want to review\u2026", value: instruction });
+    const counter = text2("span", { className: "query-assistant-counter", ariaLive: "polite" }, `${instruction.length}/12000`);
+    let generateButton;
+    input.addEventListener("input", () => {
+      instruction = input.value.slice(0, 12e3);
+      input.value = instruction;
+      counter.textContent = `${instruction.length}/12000`;
+      if (generateButton) {
+        generateButton.disabled = disabled || !generationAvailable(current) || blocked || !instruction.trim() || hasCodeExpression(getDraft());
+      }
+    });
+    input.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        generate();
+      }
+      if (event.key === "Escape" && activeId) {
+        event.preventDefault();
+        event.stopPropagation?.();
+        cancel();
+      }
+    });
+    children.push(input, counter);
+    const actions = element3("div", { className: "query-assistant-actions" });
+    generateButton = text2("button", { disabled: !canGenerate, type: "button" }, "Generate suggestion");
+    generateButton.addEventListener("click", generate);
+    const refresh = text2("button", { className: "secondary", disabled, type: "button" }, "Refresh models");
+    refresh.addEventListener("click", () => {
+      const id = requestId(++sequence);
+      pendingId = id;
+      error = "";
+      focusId = "queryAssistantRefresh";
+      message = "Refreshing provider models\u2026";
+      send2({ requestId: id, type: "refreshQueryAssistantProviders" });
+      render();
+    });
+    refresh.id = "queryAssistantRefresh";
+    const open = text2("button", { className: "secondary", type: "button" }, "Open settings");
+    open.addEventListener("click", () => send2({ type: "openQueryAssistantSettings" }));
+    actions.append(generateButton, refresh, open);
+    if (running) {
+      const cancelButton = text2("button", { className: "secondary", disabled: Boolean(cancellingId), id: "queryAssistantCancel", type: "button" }, "Cancel");
+      cancelButton.addEventListener("click", cancel);
+      actions.appendChild(cancelButton);
+    }
+    children.push(actions);
+    if (running) {
+      children.push(text2("p", { className: "query-assistant-status", ariaLive: "polite" }, `Generating suggestion with ${current?.label || selected} \xB7 ${automatic ? "provider default/latest" : current?.settings?.model} \xB7 ${current?.settings?.reasoningEffort || "provider reasoning"}\u2026`));
+    }
+    if (suggestion) {
+      const outdated = stale();
+      children.push(text2("strong", { className: "query-assistant-generated" }, `AI-generated suggestion \xB7 ${suggestion.provider === "claude" ? "Claude Code" : "Codex"}`), text2("p", { className: "query-assistant-summary" }, suggestion.summary || "AI-generated Recipe"), text2("pre", { className: "query-assistant-orm" }, suggestion.orm || "No Django ORM preview available."));
+      for (const warning of Array.isArray(suggestion.warnings) ? suggestion.warnings.slice(0, 8) : []) {
+        children.push(text2("p", { className: "query-assistant-status", role: "note" }, String(warning).slice(0, 240)));
+      }
+      if (outdated) {
+        children.push(text2("p", { className: "query-assistant-error", id: "queryAssistantStale", role: "alert" }, "This suggestion is stale. Generate a new suggestion."));
+      } else if (accepting) {
+        children.push(text2("p", { className: "query-assistant-status", id: "queryAssistantAccepting", ariaLive: "polite" }, "Validating and adding AI suggestion to the draft\u2026"));
+      }
+      const review = element3("div", { className: "query-assistant-actions" });
+      const dismiss = text2("button", { className: "secondary", disabled: accepting, type: "button" }, "Dismiss");
+      dismiss.addEventListener("click", () => send2({ suggestionId: suggestion.suggestionId, type: "dismissQueryAssistantSuggestion" }));
+      review.appendChild(dismiss);
+      children.push(review);
+    }
+    mount.replaceChildren(...children);
+    if (focusId) {
+      const target = mount.querySelector?.(`#${focusId}`);
+      if (target && !target.disabled) {
+        target.focus?.();
+        focusId = "";
+      }
+    }
+  }
+  function generate() {
+    const current = provider();
+    if (activeId || acceptingId || pendingId || !generationAvailable(current) || !instruction.trim() || hasCodeExpression(getDraft())) {
+      render();
+      return;
+    }
+    const draft = getDraft();
+    suggestion = void 0;
+    invalidated = false;
+    activeId = requestId(++sequence);
+    generation = { requestId: activeId, revision: getRevision(), source: { ...draft.source } };
+    error = "";
+    message = "";
+    send2({ instruction: instruction.trim(), provider: selected, recipe: draft, requestId: activeId, revision: generation.revision, type: "generateQueryAssistantSuggestion" });
+    render();
+  }
+  function cancel() {
+    if (activeId && !cancellingId) {
+      cancellingId = activeId;
+      message = "Cancelling generation\u2026";
+      const cancelButton = mount?.querySelector?.("#queryAssistantCancel");
+      if (cancelButton) {
+        cancelButton.disabled = true;
+      }
+      const status = mount?.querySelector?.("#queryAssistantStatus");
+      if (status) {
+        status.textContent = message;
+      }
+      send2({ requestId: activeId, type: "cancelQueryAssistantSuggestion" });
+    }
+  }
+  function acceptSuggestion() {
+    if (!suggestion || stale() || acceptingId) {
+      return;
+    }
+    acceptingId = requestId(++sequence);
+    error = "";
+    message = "Validating and adding AI suggestion to the draft\u2026";
+    send2({ requestId: acceptingId, revision: getRevision(), suggestionId: suggestion.suggestionId, type: "acceptQueryAssistantSuggestion" });
+  }
+  function onMessage(value) {
+    if (destroyed || !value || typeof value !== "object") {
+      return false;
+    }
+    if (value.type === "queryAssistantProviders") {
+      if (pendingId && value.requestId !== pendingId) {
+        return true;
+      }
+      const before = settingsIdentity();
+      const failed = failedRequestId === value.requestId;
+      const external = value.settingsSync === true;
+      snapshot = { preferredProvider: value.preferredProvider === "codex" ? "codex" : "claude", providers: Array.isArray(value.providers) ? value.providers.filter((entry2) => entry2 && (entry2.provider === "claude" || entry2.provider === "codex")) : [] };
+      const preferred = snapshot.providers.find((entry2) => entry2.provider === snapshot.preferredProvider);
+      if (!receivedSnapshot || failed || external) {
+        if (preferred?.available) {
+          selected = preferred.provider;
+        } else {
+          const fallback = snapshot.providers.find((entry2) => entry2.provider === selected && entry2.available)?.provider || snapshot.providers.find((entry2) => entry2.available)?.provider;
+          if (fallback) {
+            selected = fallback;
+            message = "Your preferred provider is unavailable; showing an available provider without changing your saved preference.";
+          }
+        }
+      } else if (!provider()?.available) {
+        const fallback = preferred?.available ? preferred.provider : snapshot.providers.find((entry2) => entry2.available)?.provider;
+        if (fallback && fallback !== selected) {
+          selected = fallback;
+          message = "Your preferred provider is unavailable; showing an available provider without changing your saved preference.";
+        }
+      }
+      const changed = before !== settingsIdentity();
+      if (suggestion && changed) {
+        invalidated = true;
+        message = "Provider settings changed. Generate a new suggestion.";
+      }
+      receivedSnapshot = true;
+      pendingId = "";
+      if (!failed) {
+        error = "";
+        failedRequestId = "";
+      }
+      if (!message || /^(Detecting|Refreshing|Saving)/.test(message)) {
+        message = "";
+      }
+      render();
+      return true;
+    }
+    if (value.type === "queryAssistantCancelled" && value.requestId === activeId) {
+      activeId = "";
+      cancellingId = "";
+      generation = void 0;
+      message = "Generation was cancelled.";
+      render();
+      return true;
+    }
+    if (value.type === "queryAssistantError" && (value.requestId === activeId || value.requestId === acceptingId || value.requestId === pendingId || !value.requestId && !activeId && !acceptingId)) {
+      if (value.category === "stale" && !value.requestId && suggestion) {
+        invalidate();
+        return true;
+      }
+      if (value.requestId) {
+        failedRequestId = value.requestId;
+      }
+      if (value.requestId === activeId) {
+        activeId = "";
+        cancellingId = "";
+        generation = void 0;
+      }
+      if (value.requestId === acceptingId) {
+        acceptingId = "";
+        message = "";
+      }
+      if (value.requestId === pendingId && value.terminal) {
+        pendingId = "";
+      }
+      error = errorCopy(value.category);
+      render();
+      return true;
+    }
+    if (value.type === "queryAssistantSuggestion" && value.requestId === activeId && generation?.requestId === value.requestId) {
+      activeId = "";
+      cancellingId = "";
+      suggestion = { ...value, revision: generation.revision, source: { ...generation.source } };
+      generation = void 0;
+      invalidated = false;
+      acceptSuggestion();
+      render();
+      return true;
+    }
+    if (value.type === "queryAssistantDismissed" && suggestion?.suggestionId === value.suggestionId) {
+      suggestion = void 0;
+      message = "Suggestion dismissed.";
+      render();
+      return true;
+    }
+    if (value.type === "queryAssistantAccepted" && value.requestId === acceptingId && suggestion?.suggestionId === value.suggestionId) {
+      acceptingId = "";
+      if (value.revision !== getRevision() || stale()) {
+        invalidated = true;
+        error = errorCopy("stale");
+        message = "";
+        render();
+        return true;
+      }
+      suggestion = void 0;
+      onAccepted(value.recipe);
+      message = "AI suggestion added to the draft. Review and Apply when ready.";
+      render();
+      return true;
+    }
+    return false;
+  }
+  function invalidate() {
+    if (!suggestion || invalidated) {
+      return;
+    }
+    invalidated = true;
+    if (!mount?.querySelector?.("#queryAssistantStale")) {
+      mount?.appendChild?.(text2("p", { className: "query-assistant-error", id: "queryAssistantStale", role: "alert" }, "This suggestion is stale. Generate a new suggestion."));
+    }
+  }
+  function destroy() {
+    destroyed = true;
+    mount?.removeEventListener?.("keydown", panelKeydown);
+    mount?.replaceChildren();
+  }
+  function panelKeydown(event) {
+    if (event.key === "Escape" && activeId) {
+      event.preventDefault();
+      event.stopPropagation?.();
+      cancel();
+    }
+  }
+  mount?.addEventListener?.("keydown", panelKeydown);
+  detect();
+  render();
+  return { destroy, invalidate, onMessage, render };
+}
+
 // media/gridQuerySummary.js
 function countPredicateNodes(group) {
   return (group?.children || []).reduce((count, node) => count + 1 + (node.kind === "group" ? countPredicateNodes(node) : node.kind === "existsPredicate" ? countPredicateNodes(node.where) : 0), 0);
 }
+function summarizeRecipeFilters(recipe = {}) {
+  const sourceCount = countPredicateNodes(recipe.where);
+  const resultCount = countPredicateNodes(recipe.postFilter);
+  return {
+    resultCount,
+    resultText: resultCount > 0 ? predicateSummary(recipe.postFilter, true) : "",
+    sourceCount,
+    sourceText: sourceCount > 0 ? predicateSummary(recipe.where, true) : "",
+    totalCount: sourceCount + resultCount
+  };
+}
 function describeQueryRecipe(recipe) {
   const where = predicateSummary(recipe?.where, true);
   const computed = computedSummary(recipe?.computed);
+  const { resultCount, resultText } = summarizeRecipeFilters(recipe);
   const result = resultSummary(recipe);
-  return [where, computed, result].filter(Boolean).join(" \xB7 ");
+  return [where, computed, resultCount > 0 ? `Result filter: ${resultText}` : "", result].filter(Boolean).join(" \xB7 ");
 }
 function renderRecipeNarrative(recipe) {
   return `Recipe: ${describeQueryRecipe(recipe)}`;
@@ -5481,15 +6546,26 @@ Django ORM
 ${ormPreview.trim()}` : narrative;
 }
 function renderQuerySummary(elements, snapshot) {
-  const recipe = snapshot?.draft;
-  const filterCount = countPredicateNodes(recipe?.where);
+  const recipe = snapshot?.applied;
+  const { resultCount, resultText, sourceCount, sourceText, totalCount } = summarizeRecipeFilters(recipe);
   const columnCount = (recipe?.computed || []).filter((item) => item.enabled).length;
-  const text = describeQueryRecipe(recipe);
-  elements.queryFilterButton.textContent = `Filter ${filterCount}`;
+  const text2 = `Applied \xB7 ${describeQueryRecipe(recipe)}`;
+  elements.queryFilterButton.textContent = `Filters ${totalCount}`;
+  elements.queryFilterButton.title = `Applied filters: ${sourceCount} row condition(s), ${resultCount} result condition(s). Open the Filter Rows draft editor.`;
   elements.queryColumnsButton.textContent = `Columns ${columnCount}`;
+  elements.queryColumnsButton.title = "Applied calculated columns. Open the Calculated Values draft editor.";
   elements.queryModeButton.textContent = recipe?.mode === "summary" ? "Summary" : "Rows";
-  elements.queryHumanSummary.textContent = text;
-  elements.queryHumanSummary.title = text;
+  elements.queryModeButton.title = "Applied result mode. Open the Result draft editor.";
+  elements.queryHumanSummary.textContent = text2;
+  elements.queryHumanSummary.title = text2;
+  elements.queryAppliedWhere.hidden = sourceCount === 0;
+  elements.queryAppliedWhere.textContent = sourceCount > 0 ? `Rows \xB7 ${sourceText}` : "";
+  elements.queryAppliedWhere.title = sourceCount > 0 ? `Rows \xB7 ${sourceText}` : "";
+  elements.queryAppliedPostFilter.hidden = resultCount === 0;
+  elements.queryAppliedPostFilter.textContent = resultCount > 0 ? `Results \xB7 ${resultText}` : "";
+  elements.queryAppliedPostFilter.title = resultCount > 0 ? `Results \xB7 ${resultText}` : "";
+  elements.queryAppliedFilters.hidden = totalCount === 0;
+  elements.queryAppliedFiltersEmpty.hidden = totalCount > 0;
   elements.queryDirtyState.hidden = !snapshot?.dirty;
 }
 function predicateSummary(group, root = false) {
@@ -5509,15 +6585,15 @@ function predicateNodeSummary(node) {
   if (node?.kind === "existsPredicate") {
     const source = node.source?.kind === "relation" ? node.source.relation : `${node.source?.app || "?"}.${node.source?.model || "?"}`;
     const correlation = Array.isArray(node.correlations) && node.correlations.length ? ` correlated by ${node.correlations.map((item) => `${item.outerPath}=${item.targetPath}`).join(", ")}` : "";
-    const text = `EXISTS ${source}${correlation} where ${predicateSummary(node.where)}`;
-    return node.negated ? `NOT (${text})` : text;
+    const text2 = `EXISTS ${source}${correlation} where ${predicateSummary(node.where)}`;
+    return node.negated ? `NOT (${text2})` : text2;
   }
   if (node?.kind === "comparison") {
     if (node.lookup === "isnull") {
       return `${referenceSummary(node.lhs)} ${isNullSummary(node)}`;
     }
-    const text = `${referenceSummary(node.lhs)} ${String(node.lookup || "exact")} ${valueSummary(node.rhs)}`;
-    return node.negated ? `NOT (${text})` : text;
+    const text2 = `${referenceSummary(node.lhs)} ${String(node.lookup || "exact")} ${valueSummary(node.rhs)}`;
+    return node.negated ? `NOT (${text2})` : text2;
   }
   return "invalid condition";
 }
@@ -5688,19 +6764,19 @@ function renderQueryValidation({ issueSummary, validationState }, validation, op
     const item = document.createElement("article");
     item.className = "query-issue-item";
     item.dataset.severity = presentation.severity;
-    const button2 = document.createElement("button");
-    button2.className = "query-issue";
-    button2.dataset.severity = issue.severity === "warning" ? "warning" : "error";
-    button2.type = "button";
-    button2.textContent = `${presentation.severity === "warning" ? "Warning" : "Error"}: ${presentation.title}`;
+    const button3 = document.createElement("button");
+    button3.className = "query-issue";
+    button3.dataset.severity = issue.severity === "warning" ? "warning" : "error";
+    button3.type = "button";
+    button3.textContent = `${presentation.severity === "warning" ? "Warning" : "Error"}: ${presentation.title}`;
     const detailId = `query-issue-detail-${issue.nodeId || issue.code || "unknown"}-${index}`;
-    button2.setAttribute("aria-describedby", detailId);
-    button2.addEventListener("click", () => options.onFocusIssue?.(issue));
+    button3.setAttribute("aria-describedby", detailId);
+    button3.addEventListener("click", () => options.onFocusIssue?.(issue));
     const detail = document.createElement("p");
     detail.className = "query-issue-detail";
     detail.id = detailId;
     detail.textContent = `${presentation.explanation} Fix: ${presentation.fix}`;
-    item.append(button2, detail);
+    item.append(button3, detail);
     issueSummary.appendChild(item);
   }
 }
@@ -5774,13 +6850,20 @@ function cssEscape(value) {
 }
 
 // media/gridQueryController.js
-var QUERY_IDS = ["querySummaryBand", "queryFilterButton", "queryColumnsButton", "queryModeButton", "queryHumanSummary", "queryDirtyState", "queryValidationState", "queryDrawerToggle", "queryDrawer", "queryDrawerResizeHandle", "queryDrawerHeader", "queryBuilderTitle", "queryWhereSection", "queryWhereGuide", "queryWhereRoot", "queryComputedSection", "queryComputedGuide", "queryComputedList", "queryPostFilterSection", "queryPostFilterGuide", "queryPostFilterRoot", "queryResultSection", "queryResultGuide", "queryGroupBy", "queryOrderBy", "queryPreviewSection", "queryPreviewGuide", "queryPlainMeaning", "queryImplicitBehavior", "queryOrmPreview", "queryCopyOrm", "queryIssueSummary", "queryResetDraft", "queryClearDraft", "queryDrawerApply", "queryDrawerApplyHelp", "queryDrawerStatus", "queryDraftStatus", "queryUndo", "queryRedo", "queryFocusMode", "queryMoreActions", "queryMoreMenu", "queryClose", "queryStageNav", "queryStageSelect", "queryStageFilterRows", "queryStageCalculatedValues", "queryStageFilterResults", "queryStageResult", "queryFilterRowsPanel", "queryCalculatedValuesPanel", "queryFilterResultsPanel", "queryResultPanel", "queryInspectorTabs", "queryInspectorMeaning", "queryInspectorProblems", "queryInspectorOrm", "queryMeaningPanel", "queryProblemsPanel", "queryEditorPane", "queryReviewPane", "queryOrmPanel", "queryPopoverLayer", "queryWorkspace", "queryMobilePaneSwitch", "queryDrawerFooter"];
+var QUERY_IDS = ["querySummaryBand", "queryFilterButton", "queryColumnsButton", "queryModeButton", "queryHumanSummary", "queryDirtyState", "queryValidationState", "queryAppliedFiltersLabel", "queryAppliedFiltersEmpty", "queryAppliedFilters", "queryAppliedWhere", "queryAppliedPostFilter", "queryDrawerToggle", "queryDrawer", "queryDrawerResizeHandle", "gridwrap", "queryDrawerHeader", "queryBuilderTitle", "queryExamples", "queryWhereSection", "queryWhereGuide", "queryWhereRoot", "queryComputedSection", "queryComputedGuide", "queryComputedList", "queryPostFilterSection", "queryPostFilterGuide", "queryPostFilterRoot", "queryResultSection", "queryResultGuide", "queryGroupBy", "queryOrderBy", "queryPreviewSection", "queryPreviewGuide", "queryPlainMeaning", "queryImplicitBehavior", "queryOrmPreview", "queryCopyOrm", "queryIssueSummary", "queryResetDraft", "queryClearDraft", "queryDrawerApply", "queryDrawerApplyHelp", "queryDrawerStatus", "queryDraftStatus", "queryUndo", "queryRedo", "queryFocusMode", "queryMoreActions", "queryMoreMenu", "queryClose", "queryStageNav", "queryStageSelect", "queryStageFilterRows", "queryStageCalculatedValues", "queryStageFilterResults", "queryStageResult", "queryFilterRowsPanel", "queryCalculatedValuesPanel", "queryFilterResultsPanel", "queryResultPanel", "queryInspectorTabs", "queryInspectorMeaning", "queryInspectorProblems", "queryInspectorOrm", "queryInspectorAssistant", "queryMeaningPanel", "queryProblemsPanel", "queryEditorPane", "queryReviewPane", "queryOrmPanel", "queryAssistantPanel", "queryPopoverLayer", "queryWorkspace", "queryMobilePaneSwitch", "queryDrawerFooter"];
 var QUERY_STAGE_ORDINALS = { calculatedValues: 2, filterResults: 3, filterRows: 1, result: 4 };
 function createQueryController(options) {
   const root = options.root || document;
   const elements = Object.fromEntries(QUERY_IDS.map((id) => [id, root.getElementById(id)]));
+  elements.queryDraftAiAssembly = root.getElementById("queryDraftAiAssembly");
   if (!elements.querySummaryBand) {
     return noQueryController();
+  }
+  if (elements.queryInspectorAssistant && elements.queryInspectorTabs && elements.queryInspectorAssistant.parentElement !== elements.queryInspectorTabs) {
+    elements.queryInspectorTabs.appendChild(elements.queryInspectorAssistant);
+  }
+  if (elements.queryAssistantPanel && elements.queryPreviewSection && elements.queryAssistantPanel.parentElement !== elements.queryPreviewSection) {
+    elements.queryPreviewSection.appendChild(elements.queryAssistantPanel);
   }
   elements.queryBuilderTitle?.setAttribute("role", "heading");
   elements.queryBuilderTitle?.setAttribute("aria-level", "2");
@@ -5791,6 +6874,7 @@ function createQueryController(options) {
   let requestSequence = 0;
   let previewTimer = 0;
   let observedDraftRevision = 0;
+  let aiAssemblyRevision = -1;
   let metadataCatalogRequest = 0;
   let sectionsMounted = false;
   let resultSignature = "";
@@ -5798,16 +6882,18 @@ function createQueryController(options) {
   let predicateRenderVersion = 0;
   const scope = { columns: [], relations: [], source, target: source };
   const store = createQueryRecipeStore(createEmptyQueryRecipe(source));
-  const resultControls = createQueryResultControls({ dispatch: (action) => store.dispatch(action), el: element2, groupByMount: elements.queryGroupBy, orderByMount: elements.queryOrderBy, popoverLayer: elements.queryPopoverLayer, replaceGroupBy });
+  const resultControls = createQueryResultControls({ dispatch: (action) => store.dispatch(action), el: element2, groupByMount: elements.queryGroupBy, orderByMount: elements.queryOrderBy, replaceGroupBy });
   const metadata = createQueryMetadataService({ onChange: () => requestBuilderRender("metadata"), post });
   let applyLifecycle = createApplyLifecycle();
   let validationLifecycle = createValidationLifecycle();
   const uiState = createQueryUiState({ getPersisted: options.getPersisted, persist: options.persist });
   const focusIntent = createQueryFocusIntent();
+  const examplesView = createQueryExamplesView({ el: element2, mount: elements.queryExamples, onChoose: chooseQueryExample });
+  const assistant = createQueryAssistant({ element: element2, getDraft: () => store.getSnapshot().draft, getRevision: () => store.getSnapshot().draftRevision, mount: elements.queryAssistantPanel, onAccepted: acceptAssistantRecipe, post });
   let predicateBuilders = [];
   let computedBuilder;
   const menuAbort = new AbortController();
-  const drawerResize = createQueryDrawerResize({ drawer: elements.queryDrawer, handle: elements.queryDrawerResizeHandle, onHeight: (height, dragging, bounds) => {
+  const drawerResize = createQueryDrawerResize({ container: elements.queryDrawer.parentElement, drawer: elements.queryDrawer, grid: elements.gridwrap, handle: elements.queryDrawerResizeHandle, onHeight: (height, dragging, bounds) => {
     uiState.setBounds(bounds);
     uiState.dispatch({ dragging, height, type: "SET_DRAWER_HEIGHT" });
   }, root });
@@ -5828,10 +6914,62 @@ function createQueryController(options) {
       } },
       { id: "workspace", signature: (model) => JSON.stringify(model.ui), update: (model) => workspace.render(model.ui) }
     ],
-    restoreFocus: (captured) => restoreQueryFocus(root, focusIntent.consume() || captured)
+    restoreFocus: (captured) => restoreCoordinatorFocus(captured)
   });
   function requestRender(reason = "recipe") {
     coordinator.request(reason);
+  }
+  function findExplicitFocusTarget(intent) {
+    return [...root?.querySelectorAll?.("[data-query-control-key]") || []].find((control) => control.dataset?.queryControlKey === intent?.controlKey);
+  }
+  function isAvailableFocusTarget(control) {
+    return Boolean(control?.focus) && control.disabled !== true && control.getAttribute?.("aria-disabled") !== "true";
+  }
+  function restoreCoordinatorFocus(captured) {
+    const intent = focusIntent.consume();
+    if (!intent) {
+      return restoreQueryFocus(root, captured);
+    }
+    const control = findExplicitFocusTarget(intent);
+    if (isAvailableFocusTarget(control) && restoreQueryFocus(root, intent, { reveal: true })) {
+      return true;
+    }
+    const fallback = root?.getElementById?.(intent.fallbackId);
+    if (fallback?.focus) {
+      fallback.focus({ preventScroll: true });
+      return true;
+    }
+    return false;
+  }
+  function sameQuerySource(left, right) {
+    return typeof left?.app === "string" && typeof left?.model === "string" && left.app.trim() !== "" && left.model.trim() !== "" && left.app === right?.app && left.model === right?.model;
+  }
+  function chooseQueryExample(candidate) {
+    const snapshot = store.getSnapshot();
+    if (!sameQuerySource(source, candidate?.source) || !sameQuerySource(snapshot.draft.source, source) || !isCanonicalEmptyQueryRecipe(snapshot.draft)) {
+      status.textContent = "The draft changed; clear it before choosing an example.";
+      announcer2?.announceStatus("The draft changed; clear it before choosing an example.");
+      requestRender("query-example-stale");
+      return;
+    }
+    uiState.dispatch({ stage: candidate.stage, type: "SET_ACTIVE_STAGE" });
+    focusIntent.set({ controlKey: candidate.controlKey, fallbackId: candidate.fallbackId });
+    store.dispatch({ recipe: candidate.recipe, type: "REPLACE_DRAFT" });
+    requestBuilderRender("query-example");
+    const message = `${candidate.label} added to the draft. Review and Apply when ready.`;
+    status.textContent = message;
+    announcer2?.announceStatus(message);
+  }
+  function acceptAssistantRecipe(recipe) {
+    const snapshot = store.getSnapshot();
+    if (!recipe || !sameQuerySource(recipe.source, source)) {
+      return;
+    }
+    uiState.dispatch({ stage: "calculatedValues", type: "SET_ACTIVE_STAGE" });
+    uiState.dispatch({ tab: "meaning", type: "SET_INSPECTOR_TAB" });
+    store.dispatch({ recipe, type: "REPLACE_DRAFT" });
+    aiAssemblyRevision = store.getSnapshot().draftRevision;
+    requestBuilderRender("query-assistant-accepted");
   }
   function requestBuilderRender(reason, { computed = true, predicate = true } = {}) {
     if (computed) {
@@ -5856,6 +6994,8 @@ function createQueryController(options) {
     restoreDraft("redo", () => store.redo());
   }
   function renderMain(snapshot) {
+    const examples = buildQueryExamples({ columns: scope.columns, relations: scope.relations, source });
+    examplesView.render({ draft: snapshot.draft, examples, source });
     const checking = validationLifecycle.phase === "pending" || validationLifecycle.phase === "previewing";
     renderQuerySummary(elements, snapshot);
     const localOrderIssues = outerOrderIssues(snapshot.draft.orderBy);
@@ -5875,6 +7015,9 @@ function createQueryController(options) {
     if (elements.queryDraftStatus) {
       elements.queryDraftStatus.textContent = snapshot.dirty ? "Draft changes are not applied" : "Draft matches applied query";
     }
+    if (elements.queryDraftAiAssembly) {
+      elements.queryDraftAiAssembly.hidden = aiAssemblyRevision !== snapshot.draftRevision;
+    }
     if (elements.queryUndo) {
       elements.queryUndo.disabled = !snapshot.canUndo;
     }
@@ -5892,9 +7035,9 @@ function createQueryController(options) {
     renderQueryInspector({ element: element2, elements, recipe: snapshot.draft, root, scope, validation });
     const stageCounts = queryStageCounts(snapshot.draft);
     const stageButtons = { calculatedValues: elements.queryStageCalculatedValues, filterResults: elements.queryStageFilterResults, filterRows: elements.queryStageFilterRows, result: elements.queryStageResult };
-    for (const [stage2, button2] of Object.entries(stageButtons)) {
-      if (button2) {
-        button2.textContent = `${QUERY_STAGE_ORDINALS[stage2]}. ${stageLabel(stage2, stageCounts[stage2])}`;
+    for (const [stage2, button3] of Object.entries(stageButtons)) {
+      if (button3) {
+        button3.textContent = `${QUERY_STAGE_ORDINALS[stage2]}. ${stageLabel(stage2, stageCounts[stage2])}`;
       }
     }
     scope.computedFields = (snapshot.draft.computed || []).filter((item) => item?.enabled).map((item) => ({ alias: item.alias, enabled: item.enabled, outputType: item.outputType || "" }));
@@ -6018,11 +7161,11 @@ function createQueryController(options) {
     elements.queryComputedList.replaceChildren(computedBuilder.node);
   }
   function modeButton(label, mode, current) {
-    const button2 = root.createElement("button");
-    button2.type = "button";
-    button2.textContent = label;
-    button2.setAttribute("aria-pressed", String(current === mode));
-    button2.addEventListener("click", () => {
+    const button3 = root.createElement("button");
+    button3.type = "button";
+    button3.textContent = label;
+    button3.setAttribute("aria-pressed", String(current === mode));
+    button3.addEventListener("click", () => {
       const recipe = store.getSnapshot().draft;
       if (mode === "rows" && recipe.mode === "summary" && recipe.groupBy.length) {
         uiState.dispatch({ mode, type: "SET_PENDING_RESULT_MODE" });
@@ -6030,13 +7173,13 @@ function createQueryController(options) {
       }
       store.dispatch({ type: "SET_MODE", mode });
     });
-    return button2;
+    return button3;
   }
-  function setSectionText(container, text) {
+  function setSectionText(container, text2) {
     container.replaceChildren();
     const paragraph = root.createElement("p");
     paragraph.className = "query-builder-empty";
-    paragraph.textContent = text;
+    paragraph.textContent = text2;
     container.appendChild(paragraph);
   }
   function schedulePreview() {
@@ -6048,10 +7191,10 @@ function createQueryController(options) {
     }
     const revision = store.getSnapshot().draftRevision;
     previewTimer = window.setTimeout(() => {
-      const requestId = `recipe-preview-${requestSequence += 1}`;
-      validationLifecycle = transitionValidation(validationLifecycle, { requestId, revision, type: "PREVIEW_TIMER_FIRED" });
+      const requestId2 = `recipe-preview-${requestSequence += 1}`;
+      validationLifecycle = transitionValidation(validationLifecycle, { requestId: requestId2, revision, type: "PREVIEW_TIMER_FIRED" });
       requestRender("preview-started");
-      post({ recipe: store.getSnapshot().draft, requestId, revision, type: "previewQueryRecipe" });
+      post({ recipe: store.getSnapshot().draft, requestId: requestId2, revision, type: "previewQueryRecipe" });
     }, 400);
   }
   function apply() {
@@ -6084,6 +7227,7 @@ function createQueryController(options) {
     }
     const changed = source.app !== nextSource.app || source.model !== nextSource.model;
     source = { app: nextSource.app, model: nextSource.model };
+    assistant.invalidate();
     scope.columns = Array.isArray(nextSource.columns) ? nextSource.columns : scope.columns;
     scope.relations = Array.isArray(nextSource.relations) ? nextSource.relations : scope.relations;
     scope.source = source;
@@ -6101,8 +7245,7 @@ function createQueryController(options) {
     sectionsMounted = false;
     resultSignature = "";
     if (uiState.getSnapshot().focusMode) {
-      options.gridAdapter?.exitQueryFocusMode?.();
-      uiState.dispatch({ enabled: false, type: "SET_FOCUS_MODE" });
+      setQueryFocusMode(false);
     }
     uiState.dispatch({ type: "RESET_TRANSIENT_FOR_SOURCE" });
     metadataCatalogRequest += 1;
@@ -6118,6 +7261,9 @@ function createQueryController(options) {
     store.dispatch({ recipe, type: "REPLACE_DRAFT" });
   }
   function onMessage(message) {
+    if (assistant.onMessage(message)) {
+      return true;
+    }
     if (!message || typeof message.type !== "string") {
       return false;
     }
@@ -6225,20 +7371,14 @@ function createQueryController(options) {
   elements.queryMoreActions.addEventListener("click", () => toggleMoreActions());
   elements.queryClose.addEventListener("click", closeDrawer);
   elements.queryFocusMode.addEventListener("click", () => {
-    const enabled = !uiState.getSnapshot().focusMode;
-    uiState.dispatch({ enabled, type: "SET_FOCUS_MODE" });
-    if (enabled) {
-      options.gridAdapter?.enterQueryFocusMode?.();
-    } else {
-      options.gridAdapter?.exitQueryFocusMode?.();
-    }
+    setQueryFocusMode(!uiState.getSnapshot().focusMode);
   });
   const stageControls = { queryStageCalculatedValues: "calculatedValues", queryStageFilterResults: "filterResults", queryStageFilterRows: "filterRows", queryStageResult: "result" };
   for (const [id, stage2] of Object.entries(stageControls)) {
     elements[id].addEventListener("click", () => uiState.dispatch({ stage: stage2, type: "SET_ACTIVE_STAGE" }));
   }
   elements.queryStageSelect.addEventListener("change", () => uiState.dispatch({ stage: elements.queryStageSelect.value, type: "SET_ACTIVE_STAGE" }));
-  const inspectorControls = { queryInspectorMeaning: "meaning", queryInspectorOrm: "orm", queryInspectorProblems: "problems" };
+  const inspectorControls = { queryInspectorMeaning: "meaning", queryInspectorOrm: "orm", queryInspectorProblems: "problems", queryInspectorAssistant: "assistant" };
   for (const [id, tab] of Object.entries(inspectorControls)) {
     elements[id].addEventListener("click", () => uiState.dispatch({ tab, type: "SET_INSPECTOR_TAB" }));
   }
@@ -6292,8 +7432,7 @@ function createQueryController(options) {
     }
     if (event.key === "Escape" && uiState.getSnapshot().focusMode) {
       event.preventDefault();
-      uiState.dispatch({ enabled: false, type: "SET_FOCUS_MODE" });
-      options.gridAdapter?.exitQueryFocusMode?.();
+      setQueryFocusMode(false);
       elements.queryFocusMode.focus();
       return;
     }
@@ -6325,7 +7464,11 @@ function createQueryController(options) {
   store.subscribe((snapshot) => {
     if (snapshot.draftRevision !== observedDraftRevision) {
       observedDraftRevision = snapshot.draftRevision;
+      if (aiAssemblyRevision !== snapshot.draftRevision) {
+        aiAssemblyRevision = -1;
+      }
       validationLifecycle = transitionValidation(validationLifecycle, { revision: snapshot.draftRevision, type: "DRAFT_CHANGED" });
+      assistant.invalidate();
       schedulePreview();
     }
     requestRender("store");
@@ -6340,6 +7483,8 @@ function createQueryController(options) {
   return { apply, destroy() {
     menuAbort.abort();
     drawerResize.destroy();
+    assistant.destroy();
+    examplesView.destroy();
     coordinator.destroy();
     uiState.destroy();
     disposePredicateBuilders();
@@ -6357,6 +7502,16 @@ function createQueryController(options) {
   function closeMoreActions() {
     elements.queryMoreMenu.hidden = true;
     elements.queryMoreActions.setAttribute("aria-expanded", "false");
+  }
+  function setQueryFocusMode(enabled) {
+    const next = Boolean(enabled);
+    if (next) {
+      options.gridAdapter?.enterQueryFocusMode?.();
+    } else {
+      options.gridAdapter?.exitQueryFocusMode?.();
+    }
+    uiState.dispatch({ enabled: next, type: "SET_FOCUS_MODE" });
+    drawerResize.refresh();
   }
   function handleMoreMenuKey(event) {
     const items = [...elements.queryMoreMenu.querySelectorAll('[role="menuitem"]')];
@@ -6394,6 +7549,8 @@ function element2(tagName, properties = {}, ...children) {
       node.setAttribute("aria-hidden", value);
     } else if (name === "checked") {
       node.checked = Boolean(value);
+    } else if (name === "disabled") {
+      node.disabled = Boolean(value);
     } else if (name === "value") {
       node.value = value;
     } else {
@@ -6456,6 +7613,250 @@ function renderQuerySummaryTable(result, helpers) {
   return table;
 }
 
+// media/modelQueryBuilderE2eProbe.js
+async function waitFor(predicate, label, timeoutMs = 5e3) {
+  const started = Date.now();
+  let value;
+  while (Date.now() - started < timeoutMs) {
+    value = predicate();
+    if (value) {
+      return value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for ${label}.`);
+}
+function button2(document2, label) {
+  return [...document2.querySelectorAll("button")].find((candidate) => !candidate.hidden && candidate.textContent?.trim() === label);
+}
+function click(document2, label) {
+  const target = button2(document2, label);
+  if (!target || target.disabled) {
+    throw new Error(`${label} is unavailable.`);
+  }
+  target.click();
+  return target;
+}
+function conditionAdd(document2) {
+  return [...document2.querySelectorAll("button")].find((candidate) => candidate.getAttribute("aria-label") === "Add condition to this group");
+}
+async function waitForE2eField(document2, predicate, timeoutMs = 5e3) {
+  return waitFor(() => {
+    const select = document2.querySelector('select[aria-label="Condition field"]');
+    return select && predicate(select) ? select : void 0;
+  }, "Query Builder Field control", timeoutMs);
+}
+function previewIsReady(document2) {
+  return !document2.getElementById("queryDrawerApply")?.disabled && !document2.getElementById("queryDrawerStatus")?.textContent?.includes("Checking latest");
+}
+function examplesRestored(document2) {
+  const text2 = [document2.getElementById("queryComputedList")?.textContent, document2.getElementById("queryPostFilterRoot")?.textContent, document2.getElementById("queryOrderBy")?.textContent].join(" ");
+  const aliases = ["row_count", "has_memberships", "normalized_username", "username_length", "rank_within_status"];
+  return document2.querySelectorAll("#queryExamples button").length === 4 && document2.getElementById("queryDraftStatus")?.textContent === "Draft matches applied query" && aliases.every((alias2) => !text2.includes(alias2));
+}
+function assistantOverflow(document2) {
+  const metrics = {};
+  for (const [name, selector] of Object.entries({ actions: ".query-assistant-actions", form: ".query-assistant-panel", panel: "#queryAssistantPanel", review: "#queryReviewPane" })) {
+    const node = document2.querySelector(selector);
+    metrics[name] = node ? { clientWidth: node.clientWidth, scrollWidth: node.scrollWidth } : void 0;
+  }
+  return metrics;
+}
+function assistantSettingsReady(document2, expected) {
+  const provider = document2.getElementById("queryAssistantProvider");
+  const model = document2.getElementById("queryAssistantModel");
+  const reasoning = document2.getElementById("queryAssistantReasoning");
+  const refresh = document2.getElementById("queryAssistantRefresh");
+  return provider?.value === expected.provider && !provider.disabled && model?.value === (expected.automatic ? "" : expected.model) && !model?.disabled && reasoning?.value === expected.reasoning && !reasoning.disabled && !refresh?.disabled;
+}
+async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, requestId: requestId2 }) {
+  let selectPrototype;
+  let originalShowPicker;
+  let showPickerCalls = 0;
+  let terminal = false;
+  const view = document2.defaultView || globalThis.window;
+  const finish = (snapshot) => {
+    if (terminal) {
+      return;
+    }
+    terminal = true;
+    try {
+      postMessage({ requestId: requestId2, snapshot, type: "e2eQueryBuilderProbeResult" });
+    } catch {
+    }
+  };
+  const progress = (stage2) => postMessage({ requestId: requestId2, stage: stage2, type: "e2eQueryBuilderProbeProgress" });
+  const terminalError = (event) => finish({ error: String(event?.reason?.message || event?.error?.message || event?.message || "window error"), showPickerCalls });
+  view?.addEventListener?.("error", terminalError);
+  view?.addEventListener?.("unhandledrejection", terminalError);
+  try {
+    selectPrototype = HTMLSelectElement.prototype;
+    originalShowPicker = Object.getOwnPropertyDescriptor(selectPrototype, "showPicker");
+    progress("examples");
+    Object.defineProperty(selectPrototype, "showPicker", { configurable: true, value() {
+      showPickerCalls += 1;
+    } });
+    const drawer = document2.getElementById("queryDrawer");
+    if (drawer?.hidden) {
+      document2.getElementById("queryDrawerToggle")?.click();
+    }
+    const examples = [...document2.querySelectorAll("#queryExamples button")];
+    if (examples.length !== 4 || !examples[0].getAttribute("aria-label")?.includes("Aggregate summary") || !examples[1].getAttribute("aria-label")?.includes("Correlated Exists") || !examples[2].getAttribute("aria-label")?.includes("Chained Formula") || !examples[3].getAttribute("aria-label")?.includes("Window RowNumber")) {
+      throw new Error("Progressive examples are missing or unordered.");
+    }
+    progress("example-aggregate-apply");
+    examples[0].click();
+    await waitFor(() => document2.getElementById("queryComputedList")?.textContent?.includes("row_count") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("row_count"), "aggregate example controls");
+    await waitFor(() => previewIsReady(document2), "aggregate preview");
+    if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
+      throw new Error("Aggregate example changed applied filters.");
+    }
+    progress("example-aggregate-undo-click");
+    click(document2, "Undo");
+    await waitFor(() => examplesRestored(document2), "aggregate undo");
+    progress("example-aggregate-undo-restored");
+    progress("example-exists-apply");
+    click(document2, "2 \xB7 Related memberships via Exists");
+    await waitFor(() => document2.getElementById("queryComputedList")?.textContent?.includes("has_memberships") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("has_memberships"), "Exists example controls");
+    await waitFor(() => previewIsReady(document2), "Exists preview");
+    if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
+      throw new Error("Exists example changed applied filters.");
+    }
+    progress("example-exists-undo-click");
+    click(document2, "Undo");
+    await waitFor(() => examplesRestored(document2), "Exists undo");
+    progress("example-exists-undo-restored");
+    progress("example-formula-apply");
+    click(document2, "3 \xB7 Normalize Username; Length \u2265 8");
+    await waitFor(() => document2.getElementById("queryComputedList")?.textContent?.includes("normalized_username") && document2.getElementById("queryComputedList")?.textContent?.includes("username_length") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("username_length") && document2.getElementById("queryOrderBy")?.textContent?.includes("username_length") && document2.getElementById("queryOrderBy")?.textContent?.includes("normalized_username"), "Formula example controls");
+    await waitFor(() => previewIsReady(document2), "Formula preview");
+    if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
+      throw new Error("Formula example changed applied filters.");
+    }
+    progress("example-formula-undo-click");
+    click(document2, "Undo");
+    await waitFor(() => examplesRestored(document2), "Formula undo");
+    progress("example-formula-undo-restored");
+    progress("example-window-apply");
+    click(document2, "4 \xB7 Top 3 ID per Status");
+    await waitFor(() => document2.getElementById("queryComputedList")?.textContent?.includes("rank_within_status") && document2.getElementById("queryComputedList")?.textContent?.includes("Window: row_number") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("rank_within_status") && document2.getElementById("queryOrderBy")?.textContent?.includes("status") && document2.getElementById("queryOrderBy")?.textContent?.includes("rank_within_status"), "Window example controls");
+    await waitFor(() => previewIsReady(document2), "Window preview");
+    if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
+      throw new Error("Window example changed applied filters.");
+    }
+    progress("example-window-undo-click");
+    click(document2, "Undo");
+    await waitFor(() => examplesRestored(document2), "Window undo");
+    progress("example-window-undo-restored");
+    await waitFor(() => document2.getElementById("queryDrawerStatus")?.textContent === "Applied query is current.", "restored draft preview");
+    progress("assistant-settings");
+    click(document2, "AI Assist");
+    const assistant = await waitFor(() => document2.getElementById("queryAssistantPanel")?.hidden === false ? document2.getElementById("queryAssistantPanel") : void 0, "AI Assist panel");
+    const provider = await waitFor(() => document2.getElementById("queryAssistantProvider"), "assistant provider selector");
+    const instructions = document2.getElementById("queryAssistantInstructions");
+    const model = document2.getElementById("queryAssistantModel");
+    const reasoning = document2.getElementById("queryAssistantReasoning");
+    if (!instructions || model?.value !== "" || model?.disabled || reasoning?.value !== "" || !assistant.textContent?.includes("Row data is excluded") || provider.options.length !== 2 || !button2(document2, "Generate suggestion")?.disabled) {
+      throw new Error("AI Assist automatic default state is incomplete.");
+    }
+    let modelControl = document2.getElementById("queryAssistantModel");
+    modelControl.value = "sonnet";
+    modelControl.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "" }), "Claude direct model save");
+    let reasoningControl = document2.getElementById("queryAssistantReasoning");
+    reasoningControl.value = "high";
+    reasoningControl.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "Claude reasoning save");
+    let providerControl = document2.getElementById("queryAssistantProvider");
+    providerControl.value = "codex";
+    providerControl.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => assistantSettingsReady(document2, { automatic: true, model: "", provider: "codex", reasoning: "" }), "Codex provider acknowledgement");
+    modelControl = document2.getElementById("queryAssistantModel");
+    modelControl.value = "gpt-5";
+    modelControl.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "" }), "Codex model save");
+    reasoningControl = document2.getElementById("queryAssistantReasoning");
+    reasoningControl.value = "xhigh";
+    reasoningControl.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "xhigh" }), "Codex supported reasoning save");
+    modelControl = document2.getElementById("queryAssistantModel");
+    modelControl.value = "gpt-5-mini";
+    modelControl.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => assistant.textContent?.includes("does not support the selected reasoning level") && document2.getElementById("queryAssistantProvider")?.value === "codex" && !document2.getElementById("queryAssistantProvider")?.disabled, "known incompatible reasoning");
+    reasoningControl = document2.getElementById("queryAssistantReasoning");
+    reasoningControl.value = "medium";
+    reasoningControl.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5-mini", provider: "codex", reasoning: "medium" }) && !assistant.textContent?.includes("does not support the selected reasoning level"), "compatible reasoning recovery");
+    providerControl = document2.getElementById("queryAssistantProvider");
+    providerControl.value = "claude";
+    providerControl.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "retained Claude settings");
+    modelControl = document2.getElementById("queryAssistantModel");
+    modelControl.value = "";
+    modelControl.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => assistantSettingsReady(document2, { automatic: true, model: "", provider: "claude", reasoning: "high" }), "automatic mode restoration");
+    modelControl = document2.getElementById("queryAssistantModel");
+    modelControl.value = "sonnet";
+    modelControl.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "retained manual pin after automatic mode");
+    const currentInstructions = await waitFor(() => document2.getElementById("queryAssistantInstructions"), "assistant instruction control after provider selection");
+    currentInstructions.value = "Create a valid query draft";
+    currentInstructions.dispatchEvent(new Event("input", { bubbles: true }));
+    const refresh = document2.getElementById("queryAssistantRefresh");
+    refresh.focus();
+    click(document2, "Refresh models");
+    await waitFor(() => document2.getElementById("queryAssistantInstructions")?.value === "Create a valid query draft" && assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }) && document2.activeElement?.id === "queryAssistantRefresh", "metadata refresh preservation and focus");
+    await waitFor(() => button2(document2, "Generate suggestion") && !button2(document2, "Generate suggestion")?.disabled, "enabled assistant generation");
+    progress("generation-running");
+    click(document2, "Generate suggestion");
+    await waitFor(() => assistant.textContent?.includes("Generating suggestion with Claude Code") && button2(document2, "Generate suggestion")?.disabled && button2(document2, "Cancel"), "assistant running state");
+    progress("cancel-clicked");
+    click(document2, "Cancel");
+    await waitFor(() => button2(document2, "Cancel")?.disabled && assistant.textContent?.includes("Cancelling generation\u2026"), "assistant cancellation pending");
+    progress("cancel-ack");
+    await waitFor(() => assistant.textContent?.includes("Generation was cancelled.") && !assistant.textContent?.includes("AI-generated suggestion"), "assistant cancellation");
+    await waitFor(() => button2(document2, "Generate suggestion") && !button2(document2, "Generate suggestion")?.disabled, "generation after cancellation");
+    progress("second-generation");
+    click(document2, "Generate suggestion");
+    progress("suggestion");
+    await waitFor(() => assistant.textContent?.includes("AI-generated suggestion \xB7 Claude Code") || document2.getElementById("queryDraftAiAssembly")?.hidden === false, "assistant result or assembled draft");
+    if (button2(document2, "Use as draft")) {
+      throw new Error("AI Assist exposed a manual draft action.");
+    }
+    if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
+      throw new Error("Suggestion changed applied filters.");
+    }
+    await waitFor(() => document2.getElementById("queryDraftStatus")?.textContent === "Draft changes are not applied" && document2.getElementById("queryDraftAiAssembly")?.hidden === false && document2.getElementById("queryWhereRoot")?.textContent?.includes("Status") && document2.getElementById("queryWhereRoot")?.textContent?.includes("equals \u201Cactive\u201D.") && !document2.getElementById("queryDrawerApply")?.disabled, "rendered automatic draft-only assistant acceptance");
+    if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None" || document2.getElementById("queryDrawerStatus")?.textContent?.includes("Applying")) {
+      throw new Error("Assistant acceptance applied the query.");
+    }
+    click(document2, "Undo");
+    await waitFor(() => document2.getElementById("queryDraftStatus")?.textContent === "Draft matches applied query", "assistant acceptance undo");
+    progress("legacy-picker");
+    click(document2, "1. Filter Rows");
+    const pickerAdd = await waitFor(() => conditionAdd(document2), "legacy picker condition control");
+    pickerAdd.click();
+    const select = await waitForE2eField(document2, (candidate) => !candidate.disabled);
+    const optionGroups = [...select.querySelectorAll("optgroup")].map((group) => group.label);
+    const options = [...select.querySelectorAll("option")];
+    const overflow = assistantOverflow(document2);
+    finish({ appliedFilters: document2.getElementById("queryAppliedFiltersEmpty")?.textContent || "", applyDisabled: document2.getElementById("queryDrawerApply")?.disabled === true, assistantOverflow: overflow, conditionCount: document2.querySelectorAll('select[aria-label="Condition field"]').length, disabled: select.disabled, drawerOpen: drawer?.hidden === false, enabledOptionCount: options.filter((option) => !option.disabled && option.value).length, exampleCount: examples.length, focused: document2.activeElement === select, optionGroups, placeholderDisabled: options[0]?.disabled === true, selectedValue: select.value, showPickerCalls });
+  } catch (error) {
+    finish({ error: String(error?.message || error), showPickerCalls });
+  } finally {
+    view?.removeEventListener?.("error", terminalError);
+    view?.removeEventListener?.("unhandledrejection", terminalError);
+    try {
+      if (selectPrototype && originalShowPicker) {
+        Object.defineProperty(selectPrototype, "showPicker", originalShowPicker);
+      } else if (selectPrototype) {
+        delete selectPrototype.showPicker;
+      }
+    } catch {
+    }
+  }
+}
+
 // media/modelBrowserSource.js
 var vscode = acquireVsCodeApi();
 var els = {};
@@ -6467,7 +7868,8 @@ installModelBrowserChrome(document);
 var MAX_LOG_ENTRIES = 200;
 var ALL_PAGE_SIZE = 1e9;
 var state = { columns: [], pk: "id", relations: [], rowCount: 0, totalCount: void 0, hasMore: false, order: [], model: "", pinned: /* @__PURE__ */ new Set(), widths: {}, computed: {}, computedActive: /* @__PURE__ */ new Set() };
-var queryController = createQueryController({ announcer, getPersisted: () => vscode.getState() || {}, gridAdapter: createQueryFocusGridAdapter(), onCount: onQueryCount, onRejected: onQueryRejected, onRows, onSummary: onQuerySummary, persist: (preferences2) => vscode.setState({ ...vscode.getState() || {}, ...preferences2 }), post: (message) => send(message), root: document, status: els.status });
+var queryController;
+queryController = createQueryController({ announcer, getPersisted: () => vscode.getState() || {}, gridAdapter: createQueryFocusGridAdapter(), onCount: onQueryCount, onRejected: onQueryRejected, onRows, onSummary: onQuerySummary, persist: (preferences2) => vscode.setState({ ...vscode.getState() || {}, ...preferences2 }), post: (message) => send(message), root: document, status: els.status });
 function createQueryFocusGridAdapter() {
   let saved;
   return {
@@ -6529,8 +7931,8 @@ var editor = createEditor({
     els.status.textContent = `Committing ${count} changes\u2026`;
     announcer.announceStatus(`Committing ${count} changes\u2026`);
   },
-  notify: (text) => {
-    els.status.textContent = text;
+  notify: (text2) => {
+    els.status.textContent = text2;
   }
 });
 var virtual = createVirtualRows({
@@ -6590,6 +7992,10 @@ window.addEventListener("keydown", (event) => {
 vscode.postMessage({ type: "ready" });
 function handleMessage(message) {
   if (!message || typeof message.type !== "string") {
+    return;
+  }
+  if (message.type === "e2eQueryBuilderProbe") {
+    void runModelQueryBuilderE2eProbe({ document, postMessage: (value) => vscode.postMessage(value), requestId: message.requestId }).catch(() => vscode.postMessage({ requestId: message.requestId, snapshot: { error: "Query Builder E2E probe bootstrap failed." }, type: "e2eQueryBuilderProbeResult" }));
     return;
   }
   if (queryController.onMessage(message)) {
@@ -6692,9 +8098,9 @@ function installGridTable() {
   table.addEventListener("dblclick", onTableDblClick);
   installGridKeyboard(table, {
     activate: (cell) => {
-      const button2 = cell.querySelector("button");
-      if (button2) {
-        button2.click();
+      const button3 = cell.querySelector("button");
+      if (button3) {
+        button3.click();
       } else {
         editor.editCell(cell);
       }
@@ -6947,16 +8353,16 @@ function cellRawText(cell) {
   }
   return typeof cell === "object" ? (cell.edit ?? cell.v) == null ? "" : String(cell.edit ?? cell.v) : String(cell);
 }
-function appendArrayEditButton(td, column, text) {
+function appendArrayEditButton(td, column, text2) {
   if (!column.editable) {
     return;
   }
-  const parsed = parseEditableArray(column, text);
+  const parsed = parseEditableArray(column, text2);
   if (!parsed) {
     return;
   }
-  const button2 = el("button", { className: "arrayedit-open", dataset: { act: "editArray" }, title: `Edit ${parsed.items.length} list item${parsed.items.length === 1 ? "" : "s"}` }, `\u25A6 ${parsed.items.length}`);
-  td.insertBefore(button2, td.firstChild);
+  const button3 = el("button", { className: "arrayedit-open", dataset: { act: "editArray" }, title: `Edit ${parsed.items.length} list item${parsed.items.length === 1 ? "" : "s"}` }, `\u25A6 ${parsed.items.length}`);
+  td.insertBefore(button3, td.firstChild);
 }
 function renderValue(cell) {
   if (cell === null || cell === void 0) {
@@ -7023,7 +8429,7 @@ function toggleSort(col) {
   updateSortArrows();
   queryController.toggleGridOrder(col, state.order[0]?.desc);
 }
-function toggleComputed(field, button2) {
+function toggleComputed(field, button3) {
   const active = !state.computedActive.has(field);
   if (active) {
     state.computedActive.add(field);
@@ -7032,10 +8438,10 @@ function toggleComputed(field, button2) {
     state.computedActive.delete(field);
     delete state.computed[field];
   }
-  if (button2) {
-    button2.classList.toggle("active", active);
-    button2.replaceChildren(codicon(active ? "refresh" : "triangle-right"));
-    button2.title = active ? "Reload computed values for loaded rows" : "Load this @property for loaded rows (lazy \u2014 not auto-computed)";
+  if (button3) {
+    button3.classList.toggle("active", active);
+    button3.replaceChildren(codicon(active ? "refresh" : "triangle-right"));
+    button3.title = active ? "Reload computed values for loaded rows" : "Load this @property for loaded rows (lazy \u2014 not auto-computed)";
   }
   virtual.refresh();
 }
@@ -7078,7 +8484,7 @@ function send(message) {
   if (label) {
     startProgress(label);
   }
-  const applied = queryController.getSnapshot?.();
+  const applied = queryController?.getSnapshot?.();
   const revisioned = ["loadMore", "reload", "requestCount"].includes(message.type) && Number.isSafeInteger(applied?.appliedRevision) ? { ...message, revision: applied.appliedRevision } : message;
   vscode.postMessage({ ...revisioned, pageSize: pageSizeValue() });
 }
@@ -7130,19 +8536,19 @@ function durationText(startedAt) {
   }
   return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
 }
-function expandInto(button2, request) {
-  if (button2.dataset.open === "1") {
-    closeDetail(button2);
+function expandInto(button3, request) {
+  if (button3.dataset.open === "1") {
+    closeDetail(button3);
     return;
   }
   const body = el("div", { className: "nestedscroll" }, "Loading\u2026");
   els.detailDrawer.hidden = false;
-  els.detailContent.replaceChildren(nestedPanel(request.relation, button2, body));
-  const requestId = relRequestId += 1;
-  pendingRelated.set(requestId, { body, label: request.relation });
-  button2.dataset.open = "1";
-  detailTrigger = button2;
-  vscode.postMessage({ type: "expandRelated", requestId, relation: request.relation, pk: request.pk, value: request.value, single: request.single });
+  els.detailContent.replaceChildren(nestedPanel(request.relation, button3, body));
+  const requestId2 = relRequestId += 1;
+  pendingRelated.set(requestId2, { body, label: request.relation });
+  button3.dataset.open = "1";
+  detailTrigger = button3;
+  vscode.postMessage({ type: "expandRelated", requestId: requestId2, relation: request.relation, pk: request.pk, value: request.value, single: request.single });
 }
 function nestedPanel(title, trigger, body) {
   const head = el("div", { className: "nestedhead" });
@@ -7156,12 +8562,12 @@ function nestedPanel(title, trigger, body) {
   wrap.appendChild(body);
   return wrap;
 }
-function closeDetail(button2) {
+function closeDetail(button3) {
   els.detailDrawer.hidden = true;
   els.detailContent.innerHTML = "";
-  button2.dataset.open = "";
+  button3.dataset.open = "";
   detailTrigger = void 0;
-  button2.focus();
+  button3.focus();
 }
 function closeOpenDetail() {
   if (!detailTrigger) {
@@ -7202,14 +8608,14 @@ function logSql(action, sql, orm) {
 function rawValue(cell) {
   return cell !== null && typeof cell === "object" ? cell.v : cell;
 }
-function coerce(text) {
-  if (text === "true" || text === "false") {
-    return text === "true";
+function coerce(text2) {
+  if (text2 === "true" || text2 === "false") {
+    return text2 === "true";
   }
-  if (text !== "" && !Number.isNaN(Number(text))) {
-    return Number(text);
+  if (text2 !== "" && !Number.isNaN(Number(text2))) {
+    return Number(text2);
   }
-  return text;
+  return text2;
 }
 function toggleFieldFinder() {
   if (els.fieldfinder.hidden) {

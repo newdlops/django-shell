@@ -38,6 +38,19 @@ test("enables diagnostic logging by default so the shell session is captured for
   assert.equal(manifest.contributes.configuration.properties["djangoShell.diagnosticLogging"].default, true);
 });
 
+test("contributes bounded persistent Query Assistant provider model settings", () => {
+  const properties = manifest.contributes.configuration.properties;
+  assert.deepEqual(properties["djangoShell.queryAssistant.provider"].enum, ["claude", "codex"]);
+  assert.equal(properties["djangoShell.queryAssistant.provider"].default, "claude");
+  for (const provider of ["claude", "codex"]) {
+    assert.equal(properties[`djangoShell.queryAssistant.${provider}AutoUpdateModel`].default, true);
+    assert.equal(properties[`djangoShell.queryAssistant.${provider}Model`].default, "");
+    assert.equal(properties[`djangoShell.queryAssistant.${provider}Model`].maxLength, 160);
+    assert.deepEqual(properties[`djangoShell.queryAssistant.${provider}ReasoningEffort`].enum, ["", "low", "medium", "high", "xhigh", "max", "ultra"]);
+    assert.equal(properties[`djangoShell.queryAssistant.${provider}ReasoningEffort`].default, "");
+  }
+});
+
 test("keeps Python cell Enter from interrupting completion UI", () => {
   const binding = manifest.contributes.keybindings.find((item) => item.command === "djangoShell.overlayAcceptInput");
   assert.ok(binding);

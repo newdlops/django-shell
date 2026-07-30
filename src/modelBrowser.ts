@@ -9,8 +9,11 @@ import { DiagnosticLogger } from "./diagnostics";
 import { buildRecipeCountOrm, buildRecipeRowsOrm, buildRecipeSummaryOrm } from "./modelQueryRecipeOrm";
 import { cloneModelQueryRecipe, createEmptyModelQueryRecipe, isModelQueryRecipeV2, type ModelQueryRecipeV2, type QueryModelRef } from "./modelQueryRecipe";
 import { createInitialPkModelQueryRecipe, isRecipeInitialPk } from "./modelQueryRecipeInitialPk";
-import { loadModelQueryMetadata, ModelQueryMetadataIndex } from "./modelQueryRecipeMetadata";
+import { loadModelQueryMetadata, ModelQueryMetadataIndex, selectQueryAssistantRelatedModels } from "./modelQueryRecipeMetadata";
 import type { ModelQueryIssue, ModelQueryValidation } from "./modelQueryRecipeValidation";
+import { createModelQueryAssistantHost } from "./modelQueryAssistantHost";
+import { createQueryAssistantService, type QueryAssistantService } from "./modelQueryAssistantService";
+import { parseQueryAssistantMessage } from "./modelQueryAssistantProtocol";
 
 /** Backend access used by the catalog tree and the data browser panels. */
 export interface ModelDataSource {
@@ -64,6 +67,7 @@ interface IncomingMessage {
   requestId?: number | string;
   recipe?: ModelQueryRecipeV2;
   revision?: number;
+  snapshot?: Record<string, unknown>;
   single?: boolean;
   target?: string;
   type: string;
@@ -99,7 +103,7 @@ export class ModelBrowser implements vscode.Disposable {
   private readonly panels = new Set<ModelBrowserPanel>();
 
   /** Stores the extension path and the model data source. */
-  constructor(private readonly extensionPath: string, private readonly source: ModelDataSource, private readonly logger?: DiagnosticLogger) {}
+  constructor(private readonly extensionPath: string, private readonly source: ModelDataSource, private readonly logger?: DiagnosticLogger, private readonly assistantService?: QueryAssistantService) {}
 
   /** Registers the open-model command and runtime change refresh. */
   activate(context: vscode.ExtensionContext): void {
@@ -126,9 +130,25 @@ export class ModelBrowser implements vscode.Disposable {
     if (!resolved) {
       return;
     }
-    const panel = new ModelBrowserPanel(this.extensionPath, this.source, resolved, (next) => void this.openModel(next), this.logger);
+    this.createPanel(resolved);
+  }
+
+  /** Opens an isolated model panel, probes its rendered Query Builder, and closes only that panel. */
+  async e2eProbeQueryBuilder(target: ModelTarget): Promise<Record<string, unknown>> {
+    const panel = this.createPanel(target);
+    try {
+      return await panel.e2eProbeQueryBuilder();
+    } finally {
+      panel.dispose();
+    }
+  }
+
+  /** Creates and tracks one independently disposable model-data panel. */
+  private createPanel(target: ModelTarget): ModelBrowserPanel {
+    const panel = new ModelBrowserPanel(this.extensionPath, this.source, target, (next) => void this.openModel(next), this.logger, this.assistantService);
     this.panels.add(panel);
     panel.onDidDispose(() => this.panels.delete(panel));
+    return panel;
   }
 
   /** Reloads every open panel after the attached runtime changes. */
@@ -175,11 +195,36 @@ class ModelBrowserPanel {
   private appliedRecipeSummary = "All rows · no computed columns · Rows ordered by primary key ascending";
   private initialRecipeHydrated = false;
   private latestRecipeRevision = 0;
+  private latestDraftRecipe!: ModelQueryRecipeV2;
+  private latestDraftMetadata: { metadata: ModelQueryMetadataIndex; revision: number } | undefined;
   private recipeMetadata: ModelQueryMetadataIndex | undefined;
   private readonly recipeTreeCache = new Map<string, BackendFilterFieldTree>();
   private readonly recipeTreeRequests = new Map<string, Promise<BackendFilterFieldTree>>();
   private recipeModelCatalog: QueryModelRef[] | undefined;
   private recipeModelCatalogRequest: Promise<QueryModelRef[]> | undefined;
+  private readonly initialLoad: Promise<void>;
+  private resolveInitialLoad!: () => void;
+  private readonly e2eProbes = new Map<string, { elapsedMs: () => number; reject: (error: Error) => void; resolve: (snapshot: Record<string, unknown>) => void; stage: string; timer: NodeJS.Timeout }>();
+  private assistant!: ReturnType<typeof createModelQueryAssistantHost>;
+  /** Builds the panel-local assistant host after injected dependencies are available. */
+  private createAssistant(service?: QueryAssistantService): ReturnType<typeof createModelQueryAssistantHost> { return createModelQueryAssistantHost({
+    capture: () => {
+      const source = this.latestDraftRecipe.source; const metadata = this.latestDraftMetadata?.revision === this.latestRecipeRevision ? this.latestDraftMetadata.metadata.toBundle() : undefined;
+      return { context: { columns: this.columns, relatedModels: metadata ? selectQueryAssistantRelatedModels(this.latestDraftRecipe, metadata) : [], relations: this.relations, source, transport: this.source.modelTransportInfo().active }, revision: this.latestRecipeRevision, source };
+    },
+    onSettings: () => vscode.commands.executeCommand("workbench.action.openSettings", "djangoShell.queryAssistant"),
+    post: (message) => this.post(message),
+    prepare: async (recipe, revision) => {
+      const metadata = await this.prepareRecipeMetadata(recipe);
+      if (!this.disposed && revision === this.latestRecipeRevision && JSON.stringify(recipe) === JSON.stringify(this.latestDraftRecipe)) { this.latestDraftMetadata = { metadata, revision }; }
+    },
+    service: service ?? createQueryAssistantService(),
+    validate: async (recipe) => {
+      const issues = this.recipeInputIssues(recipe); if (issues.length) { return { issues, ok: false }; }
+      const validation = this.compileRecipe(recipe, await this.prepareRecipeMetadata(recipe));
+      return { issues: validation.issues, normalized: validation.normalized, ok: validation.ok, orm: validation.ormPreview, summary: compactRecipeSummary(validation.normalized ?? recipe), warnings: validation.issues.filter((issue) => issue.severity === "warning").map((issue) => issue.message) };
+    }
+  }); }
 
   /** Creates the webview panel for one model target and wires its message and dispose handlers. */
   constructor(
@@ -187,14 +232,16 @@ class ModelBrowserPanel {
     private readonly source: ModelDataSource,
     private readonly target: ModelTarget,
     private readonly openAnother: (target: ModelTarget) => void,
-    private readonly logger?: DiagnosticLogger
+    private readonly logger?: DiagnosticLogger,
+    assistantService?: QueryAssistantService
   ) {
+    this.assistant = this.createAssistant(assistantService);
+    this.initialLoad = new Promise((resolve) => { this.resolveInitialLoad = resolve; });
     this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, `${target.model} — data`, vscode.ViewColumn.Active, {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.file(path.join(extensionPath, "media"))],
       retainContextWhenHidden: true
     });
-    this.panel.webview.html = modelBrowserHtml(this.panel.webview, extensionPath, { mode: "model" });
     const recipeSource = { app: target.app, model: target.model };
     this.appliedRecipe = createEmptyModelQueryRecipe(recipeSource);
     if (target.initialPk !== undefined && target.initialPk !== null && isRecipeInitialPk(target.initialPk)) {
@@ -203,8 +250,10 @@ class ModelBrowserPanel {
       this.appliedRecipe = createInitialPkModelQueryRecipe(recipeSource, target.initialPk);
       this.appliedRecipeSummary = compactRecipeSummary(this.appliedRecipe);
     }
+    this.latestDraftRecipe = cloneModelQueryRecipe(this.appliedRecipe);
     this.panel.onDidDispose(() => this.handleDispose(), undefined, this.disposables);
     this.panel.webview.onDidReceiveMessage((message: IncomingMessage) => void this.handleMessage(message), undefined, this.disposables);
+    this.panel.webview.html = modelBrowserHtml(this.panel.webview, extensionPath, { mode: "model" });
   }
 
   /** Registers a callback fired when this panel is closed. */
@@ -217,8 +266,40 @@ class ModelBrowserPanel {
     this.panel.dispose();
   }
 
+  /** Requests one non-selecting Query Builder DOM probe from the loaded webview. */
+  async e2eProbeQueryBuilder(): Promise<Record<string, unknown>> {
+    await this.waitForE2eInitialLoad();
+    if (this.disposed) { throw new Error("Model Browser E2E panel closed before its probe."); }
+    const requestId = `query-builder-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return new Promise((resolve, reject) => {
+      const started = Date.now();
+      const timer = setTimeout(() => {
+        const probe = this.e2eProbes.get(requestId); this.e2eProbes.delete(requestId);
+        reject(new Error(`Timed out waiting for the Model Browser Query Builder E2E probe at ${probe?.stage || "bootstrap"} after ${probe?.elapsedMs() || Date.now() - started}ms.`));
+      }, 30000);
+      this.e2eProbes.set(requestId, { elapsedMs: () => Date.now() - started, reject, resolve, stage: "bootstrap", timer });
+      void this.panel.webview.postMessage({ requestId, type: "e2eQueryBuilderProbe" }).then((accepted) => {
+        if (accepted || !this.e2eProbes.has(requestId)) { return; }
+        clearTimeout(timer);
+        this.e2eProbes.delete(requestId);
+        reject(new Error("Model Browser webview rejected the Query Builder E2E probe."));
+      });
+    });
+  }
+
+  /** Bounds the test-only wait for the webview ready handshake so a failed renderer reports its stage. */
+  private async waitForE2eInitialLoad(): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([this.initialLoad, new Promise<void>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("Timed out waiting for the Model Browser webview ready handshake.")), 10000); })]);
+    } finally {
+      if (timer) { clearTimeout(timer); }
+    }
+  }
+
   /** Reloads the panel when the attached runtime changes. */
   refresh(): void {
+    this.assistant.invalidate("runtime-refresh");
     if (this.panelReady) {
       void this.refreshAppliedRecipe();
     }
@@ -227,6 +308,13 @@ class ModelBrowserPanel {
   /** Releases listeners and notifies the owner when the panel is closed. */
   private handleDispose(): void {
     this.disposed = true;
+    this.assistant.dispose();
+    this.resolveInitialLoad();
+    for (const probe of this.e2eProbes.values()) {
+      clearTimeout(probe.timer);
+      probe.reject(new Error("Model Browser E2E panel closed before its probe completed."));
+    }
+    this.e2eProbes.clear();
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
@@ -396,6 +484,13 @@ class ModelBrowserPanel {
     return [];
   }
 
+  /** Stores the current webview draft and invalidates metadata from a different draft revision. */
+  private storeLatestDraft(recipe: ModelQueryRecipeV2, revision: number): void {
+    const changed = revision !== this.latestRecipeRevision || JSON.stringify(recipe) !== JSON.stringify(this.latestDraftRecipe);
+    this.latestDraftRecipe = cloneModelQueryRecipe(recipe);
+    if (changed) { this.latestDraftMetadata = undefined; }
+  }
+
   /** Advances the monotonic Recipe revision unless this message is stale. */
   private acceptRecipeRevision(revision: unknown): revision is number {
     if (!Number.isSafeInteger(revision) || (revision as number) < 0 || (revision as number) < this.latestRecipeRevision) { return false; }
@@ -410,9 +505,11 @@ class ModelBrowserPanel {
     const issues = this.recipeInputIssues(message.recipe);
     if (issues.length) { this.post({ issues, revision: message.revision, type: "queryRecipeRejected" }); return; }
     const recipe = message.recipe as ModelQueryRecipeV2;
+    this.storeLatestDraft(recipe, message.revision as number);
     try {
       const metadata = await this.prepareRecipeMetadata(recipe);
       if (this.disposed || message.revision !== this.latestRecipeRevision) { return; }
+      this.latestDraftMetadata = { metadata, revision: message.revision as number };
       const validation = this.compileRecipe(recipe, metadata);
       this.post({ requestId, revision: message.revision, type: "queryRecipePreview", validation });
     } catch (error) {
@@ -426,6 +523,7 @@ class ModelBrowserPanel {
     const issues = this.recipeInputIssues(message.recipe);
     if (issues.length) { this.post({ issues, revision: message.revision, type: "queryRecipeRejected" }); return; }
     const recipe = message.recipe as ModelQueryRecipeV2;
+    this.storeLatestDraft(recipe, message.revision as number);
     try {
       const metadata = await this.prepareRecipeMetadata(recipe);
       if (this.disposed || message.revision !== this.latestRecipeRevision) { return; }
@@ -435,6 +533,7 @@ class ModelBrowserPanel {
       this.appliedRecipeRevision = message.revision;
       this.appliedRecipeSummary = compactRecipeSummary(this.appliedRecipe);
       this.recipeMetadata = metadata;
+      this.latestDraftMetadata = { metadata, revision: message.revision as number };
       this.post({ recipe: this.appliedRecipe, revision: this.appliedRecipeRevision, type: "queryRecipeApplied" });
       if (this.appliedRecipe.mode === "summary") { await this.loadRecipeSummary(this.appliedRecipeRevision); }
       else { await this.loadPage(true); }
@@ -475,12 +574,18 @@ class ModelBrowserPanel {
 
   /** Routes one message from the webview to its handler. */
   private async handleMessage(message: IncomingMessage): Promise<void> {
+    const assistantMessage = parseQueryAssistantMessage(message);
+    if (assistantMessage?.type === "generateQueryAssistantSuggestion" && this.recipeInputIssues(assistantMessage.recipe).length === 0 && this.acceptRecipeRevision(assistantMessage.revision)) {
+      this.storeLatestDraft(assistantMessage.recipe, assistantMessage.revision);
+    }
+    if (await this.assistant.handleMessage(message, assistantMessage)) { return; }
     if (typeof message.pageSize === "number" && message.pageSize > 0) {
       this.pageSize = message.pageSize;
     }
     if (message.type === "ready") {
       this.panelReady = true;
       await this.loadModel();
+      this.resolveInitialLoad();
     } else if (message.type === "reload") {
       if (!this.isRequestedRecipeRevisionCurrent(message)) { return; }
       await this.loadModel();
@@ -496,6 +601,8 @@ class ModelBrowserPanel {
       this.appliedRecipe = createEmptyModelQueryRecipe({ app: this.target.app, model: this.target.model });
       this.appliedRecipeRevision += 1;
       this.latestRecipeRevision = Math.max(this.latestRecipeRevision, this.appliedRecipeRevision);
+      this.latestDraftRecipe = cloneModelQueryRecipe(this.appliedRecipe);
+      this.latestDraftMetadata = undefined;
       this.post({ phase: "filters", type: "loading" });
       await this.loadPage(true);
     } else if (message.type === "applyQueryRecipe") {
@@ -526,11 +633,24 @@ class ModelBrowserPanel {
       await this.sendModelList(message);
     } else if (message.type === "gridRendered" && message.grid) {
       this.logger?.log("model.grid.render", message.grid);
+    } else if (message.type === "e2eQueryBuilderProbeProgress" && message.requestId !== undefined) {
+      const progress = message as unknown as Record<string, unknown>; const probe = this.e2eProbes.get(String(message.requestId)); if (probe && typeof progress.stage === "string") { probe.stage = progress.stage.slice(0, 80); }
+    } else if (message.type === "e2eQueryBuilderProbeResult" && message.requestId !== undefined) {
+      this.resolveE2eProbe(String(message.requestId), message.snapshot);
     } else if (message.type === "openConsole") {
       await vscode.commands.executeCommand("djangoShell.openConsole");
     } else if (message.type === "openModel" && message.app && message.model) {
       this.openAnother({ app: message.app, initialPk: message.filterPk, model: message.model });
     }
+  }
+
+  /** Resolves one pending rendered Query Builder probe without exposing it to product handlers. */
+  private resolveE2eProbe(requestId: string, snapshot: Record<string, unknown> | undefined): void {
+    const probe = this.e2eProbes.get(requestId);
+    if (!probe) { return; }
+    clearTimeout(probe.timer);
+    this.e2eProbes.delete(requestId);
+    probe.resolve(snapshot || {});
   }
 
   /** Rejects a stale webview pagination or count action without changing the applied Recipe. */

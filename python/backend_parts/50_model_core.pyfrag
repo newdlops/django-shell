@@ -540,12 +540,76 @@ def _browse_cell(value):
     if isinstance(value, (list, tuple, dict, set, frozenset)):
         edit_text = _browse_json_edit_text(value)
         return {"edit": edit_text, "t": "json", "v": _truncate(edit_text, 400)}
+    object_json = _browse_object_json(value)
+    if object_json is not None:
+        return {"edit": object_json, "t": "json", "v": _truncate(object_json, 400)}
     # File/Image fields and other value-objects: show the stored value (e.g. the file path / str()), not the "<FieldFile: ...>" object ref.
     try:
         text = str(value)
     except Exception:
         text = repr(value)
     return {"t": "repr", "v": _truncate(text, 400)}
+
+
+def _browse_object_json(value):
+    """Returns a bounded deterministic JSON projection of direct public instance state without evaluating other attributes."""
+    import json
+
+    try:
+        state = object.__getattribute__(value, "__dict__")
+    except Exception:
+        return None
+    if type(state) is not dict:
+        return None
+    projected = {}
+    for key in sorted(key for key in state if type(key) is str):
+        if len(projected) >= 40 or key.startswith("_"):
+            continue
+        safe = _browse_safe_object_value(state[key])
+        if safe is not _BROWSE_UNSAFE_OBJECT_VALUE:
+            projected[key] = safe
+    if not projected:
+        return None
+    try:
+        return json.dumps(projected, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError):
+        return None
+
+
+_BROWSE_UNSAFE_OBJECT_VALUE = object()
+
+
+def _browse_safe_object_value(value, depth=0):
+    """Copies only bounded materialized scalar and collection state without invoking conversions or nested attributes."""
+    import json
+
+    if value is None or type(value) in (bool, int, float, str):
+        return value if type(value) is not str else _truncate(value, 120)
+    if depth >= 3:
+        return _BROWSE_UNSAFE_OBJECT_VALUE
+    if type(value) in (list, tuple):
+        items = []
+        for item in value[:40]:
+            safe = _browse_safe_object_value(item, depth + 1)
+            if safe is not _BROWSE_UNSAFE_OBJECT_VALUE:
+                items.append(safe)
+        return items
+    if type(value) in (set, frozenset):
+        items = [_browse_safe_object_value(item, depth + 1) for item in value]
+        if any(item is _BROWSE_UNSAFE_OBJECT_VALUE for item in items):
+            return _BROWSE_UNSAFE_OBJECT_VALUE
+        try:
+            return sorted(items, key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True))[:40]
+        except (TypeError, ValueError):
+            return _BROWSE_UNSAFE_OBJECT_VALUE
+    if type(value) is dict:
+        result = {}
+        for key in sorted(key for key in value if type(key) is str)[:40]:
+            safe = _browse_safe_object_value(value[key], depth + 1)
+            if safe is not _BROWSE_UNSAFE_OBJECT_VALUE:
+                result[key] = safe
+        return result
+    return _BROWSE_UNSAFE_OBJECT_VALUE
 
 
 def _browse_json_edit_text(value):

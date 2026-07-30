@@ -21,6 +21,7 @@ import { createCombobox } from "./gridCombobox.js";
 import { createQueryController } from "./gridQueryController.js";
 import { recipeLogLabel, resultCountLabel } from "./gridQueryResultBuilder.js";
 import { renderQuerySummaryTable } from "./gridQuerySummaryTable.js";
+import { runModelQueryBuilderE2eProbe } from "./modelQueryBuilderE2eProbe.js";
 const vscode = acquireVsCodeApi();
 const els = {};
 for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode", "fieldfinder", "fieldfindslot", "fieldfindClose", "interruptQuery", "openQueryConsole", "detailDrawer", "detailContent"]) {
@@ -30,7 +31,8 @@ const announcer = createAnnouncer(); installModelBrowserChrome(document);
 const MAX_LOG_ENTRIES = 200;
 const ALL_PAGE_SIZE = 1000000000;
 const state = { columns: [], pk: "id", relations: [], rowCount: 0, totalCount: undefined, hasMore: false, order: [], model: "", pinned: new Set(), widths: {}, computed: {}, computedActive: new Set() };
-const queryController = createQueryController({ announcer, getPersisted: () => vscode.getState() || {}, gridAdapter: createQueryFocusGridAdapter(), onCount: onQueryCount, onRejected: onQueryRejected, onRows, onSummary: onQuerySummary, persist: (preferences) => vscode.setState({ ...(vscode.getState() || {}), ...preferences }), post: (message) => send(message), root: document, status: els.status });
+let queryController;
+queryController = createQueryController({ announcer, getPersisted: () => vscode.getState() || {}, gridAdapter: createQueryFocusGridAdapter(), onCount: onQueryCount, onRejected: onQueryRejected, onRows, onSummary: onQuerySummary, persist: (preferences) => vscode.setState({ ...(vscode.getState() || {}), ...preferences }), post: (message) => send(message), root: document, status: els.status });
 
 /** Captures and restores grid scroll plus active-cell navigation for Focus Builder mode. */
 function createQueryFocusGridAdapter() {
@@ -123,6 +125,10 @@ function handleMessage(message) {
   if (!message || typeof message.type !== "string") {
     return;
   }
+  if (message.type === "e2eQueryBuilderProbe") {
+    void runModelQueryBuilderE2eProbe({ document, postMessage: (value) => vscode.postMessage(value), requestId: message.requestId }).catch(() => vscode.postMessage({ requestId: message.requestId, snapshot: { error: "Query Builder E2E probe bootstrap failed." }, type: "e2eQueryBuilderProbeResult" }));
+    return;
+  }
   if (queryController.onMessage(message)) {
     return;
   }
@@ -167,6 +173,7 @@ function handleMessage(message) {
     renderError(message.message);
   }
 }
+
 function renderLoading(message) {
   if (!isQuerySurface()) {
     els.title.textContent = message.model || "Model Data";
@@ -629,7 +636,7 @@ function send(message) {
   if (label) {
     startProgress(label);
   }
-  const applied = queryController.getSnapshot?.();
+  const applied = queryController?.getSnapshot?.();
   const revisioned = ["loadMore", "reload", "requestCount"].includes(message.type) && Number.isSafeInteger(applied?.appliedRevision)
     ? { ...message, revision: applied.appliedRevision }
     : message;
