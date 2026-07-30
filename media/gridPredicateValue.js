@@ -1,5 +1,5 @@
 // Typed Recipe predicate lookup matrix and value editors for the VS Code-native Query Builder.
-import { createGridCombobox } from "./gridCombobox.js";
+import { createQuerySelect } from "./gridQuerySelect.js";
 import { inputTypeForQueryScalar, parseQueryScalar } from "./gridQueryScalarEditor.js";
 
 const NUMERIC_TYPES = /Integer|Float|Decimal|AutoField/;
@@ -79,7 +79,7 @@ export function createPredicateValueEditor({ context, el, field, lookup, onChang
 
   /** Creates a field-reference select for F or OuterRef RHS variants. */
   function fieldReference(kindName, options) {
-    const picker = createGridCombobox({ el, label: kindName === "outerField" ? "Outer field" : "Compare to field", onChange: (path) => emit({ kind: kindName, path }), options: [{ label: "Choose field", value: "" }, ...options.map((entry) => ({ description: entry.type || "", label: entry.label || entry.path, value: entry.path }))], popoverLayer, value: rhs.path || "" });
+    const picker = createQuerySelect({ ariaLabel: kindName === "outerField" ? "Outer field" : "Compare to field", el, onChange: (path) => emit({ kind: kindName, path }), options: [{ disabled: true, label: "Choose field", value: "" }, ...options.map((entry) => ({ description: entry.type || "", group: "Fields", label: entry.label || entry.path, value: entry.path }))], value: rhs.path || "" });
     node.appendChild(picker.node);
     return picker;
   }

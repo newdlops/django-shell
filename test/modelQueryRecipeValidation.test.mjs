@@ -20,7 +20,7 @@ function context() {
     { attname: "is_demo", name: "is_demo", null: false, pk: false, type: "BooleanField" },
     { attname: "created_at", name: "created_at", null: false, pk: false, type: "DateTimeField" },
     { attname: "score", name: "score", null: true, pk: false, type: "IntegerField" }
-  ], relations: [{ filterField: "company_id", kind: "reverse", name: "addresses", outerField: "id", single: false, target: "db.Address" }] });
+  ], relations: [{ filterField: "company_id", kind: "reverse", name: "address_set", outerField: "id", queryName: "addresses", single: false, target: "db.Address" }] });
   index.addTree({ app: "db", model: "Address" }, { ok: true, pk: "id", fields: [
     { attname: "id", name: "id", null: false, pk: true, type: "AutoField" },
     { attname: "company_id", name: "company_id", null: false, pk: false, type: "IntegerField" },
@@ -154,4 +154,9 @@ test("validates relation-source correlation contracts without permitting unsafe 
   const malformedRawType = context();
   malformedRawType.metadata.getTree({ app: "db", model: "Address" }).fields.find((field) => field.attname === "company_id").type = "ForeignKey";
   assert.ok(validateModelQueryRecipe(recipe, malformedRawType).issues.some((issue) => issue.code === "SUBQUERY_CORRELATION_INVALID"));
+});
+
+test("resolves relation accessor, distinct queryName, filterField, and rejects unknown identity", () => {
+  for (const relation of ["address_set", "addresses", "company_id"]) { const recipe = createEmptyModelQueryRecipe(context().source); recipe.computed.push({ kind: "exists", nodeId: `exists-${relation}`, alias: `has_${relation}`, enabled: true, source: { kind: "relation", relation }, correlations: [], where: { children: [], join: "and", kind: "group", negated: false, nodeId: `where-${relation}` } }); assert.equal(validateModelQueryRecipe(recipe, context()).ok, true, relation); }
+  const invalid = createEmptyModelQueryRecipe(context().source); invalid.computed.push({ kind: "exists", nodeId: "bad", alias: "bad", enabled: true, source: { kind: "relation", relation: "missing" }, correlations: [], where: { children: [], join: "and", kind: "group", negated: false, nodeId: "bad-where" } }); assert.ok(validateModelQueryRecipe(invalid, context()).issues.some((issue) => issue.code === "SUBQUERY_RELATION_INVALID"));
 });

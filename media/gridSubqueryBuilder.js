@@ -2,26 +2,11 @@
 import { createComputedPredicateEditor, computedInput, computedSelect } from "./gridComputedShared.js";
 import { createGridCombobox } from "./gridCombobox.js";
 import { createQueryFieldPicker } from "./gridQueryFieldPicker.js";
+import { createQuerySourceScope, relationSourceState } from "./gridQueryRelations.js";
 import { MODEL_QUERY_AGGREGATE_FUNCTIONS, MODEL_QUERY_OUTPUT_TYPES, MODEL_QUERY_RECIPE_LIMITS } from "./gridQueryRecipeLimits.js";
 
 /** Returns app-qualified metadata catalog entries, preserving the backend's explicit model identity. */
 function catalog(metadata) { return metadata?.getCatalog?.() || []; }
-
-/** Parses a backend app-qualified model label into the picker target shape. */
-function targetFromLabel(label) {
-  const value = String(label || "");
-  const boundary = value.lastIndexOf(".");
-  return boundary > 0 ? { app: value.slice(0, boundary), model: value.slice(boundary + 1) } : undefined;
-}
-
-/** Resolves the selected scalar source into the model whose fields can be safely picked. */
-function sourceTarget(source, scope) {
-  if (source?.kind === "model") { return source.target?.app && source.target?.model ? { app: source.target.app, model: source.target.model } : undefined; }
-  return targetFromLabel((scope?.relations || []).find((relation) => relation?.name === source?.relation || relation?.queryName === source?.relation)?.target);
-}
-
-/** Returns the filter-query identity required by Recipe validation while retaining the accessor label in the UI. */
-function relationValue(relation) { return relation?.queryName || relation?.name || ""; }
 
 /** Retains one picker disposer in the specialized builder that owns its DOM lifetime. */
 function trackPicker(pickers, picker) {
@@ -42,8 +27,8 @@ function moveSubqueryOrder(entries, index, delta) {
 }
 
 /** Creates a metadata-backed field picker or a direct explanation until its source is complete. */
-function sourceFieldPicker({ ariaLabel, computed, dispatch, el, item, metadata, onChange, pickers, popoverLayer, scope, value }) {
-  const target = sourceTarget(item.source, scope);
+function sourceFieldPicker({ ariaLabel, computed, el, metadata, onChange, pickers, popoverLayer, sourceScope, value }) {
+  const target = sourceScope?.target;
   if (!target) { return el("p", { className: "query-control-help" }, "Choose a relation or model source before selecting a field."); }
   const picker = trackPicker(pickers, createQueryFieldPicker({ ariaLabel, computed, current: value, el, metadata, onChange, popoverLayer, source: target, context: "subquery" }));
   return picker.node;
@@ -54,11 +39,21 @@ function sourceControls({ dispatch, el, item, metadata, pickers, popoverLayer, s
   const wrap = el("fieldset", { className: "query-subquery-source" });
   wrap.appendChild(el("legend", {}, "1. Source"));
   const source = item.source || { kind: "relation", relation: "" };
+  const owner = scope?.target || scope?.source;
+  const ownerState = metadata?.getState?.(owner);
+  if (owner && !ownerState?.tree && !ownerState?.pending && !ownerState?.error) { metadata?.loadTree?.(owner).catch(() => {}); }
   const kind = computedSelect(el, "Subquery source type", [{ label: "Relation", value: "relation" }, { label: "Model", value: "model" }], source.kind, (value) => dispatch({ changes: { source: value === "model" ? { kind: "model", target: { app: "", model: "" } } : { kind: "relation", relation: "" } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
   wrap.appendChild(el("label", {}, "Source", kind));
   if (source.kind === "relation") {
-    const relation = trackPicker(pickers, createGridCombobox({ el, label: "Relation", onChange: (value) => dispatch({ changes: { source: { kind: "relation", relation: value } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: [{ label: "Choose related rows", value: "" }, ...(scope?.relations || []).map((entry) => ({ description: `${entry.kind || "relation"}. ${entry.target || "related model"}`, label: `${entry.label || entry.name} → ${entry.target || "related model"}`, value: relationValue(entry) }))], popoverLayer, value: source.relation }));
+    const state = relationSourceState({ current: source.relation, metadata, owner: scope?.target || scope?.source });
+    const errorHelpId = state.phase === "error" ? `query-subquery-relation-error-${item.nodeId}` : "";
+    const relation = trackPicker(pickers, createGridCombobox({ describedBy: errorHelpId, el, label: "Relation", onChange: (value) => dispatch({ changes: { source: { kind: "relation", relation: value } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), options: [{ label: state.phase === "loading" ? "Loading relations…" : "Choose related rows", value: "" }, ...state.options], popoverLayer, value: source.relation }));
+    const input = relation.node.querySelector?.("input");
+    if (input) { input.disabled = state.phase === "loading" || state.phase === "error"; }
     wrap.appendChild(el("label", {}, "Relation", relation.node));
+    if (errorHelpId) { wrap.appendChild(el("p", { id: errorHelpId, className: "query-control-help", role: "note" }, String(state.error || "Relation metadata could not be loaded."))); }
+    if (state.phase === "error") { const retry = el("button", { className: "secondary", type: "button" }, "Retry"); retry.addEventListener("click", () => { if (retry.disabled) { return; } retry.disabled = true; metadata.retry?.(owner).catch(() => {}); }); wrap.appendChild(retry); }
+    if (state.phase === "empty") { wrap.appendChild(el("p", { className: "query-builder-empty" }, "No related sources are available for this model.")); }
   } else {
     const target = `${source.target?.app || ""}.${source.target?.model || ""}`.replace(/^\.|\.$/g, "");
     const model = trackPicker(pickers, createGridCombobox({ el, label: "Subquery model", onChange: (value) => { const split = value.lastIndexOf("."); dispatch({ changes: { source: { kind: "model", target: split > 0 ? { app: value.slice(0, split), model: value.slice(split + 1) } : { app: "", model: "" } } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }); }, options: [{ label: "Choose model", value: "" }, ...catalog(metadata).map((entry) => ({ label: `${entry.app}.${entry.model}`, value: `${entry.app}.${entry.model}` }))], popoverLayer, value: target }));
@@ -68,15 +63,15 @@ function sourceControls({ dispatch, el, item, metadata, pickers, popoverLayer, s
 }
 
 /** Renders bounded custom-model correlation controls; relation correlation stays read-only and implicit. */
-function correlationControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope }) {
+function correlationControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope, sourceScope }) {
   const root = el("fieldset", { className: "query-subquery-correlations" });
   root.appendChild(el("legend", {}, "2. Connection"));
   if (item.source?.kind === "relation") { root.appendChild(el("p", { className: "query-builder-empty" }, "The selected relation supplies correlation automatically.")); return root; }
   const entries = item.correlations || [];
   for (const [index, correlation] of entries.entries()) {
     const row = el("div", { className: "query-subquery-correlation", dataset: { queryNodeId: correlation.nodeId } });
-    const outer = trackPicker(pickers, createQueryFieldPicker({ ariaLabel: "Outer field", current: correlation.outerPath, el, metadata, onChange: (value) => change(index, { outerPath: value }), popoverLayer, source: scope?.source, context: "subquery" }));
-    const target = sourceFieldPicker({ ariaLabel: "Target field", dispatch, el, item, metadata, onChange: (value) => change(index, { targetPath: value }), pickers, popoverLayer, scope, value: correlation.targetPath });
+    const outer = trackPicker(pickers, createQueryFieldPicker({ ariaLabel: "Outer field", current: correlation.outerPath, el, metadata, onChange: (value) => change(index, { outerPath: value }), popoverLayer, source: scope?.target || scope?.source, context: "subquery" }));
+    const target = sourceFieldPicker({ ariaLabel: "Target field", el, metadata, onChange: (value) => change(index, { targetPath: value }), pickers, popoverLayer, sourceScope, value: correlation.targetPath });
     const remove = el("button", { ariaLabel: "Remove correlation", className: "secondary", type: "button" }, "Remove");
     remove.addEventListener("click", () => dispatch({ changes: { correlations: entries.filter((_, entryIndex) => entryIndex !== index) }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
     row.append(el("label", {}, "Outer", outer.node), el("label", {}, "Target", target), remove); root.appendChild(row);
@@ -91,7 +86,7 @@ function correlationControls({ dispatch, el, item, metadata, pickers, popoverLay
 }
 
 /** Renders the scalar-only select, order, empty-value, and output-type controls. */
-function scalarControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope }) {
+function scalarControls({ dispatch, el, item, metadata, pickers, popoverLayer, sourceScope }) {
   const root = el("div", { className: "query-subquery-scalar" });
   const select = item.select || { field: { kind: "field", path: "" }, kind: "field" };
   const returned = el("fieldset", { className: "query-subquery-returned" });
@@ -99,7 +94,7 @@ function scalarControls({ dispatch, el, item, metadata, pickers, popoverLayer, s
   const kind = computedSelect(el, "Subquery select type", [{ label: "Field", value: "field" }, { label: "Aggregate", value: "aggregate" }], select.kind, (value) => dispatch({ changes: { select: value === "aggregate" ? { distinct: "auto", field: { kind: "all" }, function: "count", kind: "aggregate" } : { field: { kind: "field", path: "" }, kind: "field" } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
   returned.appendChild(el("label", {}, "Select", kind));
   if (select.kind === "field") {
-    const field = sourceFieldPicker({ ariaLabel: "Subquery field", dispatch, el, item, metadata, onChange: (value) => dispatch({ changes: { select: { field: { kind: "field", path: value }, kind: "field" } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), pickers, popoverLayer, scope, value: select.field?.path });
+    const field = sourceFieldPicker({ ariaLabel: "Subquery field", el, metadata, onChange: (value) => dispatch({ changes: { select: { field: { kind: "field", path: value }, kind: "field" } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }), pickers, popoverLayer, sourceScope, value: select.field?.path });
     returned.appendChild(el("label", {}, "Field", field));
   } else {
     returned.appendChild(el("label", {}, "Aggregate", computedSelect(el, "Subquery aggregate", MODEL_QUERY_AGGREGATE_FUNCTIONS.map((value) => ({ label: value, value })), select.function, (value) => dispatch({ changes: { select: { ...select, function: value } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }))));
@@ -111,7 +106,7 @@ function scalarControls({ dispatch, el, item, metadata, pickers, popoverLayer, s
   orderGroup.appendChild(el("p", { className: "query-control-help" }, `Order the matching rows before returning one value (up to ${MODEL_QUERY_RECIPE_LIMITS.subqueryOrderTerms}).`));
   for (const [index, entry] of orders.entries()) {
     const row = el("div", { className: "query-subquery-order", dataset: { queryNodeId: entry.nodeId } });
-    const path = sourceFieldPicker({ ariaLabel: "Subquery order field", dispatch, el, item, metadata, onChange: (value) => changeOrder(index, { ref: { kind: "field", path: value } }), pickers, popoverLayer, scope, value: entry.ref?.path });
+    const path = sourceFieldPicker({ ariaLabel: "Subquery order field", el, metadata, onChange: (value) => changeOrder(index, { ref: { kind: "field", path: value } }), pickers, popoverLayer, sourceScope, value: entry.ref?.path });
     const direction = computedSelect(el, "Subquery order direction", [{ label: "Ascending", value: "asc" }, { label: "Descending", value: "desc" }], entry.direction, (value) => changeOrder(index, { direction: value }));
     const up = el("button", { ariaLabel: "Move subquery order up", className: "secondary", type: "button" }, "Up");
     up.disabled = index === 0;
@@ -144,13 +139,14 @@ function scalarControls({ dispatch, el, item, metadata, pickers, popoverLayer, s
 export function renderSubqueryBuilder({ dispatch, el, getRecipe, getScope, item, metadata, popoverLayer, scope, validation }) {
   const root = el("div", { className: "query-computed-body query-subquery-builder" });
   const pickers = [];
-  root.append(sourceControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope }), correlationControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope }));
+  const sourceScope = createQuerySourceScope(item.source, scope, metadata);
+  root.append(sourceControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope }), correlationControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope, sourceScope }));
   const targetFilter = el("fieldset", { className: "query-subquery-target-filter" });
   targetFilter.appendChild(el("legend", {}, "3. Target filter"));
-  const predicate = createComputedPredicateEditor({ context: "subquery", dispatch, el, getRecipe, getScope: () => getScope?.(item) || {}, item, key: "where", metadata, validation });
+  const predicate = createComputedPredicateEditor({ context: "subquery", dispatch, el, getRecipe, getScope: () => sourceScope, item, key: "where", metadata, validation });
   if (predicate) { pickers.push(() => predicate.destroy()); targetFilter.appendChild(predicate.node); predicate.render(); }
   else { targetFilter.appendChild(el("p", { className: "query-builder-empty" }, "No target filter is configured.")); }
-  root.append(targetFilter, scalarControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope }));
+  root.append(targetFilter, scalarControls({ dispatch, el, item, metadata, pickers, popoverLayer, sourceScope }));
   const reset = el("button", { className: "secondary", type: "button" }, "Reset incompatible fields");
   reset.addEventListener("click", () => dispatch({ changes: { orderBy: [], select: { field: { kind: "field", path: "" }, kind: "field" }, where: { ...item.where, children: [] } }, nodeId: item.nodeId, type: "UPDATE_COMPUTED" }));
   root.appendChild(reset);
@@ -162,8 +158,9 @@ export function renderSubqueryBuilder({ dispatch, el, getRecipe, getScope, item,
 export function renderExistsComputedBuilder({ dispatch, el, getRecipe, getScope, item, metadata, popoverLayer, scope, validation }) {
   const root = el("div", { className: "query-computed-body query-exists-builder" });
   const pickers = [];
-  root.append(sourceControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope }), correlationControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope }));
-  const predicate = createComputedPredicateEditor({ context: "subquery", dispatch, el, getRecipe, getScope: () => getScope?.(item) || {}, item, key: "where", metadata, validation });
+  const sourceScope = createQuerySourceScope(item.source, scope, metadata);
+  root.append(sourceControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope }), correlationControls({ dispatch, el, item, metadata, pickers, popoverLayer, scope, sourceScope }));
+  const predicate = createComputedPredicateEditor({ context: "subquery", dispatch, el, getRecipe, getScope: () => sourceScope, item, key: "where", metadata, validation });
   if (predicate) { pickers.push(() => predicate.destroy()); root.appendChild(predicate.node); predicate.render(); }
   root.__queryDestroy = () => releasePickers(pickers);
   return root;
@@ -174,7 +171,4 @@ export const __test = {
   canAddCorrelation: (entries) => (entries || []).length < MODEL_QUERY_RECIPE_LIMITS.subqueryCorrelations,
   canAddOrder: (entries) => (entries || []).length < MODEL_QUERY_RECIPE_LIMITS.subqueryOrderTerms,
   moveSubqueryOrder,
-  relationValue,
-  sourceTarget,
-  targetFromLabel
 };

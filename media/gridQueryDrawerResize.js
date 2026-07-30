@@ -1,83 +1,133 @@
-// Pointer and keyboard resize behavior for the Model Data Query Builder drawer.
+// Accessible geometry and interaction controller for the Query Builder drawer.
 
-/** Clamps a requested drawer height to the currently usable viewport range. */
+export const QUERY_DRAWER_MINIMUM_HEIGHT = 220;
+export const QUERY_DRAWER_PREFERRED_HEIGHT = 360;
+export const QUERY_GRID_MINIMUM_HEIGHT = 144;
+
+/** Clamps a requested drawer height to the supplied inclusive range. */
 function clampHeight(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, Math.round(Number(value) || minimum)));
 }
 
-/** Creates an accessible horizontal drawer resize controller with no Recipe dependency. */
-export function createQueryDrawerResize({ drawer, handle, onHeight, root = document } = {}) {
+/** Calculates height bounds from already measured layout inputs. */
+function calculateDrawerBounds({ containerHeight, fixedHeight, gridHidden } = {}) {
+  const available = Math.floor((Number.isFinite(containerHeight) && containerHeight > 0 ? containerHeight : 0) - (Number.isFinite(fixedHeight) && fixedHeight > 0 ? fixedHeight : 0) - (gridHidden ? 0 : QUERY_GRID_MINIMUM_HEIGHT));
+  return { minimumHeight: QUERY_DRAWER_MINIMUM_HEIGHT, maximumHeight: Math.max(QUERY_DRAWER_MINIMUM_HEIGHT, available) };
+}
+
+/** Measures direct layout siblings and returns the current drawer bounds. */
+function measureDrawerBounds({ container, drawer, grid, root }) {
+  const measuredHeight = container?.getBoundingClientRect?.().height;
+  const containerHeight = Number.isFinite(measuredHeight) && measuredHeight > 0 ? measuredHeight : root?.defaultView?.innerHeight || 0;
+  const fixedHeight = [...(container?.children || [])]
+    .filter((child) => child !== drawer && child !== grid && !child.hidden)
+    .reduce((total, child) => {
+      const height = child.getBoundingClientRect?.().height;
+      return total + (Number.isFinite(height) && height > 0 ? height : 0);
+    }, 0);
+  return calculateDrawerBounds({ containerHeight, fixedHeight, gridHidden: Boolean(grid?.hidden) });
+}
+
+/** Creates the Query Builder's measurable, keyboard-accessible drawer resizer. */
+export function createQueryDrawerResize({ container, drawer, grid, handle, onHeight, root = document } = {}) {
   let dragging = false;
+  let pointerId;
   let startHeight = 0;
   let startY = 0;
+  let appliedHeight = QUERY_DRAWER_MINIMUM_HEIGHT;
+  let emitted = "";
 
-  /** Calculates bounds from the visible viewport while preserving room for the data grid. */
-  function bounds() {
-    const viewport = Math.max(440, root.defaultView?.innerHeight || window.innerHeight || 800);
-    return { maximum: Math.max(320, Math.min(660, viewport - 180)), minimum: 220 };
+  /** Applies a height, synchronizes separator semantics, and emits state changes. */
+  function setHeight(value, draggingUpdate = false, forceEmit = false) {
+    const bounds = measureDrawerBounds({ container, drawer, grid, root });
+    appliedHeight = clampHeight(value, bounds.minimumHeight, bounds.maximumHeight);
+    drawer.style.height = `${appliedHeight}px`;
+    handle.setAttribute("aria-valuemin", String(bounds.minimumHeight));
+    handle.setAttribute("aria-valuemax", String(bounds.maximumHeight));
+    handle.setAttribute("aria-valuenow", String(appliedHeight));
+    handle.setAttribute("aria-valuetext", `${appliedHeight} pixels high`);
+    const next = `${appliedHeight}/${bounds.minimumHeight}/${bounds.maximumHeight}/${draggingUpdate}`;
+    if (forceEmit || next !== emitted) {
+      emitted = next;
+      onHeight?.(appliedHeight, draggingUpdate, bounds);
+    }
   }
 
-  /** Applies a height to both the DOM and its UI-state owner. */
-  function setHeight(value, draggingUpdate = false) {
-    const range = bounds();
-    const height = clampHeight(value, range.minimum, range.maximum);
-    drawer.style.height = `${height}px`;
-    handle.setAttribute("aria-valuemin", String(range.minimum));
-    handle.setAttribute("aria-valuemax", String(range.maximum));
-    handle.setAttribute("aria-valuenow", String(height));
-    onHeight?.(height, draggingUpdate, range);
-  }
-
-  /** Completes a pointer resize without leaving document listeners behind. */
-  function finishPointer() {
-    if (!dragging) { return; }
+  /** Removes pointer listeners and capture for the active pointer only. */
+  function finishPointer(event) {
+    if (!dragging || (event?.pointerId !== undefined && event.pointerId !== pointerId)) { return; }
     dragging = false;
     handle.removeAttribute("data-dragging");
     root.removeEventListener("pointermove", movePointer);
     root.removeEventListener("pointerup", finishPointer);
     root.removeEventListener("pointercancel", finishPointer);
+    if (pointerId !== undefined && handle.hasPointerCapture?.(pointerId)) { handle.releasePointerCapture?.(pointerId); }
+    pointerId = undefined;
+    setHeight(appliedHeight, false, true);
   }
 
-  /** Converts a pointer delta into a height change from the drawer's bottom edge. */
+  /** Converts movement of the drawer's bottom separator into a matching height. */
   function movePointer(event) {
-    if (!dragging) { return; }
-    setHeight(startHeight + (startY - event.clientY), true);
+    if (dragging && (event.pointerId === undefined || event.pointerId === pointerId)) {
+      setHeight(startHeight + (event.clientY - startY), true);
+    }
   }
 
-  /** Starts pointer capture when the user grabs the dedicated resize separator. */
+  /** Begins one primary-pointer resize gesture. */
   function startPointer(event) {
-    if (event.button !== 0) { return; }
+    if (dragging || event.button !== 0) { return; }
     event.preventDefault();
     dragging = true;
+    pointerId = event.pointerId;
     startY = event.clientY;
-    startHeight = drawer.getBoundingClientRect().height;
+    startHeight = appliedHeight = drawer.getBoundingClientRect().height;
     handle.dataset.dragging = "true";
-    handle.setPointerCapture?.(event.pointerId);
+    handle.setPointerCapture?.(pointerId);
     root.addEventListener("pointermove", movePointer);
     root.addEventListener("pointerup", finishPointer);
     root.addEventListener("pointercancel", finishPointer);
   }
 
-  /** Handles standard separator keyboard resizing with Home and End bounds. */
+  /** Handles documented separator keyboard controls. */
   function onKeyDown(event) {
-    const current = drawer.getBoundingClientRect().height;
-    const range = bounds();
-    const increment = event.shiftKey ? 48 : 16;
-    const next = event.key === "ArrowUp" ? current + increment : event.key === "ArrowDown" ? current - increment : event.key === "Home" ? range.minimum : event.key === "End" ? range.maximum : undefined;
-    if (next === undefined) { return; }
+    const bounds = measureDrawerBounds({ container, drawer, grid, root });
+    const current = appliedHeight || drawer.getBoundingClientRect().height;
+    const step = event.shiftKey ? 64 : 16;
+    const value = event.key === "ArrowUp" ? current - step : event.key === "ArrowDown" ? current + step : event.key === "Home" ? bounds.minimumHeight : event.key === "End" ? bounds.maximumHeight : undefined;
+    if (value === undefined) { return; }
     event.preventDefault();
-    setHeight(next);
+    setHeight(value);
   }
 
+  /** Reclamps the current height after a layout change when the drawer is visible. */
+  function refresh() {
+    if (!dragging && !drawer.hidden) { setHeight(appliedHeight || drawer.getBoundingClientRect().height); }
+  }
+
+  const ResizeObserverClass = root.defaultView?.ResizeObserver || globalThis.ResizeObserver;
+  const observer = typeof ResizeObserverClass === "function" ? new ResizeObserverClass(refresh) : undefined;
+  if (container) { observer?.observe(container); }
+  if (grid) { observer?.observe(grid); }
+  root.defaultView?.addEventListener("resize", refresh);
   handle.addEventListener("pointerdown", startPointer);
+  handle.addEventListener("lostpointercapture", finishPointer);
   handle.addEventListener("keydown", onKeyDown);
   return {
-    /** Removes all local and transient document listeners. */
-    destroy() { finishPointer(); handle.removeEventListener("pointerdown", startPointer); handle.removeEventListener("keydown", onKeyDown); },
-    /** Synchronizes a restored persisted height after the drawer opens. */
+    /** Removes all installed pointer, keyboard, window, and observer behavior. */
+    destroy() {
+      finishPointer();
+      observer?.disconnect();
+      root.defaultView?.removeEventListener("resize", refresh);
+      handle.removeEventListener("pointerdown", startPointer);
+      handle.removeEventListener("lostpointercapture", finishPointer);
+      handle.removeEventListener("keydown", onKeyDown);
+    },
+    /** Recalculates bounds after a layout transition. */
+    refresh,
+    /** Synchronizes a restored height after the drawer opens. */
     setHeight(value) { setHeight(value); }
   };
 }
 
-/** Exposes the pure height clamp for focused tests. */
-export const __test = { clampHeight };
+/** Exposes pure helpers for focused geometry tests. */
+export const __test = { calculateDrawerBounds, clampHeight };

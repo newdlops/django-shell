@@ -166,6 +166,8 @@ export interface BackendFilterRelation {
   label?: string;
   name: string;
   outerField?: string;
+  /** Django lookup identity when it differs from the expandable reverse accessor name. */
+  queryName?: string;
   single: boolean;
   target: string;
   throughOwner?: string;

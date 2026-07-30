@@ -19,7 +19,7 @@ const COLUMNS = [
 function metadata() {
   const index = new ModelQueryMetadataIndex();
   index.setCatalog([SOURCE, { app: "db", model: "ValuationHistory" }]);
-  index.addTree(SOURCE, { fields: COLUMNS.map((column) => ({ attname: column.attname, name: column.name, null: column.null, pk: column.pk, type: column.type })), ok: true, pk: "id", relations: [{ filterField: "company_id", kind: "reverse", label: "valuation_history_set", name: "valuation_history", outerField: "id", single: false, target: "db.ValuationHistory" }] });
+  index.addTree(SOURCE, { fields: COLUMNS.map((column) => ({ attname: column.attname, name: column.name, null: column.null, pk: column.pk, type: column.type })), ok: true, pk: "id", relations: [{ filterField: "company_id", kind: "reverse", label: "valuation_history_set", name: "valuation_history_set", outerField: "id", queryName: "valuation_history", single: false, target: "db.ValuationHistory" }] });
   index.addTree({ app: "db", model: "ValuationHistory" }, { fields: [{ attname: "id", name: "id", null: false, pk: true, type: "AutoField" }, { attname: "company_id", name: "company_id", null: false, pk: false, type: "AutoField" }], ok: true, pk: "id", relations: [] });
   index.addColumns(SOURCE, COLUMNS);
   return index;
@@ -69,6 +69,13 @@ test("compiles rows aggregate annotations and summary aggregates in Recipe order
   const summary = buildRecipeSummaryOrm(recipe, context());
   assert.equal(summary.validation.ok, true);
   assert.equal(summary.cell, '[__import__("django.apps", fromlist=["apps"]).apps.get_model("db", "Company")._base_manager.filter(models.Q()).aggregate(total_amount=models.Sum("amount", filter=models.Q()))]');
+});
+
+test("compiles relation Exists through a distinct Django queryName identity", () => {
+  const recipe = createEmptyModelQueryRecipe(SOURCE);
+  recipe.computed.push({ alias: "has_history", correlations: [], enabled: true, kind: "exists", nodeId: "exists-history", source: { kind: "relation", relation: "valuation_history" }, where: { children: [], join: "and", kind: "group", negated: false, nodeId: "exists-where" } });
+  const compiled = buildRecipeRowsOrm(recipe, context());
+  assert.equal(compiled.validation.ok, true); assert.match(compiled.cell, /OuterRef\("id"\)/); assert.match(compiled.cell, /company_id/);
 });
 
 test("builds count from the full validated Recipe and refuses injection-shaped input", () => {

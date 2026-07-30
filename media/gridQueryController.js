@@ -18,17 +18,22 @@ import { QUERY_SECTION_GUIDANCE } from "./gridQueryGuidanceCopy.js";
 import { renderApplyHelp, renderSectionGuidance } from "./gridQueryGuidanceView.js";
 import { mergeRecipeIssues, outerOrderIssues } from "./gridQueryResultBuilder.js";
 import { createQueryResultControls } from "./gridQueryResultControls.js";
+import { buildQueryExamples, createQueryExamplesView, isCanonicalEmptyQueryRecipe } from "./gridQueryExamples.js";
+import { createQueryAssistant } from "./gridQueryAssistant.js";
 import { renderRecipePreview, renderQuerySummary } from "./gridQuerySummary.js";
 import { applyQueryValidationAnnotations, focusQueryIssue, renderQueryValidation } from "./gridQueryValidationView.js";
 
-const QUERY_IDS = ["querySummaryBand", "queryFilterButton", "queryColumnsButton", "queryModeButton", "queryHumanSummary", "queryDirtyState", "queryValidationState", "queryDrawerToggle", "queryDrawer", "queryDrawerResizeHandle", "queryDrawerHeader", "queryBuilderTitle", "queryWhereSection", "queryWhereGuide", "queryWhereRoot", "queryComputedSection", "queryComputedGuide", "queryComputedList", "queryPostFilterSection", "queryPostFilterGuide", "queryPostFilterRoot", "queryResultSection", "queryResultGuide", "queryGroupBy", "queryOrderBy", "queryPreviewSection", "queryPreviewGuide", "queryPlainMeaning", "queryImplicitBehavior", "queryOrmPreview", "queryCopyOrm", "queryIssueSummary", "queryResetDraft", "queryClearDraft", "queryDrawerApply", "queryDrawerApplyHelp", "queryDrawerStatus", "queryDraftStatus", "queryUndo", "queryRedo", "queryFocusMode", "queryMoreActions", "queryMoreMenu", "queryClose", "queryStageNav", "queryStageSelect", "queryStageFilterRows", "queryStageCalculatedValues", "queryStageFilterResults", "queryStageResult", "queryFilterRowsPanel", "queryCalculatedValuesPanel", "queryFilterResultsPanel", "queryResultPanel", "queryInspectorTabs", "queryInspectorMeaning", "queryInspectorProblems", "queryInspectorOrm", "queryMeaningPanel", "queryProblemsPanel", "queryEditorPane", "queryReviewPane", "queryOrmPanel", "queryPopoverLayer", "queryWorkspace", "queryMobilePaneSwitch", "queryDrawerFooter"];
+const QUERY_IDS = ["querySummaryBand", "queryFilterButton", "queryColumnsButton", "queryModeButton", "queryHumanSummary", "queryDirtyState", "queryValidationState", "queryAppliedFiltersLabel", "queryAppliedFiltersEmpty", "queryAppliedFilters", "queryAppliedWhere", "queryAppliedPostFilter", "queryDrawerToggle", "queryDrawer", "queryDrawerResizeHandle", "gridwrap", "queryDrawerHeader", "queryBuilderTitle", "queryExamples", "queryWhereSection", "queryWhereGuide", "queryWhereRoot", "queryComputedSection", "queryComputedGuide", "queryComputedList", "queryPostFilterSection", "queryPostFilterGuide", "queryPostFilterRoot", "queryResultSection", "queryResultGuide", "queryGroupBy", "queryOrderBy", "queryPreviewSection", "queryPreviewGuide", "queryPlainMeaning", "queryImplicitBehavior", "queryOrmPreview", "queryCopyOrm", "queryIssueSummary", "queryResetDraft", "queryClearDraft", "queryDrawerApply", "queryDrawerApplyHelp", "queryDrawerStatus", "queryDraftStatus", "queryUndo", "queryRedo", "queryFocusMode", "queryMoreActions", "queryMoreMenu", "queryClose", "queryStageNav", "queryStageSelect", "queryStageFilterRows", "queryStageCalculatedValues", "queryStageFilterResults", "queryStageResult", "queryFilterRowsPanel", "queryCalculatedValuesPanel", "queryFilterResultsPanel", "queryResultPanel", "queryInspectorTabs", "queryInspectorMeaning", "queryInspectorProblems", "queryInspectorOrm", "queryInspectorAssistant", "queryMeaningPanel", "queryProblemsPanel", "queryEditorPane", "queryReviewPane", "queryOrmPanel", "queryAssistantPanel", "queryPopoverLayer", "queryWorkspace", "queryMobilePaneSwitch", "queryDrawerFooter"];
 const QUERY_STAGE_ORDINALS = { calculatedValues: 2, filterResults: 3, filterRows: 1, result: 4 };
 
 /** Creates the model-only Query Builder shell and its immutable Recipe state controller. */
 export function createQueryController(options) {
   const root = options.root || document;
   const elements = Object.fromEntries(QUERY_IDS.map((id) => [id, root.getElementById(id)]));
+  elements.queryDraftAiAssembly = root.getElementById("queryDraftAiAssembly");
   if (!elements.querySummaryBand) { return noQueryController(); }
+  if (elements.queryInspectorAssistant && elements.queryInspectorTabs && elements.queryInspectorAssistant.parentElement !== elements.queryInspectorTabs) { elements.queryInspectorTabs.appendChild(elements.queryInspectorAssistant); }
+  if (elements.queryAssistantPanel && elements.queryPreviewSection && elements.queryAssistantPanel.parentElement !== elements.queryPreviewSection) { elements.queryPreviewSection.appendChild(elements.queryAssistantPanel); }
   elements.queryBuilderTitle?.setAttribute("role", "heading");
   elements.queryBuilderTitle?.setAttribute("aria-level", "2");
   const post = options.post;
@@ -38,6 +43,7 @@ export function createQueryController(options) {
   let requestSequence = 0;
   let previewTimer = 0;
   let observedDraftRevision = 0;
+  let aiAssemblyRevision = -1;
   let metadataCatalogRequest = 0;
   let sectionsMounted = false;
   let resultSignature = "";
@@ -45,16 +51,18 @@ export function createQueryController(options) {
   let predicateRenderVersion = 0;
   const scope = { columns: [], relations: [], source, target: source };
   const store = createQueryRecipeStore(createEmptyQueryRecipe(source));
-  const resultControls = createQueryResultControls({ dispatch: (action) => store.dispatch(action), el: element, groupByMount: elements.queryGroupBy, orderByMount: elements.queryOrderBy, popoverLayer: elements.queryPopoverLayer, replaceGroupBy });
+  const resultControls = createQueryResultControls({ dispatch: (action) => store.dispatch(action), el: element, groupByMount: elements.queryGroupBy, orderByMount: elements.queryOrderBy, replaceGroupBy });
   const metadata = createQueryMetadataService({ onChange: () => requestBuilderRender("metadata"), post });
   let applyLifecycle = createApplyLifecycle();
   let validationLifecycle = createValidationLifecycle();
   const uiState = createQueryUiState({ getPersisted: options.getPersisted, persist: options.persist });
   const focusIntent = createQueryFocusIntent();
+  const examplesView = createQueryExamplesView({ el: element, mount: elements.queryExamples, onChoose: chooseQueryExample });
+  const assistant = createQueryAssistant({ element, getDraft: () => store.getSnapshot().draft, getRevision: () => store.getSnapshot().draftRevision, mount: elements.queryAssistantPanel, onAccepted: acceptAssistantRecipe, post });
   let predicateBuilders = [];
   let computedBuilder;
   const menuAbort = new AbortController();
-  const drawerResize = createQueryDrawerResize({ drawer: elements.queryDrawer, handle: elements.queryDrawerResizeHandle, onHeight: (height, dragging, bounds) => { uiState.setBounds(bounds); uiState.dispatch({ dragging, height, type: "SET_DRAWER_HEIGHT" }); }, root });
+  const drawerResize = createQueryDrawerResize({ container: elements.queryDrawer.parentElement, drawer: elements.queryDrawer, grid: elements.gridwrap, handle: elements.queryDrawerResizeHandle, onHeight: (height, dragging, bounds) => { uiState.setBounds(bounds); uiState.dispatch({ dragging, height, type: "SET_DRAWER_HEIGHT" }); }, root });
   const workspace = createQueryWorkspace({ drawerResize, element, elements, root, uiState });
   const openDrawer = workspace.open;
   const closeDrawer = workspace.close;
@@ -68,11 +76,66 @@ export function createQueryController(options) {
       { id: "validation", signature: (model) => JSON.stringify({ revision: model.recipe.validationRevision, validation: model.recipe.validation }), update: (model) => { predicateBuilders.forEach((builder) => builder.updateValidation?.()); computedBuilder?.updateValidation?.(); applyQueryValidationAnnotations(root, model.recipe.validation); } },
       { id: "workspace", signature: (model) => JSON.stringify(model.ui), update: (model) => workspace.render(model.ui) }
     ],
-    restoreFocus: (captured) => restoreQueryFocus(root, focusIntent.consume() || captured)
+    restoreFocus: (captured) => restoreCoordinatorFocus(captured)
   });
 
   /** Requests one coalesced Query Builder render without directly touching editor DOM. */
   function requestRender(reason = "recipe") { coordinator.request(reason); }
+
+  /** Finds the currently rendered control for an explicit focus intent by exact key. */
+  function findExplicitFocusTarget(intent) {
+    return [...(root?.querySelectorAll?.("[data-query-control-key]") || [])].find((control) => control.dataset?.queryControlKey === intent?.controlKey);
+  }
+
+  /** Returns whether an explicit focus target can safely receive keyboard focus. */
+  function isAvailableFocusTarget(control) {
+    return Boolean(control?.focus) && control.disabled !== true && control.getAttribute?.("aria-disabled") !== "true";
+  }
+
+  /** Restores an explicit intent first and uses its stage heading if the control is unavailable. */
+  function restoreCoordinatorFocus(captured) {
+    const intent = focusIntent.consume();
+    if (!intent) { return restoreQueryFocus(root, captured); }
+    const control = findExplicitFocusTarget(intent);
+    if (isAvailableFocusTarget(control) && restoreQueryFocus(root, intent, { reveal: true })) { return true; }
+    const fallback = root?.getElementById?.(intent.fallbackId);
+    if (fallback?.focus) { fallback.focus({ preventScroll: true }); return true; }
+    return false;
+  }
+
+  /** Returns whether two source objects have the same complete app/model identity. */
+  function sameQuerySource(left, right) {
+    return typeof left?.app === "string" && typeof left?.model === "string" && left.app.trim() !== "" && left.model.trim() !== "" && left.app === right?.app && left.model === right?.model;
+  }
+
+  /** Revalidates and applies one schema-derived example only to the live draft. */
+  function chooseQueryExample(candidate) {
+    const snapshot = store.getSnapshot();
+    if (!sameQuerySource(source, candidate?.source) || !sameQuerySource(snapshot.draft.source, source) || !isCanonicalEmptyQueryRecipe(snapshot.draft)) {
+      status.textContent = "The draft changed; clear it before choosing an example.";
+      announcer?.announceStatus("The draft changed; clear it before choosing an example.");
+      requestRender("query-example-stale");
+      return;
+    }
+    uiState.dispatch({ stage: candidate.stage, type: "SET_ACTIVE_STAGE" });
+    focusIntent.set({ controlKey: candidate.controlKey, fallbackId: candidate.fallbackId });
+    store.dispatch({ recipe: candidate.recipe, type: "REPLACE_DRAFT" });
+    requestBuilderRender("query-example");
+    const message = `${candidate.label} added to the draft. Review and Apply when ready.`;
+    status.textContent = message;
+    announcer?.announceStatus(message);
+  }
+
+  /** Replaces only the live draft after the host has freshly validated an AI suggestion. */
+  function acceptAssistantRecipe(recipe) {
+    const snapshot = store.getSnapshot();
+    if (!recipe || !sameQuerySource(recipe.source, source)) { return; }
+    uiState.dispatch({ stage: "calculatedValues", type: "SET_ACTIVE_STAGE" });
+    uiState.dispatch({ tab: "meaning", type: "SET_INSPECTOR_TAB" });
+    store.dispatch({ recipe, type: "REPLACE_DRAFT" });
+    aiAssemblyRevision = store.getSnapshot().draftRevision;
+    requestBuilderRender("query-assistant-accepted");
+  }
 
   /** Requests persistent builder refreshes only for structural or metadata-driven changes. */
   function requestBuilderRender(reason, { computed = true, predicate = true } = {}) {
@@ -96,6 +159,8 @@ export function createQueryController(options) {
 
   /** Renders static Query Builder regions from one coordinator-owned immutable snapshot. */
   function renderMain(snapshot) {
+    const examples = buildQueryExamples({ columns: scope.columns, relations: scope.relations, source });
+    examplesView.render({ draft: snapshot.draft, examples, source });
     const checking = validationLifecycle.phase === "pending" || validationLifecycle.phase === "previewing";
     renderQuerySummary(elements, snapshot);
     const localOrderIssues = outerOrderIssues(snapshot.draft.orderBy);
@@ -111,6 +176,7 @@ export function createQueryController(options) {
     const availability = applyAvailability(snapshot, { applying: applyLifecycle.phase === "applying" || applyLifecycle.phase === "loadingResults" || Boolean(snapshot.applyingRevision), checking, metadataState: metadata.getState(source)?.pending ? "pending" : metadata.getState(source)?.error ? "error" : "ready", source, stale: snapshot.validationRevision !== snapshot.draftRevision, validation });
     renderApplyHelp(elements.queryDrawerApplyHelp, availability);
     if (elements.queryDraftStatus) { elements.queryDraftStatus.textContent = snapshot.dirty ? "Draft changes are not applied" : "Draft matches applied query"; }
+    if (elements.queryDraftAiAssembly) { elements.queryDraftAiAssembly.hidden = aiAssemblyRevision !== snapshot.draftRevision; }
     if (elements.queryUndo) { elements.queryUndo.disabled = !snapshot.canUndo; }
     if (elements.queryRedo) { elements.queryRedo.disabled = !snapshot.canRedo; }
     const countButton = root.getElementById("count");
@@ -299,6 +365,7 @@ export function createQueryController(options) {
     if (!nextSource?.app || !nextSource?.model) { return; }
     const changed = source.app !== nextSource.app || source.model !== nextSource.model;
     source = { app: nextSource.app, model: nextSource.model };
+    assistant.invalidate();
     scope.columns = Array.isArray(nextSource.columns) ? nextSource.columns : scope.columns;
     scope.relations = Array.isArray(nextSource.relations) ? nextSource.relations : scope.relations;
     scope.source = source;
@@ -312,7 +379,7 @@ export function createQueryController(options) {
     resultControls.destroy();
     sectionsMounted = false;
     resultSignature = "";
-    if (uiState.getSnapshot().focusMode) { options.gridAdapter?.exitQueryFocusMode?.(); uiState.dispatch({ enabled: false, type: "SET_FOCUS_MODE" }); }
+    if (uiState.getSnapshot().focusMode) { setQueryFocusMode(false); }
     uiState.dispatch({ type: "RESET_TRANSIENT_FOR_SOURCE" });
     metadataCatalogRequest += 1;
     post({ requestId: `query-meta-catalog-${metadataCatalogRequest}`, type: "modelList" });
@@ -331,6 +398,7 @@ export function createQueryController(options) {
 
   /** Routes host Recipe messages and ignores stale preview/apply revisions. */
   function onMessage(message) {
+    if (assistant.onMessage(message)) { return true; }
     if (!message || typeof message.type !== "string") { return false; }
     if (message.type === "filterFields") { return metadata.onMessage(message); }
     if (message.type === "modelList" && typeof message.requestId === "string" && message.requestId.startsWith("query-meta-catalog-")) {
@@ -416,14 +484,12 @@ export function createQueryController(options) {
   elements.queryMoreActions.addEventListener("click", () => toggleMoreActions());
   elements.queryClose.addEventListener("click", closeDrawer);
   elements.queryFocusMode.addEventListener("click", () => {
-    const enabled = !uiState.getSnapshot().focusMode;
-    uiState.dispatch({ enabled, type: "SET_FOCUS_MODE" });
-    if (enabled) { options.gridAdapter?.enterQueryFocusMode?.(); } else { options.gridAdapter?.exitQueryFocusMode?.(); }
+    setQueryFocusMode(!uiState.getSnapshot().focusMode);
   });
   const stageControls = { queryStageCalculatedValues: "calculatedValues", queryStageFilterResults: "filterResults", queryStageFilterRows: "filterRows", queryStageResult: "result" };
   for (const [id, stage] of Object.entries(stageControls)) { elements[id].addEventListener("click", () => uiState.dispatch({ stage, type: "SET_ACTIVE_STAGE" })); }
   elements.queryStageSelect.addEventListener("change", () => uiState.dispatch({ stage: elements.queryStageSelect.value, type: "SET_ACTIVE_STAGE" }));
-  const inspectorControls = { queryInspectorMeaning: "meaning", queryInspectorOrm: "orm", queryInspectorProblems: "problems" };
+  const inspectorControls = { queryInspectorMeaning: "meaning", queryInspectorOrm: "orm", queryInspectorProblems: "problems", queryInspectorAssistant: "assistant" };
   for (const [id, tab] of Object.entries(inspectorControls)) { elements[id].addEventListener("click", () => uiState.dispatch({ tab, type: "SET_INSPECTOR_TAB" })); }
   workspace.installRovingTabs(Object.entries(stageControls).map(([id, value]) => ({ button: elements[id], value })), (stage) => uiState.dispatch({ stage, type: "SET_ACTIVE_STAGE" }));
   workspace.installRovingTabs(Object.entries(inspectorControls).map(([id, value]) => ({ button: elements[id], value })), (tab) => uiState.dispatch({ tab, type: "SET_INSPECTOR_TAB" }));
@@ -446,8 +512,7 @@ export function createQueryController(options) {
     if (event.key === "Escape" && uiState.getSnapshot().pendingResultMode) { event.preventDefault(); uiState.dispatch({ type: "CLEAR_PENDING_RESULT_MODE" }); requestRender("result-mode-cancelled"); return; }
     if (event.key === "Escape" && uiState.getSnapshot().focusMode) {
       event.preventDefault();
-      uiState.dispatch({ enabled: false, type: "SET_FOCUS_MODE" });
-      options.gridAdapter?.exitQueryFocusMode?.();
+      setQueryFocusMode(false);
       elements.queryFocusMode.focus();
       return;
     }
@@ -460,7 +525,9 @@ export function createQueryController(options) {
   store.subscribe((snapshot) => {
     if (snapshot.draftRevision !== observedDraftRevision) {
       observedDraftRevision = snapshot.draftRevision;
+      if (aiAssemblyRevision !== snapshot.draftRevision) { aiAssemblyRevision = -1; }
       validationLifecycle = transitionValidation(validationLifecycle, { revision: snapshot.draftRevision, type: "DRAFT_CHANGED" });
+      assistant.invalidate();
       schedulePreview();
     }
     requestRender("store");
@@ -468,7 +535,7 @@ export function createQueryController(options) {
   uiState.subscribe(() => requestRender("ui"));
   coordinator.flush();
   if (uiState.getSnapshot().drawerOpen) { elements.queryDrawer.hidden = false; elements.queryDrawerToggle.setAttribute("aria-expanded", "true"); drawerResize.setHeight(uiState.getSnapshot().drawerHeight); }
-  return { apply, destroy() { menuAbort.abort(); drawerResize.destroy(); coordinator.destroy(); uiState.destroy(); disposePredicateBuilders(); computedBuilder?.destroy?.(); resultControls.destroy(); }, getSnapshot: () => store.getSnapshot(), onMessage, openDrawer, setSource, toggleGridOrder };
+  return { apply, destroy() { menuAbort.abort(); drawerResize.destroy(); assistant.destroy(); examplesView.destroy(); coordinator.destroy(); uiState.destroy(); disposePredicateBuilders(); computedBuilder?.destroy?.(); resultControls.destroy(); }, getSnapshot: () => store.getSnapshot(), onMessage, openDrawer, setSource, toggleGridOrder };
 
   /** Opens or closes the compact overflow menu for draft recovery actions. */
   function toggleMoreActions() {
@@ -482,6 +549,14 @@ export function createQueryController(options) {
   function closeMoreActions() {
     elements.queryMoreMenu.hidden = true;
     elements.queryMoreActions.setAttribute("aria-expanded", "false");
+  }
+
+  /** Changes Focus Builder layout before synchronously refreshing drawer geometry. */
+  function setQueryFocusMode(enabled) {
+    const next = Boolean(enabled);
+    if (next) { options.gridAdapter?.enterQueryFocusMode?.(); } else { options.gridAdapter?.exitQueryFocusMode?.(); }
+    uiState.dispatch({ enabled: next, type: "SET_FOCUS_MODE" });
+    drawerResize.refresh();
   }
 
   /** Implements conventional menu navigation without trapping Tab or duplicating native buttons. */
@@ -508,6 +583,7 @@ function element(tagName, properties = {}, ...children) {
     else if (name === "ariaLive") { node.setAttribute("aria-live", value); }
     else if (name === "ariaHidden") { node.setAttribute("aria-hidden", value); }
     else if (name === "checked") { node.checked = Boolean(value); }
+    else if (name === "disabled") { node.disabled = Boolean(value); }
     else if (name === "value") { node.value = value; }
     else { node.setAttribute(name, value); }
   }

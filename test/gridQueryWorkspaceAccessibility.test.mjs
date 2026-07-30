@@ -23,6 +23,7 @@ test("Query Builder controls expose tabs, visible labels, and one primary Apply"
   assert.match(html, /id="queryStageNav"[^>]*role="tablist"/);
   assert.match(html, /id="queryInspectorTabs"[^>]*role="tablist"/);
   assert.match(html, /id="queryDrawerResizeHandle"[^>]*role="separator"/);
+  assert.ok(html.indexOf('id="queryDrawerFooter"') < html.indexOf('id="queryDrawerResizeHandle"') && html.indexOf('id="queryDrawerResizeHandle"') < html.indexOf('id="queryPopoverLayer"'), "resize separator follows the drawer footer at the grid-facing edge");
   assert.match(html, /id="queryDrawerApply"[^>]*aria-describedby="queryDrawerApplyHelp"/);
   assert.equal((html.match(/id="queryApply"/g) || []).length, 0, "the summary never duplicates the drawer Apply action");
 });
@@ -47,10 +48,11 @@ test("Query Builder tabs select controlled panels and make inactive review panel
   ]) {
     assert.match(html, new RegExp(`id="${tab}"[^>]*aria-controls="${panel}"[^>]*aria-selected="${selected}"`));
   }
-  for (const panel of ["queryProblemsPanel", "queryOrmPanel"]) {
+  for (const panel of ["queryAssistantPanel", "queryProblemsPanel", "queryOrmPanel"]) {
     assert.match(html, new RegExp(`id="${panel}"[^>]*hidden inert aria-hidden="true"`));
   }
   assert.match(fs.readFileSync(new URL("../media/gridQueryWorkspace.js", import.meta.url), "utf8"), /panel\.inert = !selected/);
+  assert.match(html, /id="queryInspectorAssistant"[^>]*aria-controls="queryAssistantPanel"[^>]*aria-selected="false"/);
 });
 
 test("Query Builder provides focused skip links to every major workspace region", () => {

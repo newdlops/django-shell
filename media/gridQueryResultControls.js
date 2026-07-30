@@ -1,5 +1,5 @@
 // Persistent metadata-backed controls for the Query Builder Result stage.
-import { createGridCombobox } from "./gridCombobox.js";
+import { createQuerySelect } from "./gridQuerySelect.js";
 import { createStableListKeyReconciler } from "./gridQueryStableListKeys.js";
 
 /** Returns direct-field and enabled-calculated options grouped for Result controls. */
@@ -8,7 +8,7 @@ export function resultReferenceOptions(fields = [], computed = []) {
 }
 
 /** Builds a persistent Result renderer with bounded pickers and deterministic cleanup. */
-export function createQueryResultControls({ dispatch, el, groupByMount, orderByMount, popoverLayer, replaceGroupBy } = {}) {
+export function createQueryResultControls({ dispatch, el, groupByMount, orderByMount, replaceGroupBy } = {}) {
   let pickers = [];
   const groupByKeys = createStableListKeyReconciler("result-group");
 
@@ -20,7 +20,7 @@ export function createQueryResultControls({ dispatch, el, groupByMount, orderByM
 
   /** Creates a bounded picker and retains it for the Result renderer lifetime. */
   function picker(entries, current, label, onChange, key) {
-    const control = createGridCombobox({ dataset: { queryControlKey: key }, el, label, onChange, options: [{ label: "Choose field", value: "" }, ...entries], popoverLayer, value: entries.some((entry) => entry.value === current) ? current : "" });
+    const control = createQuerySelect({ ariaLabel: label, dataset: { queryControlKey: key }, el, onChange, options: [{ disabled: true, label: "Choose field", value: "" }, ...entries], value: current });
     pickers.push(control);
     return control.node;
   }

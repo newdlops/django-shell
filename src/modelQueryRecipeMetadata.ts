@@ -8,6 +8,8 @@ import type { ModelQueryRecipeV2, QueryModelRef } from "./modelQueryRecipe";
 export interface QueryResolvedPath { choices?: Array<[unknown, string]>; leafKind: "field" | "property" | "relation"; nullable: boolean; path: string; relationTerminal: boolean; toMany: boolean; type: string; }
 /** Serializable snapshot of all trees and root columns used by a recipe. */
 export interface ModelQueryMetadataBundle { catalog: QueryModelRef[]; models: Record<string, { columns?: BackendModelColumn[]; tree: BackendFilterFieldTree }>; }
+/** One loaded model descriptor that is safe to include in an assistant schema projection. */
+export interface QueryAssistantRelatedModel { app: string; columns: Array<Pick<BackendModelColumn, "attname" | "choices" | "label" | "name" | "null" | "pk" | "type">>; model: string; relations: BackendFilterRelation[]; }
 
 /** Holds live model trees without falling back to lexical path guesses. */
 export class ModelQueryMetadataIndex {
@@ -68,7 +70,7 @@ export class ModelQueryMetadataIndex {
       const property = final && current.app === model.app && current.model === model.model ? this.models.get(modelKey(current))?.columns?.find((candidate) => candidate.computed && (candidate.attname === segment || candidate.name === segment)) : undefined;
       if (property) { return { choices: property.choices, leafKind: "property", nullable: property.null, path, relationTerminal: false, toMany, type: property.type }; }
       const currentTree = tree;
-      const relation = currentTree.relations.find((candidate) => candidate.name === segment || candidate.filterField === segment || (segment === "pk" && currentTree.pk === segment));
+      const relation = currentTree.relations.find((candidate) => candidate.name === segment || candidate.queryName === segment || candidate.filterField === segment || (segment === "pk" && currentTree.pk === segment));
       if (!relation) { return undefined; }
       toMany ||= !relation.single;
       if (final) { return { leafKind: "relation", nullable: true, path, relationTerminal: true, toMany, type: relation.kind }; }
@@ -83,7 +85,7 @@ export class ModelQueryMetadataIndex {
   /** Resolves one direct relation from a source model's live tree. */
   resolveRelation(model: QueryModelRef, relation: string): BackendFilterRelation | undefined {
     if (!splitPath(relation) || relation.includes("__")) { return undefined; }
-    return this.getTree(model)?.relations.find((candidate) => candidate.name === relation || candidate.filterField === relation);
+    return this.getTree(model)?.relations.find((candidate) => candidate.name === relation || candidate.queryName === relation || candidate.filterField === relation);
   }
 
   /** Serializes a detached snapshot suitable for an in-process ORM compiler only. */
@@ -115,6 +117,29 @@ export async function loadModelQueryMetadata(recipe: ModelQueryRecipeV2, loadTre
     }
   }
   return index;
+}
+
+/** Selects only loaded model descriptors actually referenced by the current Recipe. */
+export function selectQueryAssistantRelatedModels(recipe: ModelQueryRecipeV2, bundle: ModelQueryMetadataBundle): QueryAssistantRelatedModel[] {
+  const wanted = new Map<string, QueryModelRef>([[modelKey(recipe.source), recipe.source]]);
+  for (const model of collectExplicitModels(recipe)) { wanted.set(modelKey(model), model); }
+  const root = bundle.models[modelKey(recipe.source)];
+  if (root) {
+    for (const relation of collectRelationSources(recipe, recipe.source)) {
+      const resolved = root.tree.relations.find((candidate) => candidate.name === relation || candidate.queryName === relation || candidate.filterField === relation);
+      const target = resolved && parseModelKey(resolved.target);
+      if (target) { wanted.set(modelKey(target), target); }
+    }
+  }
+  return [...wanted.values()].flatMap((model) => {
+    const entry = bundle.models[modelKey(model)];
+    return entry ? [{ app: model.app, columns: (entry.columns ?? entry.tree.fields).map(assistantColumn), model: model.model, relations: [...entry.tree.relations] }] : [];
+  });
+}
+
+/** Projects a loaded column or filter-tree field to the assistant's schema descriptor. */
+function assistantColumn(column: BackendModelColumn | BackendFilterField): Pick<BackendModelColumn, "attname" | "choices" | "label" | "name" | "null" | "pk" | "type"> {
+  return { attname: column.attname, choices: column.choices, label: column.label, name: column.name, null: column.null, pk: column.pk, type: column.type };
 }
 
 /** Returns stable model keys in the format used by metadata bundles. */

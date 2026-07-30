@@ -27,6 +27,15 @@ test("full preview keeps the shared narrative while adding host ORM text", () =>
   assert.match(preview, /Django ORM/);
 });
 
+test("narrative places a nonempty result filter before result settings", () => {
+  const withResultFilter = { ...recipe, computed: [{ alias: "total", enabled: true, kind: "aggregate" }], postFilter: { children: [{ kind: "comparison", lhs: { alias: "total", kind: "computed" }, lookup: "gt", negated: false, nodeId: "post-cmp", rhs: { kind: "literal", value: 1 } }], join: "and", kind: "group", negated: false, nodeId: "post-root" } };
+  const text = describeQueryRecipe(withResultFilter);
+
+  assert.ok(text.indexOf("computed column") < text.indexOf("Result filter:"));
+  assert.ok(text.indexOf("Result filter:") < text.indexOf("Rows ordered"));
+  assert.doesNotMatch(describeQueryRecipe(recipe), /Result filter:/);
+});
+
 test("backend issues merge with client issues by code, node id, and path", () => {
   const duplicate = { code: "VALUE_INVALID", nodeId: "cmp-1", path: "/where/0", severity: "error" };
   const merged = mergeRecipeIssues([duplicate], [duplicate, { code: "VALUE_INVALID", nodeId: "cmp-2", path: "/where/0", severity: "error" }]);

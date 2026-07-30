@@ -5,12 +5,26 @@ export function countPredicateNodes(group) {
   return (group?.children || []).reduce((count, node) => count + 1 + (node.kind === "group" ? countPredicateNodes(node) : node.kind === "existsPredicate" ? countPredicateNodes(node.where) : 0), 0);
 }
 
+/** Summarizes applied source-row and result-filter trees without changing their semantics. */
+export function summarizeRecipeFilters(recipe = {}) {
+  const sourceCount = countPredicateNodes(recipe.where);
+  const resultCount = countPredicateNodes(recipe.postFilter);
+  return {
+    resultCount,
+    resultText: resultCount > 0 ? predicateSummary(recipe.postFilter, true) : "",
+    sourceCount,
+    sourceText: sourceCount > 0 ? predicateSummary(recipe.where, true) : "",
+    totalCount: sourceCount + resultCount
+  };
+}
+
 /** Returns a compact, user-facing description of a Recipe without executing it. */
 export function describeQueryRecipe(recipe) {
   const where = predicateSummary(recipe?.where, true);
   const computed = computedSummary(recipe?.computed);
+  const { resultCount, resultText } = summarizeRecipeFilters(recipe);
   const result = resultSummary(recipe);
-  return [where, computed, result].filter(Boolean).join(" · ");
+  return [where, computed, resultCount > 0 ? `Result filter: ${resultText}` : "", result].filter(Boolean).join(" · ");
 }
 
 /** Produces the expanded text used beside the ORM preview from the same AST renderer as the summary band. */
@@ -26,15 +40,26 @@ export function renderRecipePreview(recipe, ormPreview) {
 
 /** Renders the collapsed summary band using textContent-only updates. */
 export function renderQuerySummary(elements, snapshot) {
-  const recipe = snapshot?.draft;
-  const filterCount = countPredicateNodes(recipe?.where);
+  const recipe = snapshot?.applied;
+  const { resultCount, resultText, sourceCount, sourceText, totalCount } = summarizeRecipeFilters(recipe);
   const columnCount = (recipe?.computed || []).filter((item) => item.enabled).length;
-  const text = describeQueryRecipe(recipe);
-  elements.queryFilterButton.textContent = `Filter ${filterCount}`;
+  const text = `Applied · ${describeQueryRecipe(recipe)}`;
+  elements.queryFilterButton.textContent = `Filters ${totalCount}`;
+  elements.queryFilterButton.title = `Applied filters: ${sourceCount} row condition(s), ${resultCount} result condition(s). Open the Filter Rows draft editor.`;
   elements.queryColumnsButton.textContent = `Columns ${columnCount}`;
+  elements.queryColumnsButton.title = "Applied calculated columns. Open the Calculated Values draft editor.";
   elements.queryModeButton.textContent = recipe?.mode === "summary" ? "Summary" : "Rows";
+  elements.queryModeButton.title = "Applied result mode. Open the Result draft editor.";
   elements.queryHumanSummary.textContent = text;
   elements.queryHumanSummary.title = text;
+  elements.queryAppliedWhere.hidden = sourceCount === 0;
+  elements.queryAppliedWhere.textContent = sourceCount > 0 ? `Rows · ${sourceText}` : "";
+  elements.queryAppliedWhere.title = sourceCount > 0 ? `Rows · ${sourceText}` : "";
+  elements.queryAppliedPostFilter.hidden = resultCount === 0;
+  elements.queryAppliedPostFilter.textContent = resultCount > 0 ? `Results · ${resultText}` : "";
+  elements.queryAppliedPostFilter.title = resultCount > 0 ? `Results · ${resultText}` : "";
+  elements.queryAppliedFilters.hidden = totalCount === 0;
+  elements.queryAppliedFiltersEmpty.hidden = totalCount > 0;
   elements.queryDirtyState.hidden = !snapshot?.dirty;
 }
 

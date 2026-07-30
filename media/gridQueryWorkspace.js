@@ -24,12 +24,12 @@ export function createQueryWorkspace({ drawerResize, element, elements, root, ui
       if (section) { section.hidden = !selected; section.inert = !selected; section.setAttribute("aria-hidden", String(!selected)); }
       if (tab) { tab.setAttribute("aria-selected", String(selected)); tab.tabIndex = selected ? 0 : -1; }
     }
-    const reviewTabs = { meaning: elements.queryInspectorMeaning, orm: elements.queryInspectorOrm, problems: elements.queryInspectorProblems };
+    const reviewTabs = { assistant: elements.queryInspectorAssistant, meaning: elements.queryInspectorMeaning, orm: elements.queryInspectorOrm, problems: elements.queryInspectorProblems };
     for (const [name, tab] of Object.entries(reviewTabs)) {
       const selected = name === ui.inspectorTab;
       if (tab) { tab.setAttribute("aria-selected", String(selected)); tab.tabIndex = selected ? 0 : -1; }
     }
-    const reviewPanels = { meaning: elements.queryMeaningPanel, orm: elements.queryOrmPanel, problems: elements.queryProblemsPanel };
+    const reviewPanels = { assistant: elements.queryAssistantPanel, meaning: elements.queryMeaningPanel, orm: elements.queryOrmPanel, problems: elements.queryProblemsPanel };
     for (const [name, panel] of Object.entries(reviewPanels)) {
       if (!panel) { continue; }
       const selected = name === ui.inspectorTab;
