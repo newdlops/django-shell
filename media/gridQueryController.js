@@ -22,6 +22,7 @@ import { buildQueryExamples, createQueryExamplesView, isCanonicalEmptyQueryRecip
 import { createQueryAssistant } from "./gridQueryAssistant.js";
 import { renderRecipePreview, renderQuerySummary } from "./gridQuerySummary.js";
 import { applyQueryValidationAnnotations, focusQueryIssue, renderQueryValidation } from "./gridQueryValidationView.js";
+import { recipeWithGridOrder } from "./gridSort.js";
 
 const QUERY_IDS = ["querySummaryBand", "queryFilterButton", "queryColumnsButton", "queryModeButton", "queryHumanSummary", "queryDirtyState", "queryValidationState", "queryAppliedFiltersLabel", "queryAppliedFiltersEmpty", "queryAppliedFilters", "queryAppliedWhere", "queryAppliedPostFilter", "queryDrawerToggle", "queryDrawer", "queryDrawerResizeHandle", "gridwrap", "queryDrawerHeader", "queryBuilderTitle", "queryExamples", "queryWhereSection", "queryWhereGuide", "queryWhereRoot", "queryComputedSection", "queryComputedGuide", "queryComputedList", "queryPostFilterSection", "queryPostFilterGuide", "queryPostFilterRoot", "queryResultSection", "queryResultGuide", "queryGroupBy", "queryOrderBy", "queryPreviewSection", "queryPreviewGuide", "queryPlainMeaning", "queryImplicitBehavior", "queryOrmPreview", "queryCopyOrm", "queryIssueSummary", "queryResetDraft", "queryClearDraft", "queryDrawerApply", "queryDrawerApplyHelp", "queryDrawerStatus", "queryDraftStatus", "queryUndo", "queryRedo", "queryFocusMode", "queryMoreActions", "queryMoreMenu", "queryClose", "queryStageNav", "queryStageSelect", "queryStageFilterRows", "queryStageCalculatedValues", "queryStageFilterResults", "queryStageResult", "queryFilterRowsPanel", "queryCalculatedValuesPanel", "queryFilterResultsPanel", "queryResultPanel", "queryInspectorTabs", "queryInspectorMeaning", "queryInspectorProblems", "queryInspectorOrm", "queryInspectorAssistant", "queryMeaningPanel", "queryProblemsPanel", "queryEditorPane", "queryReviewPane", "queryOrmPanel", "queryAssistantPanel", "queryPopoverLayer", "queryWorkspace", "queryMobilePaneSwitch", "queryDrawerFooter"];
 const QUERY_STAGE_ORDINALS = { calculatedValues: 2, filterResults: 3, filterRows: 1, result: 4 };
@@ -49,6 +50,7 @@ export function createQueryController(options) {
   let resultSignature = "";
   let computedRenderVersion = 0;
   let predicateRenderVersion = 0;
+  let gridSortRevision;
   const scope = { columns: [], relations: [], source, target: source };
   const store = createQueryRecipeStore(createEmptyQueryRecipe(source));
   const resultControls = createQueryResultControls({ dispatch: (action) => store.dispatch(action), el: element, groupByMount: elements.queryGroupBy, orderByMount: elements.queryOrderBy, replaceGroupBy });
@@ -371,6 +373,7 @@ export function createQueryController(options) {
     scope.source = source;
     scope.target = source;
     if (!changed) { requestBuilderRender("source-metadata"); return; }
+    gridSortRevision = undefined;
     const empty = createEmptyQueryRecipe(source);
     store.hydrate(empty, 0);
     disposePredicateBuilders();
@@ -389,11 +392,22 @@ export function createQueryController(options) {
     schedulePreview();
   }
 
-  /** Records a new grid-header sort as a draft order change rather than running it implicitly. */
-  function toggleGridOrder(field, descending) {
-    const recipe = store.getSnapshot().draft;
-    recipe.orderBy = descending === undefined ? [] : [{ direction: descending ? "desc" : "asc", nodeId: `grid-order-${String(field).replace(/[^A-Za-z0-9_-]/g, "-")}`, ref: { kind: "field", path: field } }];
-    store.dispatch({ recipe, type: "REPLACE_DRAFT" });
+  /** Applies a grid-header sort immediately to the authoritative Recipe without submitting unrelated draft edits. */
+  function applyGridOrder(field, descending) {
+    const snapshot = store.getSnapshot();
+    const busy = Boolean(snapshot.applyingRevision) || applyLifecycle.phase === "applying" || applyLifecycle.phase === "loadingResults";
+    if (busy || snapshot.applied.mode !== "rows" || !source.app || !source.model || typeof field !== "string" || !field) { return false; }
+    const recipe = recipeWithGridOrder(snapshot.applied, field, descending);
+    const revision = Math.max(snapshot.appliedRevision, snapshot.draftRevision) + 1;
+    gridSortRevision = revision;
+    applyLifecycle = transitionApply(applyLifecycle, { revision, type: "APPLY_STARTED" });
+    store.beginApply(revision, recipe, { advanceDraftRevision: true, preserveDraft: snapshot.dirty });
+    const direction = descending === undefined ? "default primary-key order" : `${descending ? "descending" : "ascending"} order`;
+    status.textContent = `Sorting ${field} in ${direction}…`;
+    announcer?.announceStatus(`Sorting ${field} in ${direction}…`);
+    post({ gridSort: { descending, field }, recipe, revision, type: "applyQueryRecipe" });
+    requestRender("grid-sort-started");
+    return true;
   }
 
   /** Routes host Recipe messages and ignores stale preview/apply revisions. */
@@ -422,23 +436,37 @@ export function createQueryController(options) {
       } else {
         store.hydrate(message.recipe || snapshot.draft, message.revision);
       }
+      const appliedSnapshot = store.getSnapshot();
+      if (gridSortRevision === message.revision && appliedSnapshot.dirty && appliedSnapshot.validationRevision !== appliedSnapshot.draftRevision) { schedulePreview(); }
       status.textContent = "Query applied.";
       announcer?.announceStatus("Query applied.");
       requestRender("apply-accepted");
       return true;
     }
     if (message.type === "queryRecipeRejected") {
-      if (snapshot.applyingRevision === message.revision) { applyLifecycle = transitionApply(applyLifecycle, { revision: message.revision, type: "APPLY_REJECTED" }); }
+      const gridSort = gridSortRevision === message.revision;
+      const applying = snapshot.applyingRevision === message.revision;
+      const appliedGridSort = gridSort && snapshot.appliedRevision === message.revision;
+      if (applying) { applyLifecycle = transitionApply(applyLifecycle, { revision: message.revision, type: "APPLY_REJECTED" }); }
+      else if (appliedGridSort) { applyLifecycle = transitionApply(applyLifecycle, { revision: message.revision, type: "RESULTS_FAILED" }); }
       else { validationLifecycle = transitionValidation(validationLifecycle, { requestId: message.requestId, revision: message.revision, type: "PREVIEW_REJECTED", issues: message.issues }); }
       const issues = mergeRecipeIssues(snapshot.validation?.issues, message.issues);
-      if (snapshot.applyingRevision === message.revision) {
-        store.failApply(message.revision, issues);
-      } else if (message.revision === snapshot.draftRevision) {
+      if (applying) {
+        store.failApply(message.revision, issues, { preserveValidation: gridSort });
+      } else if (!appliedGridSort && message.revision === snapshot.draftRevision) {
         store.setValidation(validationWithIssues(issues), message.revision);
-      } else {
+      } else if (!appliedGridSort) {
         store.mergeValidationIssues(issues);
       }
       options.onRejected?.(message);
+      if (gridSort) {
+        gridSortRevision = undefined;
+        const detail = message.issues?.[0]?.fix || message.issues?.[0]?.message || "Retry after refreshing the model.";
+        status.textContent = appliedGridSort ? `Sort was applied, but its rows could not be loaded. ${detail}` : `Sort was not applied. ${detail}`;
+        announcer?.announceError(status.textContent);
+        requestRender("grid-sort-rejected");
+        return true;
+      }
       status.textContent = "Query was not applied. Fix the reported errors.";
       announcer?.announceError("Query was not applied. Fix the reported errors.");
       openDrawer("queryWhereSection");
@@ -447,7 +475,8 @@ export function createQueryController(options) {
       return true;
     }
     if (message.type === "rows" && message.revision === snapshot.appliedRevision) {
-      applyLifecycle = transitionApply(applyLifecycle, { revision: message.revision, type: "RESULTS_ACCEPTED" });
+      if (gridSortRevision === message.revision) { gridSortRevision = undefined; }
+      applyLifecycle = transitionApply(applyLifecycle, { revision: message.revision, type: message.rows?.ok === false ? "RESULTS_FAILED" : "RESULTS_ACCEPTED" });
       options.onRows?.(message, snapshot);
       requestRender("rows-accepted");
       return true;
@@ -535,7 +564,7 @@ export function createQueryController(options) {
   uiState.subscribe(() => requestRender("ui"));
   coordinator.flush();
   if (uiState.getSnapshot().drawerOpen) { elements.queryDrawer.hidden = false; elements.queryDrawerToggle.setAttribute("aria-expanded", "true"); drawerResize.setHeight(uiState.getSnapshot().drawerHeight); }
-  return { apply, destroy() { menuAbort.abort(); drawerResize.destroy(); assistant.destroy(); examplesView.destroy(); coordinator.destroy(); uiState.destroy(); disposePredicateBuilders(); computedBuilder?.destroy?.(); resultControls.destroy(); }, getSnapshot: () => store.getSnapshot(), onMessage, openDrawer, setSource, toggleGridOrder };
+  return { apply, applyGridOrder, destroy() { menuAbort.abort(); drawerResize.destroy(); assistant.destroy(); examplesView.destroy(); coordinator.destroy(); uiState.destroy(); disposePredicateBuilders(); computedBuilder?.destroy?.(); resultControls.destroy(); }, getSnapshot: () => store.getSnapshot(), onMessage, openDrawer, setSource };
 
   /** Opens or closes the compact overflow menu for draft recovery actions. */
   function toggleMoreActions() {
@@ -611,5 +640,5 @@ function isTextEntry(target) {
 
 /** Creates a no-op controller for the standalone custom ORM query surface. */
 function noQueryController() {
-  return { apply() {}, getSnapshot() { return undefined; }, onMessage() { return false; }, openDrawer() {}, setSource() {}, toggleGridOrder() {} };
+  return { apply() {}, applyGridOrder() { return false; }, getSnapshot() { return undefined; }, onMessage() { return false; }, openDrawer() {}, setSource() {} };
 }

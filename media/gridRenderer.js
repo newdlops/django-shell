@@ -28,9 +28,11 @@ export function createGridHeaderRenderer({ el, relationKindLabel, relationModelN
     }
     const column = descriptor.source;
     const sortable = !column.computed;
-    const headClass = column.annotation ? "annotation" : column.computed ? "computed" : "sortable";
+    const headClass = column.annotation ? `annotation${sortable ? " sortable" : ""}` : column.computed ? "computed" : "sortable";
     const headTitle = sortable ? `Sort by ${column.name} (${column.type})` : `${column.name} (computed @property — read-only)`;
     const order = state.order.find((term) => term.field === column.attname);
+    const sortDirection = order ? (order.desc ? "descending" : "ascending") : "none";
+    const sortAction = sortDirection === "descending" ? `Clear sort for ${column.attname}` : sortDirection === "ascending" ? `Sort ${column.attname} descending` : `Sort ${column.attname} ascending`;
     const th = el("th", { ariaColIndex, ariaSort: sortable ? (order ? (order.desc ? "descending" : "ascending") : "none") : undefined, className: headClass, dataset: { key: column.attname }, role: "columnheader", title: headTitle });
     th.style.width = `${descriptor.width}px`;
     const pinned = state.pinned.has(column.attname);
@@ -40,9 +42,9 @@ export function createGridHeaderRenderer({ el, relationKindLabel, relationModelN
       const cost = column.annotated ? "DB annotation — single query" : "per-row @property — N+1";
       th.appendChild(el("button", { ariaLabel: `${loading ? "Reload" : "Load"} ${column.attname} computed values`, className: loading ? "loadbtn active" : "loadbtn", dataset: { act: "loadComputed", field: column.attname }, title: `${loading ? "Reload" : "Load"} this column for loaded rows (${cost})` }, codicon(loading ? "refresh" : "triangle-right")));
     }
-    if (sortable) { th.appendChild(el("button", { ariaLabel: headTitle, className: "sortbtn", dataset: { act: "sort", col: column.attname } }, column.attname)); } else { th.appendChild(document.createTextNode(column.attname)); }
+    if (sortable) { th.appendChild(el("button", { ariaLabel: sortAction, className: "sortbtn", dataset: { act: "sort", col: column.attname }, disabled: state.sortPending, title: headTitle }, column.attname)); } else { th.appendChild(document.createTextNode(column.attname)); }
     if (column.pk) { th.appendChild(el("span", { ariaLabel: "Primary key", className: "pkmark", title: "primary key" }, codicon("key"))); }
-    if (sortable) { th.appendChild(el("span", { className: "sortarrow", dataset: { arrow: column.attname } }, "")); }
+    if (sortable) { th.appendChild(el("span", { ariaHidden: "true", className: order ? `sortarrow codicon codicon-${order.desc ? "arrow-down" : "arrow-up"}` : "sortarrow", dataset: { arrow: column.attname } }, "")); }
     th.appendChild(el("span", { className: "coltype" }, column.relation ? `→ ${column.relation.target}` : column.computed ? (column.annotated ? "@property · 1 query" : "@property") : column.type));
     th.appendChild(el("span", { ariaLabel: `Resize ${column.attname} column`, ariaOrientation: "vertical", ariaValueMax: 480, ariaValueMin: 72, ariaValueNow: descriptor.width, className: "colresize", dataset: { key: descriptor.key }, role: "separator", tabIndex: 0, title: "Drag to resize" }));
     row.appendChild(th);

@@ -22,6 +22,7 @@ import { createQueryController } from "./gridQueryController.js";
 import { recipeLogLabel, resultCountLabel } from "./gridQueryResultBuilder.js";
 import { renderQuerySummaryTable } from "./gridQuerySummaryTable.js";
 import { runModelQueryBuilderE2eProbe } from "./modelQueryBuilderE2eProbe.js";
+import { gridOrderFromRecipe, nextGridOrder } from "./gridSort.js";
 const vscode = acquireVsCodeApi();
 const els = {};
 for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more", "pageSize", "commit", "discard", "reload", "count", "transport", "transportInfo", "logToggle", "logpanel", "logresize", "logbody", "logClear", "logMode", "fieldfinder", "fieldfindslot", "fieldfindClose", "interruptQuery", "openQueryConsole", "detailDrawer", "detailContent"]) {
@@ -30,7 +31,7 @@ for (const id of ["title", "subtitle", "gridwrap", "status", "countinfo", "more"
 const announcer = createAnnouncer(); installModelBrowserChrome(document);
 const MAX_LOG_ENTRIES = 200;
 const ALL_PAGE_SIZE = 1000000000;
-const state = { columns: [], pk: "id", relations: [], rowCount: 0, totalCount: undefined, hasMore: false, order: [], model: "", pinned: new Set(), widths: {}, computed: {}, computedActive: new Set() };
+const state = { columns: [], pk: "id", relations: [], rowCount: 0, totalCount: undefined, hasMore: false, order: [], model: "", pinned: new Set(), widths: {}, computed: {}, computedActive: new Set(), sortPending: false };
 let queryController;
 queryController = createQueryController({ announcer, getPersisted: () => vscode.getState() || {}, gridAdapter: createQueryFocusGridAdapter(), onCount: onQueryCount, onRejected: onQueryRejected, onRows, onSummary: onQuerySummary, persist: (preferences) => vscode.setState({ ...(vscode.getState() || {}), ...preferences }), post: (message) => send(message), root: document, status: els.status });
 
@@ -208,8 +209,9 @@ function onSchema(schema) {
   state.relations = schema.relations || [];
   state.rowCount = 0;
   state.totalCount = undefined;
-  state.order = [];
   if (!sameModel) {
+    state.order = [];
+    state.sortPending = false;
     state.pinned = new Set();
     state.computed = {};
     state.computedActive = new Set();
@@ -304,10 +306,21 @@ function renderViewport(snapshot) {
 function columnAttnames(columns) {
   return (columns || []).map((column) => column.attname).join(",");
 }
-function onRows(message) {
+/** Applies one authoritative rows response while synchronizing its visible sort state. */
+function onRows(message, snapshot) {
   stopProgress();
   const rows = message.rows || {};
+  const completedSort = state.sortPending;
+  state.order = gridOrderFromRecipe(snapshot?.applied);
+  setGridSortPending(false);
   if (!rows.ok) {
+    if (completedSort && els.gridwrap.querySelector("table")) {
+      updateSortIndicators();
+      els.status.textContent = `Sort was applied, but rows could not be loaded. ${rows.error || "Use Reload to retry."}`;
+      announcer.announceError(els.status.textContent);
+      els.more.disabled = true;
+      return;
+    }
     renderError(rows.error || "Could not load rows.");
     return;
   }
@@ -327,7 +340,7 @@ function onRows(message) {
   if (!message.append) {
     state.totalCount = undefined;
   }
-  updateSortArrows();
+  updateSortIndicators();
   state.rowCount = virtual.setRows(rows.rows || [], Boolean(message.append));
   if (message.append) {
     for (const field of state.computedActive) {
@@ -343,6 +356,9 @@ function onRows(message) {
     announcer.announceStatus(queryStatus);
   } else {
     els.status.textContent = loaded;
+  }
+  if (completedSort) {
+    announcer.announceStatus(state.order.length ? `Rows sorted by ${state.order.map((term) => `${term.field} ${term.desc ? "descending" : "ascending"}`).join(", then ")}.` : "Rows restored to primary-key ascending order.");
   }
 }
 /** Updates count text for the exact applied Recipe revision, including summary semantics. */
@@ -374,6 +390,9 @@ function onQuerySummary(message, snapshot) {
 /** Keeps the existing grid visible after an authoritative Recipe runtime rejection. */
 function onQueryRejected() {
   stopProgress();
+  state.order = gridOrderFromRecipe(queryController.getSnapshot()?.applied);
+  setGridSortPending(false);
+  updateSortIndicators();
   els.more.disabled = !state.hasMore;
 }
 /** Derives a safe read-only schema from one backend row when a degraded transport omitted column metadata. */
@@ -567,17 +586,17 @@ function canPinColumn(key) {
   const pinnedWidth = snapshot.pinned.reduce((sum, column) => sum + column.width, 0);
   return Boolean(next) && pinnedWidth + next.width <= Math.max(1, els.gridwrap.clientWidth) / 2;
 }
+/** Cycles and immediately applies one concrete or annotation column's grid order. */
 function toggleSort(col) {
-  const current = state.order[0];
-  if (current && current.field === col && !current.desc) {
-    state.order = [{ field: col, desc: true }];
-  } else if (current && current.field === col && current.desc) {
-    state.order = [];
-  } else {
-    state.order = [{ field: col, desc: false }];
+  const order = nextGridOrder(state.order, col);
+  if (!queryController.applyGridOrder(col, order[0]?.desc)) {
+    els.status.textContent = "Wait for the current query to finish before changing the sort.";
+    announcer.announceStatus(els.status.textContent);
+    return;
   }
-  updateSortArrows();
-  queryController.toggleGridOrder(col, state.order[0]?.desc);
+  state.order = order;
+  setGridSortPending(true);
+  updateSortIndicators();
 }
 /** Activates (loads) or deactivates a lazy @property column, updating its header button in place and repainting cells. */
 function toggleComputed(field, button) {
@@ -614,10 +633,19 @@ function onComputed(message) {
     els.status.textContent = `${message.field}: ${rows} rows · ${message.queryCount} SQL queries${shape}`;
   }
 }
-function updateSortArrows() {
+/** Synchronizes header ARIA state, next-action names, and Codicon arrows with applied order. */
+function updateSortIndicators() {
   const arrows = {};
   for (const term of state.order) {
     arrows[term.field] = term.desc ? "arrow-down" : "arrow-up";
+  }
+  for (const header of els.gridwrap.querySelectorAll("th.sortable")) {
+    const direction = arrows[header.dataset.key];
+    header.setAttribute("aria-sort", direction === "arrow-down" ? "descending" : direction === "arrow-up" ? "ascending" : "none");
+    const button = header.querySelector(".sortbtn");
+    if (button) {
+      button.ariaLabel = direction === "arrow-down" ? `Clear sort for ${header.dataset.key}` : direction === "arrow-up" ? `Sort ${header.dataset.key} descending` : `Sort ${header.dataset.key} ascending`;
+    }
   }
   for (const span of els.gridwrap.querySelectorAll(".sortarrow")) {
     const direction = arrows[span.dataset.arrow];
@@ -625,6 +653,12 @@ function updateSortArrows() {
     span.className = direction ? `sortarrow codicon codicon-${direction}` : "sortarrow";
     span.setAttribute("aria-hidden", "true");
   }
+}
+/** Disables duplicate header-sort submissions and marks the grid busy while rows are reloaded. */
+function setGridSortPending(pending) {
+  state.sortPending = pending;
+  els.gridwrap.toggleAttribute("aria-busy", pending);
+  for (const button of els.gridwrap.querySelectorAll(".sortbtn")) { button.disabled = pending; }
 }
 function pageSizeValue() {
   const value = els.pageSize ? els.pageSize.value : "50";
@@ -657,6 +691,8 @@ function progressLabelForMessage(message) {
     return "Counting rows";
   }
   if (message.type === "applyQueryRecipe") {
+    const sort = message.gridSort;
+    if (sort?.field) { return sort.descending === undefined ? "Restoring primary-key order…" : `Sorting ${sort.field} ${sort.descending ? "descending" : "ascending"}…`; }
     return "Applying query…";
   }
   return "";

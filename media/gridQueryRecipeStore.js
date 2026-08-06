@@ -62,19 +62,30 @@ export function createQueryRecipeStore(initialRecipe) {
     /** Adds one observer and returns an unsubscribe function. */
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     /** Replaces the successful applied Recipe while retaining any newer draft edits. */
-    setApplied(recipe, revision) { set({ applied: cloneQueryRecipe(recipe), appliedRevision: revision, applyingRevision: undefined }); },
+    setApplied(recipe, revision) { set({ applied: cloneQueryRecipe(recipe), appliedRevision: revision, applyingAdvanceDraftRevision: undefined, applyingDraftRevision: undefined, applyingPreserveDraft: undefined, applyingRecipe: undefined, applyingRevision: undefined }); },
     /** Restores draft from the last applied snapshot with undo support. */
     resetDraft() { const next = cloneQueryRecipe(snapshot.applied); if (!sameRecipe(next, snapshot.draft)) { checkpoint(); replaceDraft(next); } },
     /** Clears draft to the canonical source-specific empty Recipe with undo support. */
     clearDraft(source) { const next = createEmptyQueryRecipe(source || snapshot.applied.source); if (!sameRecipe(next, snapshot.draft)) { checkpoint(); replaceDraft(next); } },
     /** Records the exact revision and draft revision used for one in-flight Apply. */
-    beginApply(revision, recipe) { set({ applyingDraftRevision: snapshot.draftRevision, applyingRecipe: cloneQueryRecipe(recipe), applyingRevision: revision }); },
+    beginApply(revision, recipe, options = {}) { set({ applyingAdvanceDraftRevision: options.advanceDraftRevision === true, applyingDraftRevision: snapshot.draftRevision, applyingPreserveDraft: options.preserveDraft === true, applyingRecipe: cloneQueryRecipe(recipe), applyingRevision: revision }); },
     /** Accepts a normalized Recipe only for the matching Apply revision. */
-    finishApply(revision, normalizedRecipe) { if (snapshot.applyingRevision !== revision) { return; } const changes = { applied: cloneQueryRecipe(normalizedRecipe), appliedRevision: revision, applyingRecipe: undefined, applyingRevision: undefined }; if (snapshot.applyingDraftRevision === snapshot.draftRevision) { changes.draft = cloneQueryRecipe(normalizedRecipe); } set(changes); },
+    finishApply(revision, normalizedRecipe) {
+      if (snapshot.applyingRevision !== revision) { return; }
+      const draftUnchanged = snapshot.applyingDraftRevision === snapshot.draftRevision;
+      const validationCurrent = snapshot.validationRevision === snapshot.draftRevision;
+      const changes = { applied: cloneQueryRecipe(normalizedRecipe), appliedRevision: revision, applyingAdvanceDraftRevision: undefined, applyingDraftRevision: undefined, applyingPreserveDraft: undefined, applyingRecipe: undefined, applyingRevision: undefined };
+      if (!snapshot.applyingPreserveDraft && draftUnchanged) { changes.draft = cloneQueryRecipe(normalizedRecipe); }
+      if (snapshot.applyingAdvanceDraftRevision && revision > snapshot.draftRevision) {
+        changes.draftRevision = revision;
+        changes.validationRevision = snapshot.applyingPreserveDraft && draftUnchanged && validationCurrent ? revision : -1;
+      }
+      set(changes);
+    },
     /** Hydrates an initial host Recipe after its source schema is known, without treating it as a user edit. */
-    hydrate(recipe, revision) { if (!Number.isSafeInteger(revision) || revision < snapshot.appliedRevision) { return; } clearHistory(); set({ applied: cloneQueryRecipe(recipe), appliedRevision: revision, applyingRecipe: undefined, applyingRevision: undefined, canRedo: false, canUndo: false, draft: cloneQueryRecipe(recipe), draftRevision: revision, validationRevision: -1 }); },
-    /** Retains draft/applied Recipes and records server rejection for the matching Apply. */
-    failApply(revision, issues) { if (snapshot.applyingRevision === revision) { set({ applyingRecipe: undefined, applyingRevision: undefined, validation: { issues: cloneQueryRecipe(issues || []), ok: false, warnings: [] }, validationRevision: snapshot.draftRevision }); } },
+    hydrate(recipe, revision) { if (!Number.isSafeInteger(revision) || revision < snapshot.appliedRevision) { return; } clearHistory(); set({ applied: cloneQueryRecipe(recipe), appliedRevision: revision, applyingAdvanceDraftRevision: undefined, applyingDraftRevision: undefined, applyingPreserveDraft: undefined, applyingRecipe: undefined, applyingRevision: undefined, canRedo: false, canUndo: false, draft: cloneQueryRecipe(recipe), draftRevision: revision, validationRevision: -1 }); },
+    /** Retains draft/applied Recipes and optionally records server rejection for the matching Apply. */
+    failApply(revision, issues, options = {}) { if (snapshot.applyingRevision === revision) { const changes = { applyingAdvanceDraftRevision: undefined, applyingDraftRevision: undefined, applyingPreserveDraft: undefined, applyingRecipe: undefined, applyingRevision: undefined }; if (!options.preserveValidation) { changes.validation = { issues: cloneQueryRecipe(issues || []), ok: false, warnings: [] }; changes.validationRevision = snapshot.draftRevision; } set(changes); } },
     /** Merges authoritative runtime rejection issues while preserving an unrelated newer draft. */
     mergeValidationIssues(issues) { const merged = cloneQueryRecipe(issues || []); set({ validation: { issues: merged, ok: !merged.some((issue) => issue?.severity !== "warning"), warnings: merged.filter((issue) => issue?.severity === "warning") }, validationRevision: snapshot.draftRevision }); },
     /** Records validation that still belongs to the current draft revision. */

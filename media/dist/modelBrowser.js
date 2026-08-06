@@ -1605,9 +1605,11 @@ function createGridHeaderRenderer({ el: el2, relationKindLabel: relationKindLabe
     }
     const column = descriptor.source;
     const sortable = !column.computed;
-    const headClass = column.annotation ? "annotation" : column.computed ? "computed" : "sortable";
+    const headClass = column.annotation ? `annotation${sortable ? " sortable" : ""}` : column.computed ? "computed" : "sortable";
     const headTitle = sortable ? `Sort by ${column.name} (${column.type})` : `${column.name} (computed @property \u2014 read-only)`;
     const order = state2.order.find((term) => term.field === column.attname);
+    const sortDirection = order ? order.desc ? "descending" : "ascending" : "none";
+    const sortAction = sortDirection === "descending" ? `Clear sort for ${column.attname}` : sortDirection === "ascending" ? `Sort ${column.attname} descending` : `Sort ${column.attname} ascending`;
     const th = el2("th", { ariaColIndex, ariaSort: sortable ? order ? order.desc ? "descending" : "ascending" : "none" : void 0, className: headClass, dataset: { key: column.attname }, role: "columnheader", title: headTitle });
     th.style.width = `${descriptor.width}px`;
     const pinned = state2.pinned.has(column.attname);
@@ -1618,7 +1620,7 @@ function createGridHeaderRenderer({ el: el2, relationKindLabel: relationKindLabe
       th.appendChild(el2("button", { ariaLabel: `${loading ? "Reload" : "Load"} ${column.attname} computed values`, className: loading ? "loadbtn active" : "loadbtn", dataset: { act: "loadComputed", field: column.attname }, title: `${loading ? "Reload" : "Load"} this column for loaded rows (${cost})` }, codicon(loading ? "refresh" : "triangle-right")));
     }
     if (sortable) {
-      th.appendChild(el2("button", { ariaLabel: headTitle, className: "sortbtn", dataset: { act: "sort", col: column.attname } }, column.attname));
+      th.appendChild(el2("button", { ariaLabel: sortAction, className: "sortbtn", dataset: { act: "sort", col: column.attname }, disabled: state2.sortPending, title: headTitle }, column.attname));
     } else {
       th.appendChild(document.createTextNode(column.attname));
     }
@@ -1626,7 +1628,7 @@ function createGridHeaderRenderer({ el: el2, relationKindLabel: relationKindLabe
       th.appendChild(el2("span", { ariaLabel: "Primary key", className: "pkmark", title: "primary key" }, codicon("key")));
     }
     if (sortable) {
-      th.appendChild(el2("span", { className: "sortarrow", dataset: { arrow: column.attname } }, ""));
+      th.appendChild(el2("span", { ariaHidden: "true", className: order ? `sortarrow codicon codicon-${order.desc ? "arrow-down" : "arrow-up"}` : "sortarrow", dataset: { arrow: column.attname } }, ""));
     }
     th.appendChild(el2("span", { className: "coltype" }, column.relation ? `\u2192 ${column.relation.target}` : column.computed ? column.annotated ? "@property \xB7 1 query" : "@property" : column.type));
     th.appendChild(el2("span", { ariaLabel: `Resize ${column.attname} column`, ariaOrientation: "vertical", ariaValueMax: 480, ariaValueMin: 72, ariaValueNow: descriptor.width, className: "colresize", dataset: { key: descriptor.key }, role: "separator", tabIndex: 0, title: "Drag to resize" }));
@@ -2605,7 +2607,7 @@ function createQueryRecipeStore(initialRecipe) {
     },
     /** Replaces the successful applied Recipe while retaining any newer draft edits. */
     setApplied(recipe, revision) {
-      set({ applied: cloneQueryRecipe(recipe), appliedRevision: revision, applyingRevision: void 0 });
+      set({ applied: cloneQueryRecipe(recipe), appliedRevision: revision, applyingAdvanceDraftRevision: void 0, applyingDraftRevision: void 0, applyingPreserveDraft: void 0, applyingRecipe: void 0, applyingRevision: void 0 });
     },
     /** Restores draft from the last applied snapshot with undo support. */
     resetDraft() {
@@ -2624,17 +2626,23 @@ function createQueryRecipeStore(initialRecipe) {
       }
     },
     /** Records the exact revision and draft revision used for one in-flight Apply. */
-    beginApply(revision, recipe) {
-      set({ applyingDraftRevision: snapshot.draftRevision, applyingRecipe: cloneQueryRecipe(recipe), applyingRevision: revision });
+    beginApply(revision, recipe, options = {}) {
+      set({ applyingAdvanceDraftRevision: options.advanceDraftRevision === true, applyingDraftRevision: snapshot.draftRevision, applyingPreserveDraft: options.preserveDraft === true, applyingRecipe: cloneQueryRecipe(recipe), applyingRevision: revision });
     },
     /** Accepts a normalized Recipe only for the matching Apply revision. */
     finishApply(revision, normalizedRecipe) {
       if (snapshot.applyingRevision !== revision) {
         return;
       }
-      const changes = { applied: cloneQueryRecipe(normalizedRecipe), appliedRevision: revision, applyingRecipe: void 0, applyingRevision: void 0 };
-      if (snapshot.applyingDraftRevision === snapshot.draftRevision) {
+      const draftUnchanged = snapshot.applyingDraftRevision === snapshot.draftRevision;
+      const validationCurrent = snapshot.validationRevision === snapshot.draftRevision;
+      const changes = { applied: cloneQueryRecipe(normalizedRecipe), appliedRevision: revision, applyingAdvanceDraftRevision: void 0, applyingDraftRevision: void 0, applyingPreserveDraft: void 0, applyingRecipe: void 0, applyingRevision: void 0 };
+      if (!snapshot.applyingPreserveDraft && draftUnchanged) {
         changes.draft = cloneQueryRecipe(normalizedRecipe);
+      }
+      if (snapshot.applyingAdvanceDraftRevision && revision > snapshot.draftRevision) {
+        changes.draftRevision = revision;
+        changes.validationRevision = snapshot.applyingPreserveDraft && draftUnchanged && validationCurrent ? revision : -1;
       }
       set(changes);
     },
@@ -2644,12 +2652,17 @@ function createQueryRecipeStore(initialRecipe) {
         return;
       }
       clearHistory();
-      set({ applied: cloneQueryRecipe(recipe), appliedRevision: revision, applyingRecipe: void 0, applyingRevision: void 0, canRedo: false, canUndo: false, draft: cloneQueryRecipe(recipe), draftRevision: revision, validationRevision: -1 });
+      set({ applied: cloneQueryRecipe(recipe), appliedRevision: revision, applyingAdvanceDraftRevision: void 0, applyingDraftRevision: void 0, applyingPreserveDraft: void 0, applyingRecipe: void 0, applyingRevision: void 0, canRedo: false, canUndo: false, draft: cloneQueryRecipe(recipe), draftRevision: revision, validationRevision: -1 });
     },
-    /** Retains draft/applied Recipes and records server rejection for the matching Apply. */
-    failApply(revision, issues) {
+    /** Retains draft/applied Recipes and optionally records server rejection for the matching Apply. */
+    failApply(revision, issues, options = {}) {
       if (snapshot.applyingRevision === revision) {
-        set({ applyingRecipe: void 0, applyingRevision: void 0, validation: { issues: cloneQueryRecipe(issues || []), ok: false, warnings: [] }, validationRevision: snapshot.draftRevision });
+        const changes = { applyingAdvanceDraftRevision: void 0, applyingDraftRevision: void 0, applyingPreserveDraft: void 0, applyingRecipe: void 0, applyingRevision: void 0 };
+        if (!options.preserveValidation) {
+          changes.validation = { issues: cloneQueryRecipe(issues || []), ok: false, warnings: [] };
+          changes.validationRevision = snapshot.draftRevision;
+        }
+        set(changes);
       }
     },
     /** Merges authoritative runtime rejection issues while preserving an unrelated newer draft. */
@@ -6849,6 +6862,56 @@ function cssEscape(value) {
   return globalThis.CSS?.escape ? globalThis.CSS.escape(value) : value.replace(/[^A-Za-z0-9_-]/g, "\\$&");
 }
 
+// media/gridSort.js
+function gridOrderFromRecipe(recipe) {
+  return (recipe?.orderBy || []).map((term) => {
+    const field = term?.ref?.kind === "computed" ? term.ref.alias : term?.ref?.path;
+    return field ? { desc: term.direction === "desc", field } : void 0;
+  }).filter(Boolean);
+}
+function nextGridOrder(order, field) {
+  const current = Array.isArray(order) ? order[0] : void 0;
+  if (current?.field === field && !current.desc) {
+    return [{ desc: true, field }];
+  }
+  if (current?.field === field && current.desc) {
+    return [];
+  }
+  return [{ desc: false, field }];
+}
+function collectNodeIds(value, ids = /* @__PURE__ */ new Set()) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectNodeIds(item, ids));
+    return ids;
+  }
+  if (!value || typeof value !== "object") {
+    return ids;
+  }
+  if (typeof value.nodeId === "string") {
+    ids.add(value.nodeId);
+  }
+  Object.values(value).forEach((item) => collectNodeIds(item, ids));
+  return ids;
+}
+function gridOrderNodeId(recipe, field) {
+  const slug = String(field).replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 40) || "field";
+  const base = `grid-order-${slug}`;
+  const used = collectNodeIds(recipe);
+  let candidate = base;
+  let suffix = 2;
+  while (used.has(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+function recipeWithGridOrder(recipe, field, descending) {
+  const computed = (recipe?.computed || []).some((item) => item?.enabled && item.alias === field);
+  const ref = computed ? { alias: field, kind: "computed" } : { kind: "field", path: field };
+  const orderBy = descending === void 0 ? [] : [{ direction: descending ? "desc" : "asc", nodeId: gridOrderNodeId(recipe, field), ref }];
+  return { ...recipe, orderBy };
+}
+
 // media/gridQueryController.js
 var QUERY_IDS = ["querySummaryBand", "queryFilterButton", "queryColumnsButton", "queryModeButton", "queryHumanSummary", "queryDirtyState", "queryValidationState", "queryAppliedFiltersLabel", "queryAppliedFiltersEmpty", "queryAppliedFilters", "queryAppliedWhere", "queryAppliedPostFilter", "queryDrawerToggle", "queryDrawer", "queryDrawerResizeHandle", "gridwrap", "queryDrawerHeader", "queryBuilderTitle", "queryExamples", "queryWhereSection", "queryWhereGuide", "queryWhereRoot", "queryComputedSection", "queryComputedGuide", "queryComputedList", "queryPostFilterSection", "queryPostFilterGuide", "queryPostFilterRoot", "queryResultSection", "queryResultGuide", "queryGroupBy", "queryOrderBy", "queryPreviewSection", "queryPreviewGuide", "queryPlainMeaning", "queryImplicitBehavior", "queryOrmPreview", "queryCopyOrm", "queryIssueSummary", "queryResetDraft", "queryClearDraft", "queryDrawerApply", "queryDrawerApplyHelp", "queryDrawerStatus", "queryDraftStatus", "queryUndo", "queryRedo", "queryFocusMode", "queryMoreActions", "queryMoreMenu", "queryClose", "queryStageNav", "queryStageSelect", "queryStageFilterRows", "queryStageCalculatedValues", "queryStageFilterResults", "queryStageResult", "queryFilterRowsPanel", "queryCalculatedValuesPanel", "queryFilterResultsPanel", "queryResultPanel", "queryInspectorTabs", "queryInspectorMeaning", "queryInspectorProblems", "queryInspectorOrm", "queryInspectorAssistant", "queryMeaningPanel", "queryProblemsPanel", "queryEditorPane", "queryReviewPane", "queryOrmPanel", "queryAssistantPanel", "queryPopoverLayer", "queryWorkspace", "queryMobilePaneSwitch", "queryDrawerFooter"];
 var QUERY_STAGE_ORDINALS = { calculatedValues: 2, filterResults: 3, filterRows: 1, result: 4 };
@@ -6880,6 +6943,7 @@ function createQueryController(options) {
   let resultSignature = "";
   let computedRenderVersion = 0;
   let predicateRenderVersion = 0;
+  let gridSortRevision;
   const scope = { columns: [], relations: [], source, target: source };
   const store = createQueryRecipeStore(createEmptyQueryRecipe(source));
   const resultControls = createQueryResultControls({ dispatch: (action) => store.dispatch(action), el: element2, groupByMount: elements.queryGroupBy, orderByMount: elements.queryOrderBy, replaceGroupBy });
@@ -7236,6 +7300,7 @@ function createQueryController(options) {
       requestBuilderRender("source-metadata");
       return;
     }
+    gridSortRevision = void 0;
     const empty = createEmptyQueryRecipe(source);
     store.hydrate(empty, 0);
     disposePredicateBuilders();
@@ -7255,10 +7320,23 @@ function createQueryController(options) {
     requestBuilderRender("source-changed");
     schedulePreview();
   }
-  function toggleGridOrder(field, descending) {
-    const recipe = store.getSnapshot().draft;
-    recipe.orderBy = descending === void 0 ? [] : [{ direction: descending ? "desc" : "asc", nodeId: `grid-order-${String(field).replace(/[^A-Za-z0-9_-]/g, "-")}`, ref: { kind: "field", path: field } }];
-    store.dispatch({ recipe, type: "REPLACE_DRAFT" });
+  function applyGridOrder(field, descending) {
+    const snapshot = store.getSnapshot();
+    const busy = Boolean(snapshot.applyingRevision) || applyLifecycle.phase === "applying" || applyLifecycle.phase === "loadingResults";
+    if (busy || snapshot.applied.mode !== "rows" || !source.app || !source.model || typeof field !== "string" || !field) {
+      return false;
+    }
+    const recipe = recipeWithGridOrder(snapshot.applied, field, descending);
+    const revision = Math.max(snapshot.appliedRevision, snapshot.draftRevision) + 1;
+    gridSortRevision = revision;
+    applyLifecycle = transitionApply(applyLifecycle, { revision, type: "APPLY_STARTED" });
+    store.beginApply(revision, recipe, { advanceDraftRevision: true, preserveDraft: snapshot.dirty });
+    const direction = descending === void 0 ? "default primary-key order" : `${descending ? "descending" : "ascending"} order`;
+    status.textContent = `Sorting ${field} in ${direction}\u2026`;
+    announcer2?.announceStatus(`Sorting ${field} in ${direction}\u2026`);
+    post({ gridSort: { descending, field }, recipe, revision, type: "applyQueryRecipe" });
+    requestRender("grid-sort-started");
+    return true;
   }
   function onMessage(message) {
     if (assistant.onMessage(message)) {
@@ -7295,26 +7373,43 @@ function createQueryController(options) {
       } else {
         store.hydrate(message.recipe || snapshot.draft, message.revision);
       }
+      const appliedSnapshot = store.getSnapshot();
+      if (gridSortRevision === message.revision && appliedSnapshot.dirty && appliedSnapshot.validationRevision !== appliedSnapshot.draftRevision) {
+        schedulePreview();
+      }
       status.textContent = "Query applied.";
       announcer2?.announceStatus("Query applied.");
       requestRender("apply-accepted");
       return true;
     }
     if (message.type === "queryRecipeRejected") {
-      if (snapshot.applyingRevision === message.revision) {
+      const gridSort = gridSortRevision === message.revision;
+      const applying = snapshot.applyingRevision === message.revision;
+      const appliedGridSort = gridSort && snapshot.appliedRevision === message.revision;
+      if (applying) {
         applyLifecycle = transitionApply(applyLifecycle, { revision: message.revision, type: "APPLY_REJECTED" });
+      } else if (appliedGridSort) {
+        applyLifecycle = transitionApply(applyLifecycle, { revision: message.revision, type: "RESULTS_FAILED" });
       } else {
         validationLifecycle = transitionValidation(validationLifecycle, { requestId: message.requestId, revision: message.revision, type: "PREVIEW_REJECTED", issues: message.issues });
       }
       const issues = mergeRecipeIssues(snapshot.validation?.issues, message.issues);
-      if (snapshot.applyingRevision === message.revision) {
-        store.failApply(message.revision, issues);
-      } else if (message.revision === snapshot.draftRevision) {
+      if (applying) {
+        store.failApply(message.revision, issues, { preserveValidation: gridSort });
+      } else if (!appliedGridSort && message.revision === snapshot.draftRevision) {
         store.setValidation(validationWithIssues(issues), message.revision);
-      } else {
+      } else if (!appliedGridSort) {
         store.mergeValidationIssues(issues);
       }
       options.onRejected?.(message);
+      if (gridSort) {
+        gridSortRevision = void 0;
+        const detail = message.issues?.[0]?.fix || message.issues?.[0]?.message || "Retry after refreshing the model.";
+        status.textContent = appliedGridSort ? `Sort was applied, but its rows could not be loaded. ${detail}` : `Sort was not applied. ${detail}`;
+        announcer2?.announceError(status.textContent);
+        requestRender("grid-sort-rejected");
+        return true;
+      }
       status.textContent = "Query was not applied. Fix the reported errors.";
       announcer2?.announceError("Query was not applied. Fix the reported errors.");
       openDrawer("queryWhereSection");
@@ -7323,7 +7418,10 @@ function createQueryController(options) {
       return true;
     }
     if (message.type === "rows" && message.revision === snapshot.appliedRevision) {
-      applyLifecycle = transitionApply(applyLifecycle, { revision: message.revision, type: "RESULTS_ACCEPTED" });
+      if (gridSortRevision === message.revision) {
+        gridSortRevision = void 0;
+      }
+      applyLifecycle = transitionApply(applyLifecycle, { revision: message.revision, type: message.rows?.ok === false ? "RESULTS_FAILED" : "RESULTS_ACCEPTED" });
       options.onRows?.(message, snapshot);
       requestRender("rows-accepted");
       return true;
@@ -7480,7 +7578,7 @@ function createQueryController(options) {
     elements.queryDrawerToggle.setAttribute("aria-expanded", "true");
     drawerResize.setHeight(uiState.getSnapshot().drawerHeight);
   }
-  return { apply, destroy() {
+  return { apply, applyGridOrder, destroy() {
     menuAbort.abort();
     drawerResize.destroy();
     assistant.destroy();
@@ -7490,7 +7588,7 @@ function createQueryController(options) {
     disposePredicateBuilders();
     computedBuilder?.destroy?.();
     resultControls.destroy();
-  }, getSnapshot: () => store.getSnapshot(), onMessage, openDrawer, setSource, toggleGridOrder };
+  }, getSnapshot: () => store.getSnapshot(), onMessage, openDrawer, setSource };
   function toggleMoreActions() {
     const open = elements.queryMoreMenu.hidden;
     elements.queryMoreMenu.hidden = !open;
@@ -7576,13 +7674,14 @@ function isTextEntry(target) {
 }
 function noQueryController() {
   return { apply() {
+  }, applyGridOrder() {
+    return false;
   }, getSnapshot() {
     return void 0;
   }, onMessage() {
     return false;
   }, openDrawer() {
   }, setSource() {
-  }, toggleGridOrder() {
   } };
 }
 
@@ -7696,6 +7795,7 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
     Object.defineProperty(selectPrototype, "showPicker", { configurable: true, value() {
       showPickerCalls += 1;
     } });
+    const sortCycle = [];
     const drawer = document2.getElementById("queryDrawer");
     if (drawer?.hidden) {
       document2.getElementById("queryDrawerToggle")?.click();
@@ -7708,6 +7808,25 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
     examples[0].click();
     await waitFor(() => document2.getElementById("queryComputedList")?.textContent?.includes("row_count") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("row_count"), "aggregate example controls");
     await waitFor(() => previewIsReady(document2), "aggregate preview");
+    if (typeof document2.querySelector === "function") {
+      let usernameSort = document2.querySelector('button[data-act="sort"][data-col="username"]');
+      if (!usernameSort) {
+        throw new Error("Username grid sort is unavailable.");
+      }
+      for (const expected of ["ascending", "descending", "none"]) {
+        progress(`grid-sort-${expected}`);
+        usernameSort.click();
+        await waitFor(() => {
+          const header = document2.querySelector('th[data-key="username"]');
+          usernameSort = header?.querySelector(".sortbtn");
+          return header?.getAttribute("aria-sort") === expected && usernameSort && !usernameSort.disabled;
+        }, `grid sort ${expected}`);
+        sortCycle.push(expected);
+      }
+      if (!document2.getElementById("queryComputedList")?.textContent?.includes("row_count") || document2.getElementById("queryDraftStatus")?.textContent !== "Draft changes are not applied") {
+        throw new Error("Grid sorting changed the unrelated Query Builder draft.");
+      }
+    }
     if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
       throw new Error("Aggregate example changed applied filters.");
     }
@@ -7840,7 +7959,7 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
     const optionGroups = [...select.querySelectorAll("optgroup")].map((group) => group.label);
     const options = [...select.querySelectorAll("option")];
     const overflow = assistantOverflow(document2);
-    finish({ appliedFilters: document2.getElementById("queryAppliedFiltersEmpty")?.textContent || "", applyDisabled: document2.getElementById("queryDrawerApply")?.disabled === true, assistantOverflow: overflow, conditionCount: document2.querySelectorAll('select[aria-label="Condition field"]').length, disabled: select.disabled, drawerOpen: drawer?.hidden === false, enabledOptionCount: options.filter((option) => !option.disabled && option.value).length, exampleCount: examples.length, focused: document2.activeElement === select, optionGroups, placeholderDisabled: options[0]?.disabled === true, selectedValue: select.value, showPickerCalls });
+    finish({ appliedFilters: document2.getElementById("queryAppliedFiltersEmpty")?.textContent || "", applyDisabled: document2.getElementById("queryDrawerApply")?.disabled === true, assistantOverflow: overflow, conditionCount: document2.querySelectorAll('select[aria-label="Condition field"]').length, disabled: select.disabled, drawerOpen: drawer?.hidden === false, enabledOptionCount: options.filter((option) => !option.disabled && option.value).length, exampleCount: examples.length, focused: document2.activeElement === select, optionGroups, placeholderDisabled: options[0]?.disabled === true, selectedValue: select.value, showPickerCalls, sortCycle });
   } catch (error) {
     finish({ error: String(error?.message || error), showPickerCalls });
   } finally {
@@ -7867,7 +7986,7 @@ var announcer = createAnnouncer();
 installModelBrowserChrome(document);
 var MAX_LOG_ENTRIES = 200;
 var ALL_PAGE_SIZE = 1e9;
-var state = { columns: [], pk: "id", relations: [], rowCount: 0, totalCount: void 0, hasMore: false, order: [], model: "", pinned: /* @__PURE__ */ new Set(), widths: {}, computed: {}, computedActive: /* @__PURE__ */ new Set() };
+var state = { columns: [], pk: "id", relations: [], rowCount: 0, totalCount: void 0, hasMore: false, order: [], model: "", pinned: /* @__PURE__ */ new Set(), widths: {}, computed: {}, computedActive: /* @__PURE__ */ new Set(), sortPending: false };
 var queryController;
 queryController = createQueryController({ announcer, getPersisted: () => vscode.getState() || {}, gridAdapter: createQueryFocusGridAdapter(), onCount: onQueryCount, onRejected: onQueryRejected, onRows, onSummary: onQuerySummary, persist: (preferences2) => vscode.setState({ ...vscode.getState() || {}, ...preferences2 }), post: (message) => send(message), root: document, status: els.status });
 function createQueryFocusGridAdapter() {
@@ -8072,8 +8191,9 @@ function onSchema(schema) {
   state.relations = schema.relations || [];
   state.rowCount = 0;
   state.totalCount = void 0;
-  state.order = [];
   if (!sameModel) {
+    state.order = [];
+    state.sortPending = false;
     state.pinned = /* @__PURE__ */ new Set();
     state.computed = {};
     state.computedActive = /* @__PURE__ */ new Set();
@@ -8168,10 +8288,20 @@ function renderViewport(snapshot) {
 function columnAttnames(columns) {
   return (columns || []).map((column) => column.attname).join(",");
 }
-function onRows(message) {
+function onRows(message, snapshot) {
   stopProgress();
   const rows = message.rows || {};
+  const completedSort = state.sortPending;
+  state.order = gridOrderFromRecipe(snapshot?.applied);
+  setGridSortPending(false);
   if (!rows.ok) {
+    if (completedSort && els.gridwrap.querySelector("table")) {
+      updateSortIndicators();
+      els.status.textContent = `Sort was applied, but rows could not be loaded. ${rows.error || "Use Reload to retry."}`;
+      announcer.announceError(els.status.textContent);
+      els.more.disabled = true;
+      return;
+    }
     renderError(rows.error || "Could not load rows.");
     return;
   }
@@ -8188,7 +8318,7 @@ function onRows(message) {
   if (!message.append) {
     state.totalCount = void 0;
   }
-  updateSortArrows();
+  updateSortIndicators();
   state.rowCount = virtual.setRows(rows.rows || [], Boolean(message.append));
   if (message.append) {
     for (const field of state.computedActive) {
@@ -8204,6 +8334,9 @@ function onRows(message) {
     announcer.announceStatus(queryStatus);
   } else {
     els.status.textContent = loaded;
+  }
+  if (completedSort) {
+    announcer.announceStatus(state.order.length ? `Rows sorted by ${state.order.map((term) => `${term.field} ${term.desc ? "descending" : "ascending"}`).join(", then ")}.` : "Rows restored to primary-key ascending order.");
   }
 }
 function onQueryCount(message, snapshot) {
@@ -8232,6 +8365,9 @@ function onQuerySummary(message, snapshot) {
 }
 function onQueryRejected() {
   stopProgress();
+  state.order = gridOrderFromRecipe(queryController.getSnapshot()?.applied);
+  setGridSortPending(false);
+  updateSortIndicators();
   els.more.disabled = !state.hasMore;
 }
 function inferColumnsFromRows(rows) {
@@ -8418,16 +8554,15 @@ function canPinColumn(key) {
   return Boolean(next) && pinnedWidth + next.width <= Math.max(1, els.gridwrap.clientWidth) / 2;
 }
 function toggleSort(col) {
-  const current = state.order[0];
-  if (current && current.field === col && !current.desc) {
-    state.order = [{ field: col, desc: true }];
-  } else if (current && current.field === col && current.desc) {
-    state.order = [];
-  } else {
-    state.order = [{ field: col, desc: false }];
+  const order = nextGridOrder(state.order, col);
+  if (!queryController.applyGridOrder(col, order[0]?.desc)) {
+    els.status.textContent = "Wait for the current query to finish before changing the sort.";
+    announcer.announceStatus(els.status.textContent);
+    return;
   }
-  updateSortArrows();
-  queryController.toggleGridOrder(col, state.order[0]?.desc);
+  state.order = order;
+  setGridSortPending(true);
+  updateSortIndicators();
 }
 function toggleComputed(field, button3) {
   const active = !state.computedActive.has(field);
@@ -8462,16 +8597,31 @@ function onComputed(message) {
     els.status.textContent = `${message.field}: ${rows} rows \xB7 ${message.queryCount} SQL queries${shape}`;
   }
 }
-function updateSortArrows() {
+function updateSortIndicators() {
   const arrows = {};
   for (const term of state.order) {
     arrows[term.field] = term.desc ? "arrow-down" : "arrow-up";
+  }
+  for (const header of els.gridwrap.querySelectorAll("th.sortable")) {
+    const direction = arrows[header.dataset.key];
+    header.setAttribute("aria-sort", direction === "arrow-down" ? "descending" : direction === "arrow-up" ? "ascending" : "none");
+    const button3 = header.querySelector(".sortbtn");
+    if (button3) {
+      button3.ariaLabel = direction === "arrow-down" ? `Clear sort for ${header.dataset.key}` : direction === "arrow-up" ? `Sort ${header.dataset.key} descending` : `Sort ${header.dataset.key} ascending`;
+    }
   }
   for (const span of els.gridwrap.querySelectorAll(".sortarrow")) {
     const direction = arrows[span.dataset.arrow];
     span.textContent = "";
     span.className = direction ? `sortarrow codicon codicon-${direction}` : "sortarrow";
     span.setAttribute("aria-hidden", "true");
+  }
+}
+function setGridSortPending(pending) {
+  state.sortPending = pending;
+  els.gridwrap.toggleAttribute("aria-busy", pending);
+  for (const button3 of els.gridwrap.querySelectorAll(".sortbtn")) {
+    button3.disabled = pending;
   }
 }
 function pageSizeValue() {
@@ -8502,6 +8652,10 @@ function progressLabelForMessage(message) {
     return "Counting rows";
   }
   if (message.type === "applyQueryRecipe") {
+    const sort = message.gridSort;
+    if (sort?.field) {
+      return sort.descending === void 0 ? "Restoring primary-key order\u2026" : `Sorting ${sort.field} ${sort.descending ? "descending" : "ascending"}\u2026`;
+    }
     return "Applying query\u2026";
   }
   return "";
