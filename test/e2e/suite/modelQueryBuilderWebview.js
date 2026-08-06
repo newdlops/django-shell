@@ -24,6 +24,7 @@ async function assertModelQueryBuilderWebview(extension) {
     assert.equal(snapshot.showPickerCalls, 1, "the final legacy picker invokes the native picker once");
     assert.equal(snapshot.placeholderDisabled, true);
     assert.equal(snapshot.selectedValue, "");
+    assert.deepEqual(snapshot.sortCycle, ["ascending", "descending", "none"]);
     assert.ok(snapshot.enabledOptionCount >= 2);
     assert.deepEqual(snapshot.optionGroups, ["Fields", "Relations", "Relationship checks"]);
     assert.equal(snapshot.applyDisabled, true);
@@ -43,7 +44,8 @@ async function assertModelQueryBuilderWebview(extension) {
     }
     assert.equal(fixture.calls.modelAggregate, 0, "assistant and examples do not run aggregate queries");
     assert.equal(fixture.calls.modelCommit, 0, "assistant acceptance never commits edits");
-    assert.equal(fixture.calls.modelRows, 1, "assistant and examples do not reload fixture rows");
+    assert.equal(fixture.calls.modelRows, 4, "only the initial load and three header-sort states reload fixture rows");
+    assert.deepEqual(fixture.calls.orders, ["default", "username:asc", "username:desc", "default"]);
   } finally {
     browser.dispose();
     runtimeChange.dispose();
@@ -116,7 +118,7 @@ function modelFixtureSource(onDidChangeRuntime) {
     relations
   };
   const membershipTree = { fields: [{ attname: "company_id", label: "Company ID", name: "company_id", null: false, pk: false, type: "IntegerField" }, { attname: "id", label: "ID", name: "id", null: false, pk: true, type: "AutoField" }], ok: true, pk: "id", relations: [] };
-  const calls = { modelAggregate: 0, modelCommit: 0, modelRows: 0 };
+  const calls = { modelAggregate: 0, modelCommit: 0, modelRows: 0, orders: [] };
   const source = {
     interruptModelQuery: async () => ({ interrupted: false, ok: true }),
     listModels: async () => ({ models: [{ app: "db", label: "Application user", model: "AppUser", table: "db_appuser" }, { app: "db", label: "Membership", model: "Membership", table: "db_membership" }], ok: true }),
@@ -128,7 +130,7 @@ function modelFixtureSource(onDidChangeRuntime) {
     modelLookup: async () => ({ columns: [], ok: true, rows: [], sql: [] }),
     modelQuery: async () => ({ columns, ok: true, orm: "", rows: [], sql: [] }),
     modelRelated: async () => ({ columns: [], hasMore: false, ok: true, orm: "", rows: [], single: false, sql: [] }),
-    modelRows: async () => { calls.modelRows += 1; return { columns, hasMore: false, nextOffset: null, ok: true, orm: "db.AppUser.objects.all()", pk: "id", relations, rows: [], sql: [] }; },
+    modelRows: async (query) => { calls.modelRows += 1; const term = query.recipe?.orderBy?.[0]; calls.orders.push(term ? `${term.ref.path || term.ref.alias}:${term.direction}` : "default"); return { columns, hasMore: false, nextOffset: null, ok: true, orm: "db.AppUser.objects.all()", pk: "id", relations, rows: [], sql: [] }; },
     modelSchema: async () => ({ app: "db", columns, label: "Application user", model: "AppUser", ok: true, pk: "id", relations, table: "db_appuser" }),
     modelTransportInfo: () => ({ active: "tcp", mode: "auto" }),
     onDidChangeRuntime,

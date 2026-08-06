@@ -63,10 +63,26 @@ export async function runModelQueryBuilderE2eProbe({ document, postMessage, requ
     selectPrototype = HTMLSelectElement.prototype; originalShowPicker = Object.getOwnPropertyDescriptor(selectPrototype, "showPicker");
     progress("examples");
     Object.defineProperty(selectPrototype, "showPicker", { configurable: true, value() { showPickerCalls += 1; } });
+    const sortCycle = [];
     const drawer = document.getElementById("queryDrawer"); if (drawer?.hidden) { document.getElementById("queryDrawerToggle")?.click(); }
     const examples = [...document.querySelectorAll("#queryExamples button")];
     if (examples.length !== 4 || !examples[0].getAttribute("aria-label")?.includes("Aggregate summary") || !examples[1].getAttribute("aria-label")?.includes("Correlated Exists") || !examples[2].getAttribute("aria-label")?.includes("Chained Formula") || !examples[3].getAttribute("aria-label")?.includes("Window RowNumber")) { throw new Error("Progressive examples are missing or unordered."); }
     progress("example-aggregate-apply"); examples[0].click(); await waitFor(() => document.getElementById("queryComputedList")?.textContent?.includes("row_count") && document.getElementById("queryPostFilterRoot")?.textContent?.includes("row_count"), "aggregate example controls"); await waitFor(() => previewIsReady(document), "aggregate preview");
+    if (typeof document.querySelector === "function") {
+      let usernameSort = document.querySelector('button[data-act="sort"][data-col="username"]');
+      if (!usernameSort) { throw new Error("Username grid sort is unavailable."); }
+      for (const expected of ["ascending", "descending", "none"]) {
+        progress(`grid-sort-${expected}`);
+        usernameSort.click();
+        await waitFor(() => {
+          const header = document.querySelector('th[data-key="username"]');
+          usernameSort = header?.querySelector('.sortbtn');
+          return header?.getAttribute("aria-sort") === expected && usernameSort && !usernameSort.disabled;
+        }, `grid sort ${expected}`);
+        sortCycle.push(expected);
+      }
+      if (!document.getElementById("queryComputedList")?.textContent?.includes("row_count") || document.getElementById("queryDraftStatus")?.textContent !== "Draft changes are not applied") { throw new Error("Grid sorting changed the unrelated Query Builder draft."); }
+    }
     if (document.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") { throw new Error("Aggregate example changed applied filters."); }
     progress("example-aggregate-undo-click"); click(document, "Undo"); await waitFor(() => examplesRestored(document), "aggregate undo"); progress("example-aggregate-undo-restored");
     progress("example-exists-apply"); click(document, "2 · Related memberships via Exists"); await waitFor(() => document.getElementById("queryComputedList")?.textContent?.includes("has_memberships") && document.getElementById("queryPostFilterRoot")?.textContent?.includes("has_memberships"), "Exists example controls"); await waitFor(() => previewIsReady(document), "Exists preview");
@@ -95,7 +111,7 @@ export async function runModelQueryBuilderE2eProbe({ document, postMessage, requ
     click(document, "Undo"); await waitFor(() => document.getElementById("queryDraftStatus")?.textContent === "Draft matches applied query", "assistant acceptance undo");
     progress("legacy-picker"); click(document, "1. Filter Rows"); const pickerAdd = await waitFor(() => conditionAdd(document), "legacy picker condition control"); pickerAdd.click(); const select = await waitForE2eField(document, (candidate) => !candidate.disabled);
     const optionGroups = [...select.querySelectorAll("optgroup")].map((group) => group.label); const options = [...select.querySelectorAll("option")]; const overflow = assistantOverflow(document);
-    finish({ appliedFilters: document.getElementById("queryAppliedFiltersEmpty")?.textContent || "", applyDisabled: document.getElementById("queryDrawerApply")?.disabled === true, assistantOverflow: overflow, conditionCount: document.querySelectorAll('select[aria-label="Condition field"]').length, disabled: select.disabled, drawerOpen: drawer?.hidden === false, enabledOptionCount: options.filter((option) => !option.disabled && option.value).length, exampleCount: examples.length, focused: document.activeElement === select, optionGroups, placeholderDisabled: options[0]?.disabled === true, selectedValue: select.value, showPickerCalls });
+    finish({ appliedFilters: document.getElementById("queryAppliedFiltersEmpty")?.textContent || "", applyDisabled: document.getElementById("queryDrawerApply")?.disabled === true, assistantOverflow: overflow, conditionCount: document.querySelectorAll('select[aria-label="Condition field"]').length, disabled: select.disabled, drawerOpen: drawer?.hidden === false, enabledOptionCount: options.filter((option) => !option.disabled && option.value).length, exampleCount: examples.length, focused: document.activeElement === select, optionGroups, placeholderDisabled: options[0]?.disabled === true, selectedValue: select.value, showPickerCalls, sortCycle });
   } catch (error) { finish({ error: String(error?.message || error), showPickerCalls }); }
   finally { view?.removeEventListener?.("error", terminalError); view?.removeEventListener?.("unhandledrejection", terminalError); try { if (selectPrototype && originalShowPicker) { Object.defineProperty(selectPrototype, "showPicker", originalShowPicker); } else if (selectPrototype) { delete selectPrototype.showPicker; } } catch { /* Terminal output was already emitted. */ } }
 }
