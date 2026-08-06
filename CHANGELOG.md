@@ -18,6 +18,7 @@ versioning; the `0.0.9xx` series is the current line (it follows `0.0.8`, with n
 - Debug runs clear adapter-side breakpoints when they finish, and the built-in tracer uses explicit per-cell thread opt-in so a warm experimental session cannot pause an ordinary shell execution or newly-created background thread.
 
 ### Fixed
+- Model Data column headers now apply their asc/desc/default sort cycle to the rows immediately instead of changing only the hidden Query Builder draft; pending, accessible, and failure states keep the prior grid and any unrelated draft intact.
 - Hot reload now holds a server-side execution barrier: idle cells wait for reload, ordinary busy executions return an automatic retry signal, and Continue/Step cannot resume a paused thread until its reload finishes.
 - Deep reload now invalidates canonical bytecode for both raw and real paths, preventing stale code with symlinked temporary paths or `PYTHONPYCACHEPREFIX`.
 - The experimental debugger now accepts and preserves Port Manager's valid routed `127/8` listener addresses instead of rejecting them as non-loopback endpoints.
