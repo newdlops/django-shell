@@ -56,6 +56,43 @@ test("successful Apply preserves edits made after its snapshot began", () => {
   assert.equal(snapshot.dirty, true);
 });
 
+test("direct grid sort advances revisions while preserving an unrelated dirty draft", () => {
+  const store = createQueryRecipeStore(createEmptyQueryRecipe({ app: "db", model: "Company" }));
+  store.dispatch({ parentId: "where-root", type: "ADD_COMPARISON" });
+  let before = store.getSnapshot();
+  store.setValidation({ issues: [], ok: true, warnings: [] }, before.draftRevision);
+  before = store.getSnapshot();
+  const sorted = { ...before.applied, orderBy: [{ direction: "asc", nodeId: "grid-order-name", ref: { kind: "field", path: "name" } }] };
+
+  store.beginApply(4, sorted, { advanceDraftRevision: true, preserveDraft: true });
+  store.finishApply(4, sorted);
+  const after = store.getSnapshot();
+
+  assert.equal(after.applied.orderBy[0].ref.path, "name");
+  assert.equal(after.draft.where.children.length, 1);
+  assert.equal(after.draft.orderBy.length, 0);
+  assert.equal(after.draftRevision, 4);
+  assert.equal(after.validationRevision, 4);
+  assert.equal(after.dirty, true);
+  assert.equal(after.applyingDraftRevision, undefined);
+});
+
+test("rejected direct grid sort preserves the dirty draft validation", () => {
+  const store = createQueryRecipeStore(createEmptyQueryRecipe({ app: "db", model: "Company" }));
+  store.dispatch({ parentId: "where-root", type: "ADD_COMPARISON" });
+  const revision = store.getSnapshot().draftRevision;
+  store.setValidation({ issues: [], ok: true, warnings: [] }, revision);
+  store.beginApply(3, store.getSnapshot().applied, { advanceDraftRevision: true, preserveDraft: true });
+  store.failApply(3, [{ code: "FIELD_PATH_INVALID" }], { preserveValidation: true });
+
+  const snapshot = store.getSnapshot();
+  assert.equal(snapshot.applyingRevision, undefined);
+  assert.equal(snapshot.applyingDraftRevision, undefined);
+  assert.equal(snapshot.validation.ok, true);
+  assert.equal(snapshot.validationRevision, revision);
+  assert.equal(snapshot.draft.where.children.length, 1);
+});
+
 test("stale validation cannot overwrite the current draft revision", () => {
   const store = createQueryRecipeStore(createEmptyQueryRecipe({ app: "db", model: "Company" }));
   const firstRevision = store.getSnapshot().draftRevision;

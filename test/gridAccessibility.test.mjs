@@ -91,3 +91,14 @@ test("virtual grid headers and rendered cells retain their logical aria column i
   assert.match(browserSource, /ariaColIndex: "1"/);
   assert.match(browserSource, /setAttribute\("aria-colindex", String\(columnIndex \?\? 1\)\)/);
 });
+
+test("sortable grid headers expose current order, next action, and pending state", () => {
+  const rendererSource = readFileSync(new URL("../media/gridRenderer.js", import.meta.url), "utf8");
+  const browserSource = readFileSync(new URL("../media/modelBrowserSource.js", import.meta.url), "utf8");
+
+  assert.match(rendererSource, /ariaSort:/);
+  assert.match(rendererSource, /Clear sort for/);
+  assert.match(rendererSource, /disabled: state\.sortPending/);
+  assert.match(browserSource, /toggleAttribute\("aria-busy", pending\)/);
+  assert.match(browserSource, /button\.ariaLabel = direction/);
+});
