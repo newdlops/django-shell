@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const { createEmptyModelQueryRecipe, cloneModelQueryRecipe } = require("../out/modelQueryRecipe.js");
-const { ModelQueryMetadataIndex } = require("../out/modelQueryRecipeMetadata.js");
+const { ModelQueryMetadataIndex, modelQueryRootFieldTree } = require("../out/modelQueryRecipeMetadata.js");
 const { validateModelQueryRecipe } = require("../out/modelQueryRecipeValidation.js");
 
 /** Builds the smallest live-metadata context needed by recipe-core validation tests. */
@@ -47,6 +47,19 @@ test("empty recipe is valid and has canonical roots", () => {
   assert.equal(result.ok, true);
   assert.equal(result.normalized.where.nodeId, "where-root");
   assert.equal(result.normalized.postFilter.nodeId, "post-root");
+});
+
+test("live columns provide a safe root-only metadata tree when relation RPC metadata is unavailable", () => {
+  const tree = modelQueryRootFieldTree([
+    { attname: "id", editable: false, name: "id", null: false, pk: true, type: "AutoField" },
+    { attname: "company_id", editable: true, name: "company", null: false, pk: false, relation: { field: "company", single: true, target: "db.Company" }, type: "BigAutoField" },
+    { annotation: true, attname: "total", editable: false, name: "total", null: true, pk: false, type: "annotation" },
+    { attname: "display", computed: true, editable: false, name: "display", null: true, pk: false, type: "property" }
+  ]);
+  assert.equal(tree.partial, true);
+  assert.equal(tree.pk, "id");
+  assert.deepEqual(tree.fields.map((field) => [field.name, field.type]), [["id", "AutoField"], ["company_id", "BigAutoField"]]);
+  assert.deepEqual(tree.relations, []);
 });
 
 test("nested AND/OR/NOT remains valid and does not mutate the input", () => {

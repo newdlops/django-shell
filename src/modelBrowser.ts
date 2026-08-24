@@ -9,7 +9,7 @@ import { DiagnosticLogger } from "./diagnostics";
 import { buildRecipeCountOrm, buildRecipeRowsOrm, buildRecipeSummaryOrm } from "./modelQueryRecipeOrm";
 import { cloneModelQueryRecipe, createEmptyModelQueryRecipe, isModelQueryRecipeV2, type ModelQueryRecipeV2, type QueryModelRef } from "./modelQueryRecipe";
 import { createInitialPkModelQueryRecipe, isRecipeInitialPk } from "./modelQueryRecipeInitialPk";
-import { loadModelQueryMetadata, ModelQueryMetadataIndex, selectQueryAssistantRelatedModels } from "./modelQueryRecipeMetadata";
+import { loadModelQueryMetadata, ModelQueryMetadataIndex, modelQueryRootFieldTree, selectQueryAssistantRelatedModels } from "./modelQueryRecipeMetadata";
 import type { ModelQueryIssue, ModelQueryValidation } from "./modelQueryRecipeValidation";
 import { createModelQueryAssistantHost } from "./modelQueryAssistantHost";
 import { createQueryAssistantService, type QueryAssistantService } from "./modelQueryAssistantService";
@@ -462,12 +462,25 @@ class ModelBrowserPanel {
     const inFlight = this.recipeTreeRequests.get(key);
     if (inFlight) { return inFlight; }
     const request = this.source.modelFilterFields(model.app, model.model).then((tree) => {
-      if (!tree.ok) { throw new Error(tree.error ?? `Could not load ${key} field metadata.`); }
+      if (!tree.ok) {
+        const fallback = this.rootFieldTree(model);
+        if (fallback) { return fallback; }
+        throw new Error(tree.error ?? `Could not load ${key} field metadata.`);
+      }
       this.recipeTreeCache.set(key, tree);
       return tree;
+    }, (error: unknown) => {
+      const fallback = this.rootFieldTree(model);
+      if (fallback) { return fallback; }
+      throw error;
     }).finally(() => this.recipeTreeRequests.delete(key));
     this.recipeTreeRequests.set(key, request);
     return request;
+  }
+
+  /** Returns live scalar metadata only for this panel's root model, never for an unresolved relation target. */
+  private rootFieldTree(model: QueryModelRef): BackendFilterFieldTree | undefined {
+    return model.app === this.target.app && model.model === this.target.model ? modelQueryRootFieldTree(this.columns) : undefined;
   }
 
   /** Builds a validation-only Recipe compiler result without evaluating any Django QuerySet. */
@@ -660,11 +673,17 @@ class ModelBrowserPanel {
 
   /** Fetches one model's filter field/relation tree (root model or a relation target) for the cascading filter dropdowns. */
   private async sendFilterFields(message: IncomingMessage): Promise<void> {
-    const result = await this.source.modelFilterFields(message.app as string, message.model as string);
+    let result: BackendFilterFieldTree;
+    try {
+      result = await this.source.modelFilterFields(message.app as string, message.model as string);
+    } catch (error) {
+      result = { error: errorMessage(error), fields: [], ok: false, relations: [] };
+    }
     if (this.disposed) {
       return;
     }
-    this.post({ requestId: message.requestId, result, target: `${message.app}.${message.model}`, type: "filterFields" });
+    const fallback = !result.ok ? this.rootFieldTree({ app: message.app as string, model: message.model as string }) : undefined;
+    this.post({ requestId: message.requestId, result: fallback ?? result, target: `${message.app}.${message.model}`, type: "filterFields" });
   }
 
   /** Sends the installed-model list to the webview for free-form Subquery target selection. */

@@ -181,6 +181,8 @@ export interface BackendFilterFieldTree {
   error?: string;
   fields: BackendFilterField[];
   ok: boolean;
+  /** Marks a safe root-field projection that intentionally omits relation traversal metadata. */
+  partial?: boolean;
   pk?: string;
   relations: BackendFilterRelation[];
 }

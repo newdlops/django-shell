@@ -180,6 +180,46 @@ test("Model Browser timeout reports the latest bounded stage and elapsed time", 
   }
 });
 
+test("ORM and Terminal links keep root-field filters usable without relation metadata RPCs", async () => {
+  const harness = loadBrowserHarness();
+  let latestRowsQuery;
+  const columns = [
+    { attname: "id", editable: false, name: "id", null: false, pk: true, type: "AutoField" },
+    { attname: "name", editable: true, name: "name", null: false, pk: false, type: "CharField" }
+  ];
+  const source = {
+    ...harnessSource(),
+    modelFilterFields: async () => ({ error: "Kept out of the shell", fields: [], ok: false, relations: [] }),
+    modelRows: async (query) => { latestRowsQuery = query; return { columns, hasMore: false, nextOffset: null, ok: true, orm: "db.AppUser.objects.all()", pk: "id", relations: [], rows: [], sql: [] }; },
+    modelTransportInfo: () => ({ active: "pty", mode: "orm" })
+  };
+  const browser = new harness.ModelBrowser("/extension", source);
+  await browser.openModel({ app: "db", model: "AppUser" });
+  await harness.receive({ type: "ready" });
+  await waitForPosted(harness.posted, "rows");
+  await harness.receive({ app: "db", model: "AppUser", requestId: "query-meta-1", type: "filterFields" });
+  const fields = await waitForPosted(harness.posted, "filterFields");
+  assert.equal(fields.result.ok, true);
+  assert.equal(fields.result.partial, true);
+  assert.deepEqual(fields.result.fields.map((field) => field.name), ["id", "name"]);
+
+  const { createEmptyModelQueryRecipe } = require("../out/modelQueryRecipe.js");
+  const recipe = createEmptyModelQueryRecipe({ app: "db", model: "AppUser" });
+  recipe.where.children.push({ kind: "comparison", lhs: { kind: "field", path: "name" }, lookup: "icontains", negated: false, nodeId: "name-filter", rhs: { kind: "literal", value: "acme" } });
+  await harness.receive({ recipe, requestId: "preview-root-filter", revision: 1, type: "previewQueryRecipe" });
+  const preview = await waitForPosted(harness.posted, "queryRecipePreview");
+  assert.equal(preview.validation.ok, true);
+  assert.equal(harness.posted.some((message) => message.type === "queryRecipeRejected"), false);
+
+  await harness.receive({ recipe, revision: 2, type: "applyQueryRecipe" });
+  const applied = await waitForPosted(harness.posted, "queryRecipeApplied");
+  assert.equal(applied.revision, 2);
+  for (let attempt = 0; attempt < 20 && !latestRowsQuery?.recipe; attempt += 1) { await new Promise((resolve) => setImmediate(resolve)); }
+  assert.equal(latestRowsQuery.recipe.where.children[0].lhs.path, "name");
+  assert.equal(latestRowsQuery.recipeMetadata.models["db.AppUser"].tree.partial, true);
+  browser.dispose();
+});
+
 test("debug session restart does not automatically rerun the current cell", () => {
   assert.ok(customConsoleSource.includes("runOnNextDebugSessionStart"));
   assert.ok(customConsoleSource.includes("consumeRunOnDebugSessionStart"));

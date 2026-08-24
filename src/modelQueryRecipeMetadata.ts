@@ -119,6 +119,22 @@ export async function loadModelQueryMetadata(recipe: ModelQueryRecipeV2, loadTre
   return index;
 }
 
+/** Projects live row/schema columns into a safe root-only tree when relation metadata cannot cross the active link. */
+export function modelQueryRootFieldTree(columns: BackendModelColumn[]): BackendFilterFieldTree | undefined {
+  const fields = columns.filter((column) => !column.annotation && !column.computed).map((column) => ({
+    attname: column.attname,
+    choices: column.choices,
+    helpText: column.helpText,
+    label: column.label,
+    name: column.attname,
+    null: column.null,
+    pk: column.pk,
+    type: column.type
+  }));
+  if (!fields.length) { return undefined; }
+  return { fields, ok: true, partial: true, pk: fields.find((field) => field.pk)?.attname, relations: [] };
+}
+
 /** Selects only loaded model descriptors actually referenced by the current Recipe. */
 export function selectQueryAssistantRelatedModels(recipe: ModelQueryRecipeV2, bundle: ModelQueryMetadataBundle): QueryAssistantRelatedModel[] {
   const wanted = new Map<string, QueryModelRef>([[modelKey(recipe.source), recipe.source]]);
