@@ -392,6 +392,16 @@ export function createQueryController(options) {
     schedulePreview();
   }
 
+  /** Retries missing field metadata and revalidates the unchanged draft after selecting Socket or Auto. */
+  function onTransportChange(mode) {
+    if (!source.app || !source.model || (mode !== "auto" && mode !== "tcp")) { return false; }
+    const target = { ...source };
+    const revalidate = () => { if (sameQuerySource(source, target)) { schedulePreview(); } };
+    void metadata.refreshTree(target).then(revalidate, revalidate);
+    requestBuilderRender("transport-metadata");
+    return true;
+  }
+
   /** Applies a grid-header sort immediately to the authoritative Recipe without submitting unrelated draft edits. */
   function applyGridOrder(field, descending) {
     const snapshot = store.getSnapshot();
@@ -564,7 +574,7 @@ export function createQueryController(options) {
   uiState.subscribe(() => requestRender("ui"));
   coordinator.flush();
   if (uiState.getSnapshot().drawerOpen) { elements.queryDrawer.hidden = false; elements.queryDrawerToggle.setAttribute("aria-expanded", "true"); drawerResize.setHeight(uiState.getSnapshot().drawerHeight); }
-  return { apply, applyGridOrder, destroy() { menuAbort.abort(); drawerResize.destroy(); assistant.destroy(); examplesView.destroy(); coordinator.destroy(); uiState.destroy(); disposePredicateBuilders(); computedBuilder?.destroy?.(); resultControls.destroy(); }, getSnapshot: () => store.getSnapshot(), onMessage, openDrawer, setSource };
+  return { apply, applyGridOrder, destroy() { menuAbort.abort(); drawerResize.destroy(); assistant.destroy(); examplesView.destroy(); coordinator.destroy(); uiState.destroy(); disposePredicateBuilders(); computedBuilder?.destroy?.(); resultControls.destroy(); }, getSnapshot: () => store.getSnapshot(), onMessage, onTransportChange, openDrawer, setSource };
 
   /** Opens or closes the compact overflow menu for draft recovery actions. */
   function toggleMoreActions() {
@@ -640,5 +650,5 @@ function isTextEntry(target) {
 
 /** Creates a no-op controller for the standalone custom ORM query surface. */
 function noQueryController() {
-  return { apply() {}, applyGridOrder() { return false; }, getSnapshot() { return undefined; }, onMessage() { return false; }, openDrawer() {}, setSource() {} };
+  return { apply() {}, applyGridOrder() { return false; }, getSnapshot() { return undefined; }, onMessage() { return false; }, onTransportChange() { return false; }, openDrawer() {}, setSource() {} };
 }

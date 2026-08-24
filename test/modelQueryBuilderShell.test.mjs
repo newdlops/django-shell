@@ -43,7 +43,9 @@ test("Query Builder uses a separate theme-token stylesheet and modular controlle
   assert.ok(css.includes("var(--vscode-panel-border)") && css.includes("@media (max-width:639px)"));
   assert.ok(css.includes(".query-more-menu[hidden]{display:none}"), "the hidden recovery menu cannot remain in the accessibility tree");
   assert.ok(source.includes("createQueryController") && source.includes("queryController.onMessage"));
+  assert.ok(source.includes("queryController.onTransportChange(message.mode)"), "transport snapshots trigger Query Builder metadata recovery");
   assert.ok(controller.includes('type: "applyQueryRecipe"') && controller.includes('type: "previewQueryRecipe"'));
+  assert.ok(controller.includes("function onTransportChange(mode)") && controller.includes("metadata.refreshTree(target)") && controller.includes("schedulePreview()"), "Socket/Auto recovery retries metadata and revalidates the unchanged draft");
   assert.ok(controller.includes("stageForQueryIssue") && issueTarget.includes("filterResults"), "issue navigation routes to the owning visible stage");
   assert.ok(controller.includes("createQueryResultControls"), "Result references use the dedicated persistent renderer");
   assert.equal(controller.includes("resultReferenceSelect"), false, "Result references do not regress to unbounded native selects");

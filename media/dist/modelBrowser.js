@@ -3115,13 +3115,23 @@ function createQueryMetadataService({ post, onChange } = {}) {
   function retry(target) {
     return loadTree(target, { retry: true });
   }
+  function refreshTree(target) {
+    const state2 = getState(target);
+    if (state2.tree && !state2.tree.partial) {
+      return Promise.resolve(state2.tree);
+    }
+    if (state2.pending) {
+      return loadTree(target).catch(() => retry(target));
+    }
+    return retry(target);
+  }
   function setCatalog(models) {
     cache.catalog = Array.isArray(models) ? models.filter((model) => model && typeof model.app === "string" && typeof model.model === "string").map((model) => ({ app: model.app, model: model.model })) : [];
   }
   function getCatalog() {
     return [...cache.catalog || []].sort((left, right) => modelKey(left).localeCompare(modelKey(right)));
   }
-  return { getCatalog, getState, loadTree, onMessage, retry, setCatalog };
+  return { getCatalog, getState, loadTree, onMessage, refreshTree, retry, setCatalog };
 }
 
 // media/gridQueryFieldPicker.js
@@ -7320,6 +7330,20 @@ function createQueryController(options) {
     requestBuilderRender("source-changed");
     schedulePreview();
   }
+  function onTransportChange(mode) {
+    if (!source.app || !source.model || mode !== "auto" && mode !== "tcp") {
+      return false;
+    }
+    const target = { ...source };
+    const revalidate = () => {
+      if (sameQuerySource(source, target)) {
+        schedulePreview();
+      }
+    };
+    void metadata.refreshTree(target).then(revalidate, revalidate);
+    requestBuilderRender("transport-metadata");
+    return true;
+  }
   function applyGridOrder(field, descending) {
     const snapshot = store.getSnapshot();
     const busy = Boolean(snapshot.applyingRevision) || applyLifecycle.phase === "applying" || applyLifecycle.phase === "loadingResults";
@@ -7588,7 +7612,7 @@ function createQueryController(options) {
     disposePredicateBuilders();
     computedBuilder?.destroy?.();
     resultControls.destroy();
-  }, getSnapshot: () => store.getSnapshot(), onMessage, openDrawer, setSource };
+  }, getSnapshot: () => store.getSnapshot(), onMessage, onTransportChange, openDrawer, setSource };
   function toggleMoreActions() {
     const open = elements.queryMoreMenu.hidden;
     elements.queryMoreMenu.hidden = !open;
@@ -7679,6 +7703,8 @@ function noQueryController() {
   }, getSnapshot() {
     return void 0;
   }, onMessage() {
+    return false;
+  }, onTransportChange() {
     return false;
   }, openDrawer() {
   }, setSource() {
@@ -8141,6 +8167,7 @@ function handleMessage(message) {
   } else if (message.type === "transport") {
     els.transport.value = message.mode || "auto";
     els.transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">\u25CF ORM cell</span>' : message.active === "tcp" ? '<span class="on">\u25CF socket</span>' : message.active === "pty" ? '<span class="pty">\u25CF terminal</span>' : '<span class="off">\u25CB not connected</span>';
+    queryController.onTransportChange(message.mode);
   } else if (message.type === "queryMode") {
     enterQueryMode((payload) => send(payload), message.code || "");
   } else if (message.type === "measureQueryEditor") {

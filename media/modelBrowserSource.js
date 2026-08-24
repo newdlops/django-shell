@@ -155,6 +155,7 @@ function handleMessage(message) {
   } else if (message.type === "transport") {
     els.transport.value = message.mode || "auto";
     els.transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">● ORM cell</span>' : message.active === "tcp" ? '<span class="on">● socket</span>' : message.active === "pty" ? '<span class="pty">● terminal</span>' : '<span class="off">○ not connected</span>';
+    queryController.onTransportChange(message.mode);
   } else if (message.type === "queryMode") {
     enterQueryMode((payload) => send(payload), message.code || "");
   } else if (message.type === "measureQueryEditor") {

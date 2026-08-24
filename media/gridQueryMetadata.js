@@ -93,6 +93,14 @@ export function createQueryMetadataService({ post, onChange } = {}) {
     return loadTree(target, { retry: true });
   }
 
+  /** Reuses ready metadata or retries an absent/failed tree after the link becomes metadata-capable. */
+  function refreshTree(target) {
+    const state = getState(target);
+    if (state.tree && !state.tree.partial) { return Promise.resolve(state.tree); }
+    if (state.pending) { return loadTree(target).catch(() => retry(target)); }
+    return retry(target);
+  }
+
   /** Replaces the model catalog used by model-source Exists and Subquery controls. */
   function setCatalog(models) {
     cache.catalog = Array.isArray(models) ? models.filter((model) => model && typeof model.app === "string" && typeof model.model === "string").map((model) => ({ app: model.app, model: model.model })) : [];
@@ -103,7 +111,7 @@ export function createQueryMetadataService({ post, onChange } = {}) {
     return [...(cache.catalog || [])].sort((left, right) => modelKey(left).localeCompare(modelKey(right)));
   }
 
-  return { getCatalog, getState, loadTree, onMessage, retry, setCatalog };
+  return { getCatalog, getState, loadTree, onMessage, refreshTree, retry, setCatalog };
 }
 
 /** Exposes pure helpers for focused metadata-cache tests without requiring a browser DOM. */

@@ -20,6 +20,37 @@ test("metadata cache uses query-meta IDs, ignores stale messages, and retries ex
   assert.equal(await service.loadTree(target), service.getState(target).tree, "successful targets are cached");
 });
 
+test("metadata cache refresh retries a failed tree after the link changes", async () => {
+  const posted = [];
+  const service = createQueryMetadataService({ post: (message) => posted.push(message) });
+  const target = { app: "db", model: "Company" };
+  const failed = service.loadTree(target);
+  service.onMessage({ requestId: posted[0].requestId, result: { error: "terminal metadata suppressed", fields: [], ok: false, relations: [] } });
+  await assert.rejects(failed, /terminal metadata suppressed/);
+  assert.equal(service.getState(target).error, "terminal metadata suppressed");
+
+  const recovered = service.refreshTree(target);
+  assert.equal(posted[1].requestId, "query-meta-2");
+  service.onMessage({ requestId: posted[1].requestId, result: { fields: [{ name: "id", type: "AutoField" }], ok: true, relations: [] } });
+  assert.equal((await recovered).fields[0].name, "id");
+  assert.equal(service.getState(target).error, undefined);
+});
+
+test("metadata cache refresh upgrades a root-only tree after Socket or Auto becomes available", async () => {
+  const posted = [];
+  const service = createQueryMetadataService({ post: (message) => posted.push(message) });
+  const target = { app: "db", model: "Company" };
+  const partial = service.loadTree(target);
+  service.onMessage({ requestId: posted[0].requestId, result: { fields: [{ name: "id", type: "AutoField" }], ok: true, partial: true, relations: [] } });
+  await partial;
+
+  const upgraded = service.refreshTree(target);
+  assert.equal(posted[1].requestId, "query-meta-2");
+  service.onMessage({ requestId: posted[1].requestId, result: { fields: [{ name: "id", type: "AutoField" }], ok: true, relations: [{ name: "members", target: "db.Member" }] } });
+  assert.equal((await upgraded).relations[0].name, "members");
+  assert.equal(service.getState(target).tree.partial, undefined);
+});
+
 test("field metadata and typed RHS restrictions preserve backend-safe contexts", () => {
   const date = { role: "field", type: "DateTimeField" };
   assert.ok(lookupsForField({ role: "field", type: "CharField" }).includes("not_blank"));
