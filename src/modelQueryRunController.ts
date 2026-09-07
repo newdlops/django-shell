@@ -27,7 +27,8 @@ export type ModelQueryRunOutcome<T> =
 /** Dependencies injected into the controller so its lifecycle can be tested without VS Code or a live Django process. */
 export interface ModelQueryRunControllerOptions {
   clearTimer?: typeof clearTimeout;
-  interrupt(reason: string): Promise<BackendInterruptResult>;
+  interrupt(reason: string, requestId: number): Promise<BackendInterruptResult>;
+  interruptTimeoutMs?: number;
   now?: () => number;
   onChange(snapshot: ModelQueryRunSnapshot): void;
   setTimer?: typeof setTimeout;
@@ -48,6 +49,7 @@ interface ActiveRun {
 }
 
 const DEFAULT_SLOW_AFTER_MS = 8000;
+const DEFAULT_INTERRUPT_TIMEOUT_MS = 6000;
 
 /** Runs one ORM query at a time and safely retires timed-out, cancelled, or late backend work. */
 export class ModelQueryRunController {
@@ -82,7 +84,7 @@ export class ModelQueryRunController {
   }
 
   /** Starts an execution unless another query is active, and settles without allowing late work to update state. */
-  run<T>(execute: () => Promise<T>): Promise<ModelQueryRunOutcome<T>> {
+  run<T>(execute: (requestId: number) => Promise<T>): Promise<ModelQueryRunOutcome<T>> {
     if (this.disposed || this.activeRun) {
       return Promise.resolve({ kind: "busy" });
     }
@@ -101,7 +103,7 @@ export class ModelQueryRunController {
     return new Promise<ModelQueryRunOutcome<T>>((resolve) => {
       active.resolve = resolve as (outcome: ModelQueryRunOutcome<unknown>) => void;
       // Both fulfillment and rejection are handled here even if this run is cancelled or times out first.
-      Promise.resolve().then(execute).then(
+      Promise.resolve().then(() => active.cancelled ? undefined : execute(active.requestId)).then(
         (value) => this.finishSuccess(active, value),
         (error: unknown) => this.finishFailure(active, error)
       );
@@ -158,7 +160,7 @@ export class ModelQueryRunController {
     }
     active.cancelled = true;
     this.finish(active, { interruptConfirmed: undefined, kind: "timedOut" }, { elapsedMs: this.elapsedSince(active.startedAt), requestId: active.requestId, startedAt: active.startedAt, state: "timedOut", timeoutMs: active.timeoutMs });
-    void this.options.interrupt("modelQuery.timeout").then(
+    void this.boundedInterrupt("modelQuery.timeout", active.requestId).then(
       (result) => this.confirmTimedOutInterrupt(active, result),
       (error: unknown) => this.confirmTimedOutInterrupt(active, failedInterrupt(error))
     );
@@ -178,7 +180,7 @@ export class ModelQueryRunController {
   private async finishCancellation(active: ActiveRun, reason: "modelQuery.cancel" | "modelQuery.dispose"): Promise<void> {
     let result: BackendInterruptResult;
     try {
-      result = await this.options.interrupt(reason);
+      result = await this.boundedInterrupt(reason, active.requestId);
     } catch (error) {
       result = failedInterrupt(error);
     }
@@ -191,6 +193,20 @@ export class ModelQueryRunController {
       ? { error, interruptConfirmed, kind: "cancelled" }
       : { interruptConfirmed, kind: "cancelled" };
     this.finish(active, outcome, { elapsedMs: this.elapsedSince(active.startedAt), error, interruptConfirmed, requestId: active.requestId, startedAt: active.startedAt, state: "cancelled" });
+  }
+
+  /** Bounds acknowledgement waits even when an interrupt provider never settles its promise. */
+  private async boundedInterrupt(reason: string, requestId: number): Promise<BackendInterruptResult> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const configured = this.options.interruptTimeoutMs;
+    const timeoutMs = configured && Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_INTERRUPT_TIMEOUT_MS;
+    try {
+      const pending = this.options.interrupt(reason, requestId);
+      const deadline = new Promise<BackendInterruptResult>((resolve) => {
+        timer = this.setTimer(() => resolve({ error: "Interrupt acknowledgement timed out; execution may still be running.", interrupted: false, ok: false, reason }), timeoutMs);
+      });
+      return await Promise.race([pending, deadline]);
+    } finally { if (timer) { this.clearTimer(timer); } }
   }
 
   /** Settles a current successful result unless cancellation or timeout has already invalidated it. */

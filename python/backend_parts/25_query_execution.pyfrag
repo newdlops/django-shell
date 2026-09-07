@@ -1,0 +1,111 @@
+# Owns query request cancellation without interrupting unrelated Console execution threads.
+_QUERY_EXECUTIONS = {}
+_QUERY_EXECUTION_LOCK = threading.Lock()
+_QUERY_EXECUTION_TTL = 600
+_QUERY_EXECUTION_LIMIT = 512
+
+
+def _query_execution_record(execution_id):
+    """Finds or creates a bounded request record, including cancellation before arrival."""
+    now = time.monotonic()
+    for key, record in list(_QUERY_EXECUTIONS.items()):
+        if record["state"] in ("finished", "cancelled") and now - record["updated"] > _QUERY_EXECUTION_TTL:
+            del _QUERY_EXECUTIONS[key]
+    if execution_id in _QUERY_EXECUTIONS:
+        return _QUERY_EXECUTIONS[execution_id]
+    if len(_QUERY_EXECUTIONS) >= _QUERY_EXECUTION_LIMIT:
+        completed = next((key for key, record in _QUERY_EXECUTIONS.items() if record["state"] == "finished"), None)
+        if completed is None:
+            raise ValueError("Too many pending query requests. Wait for existing requests to finish.")
+        del _QUERY_EXECUTIONS[completed]
+    record = {"cancel": threading.Event(), "done": threading.Event(), "interrupted": False, "state": "new", "updated": now}
+    _QUERY_EXECUTIONS[execution_id] = record
+    return record
+
+
+def _query_cancel_trace(record, previous):
+    """Checks this request at Python checkpoints while preserving an existing trace callback."""
+    delegates = {}
+
+    def trace(frame, event, arg):
+        """Raises only inside this query's executing thread after a matching cancellation."""
+        if record["cancel"].is_set() and frame.f_code.co_filename == "<django-shell-query>" and event in ("line", "return"):
+            raise _ExecutionInterrupted("Query cancelled.")
+        key = id(frame)
+        callback = previous if event == "call" else delegates.get(key)
+        if callback is not None:
+            returned = callback(frame, event, arg)
+            if returned is not None:
+                delegates[key] = returned
+        if event == "return":
+            delegates.pop(key, None)
+        return trace
+
+    return trace
+
+
+@contextlib.contextmanager
+def _query_execution_scope(request):
+    """Cancels queued work before it acquires the shared execution lock and traces only its own execution."""
+    import uuid
+
+    execution_id = request.get("executionId") or uuid.uuid4().hex
+    if not isinstance(execution_id, str) or not execution_id or len(execution_id) > 160:
+        raise ValueError("Invalid query execution identifier.")
+    with _QUERY_EXECUTION_LOCK:
+        record = _query_execution_record(execution_id)
+        if record["cancel"].is_set():
+            raise _ExecutionInterrupted("Query cancelled before execution.")
+        if record["state"] != "new":
+            raise ValueError("This query execution identifier was already submitted.")
+        record["state"] = "queued"
+    acquired = False
+    previous_trace = sys.gettrace()
+    tracing = False
+    try:
+        while not acquired:
+            if record["cancel"].is_set():
+                raise _ExecutionInterrupted("Query cancelled before execution.")
+            acquired = _EXECUTION_LOCK.acquire(timeout=0.05)
+        with _QUERY_EXECUTION_LOCK:
+            if record["cancel"].is_set():
+                raise _ExecutionInterrupted("Query cancelled before execution.")
+            record["state"] = "running"
+        sys.settrace(_query_cancel_trace(record, previous_trace))
+        tracing = True
+        yield record
+    except (KeyboardInterrupt, _ExecutionInterrupted):
+        record["interrupted"] = True
+        raise
+    finally:
+        if tracing:
+            sys.settrace(previous_trace)
+        if acquired:
+            _EXECUTION_LOCK.release()
+        with _QUERY_EXECUTION_LOCK:
+            record["state"] = "finished"
+            record["updated"] = time.monotonic()
+            record["done"].set()
+
+
+def _interrupt_query_execution(request):
+    """Cancels exactly one query, reporting confirmation only after prevention or actual interruption."""
+    execution_id = request.get("executionId")
+    reason = str(request.get("reason") or "")
+    if not isinstance(execution_id, str) or not execution_id or len(execution_id) > 160:
+        return {"ok": False, "interrupted": False, "reason": reason, "error": "Query cancellation requires its execution identifier."}
+    try:
+        with _QUERY_EXECUTION_LOCK:
+            record = _query_execution_record(execution_id)
+            if record["state"] == "finished":
+                return {"ok": True, "interrupted": False, "reason": reason, "message": "The query already finished."}
+            record["cancel"].set()
+            queued = record["state"] != "running"
+            if record["state"] == "new":
+                record["state"] = "cancelled"
+        if not queued:
+            record["done"].wait(0.1)
+        confirmed = queued or (record["done"].is_set() and record["interrupted"])
+        return {"ok": True, "interrupted": confirmed, "reason": reason, "message": "Query cancelled." if confirmed else "Cancellation requested; execution has not yet stopped."}
+    except Exception as error:
+        return {"ok": False, "interrupted": False, "reason": reason, "error": str(error)}

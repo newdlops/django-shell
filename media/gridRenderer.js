@@ -1,6 +1,7 @@
 // Semantic virtual-grid header renderer for the model browser.
 
 import { codicon } from "./modelBrowserIcons.js";
+import { propertyLoadAction } from "./gridPropertyValues.js";
 
 /** Creates the header renderer for the current grid state and its DOM helper. */
 export function createGridHeaderRenderer({ el, relationKindLabel, relationModelName, state }) {
@@ -38,9 +39,10 @@ export function createGridHeaderRenderer({ el, relationKindLabel, relationModelN
     const pinned = state.pinned.has(column.attname);
     th.appendChild(el("button", { ariaLabel: pinned ? `Unpin ${column.attname} column` : `Pin ${column.attname} column`, className: pinned ? "pinbtn active" : "pinbtn", dataset: { act: "pin", col: column.attname }, title: pinned ? "Unpin column" : "Pin column (freeze left)" }, codicon(pinned ? "pinned" : "pin")));
     if (column.computed) {
-      const loading = state.computedActive.has(column.attname);
+      const active = state.computedActive.has(column.attname);
+      const action = propertyLoadAction(state, column.attname);
       const cost = column.annotated ? "DB annotation — single query" : "per-row @property — N+1";
-      th.appendChild(el("button", { ariaLabel: `${loading ? "Reload" : "Load"} ${column.attname} computed values`, className: loading ? "loadbtn active" : "loadbtn", dataset: { act: "loadComputed", field: column.attname }, title: `${loading ? "Reload" : "Load"} this column for loaded rows (${cost})` }, codicon(loading ? "refresh" : "triangle-right")));
+      th.appendChild(el("button", { ariaLabel: `${action} ${column.attname} computed values`, className: active ? "loadbtn active" : "loadbtn", dataset: { act: "loadComputed", field: column.attname }, disabled: state.computedPending.has(column.attname), title: `${action} this column for loaded rows (${cost})` }, codicon(active ? "refresh" : "triangle-right")));
     }
     if (sortable) { th.appendChild(el("button", { ariaLabel: sortAction, className: "sortbtn", dataset: { act: "sort", col: column.attname }, disabled: state.sortPending, title: headTitle }, column.attname)); } else { th.appendChild(document.createTextNode(column.attname)); }
     if (column.pk) { th.appendChild(el("span", { ariaLabel: "Primary key", className: "pkmark", title: "primary key" }, codicon("key"))); }

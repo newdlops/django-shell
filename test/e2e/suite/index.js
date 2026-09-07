@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vscode = require("vscode");
 const { assertModelQueryBuilderWebview } = require("./modelQueryBuilderWebview.js");
+const { assertModelStabilityWebview } = require("./modelStabilityWebview.js");
 const { assertPythonCellBehavior } = require("./pythonCellBehavior.js");
 const { assertWorkbenchModelLanguageSelection } = require("./workbenchOverlayModelLanguage.js");
 
@@ -16,6 +17,8 @@ async function run() {
   await writePreActivationStaleOverlayFiles();
   await extension.activate();
   await assertModelQueryBuilderWebview(extension);
+  await assertModelStabilityWebview(extension);
+  await assertModelStabilityWebview(extension, "query");
   if (process.env.DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY === "1") { return; }
   await vscode.commands.executeCommand("djangoShell.openConsole");
   const opened = await waitForSnapshot((snapshot) => snapshot.panelOpen && snapshot.hasEditorAnchor);
@@ -360,7 +363,8 @@ function assertOverlayRendererGuards(extension) {
   const sync = require(path.join(extension.extensionPath, "out", "workbenchOverlaySyncRenderer.js"));
   const source = sync.overlaySyncRendererSource();
   const state = { nodes: [], overlayRoot: null };
-  const window = { addEventListener: () => undefined, clearTimeout: () => undefined, removeEventListener: () => undefined, setTimeout: (fn) => { fn(); return 0; }, __djangoShellOverlayPrelude: "" };
+  const frames = new Map(); let frameId = 0;
+  const window = { addEventListener: () => undefined, cancelAnimationFrame: (id) => frames.delete(id), clearTimeout: () => undefined, removeEventListener: () => undefined, requestAnimationFrame: (callback) => { frames.set(++frameId, callback); return frameId; }, setTimeout: (fn) => { fn(); return 0; }, __djangoShellOverlayPrelude: "" };
   const document = { activeElement: null, addEventListener: () => undefined, getElementById: (id) => id === "django-shell-overlay" ? state.overlayRoot : null, querySelectorAll: (selector) => state.nodes.filter((node) => selectorMatches(selector, node)), removeEventListener: () => undefined };
   const api = Function("window", "document", "__dsoPost", `${source}\nreturn { applyPrelude: window.__dsoApplyPreludeHiddenArea, enterPayload: __dsoEnterPayload, installEnterRunner: window.__dsoInstallEnterRunner, suggestOpen: __dsoSuggestOpen };`)(window, document, () => undefined);
 
@@ -391,6 +395,7 @@ function assertOverlayRendererGuards(extension) {
 
   editor.hiddenAreas = [];
   model.setValue(`${prefix}objectsa = Company.objects`);
+  for (const [id, callback] of frames) { frames.delete(id); callback(); }
   assert.equal(model.getValue(), "objectsa = Company.objects");
   assert.deepEqual(editor.hiddenAreas, []);
 

@@ -74,6 +74,8 @@ def _execution_mark_inactive():
 def _interrupt_execution(request=None):
     """Raises an internal interruption in the active user execution thread without waiting for the execution lock."""
     reason = str((request or {}).get("reason") or "")
+    if (request or {}).get("executionId") is not None or reason.startswith("modelQuery."):
+        return _interrupt_query_execution(request or {})
     with _PROGRESS_LOCK:
         thread_id = _STATE.get("execution_thread_id")
     if not isinstance(thread_id, int):
@@ -807,6 +809,5 @@ def _progress_queryset_label(queryset):
         return model_label or "QuerySet"
     except Exception:
         return "QuerySet"
-
 
 

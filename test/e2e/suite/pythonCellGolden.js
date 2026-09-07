@@ -148,7 +148,10 @@ async function typeGoldenCode(extension, prelude, inputMarker, visibility, segme
       if (!completed) { break; }
       if (segment.after) { await segment.after(); }
     }
-    if (completed) { return; }
+    if (completed) {
+      await evalInWorkbench(extension, `(function(){const root=document.getElementById("django-shell-overlay"),editor=root&&root.__djangoShellEditor;if(editor){editor.revealPosition(editor.getPosition());}return "caret-revealed";})()`);
+      return;
+    }
     await vscode.commands.executeCommand("djangoShell.showOverlayEditor");
     await delay(150);
   }

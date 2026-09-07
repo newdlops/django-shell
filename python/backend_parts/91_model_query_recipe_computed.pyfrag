@@ -406,7 +406,7 @@ def _browse_recipe_rows(namespace, request):
         with _browse_capture() as ctx:
             raw = list(queryset[offset:offset + limit + 1].values(*[field.attname for field in model._meta.concrete_fields], *[item["alias"] for item in specs]))
         has_more, raw = len(raw) > limit, raw[:limit]
-        columns = _browse_columns(model) + [{"annotation": True, "attname": item["alias"], "editable": False, "name": item["alias"], "null": True, "pk": False, "type": item["kind"]} for item in specs]
+        columns = _browse_columns(model) + [{"annotation": True, "attname": item["alias"], "editable": False, "name": item["alias"], "null": True, "pk": False, "type": item["kind"]} for item in specs] + _browse_computed_columns(model)
         next_cursor = raw[-1][model._meta.pk.attname] if keyset_capable and has_more and raw else None
         next_offset = offset + limit if not keyset_capable and has_more else None
         return {"columns": columns, "hasMore": has_more, "issues": state["issues"], "nextCursor": _browse_jsonable(next_cursor), "nextOffset": next_offset, "ok": True, "orm": _browse_recipe_orm_log(state, "rows", order), "pk": model._meta.pk.attname, "recipeVersion": 2, "rows": [_browse_serialize_row(row) for row in raw], "sql": _browse_sql(ctx)}
@@ -468,12 +468,36 @@ def _browse_recipe_count(request):
 
 
 def _browse_recipe_computed(namespace, request):
-    """Rejects legacy lazy-property loading for Recipe v2 because computed columns are part of the applied query."""
-    state, _ = _browse_recipe_prepare(request, namespace)
+    """Loads one model property over the bounded, validated Rows recipe, preserving its annotations, filters, and order."""
+    state, specs = _browse_recipe_prepare(request, namespace)
     if not state.get("ok"):
-        return _browse_recipe_failure(state)
-    _browse_recipe_issue(state, "TRANSPORT_CAPABILITY_UNSUPPORTED", "/field", "Recipe v2 computed values are returned by Rows, not lazy property loading.", "Reload the rows query.")
-    return _browse_recipe_failure(state)
+        return _browse_recipe_property_failure(state)
+    model, field = state["model"], request.get("field")
+    if state["recipe"].get("mode") != "rows":
+        _browse_recipe_issue(state, "PYTHON_PROPERTY_SUMMARY_UNSUPPORTED", "/mode", "Model properties require individual model rows.", "Switch to Rows before loading a property.")
+        return _browse_recipe_property_failure(state)
+    if not isinstance(field, str) or not any(column["attname"] == field for column in _browse_computed_columns(model)):
+        _browse_recipe_issue(state, "FIELD_PATH_INVALID", "/field", "The requested field is not a model property.", "Reload model metadata and select a property column.")
+        return _browse_recipe_property_failure(state)
+    try:
+        queryset, _ = _browse_recipe_base_queryset(state, specs)
+        limit = _browse_limit(request.get("limit"), maximum=None)
+        annotations = _browse_declared_annotations(model)
+        with _browse_capture() as ctx:
+            if field in annotations:
+                raw = queryset.annotate(__djs=annotations[field]).values_list("pk", "__djs")[:limit]
+                values = {_browse_jsonable(pk): _browse_cell(value) for pk, value in raw}
+            else:
+                values = {_browse_jsonable(obj.pk): _browse_cell(_pty_safe_getattr(obj, field)) for obj in queryset[:limit]}
+        return {"annotated": field in annotations, "field": field, "ok": True, "queryCount": len(ctx.captured_queries), "rowCount": len(values), "values": values}
+    except Exception:
+        return {"error": traceback.format_exc(), "field": field, "ok": False, "values": {}}
+
+
+def _browse_recipe_property_failure(state):
+    """Adds an actionable error and empty value map to a rejected lazy-property request."""
+    error = next((item["message"] for item in state["issues"] if item["severity"] == "error"), "Could not load property values.")
+    return {**_browse_recipe_failure(state), "error": error, "values": {}}
 
 
 def _browse_recipe_orm_log(state, operation, order=()):

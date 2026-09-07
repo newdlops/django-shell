@@ -36,14 +36,17 @@ export function buildEditableRelatedTable(result, deps) {
   const pkName = result.pk || "id";
   const canEdit = Boolean(result.app && result.model && !result.single);
   const wrap = el("div", {});
+  const status = el("span", { className: "tag", role: "status", ariaLive: "polite" });
   let commitBtn = null;
   const editor = canEdit
     ? createEditor({
-        notify: () => undefined,
-        onChange: (count) => { if (commitBtn) { commitBtn.textContent = count ? `Commit ${result.model} (${count})` : `Commit ${result.model}`; commitBtn.disabled = !count; } },
+        notify: (text) => { status.textContent = text; },
+        onChange: (count) => { if (commitBtn) { commitBtn.textContent = count ? `Commit ${result.model} (${count})` : `Commit ${result.model}`; commitBtn.disabled = !count || editor.isCommitting(); } },
+        onCommitStart: () => { commitBtn.disabled = true; status.textContent = "Committing changes…"; },
+        onCommitEnd: () => { commitBtn.disabled = !editor.pendingCount(); },
         paintCell: (td) => paintRelatedCell(td, el, renderValue),
-        post: (message) => { if (message.type === "commitEdits") { post({ app: result.app, changes: message.changes, columns, model: result.model, type: "commitRelated" }); } },
-        reload: () => undefined
+        post: (message) => { if (message.type === "commitEdits") { post({ ...message, app: result.app, columns, database: result.database, model: result.model, type: "commitRelated" }); } },
+        reload: () => deps.reload?.(wrap)
       })
     : null;
   if (editor) {
@@ -52,6 +55,7 @@ export function buildEditableRelatedTable(result, deps) {
     commitBtn.addEventListener("click", () => editor.commitEdits());
     const bar = el("div", { className: "nestedhead" });
     bar.appendChild(commitBtn);
+    bar.appendChild(status);
     wrap.appendChild(bar);
   }
   const table = el("table", {});
@@ -61,27 +65,33 @@ export function buildEditableRelatedTable(result, deps) {
   }
   table.appendChild(el("thead", {}, headRow));
   const tbody = el("tbody", {});
-  for (const row of result.rows) {
-    const pk = rawOf(row[pkName]);
-    const tr = el("tr", {});
-    tr.dataset.pk = String(pk);
-    tr._pk = pk;
-    for (const column of columns) {
-      const td = el("td", {});
-      td._cell = row[column.attname];
-      td._column = column;
-      td._pk = pk;
-      if (canEdit && column.editable && !column.relation) {
-        td.classList.add("editable");
-        td.dataset.attname = column.attname;
-        td._editval = textOf(td._cell);
-        td.title = "Double-click to edit";
+  /** Rebuilds authoritative related rows while reapplying this editor's newer unsaved fields. */
+  function renderRows(rows) {
+    tbody.replaceChildren();
+    for (const row of rows) {
+      const pk = rawOf(row[pkName]);
+      const tr = el("tr", {});
+      tr.dataset.pk = String(pk);
+      tr._pk = pk;
+      for (const column of columns) {
+        const td = el("td", {});
+        td._cell = row[column.attname];
+        td._column = column;
+        td._pk = pk;
+        if (canEdit && column.editable && !column.relation) {
+          td.classList.add("editable");
+          td.dataset.attname = column.attname;
+          td._editval = textOf(td._cell);
+          td.title = "Double-click to edit";
+        }
+        paintRelatedCell(td, el, renderValue);
+        tr.appendChild(td);
       }
-      paintRelatedCell(td, el, renderValue);
-      tr.appendChild(td);
+      editor?.applyStaged(tr);
+      tbody.appendChild(tr);
     }
-    tbody.appendChild(tr);
   }
+  renderRows(result.rows);
   table.appendChild(tbody);
   if (editor) {
     table.addEventListener("dblclick", (event) => {
@@ -93,5 +103,10 @@ export function buildEditableRelatedTable(result, deps) {
     });
   }
   wrap.appendChild(table);
+  wrap.handleCommit = (message) => editor?.handleResult(message) || false;
+  wrap.refreshRows = (next) => {
+    if (!next.ok) { status.textContent = next.error || "Saved, but related rows could not be reloaded."; return; }
+    renderRows(next.rows || []);
+  };
   return wrap;
 }

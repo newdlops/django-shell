@@ -121,6 +121,7 @@ export interface BackendModelRows {
 /** Related rows fetched lazily for one source row. */
 export interface BackendModelRelatedRows {
   app?: string;
+  database?: string;
   columns: BackendModelColumn[];
   error?: string;
   hasMore: boolean;
@@ -330,6 +331,7 @@ export interface ModelCommitChange {
 /** Parameters for one staged-edit commit. (`columns` is supplied in ORM mode for typed value literals.) */
 export interface ModelCommitQuery {
   app: string;
+  database?: string;
   changes: ModelCommitChange[];
   columns?: BackendModelColumn[];
   model: string;
@@ -370,7 +372,9 @@ export interface BackendModelLookup {
 
 /** Parameters for one custom ORM query request. */
 export interface ModelQueryRequest {
-  code: string;
+  code?: string;
+  executionId?: string;
+  resultId?: string;
   limit?: number;
   offset?: number;
 }
@@ -387,6 +391,7 @@ export interface BackendModelQueryResult {
 /** Tabulated result of a custom ORM query; shares the rows shape so the grid renders it unchanged. */
 export interface BackendModelQuery {
   app?: string;
+  database?: string;
   columns: BackendModelColumn[];
   editable: boolean;
   error?: string;
@@ -397,6 +402,8 @@ export interface BackendModelQuery {
   pk?: string;
   relations: BackendModelRelation[];
   result?: BackendModelQueryResult;
+  resultId?: string;
+  nextOffset?: number | null;
   rows: BackendModelRow[];
   sql: BackendSqlEntry[];
   stderr?: string;
@@ -415,6 +422,7 @@ export interface ModelLookupQuery {
 /** Parameters for one related-rows expansion request. */
 export interface ModelRelatedQuery {
   app: string;
+  database?: string;
   limit?: number;
   model: string;
   pk: unknown;
@@ -631,17 +639,22 @@ export function parseOrmRelatedResponse(buffer: string, limit: number, single: b
 
 /** Parses an ORM-mode commit cell marker (atomic save block): ok unless the cell raised. */
 export function parseOrmCommitResponse(buffer: string, saved: number): BackendCommitResult {
-  const parsed = parseLine<{ ok?: boolean; sql?: BackendSqlEntry[]; stderr?: string; traceback?: string }>(buffer);
+  const parsed = parseLine<{ ok?: boolean; result?: string; sql?: BackendSqlEntry[]; stderr?: string; traceback?: string }>(buffer);
   if (parsed.ok === false || (parsed.traceback && parsed.traceback.trim())) {
     return { error: ormError(parsed, "Commit failed."), ok: false, orm: "", results: [], saved: 0, sql: [] };
   }
-  return { ok: true, orm: "", results: [], saved, sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
+  const count = /^\d+$/.test(String(parsed.result)) ? Number(parsed.result) : saved;
+  return { ok: true, orm: "", results: [], saved: count, sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
 }
 
 /** Parses a backend related-rows response. */
 export function parseModelRelatedResponse(buffer: string): BackendModelRelatedRows {
   const parsed = parseLine<Partial<BackendModelRelatedRows>>(buffer);
   return {
+    app: parsed.app,
+    database: typeof parsed.database === "string" ? parsed.database : undefined,
+    model: parsed.model,
+    pk: parsed.pk,
     columns: Array.isArray(parsed.columns) ? parsed.columns : [],
     error: parsed.error,
     hasMore: Boolean(parsed.hasMore),
@@ -677,6 +690,7 @@ export function parseModelQueryResponse(buffer: string): BackendModelQuery {
   const parsed = parseLine<Partial<BackendModelQuery>>(buffer);
   return {
     app: parsed.app,
+    database: typeof parsed.database === "string" ? parsed.database : undefined,
     columns: Array.isArray(parsed.columns) ? parsed.columns : [],
     editable: Boolean(parsed.editable),
     error: parsed.error,
@@ -687,6 +701,8 @@ export function parseModelQueryResponse(buffer: string): BackendModelQuery {
     pk: parsed.pk,
     relations: Array.isArray(parsed.relations) ? parsed.relations : [],
     result: parseModelQueryResult(parsed.result),
+    resultId: typeof parsed.resultId === "string" ? parsed.resultId : undefined,
+    nextOffset: typeof parsed.nextOffset === "number" ? parsed.nextOffset : null,
     rows: Array.isArray(parsed.rows) ? parsed.rows : [],
     sql: Array.isArray(parsed.sql) ? parsed.sql : [],
     stderr: typeof parsed.stderr === "string" ? parsed.stderr : undefined,
@@ -704,6 +720,7 @@ export function parseOrmQueryResponse(buffer: string, limit: number, offset: num
   const all = Array.isArray(grid.rows) ? grid.rows : [];
   return {
     app: grid.app,
+    database: typeof grid.database === "string" ? grid.database : undefined,
     columns: grid.columns,
     editable: Boolean(grid.editable),
     hasMore: all.length > offset + limit,

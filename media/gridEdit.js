@@ -2,6 +2,9 @@
 
 import { openArrayEditor, parseEditableArray } from "./gridArrayEdit.js";
 import { openFkPicker } from "./gridFkPicker.js";
+import { temporalEditorLabel, temporalEditorValue, temporalStoredValue } from "./gridTemporalEdit.js";
+
+let nextEditorId = 0;
 
 /** Builds the editing control best suited to a column: dropdown for choices/booleans, native picker for dates, text otherwise. */
 function buildControl(column, start) {
@@ -34,8 +37,9 @@ function buildPicker(kind, type, start) {
   if (kind !== "date") {
     input.step = "1";
   }
-  input.value = normalizeTemporal(type, start);
-  return { commitOnChange: false, initial: input.value, input, selectable: false };
+  input.value = temporalEditorValue(type, start);
+  input.ariaLabel = input.title = temporalEditorLabel(type, start);
+  return { commitOnChange: false, initial: input.value, input, selectable: false, serialize: (value) => temporalStoredValue(type, start, value) };
 }
 
 /** Builds a dropdown control that commits as soon as a value is chosen. */
@@ -76,30 +80,6 @@ function booleanOptions(nullable) {
   return options;
 }
 
-/** Normalizes an ISO date/time string to the value shape a native date/time input requires. */
-function normalizeTemporal(type, raw) {
-  if (!raw) {
-    return "";
-  }
-  if (type === "DateField") {
-    return raw.slice(0, 10);
-  }
-  if (type === "TimeField") {
-    return cleanTime(raw);
-  }
-  if (type === "DateTimeField") {
-    const value = raw.replace(" ", "T");
-    const split = value.indexOf("T");
-    return split < 0 ? value : `${value.slice(0, split + 1)}${cleanTime(value.slice(split + 1))}`;
-  }
-  return raw;
-}
-
-/** Strips a trailing timezone offset and any sub-second precision from an ISO time component. */
-function cleanTime(time) {
-  return time.replace(/(?:Z|[+-]\d{2}:?\d{2})$/, "").split(".")[0];
-}
-
 /** Returns the human-facing text for a staged edit, mapping choice values back to their labels. */
 export function stagedDisplay(column, staged) {
   if (staged === "") {
@@ -118,6 +98,11 @@ export function stagedDisplay(column, staged) {
 export function createEditor(ctx) {
   // ctx: { post(msg), reload(), paintCell(td), onChange(count), notify(text) }
   const pending = new Map();
+  const editorId = `editor-${++nextEditorId}`;
+  let revision = 0;
+  let commitSequence = 0;
+  let activeCommit;
+  let finishActiveControl;
   let activeArrayEditor = null;
   let activePicker = null;
   let lookupSeq = 0;
@@ -137,10 +122,11 @@ export function createEditor(ctx) {
     const key = tr.dataset.pk;
     let entry = pending.get(key);
     if (!entry) {
-      entry = { fields: {}, pk: tr._pk };
+      entry = { fields: {}, pk: tr._pk, versions: {} };
       pending.set(key, entry);
     }
     entry.fields[td.dataset.attname] = value;
+    entry.versions[td.dataset.attname] = ++revision;
     td.dataset.staged = value;
     ctx.paintCell(td);
     ctx.onChange(pendingCount());
@@ -223,12 +209,14 @@ export function createEditor(ctx) {
         return;
       }
       settled = true;
+      if (finishActiveControl === finish) { finishActiveControl = undefined; }
       if (save && input.value !== control.initial) {
-        stage(td, input.value);
+        stage(td, control.serialize ? control.serialize(input.value) : input.value);
       } else {
         ctx.paintCell(td);
       }
     };
+    finishActiveControl = finish;
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
@@ -246,16 +234,21 @@ export function createEditor(ctx) {
 
   /** Posts all staged edits for an atomic commit (the only point that reaches the server). */
   function commitEdits() {
+    if (activeCommit) { return; }
+    finishActiveControl?.(true);
     if (!pendingCount()) {
       return;
     }
+    const snapshot = new Map([...pending].map(([key, entry]) => [key, { fields: { ...entry.fields }, pk: entry.pk, versions: { ...entry.versions } }]));
+    const commitId = `${editorId}-${++commitSequence}`;
+    activeCommit = { commitId, snapshot };
     ctx.onCommitStart?.(pendingCount());
-    ctx.post({ changes: [...pending.values()], type: "commitEdits" });
+    ctx.post({ changes: [...snapshot.values()].map(({ fields, pk }) => ({ fields, pk })), commitId, editorId, type: "commitEdits" });
   }
 
   /** Drops all staged edits and reloads the page to restore original values. */
   function discardEdits() {
-    if (!pending.size) {
+    if (!pending.size || activeCommit) {
       return;
     }
     activeArrayEditor?.cancel();
@@ -264,20 +257,31 @@ export function createEditor(ctx) {
     ctx.reload();
   }
 
-  /** Handles a commit result: clears and reloads on success, reports field errors on failure. */
-  function handleResult(result) {
-    const data = result || {};
+  /** Accepts only this editor's active commit and preserves edits made after its snapshot. */
+  function handleResult(message) {
+    if (!activeCommit || message.editorId !== editorId || message.commitId !== activeCommit.commitId) { return false; }
+    finishActiveControl?.(true);
+    const { snapshot } = activeCommit;
+    activeCommit = undefined;
+    const data = message.result || {};
     if (data.ok) {
-      activeArrayEditor?.cancel();
-      pending.clear();
-      ctx.onChange(0);
+      for (const [key, sent] of snapshot) {
+        const entry = pending.get(key);
+        if (!entry) { continue; }
+        for (const field of Object.keys(sent.fields)) {
+          if (entry.versions[field] === sent.versions[field]) { delete entry.fields[field]; delete entry.versions[field]; }
+        }
+        if (!Object.keys(entry.fields).length) { pending.delete(key); }
+      }
+      ctx.onChange(pendingCount());
       ctx.onCommitEnd?.();
-      ctx.notify(`Saved ${data.saved} changes.`);
+      ctx.notify(`Saved ${data.saved} changes.${pendingCount() ? ` ${pendingCount()} uncommitted changes remain.` : ""}`);
       ctx.reload();
-      return;
+      return true;
     }
     ctx.onCommitEnd?.();
     ctx.notify(`Commit failed: ${summarize(data)}`);
+    return true;
   }
 
   /** Builds a short human summary of commit errors. */
@@ -292,9 +296,12 @@ export function createEditor(ctx) {
   /** Clears all staged edits without reloading (used when the table is rebuilt). */
   function reset() {
     activeArrayEditor?.cancel();
+    finishActiveControl?.(false);
+    activeCommit = undefined;
     pending.clear();
     ctx.onChange(0);
+    ctx.onCommitEnd?.();
   }
 
-  return { applyStaged, commitEdits, discardEdits, editCell, handleResult, onLookup, pendingCount, reset };
+  return { applyStaged, commitEdits, discardEdits, editCell, handleResult, isCommitting: () => Boolean(activeCommit), onLookup, pendingCount, reset };
 }

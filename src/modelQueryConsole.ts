@@ -1,11 +1,13 @@
 // Single reusable webview panel that runs user-written Django ORM code and renders the result in the grid.
 
 import * as path from "path";
+import { randomUUID } from "crypto";
 import * as vscode from "vscode";
 import type { BackendTransportMode } from "./backendClient";
 import type { BackendModelColumn, BackendModelQuery, BackendModelQueryResult, ModelCommitChange, ModelRelatedQuery } from "./modelBackend";
 import type { ModelDataSource } from "./modelBrowser";
 import { modelBrowserHtml } from "./modelBrowserHtml";
+import { modelCommitResponse } from "./modelCommitResponse";
 import { DiagnosticLogger } from "./diagnostics";
 import { ModelQueryRunController, type ModelQueryRunOutcome, type ModelQueryRunSnapshot } from "./modelQueryRunController";
 import type { WorkbenchOverlay, WorkbenchOverlayGeometry } from "./workbenchOverlay";
@@ -15,6 +17,9 @@ interface IncomingMessage {
   changes?: ModelCommitChange[];
   code?: string;
   columns?: BackendModelColumn[];
+  commitId?: string;
+  database?: string;
+  editorId?: string;
   mode?: BackendTransportMode;
   model?: string;
   pageSize?: number;
@@ -50,16 +55,20 @@ export class ModelQueryConsole implements vscode.Disposable {
   private draftCode = "";
   private lastCode: string | undefined;
   private lastQueryResult: { result?: BackendModelQueryResult; source: string } | undefined;
+  private lastRows: BackendModelQuery | undefined;
+  private resultId: string | undefined;
+  private runtimeId: string | undefined;
+  private readonly executionPrefix = randomUUID();
   private readonly queryRun: ModelQueryRunController;
   private nextOffset: number | null = null;
   private pageSize = PAGE_SIZE;
-  private current: { app: string; model: string } | undefined;
+  private current: { app: string; database?: string; model: string } | undefined;
   private columns: BackendModelColumn[] = [];
 
   /** Stores the extension path and source, and initializes the query lifecycle with the live user setting. */
   constructor(private readonly extensionPath: string, private readonly source: ModelDataSource, private readonly logger?: DiagnosticLogger) {
     this.queryRun = new ModelQueryRunController({
-      interrupt: (reason) => this.source.interruptModelQuery(reason),
+      interrupt: (reason, requestId) => this.source.interruptModelQuery(reason, `${this.executionPrefix}:${requestId}`),
       onChange: (snapshot) => this.postQueryRunState(snapshot),
       timeoutMs: () => queryTimeoutMs()
     });
@@ -139,9 +148,7 @@ export class ModelQueryConsole implements vscode.Disposable {
       this.post({ code: this.draftCode, type: "queryMode" });
       this.postQueryRunState(this.queryRun.snapshot);
       this.postTransport();
-      if (this.lastCode && !this.queryRun.active) {
-        await this.runQuery(this.lastCode, true);
-      }
+      if (this.lastRows) { this.postRows(this.lastRows, true); }
     } else if (message.type === "queryEditorGeometry" && isOverlayGeometry(message.rect)) {
       if (this.panelActive) { this.updateOverlayGeometry(message.rect); }
     } else if (message.type === "showQueryOverlay") {
@@ -155,11 +162,11 @@ export class ModelQueryConsole implements vscode.Disposable {
     } else if (message.type === "interruptQuery") {
       await this.queryRun.cancel("modelQuery.cancel");
     } else if (message.type === "loadMore") {
-      if (this.lastCode && this.nextOffset !== null) {
+      if (this.resultId && this.nextOffset !== null) {
         await this.runQuery(this.lastCode, false);
       }
     } else if (message.type === "reload") {
-      if (this.lastCode) {
+      if (this.resultId) {
         await this.runQuery(this.lastCode, true);
       }
     } else if (message.type === "openConsole") {
@@ -175,21 +182,23 @@ export class ModelQueryConsole implements vscode.Disposable {
     } else if (message.type === "setTransport" && message.mode) {
       this.source.setModelTransport(message.mode);
       this.postTransport();
-      if (this.lastCode) {
-        await this.runQuery(this.lastCode, true);
-      }
     }
   }
 
   /** Runs the user's ORM code through the lifecycle controller and applies only the current successful result. */
-  private async runQuery(code: string, reset: boolean, recordExecution = false): Promise<boolean> {
+  private async runQuery(code: string | undefined, reset: boolean, recordExecution = false): Promise<boolean> {
     const panel = this.panel;
     if (!panel || this.queryRun.active) {
       return false;
     }
-    if (recordExecution) { this.draftCode = code; this.lastCode = code; }
+    if (recordExecution) {
+      this.draftCode = code ?? ""; this.lastCode = code;
+      this.invalidateResult();
+      this.runtimeId = this.source.modelRuntimeId?.();
+    } else if (!this.resultId) { return false; }
     const offset = reset ? 0 : this.nextOffset ?? 0;
-    const pending = this.queryRun.run(() => this.source.modelQuery({ code, limit: this.pageSize, offset }));
+    const request = recordExecution ? { code } : { resultId: this.resultId };
+    const pending = this.queryRun.run((requestId) => this.source.modelQuery({ ...request, executionId: `${this.executionPrefix}:${requestId}`, limit: this.pageSize, offset }));
     if (!this.queryRun.active) {
       return false;
     }
@@ -211,16 +220,31 @@ export class ModelQueryConsole implements vscode.Disposable {
       this.post({ message: result.error ?? "Query failed.", type: "error" });
       return true;
     }
-    this.nextOffset = result.hasMore ? offset + this.pageSize : null;
-    this.current = result.app && result.model ? { app: result.app, model: result.model } : undefined;
+    this.resultId = result.resultId;
+    this.nextOffset = result.hasMore ? result.nextOffset ?? offset + result.rows.length : null;
+    this.current = result.editable && result.app && result.model ? { app: result.app, database: result.database, model: result.model } : undefined;
     this.columns = Array.isArray(result.columns) ? result.columns : [];
-    if (reset) { this.lastQueryResult = { result: result.result, source: code }; this.overlay?.setQueryResult(result.result, code); }
+    this.lastRows = !reset && this.lastRows ? { ...result, rows: [...this.lastRows.rows, ...result.rows] } : result;
+    if (reset) { this.lastQueryResult = { result: result.result, source: this.lastCode ?? "" }; this.overlay?.setQueryResult(result.result, this.lastCode ?? ""); }
+    this.postRows(result, reset);
+    return true;
+  }
+
+  /** Restores already evaluated rows without executing the query source again. */
+  private postRows(result: BackendModelQuery, reset: boolean): void {
+    if (!result.editable) { result = { ...result, columns: result.columns.map((column) => ({ ...column, editable: false })) }; }
     if (reset) {
       const resultLabel = result.result ? `${result.result.label} result${result.result.expression ? ` · ${result.result.expression}` : ""}` : "ORM Query";
       this.post({ schema: { app: result.app ?? "", columns: result.columns, label: resultLabel, model: result.model ?? "query", ok: true, pk: result.pk ?? "", relations: result.relations, table: "" }, type: "schema" });
     }
     this.post({ append: !reset, rows: result, type: "rows" });
-    return true;
+  }
+
+  /** Removes editor targets and result handles when explicit execution or runtime replacement invalidates them. */
+  private invalidateResult(): void {
+    this.current = undefined; this.columns = []; this.resultId = undefined;
+    this.nextOffset = null; this.lastRows = undefined; this.lastQueryResult = undefined;
+    this.post({ type: "queryInvalidated" });
   }
 
   /** Runs the complete query overlay document, preserving query-console whole-buffer semantics. */
@@ -426,22 +450,16 @@ export class ModelQueryConsole implements vscode.Disposable {
 
   /** Commits staged edits against the last query's editable model (reuses the model-browser commit). */
   private async commitEdits(message: IncomingMessage): Promise<void> {
-    if (!this.current || !Array.isArray(message.changes) || !message.changes.length) {
-      return;
-    }
-    const result = await this.source.modelCommit({ app: this.current.app, changes: message.changes, columns: this.columns, model: this.current.model });
-    this.logger?.log("model.query.commit", { model: `${this.current.app}.${this.current.model}`, ok: result.ok, saved: result.saved });
-    this.post({ result, type: "commit" });
+    const panel = this.panel;
+    const response = await modelCommitResponse({ ...message, app: this.current?.app, database: this.current?.database, model: this.current?.model }, this.columns, (query) => this.source.modelCommit(query));
+    if (panel === this.panel) { this.post(response); }
   }
 
   /** Commits staged edits made inside an expanded related table against that related model. */
   private async commitRelated(message: IncomingMessage): Promise<void> {
-    if (!message.app || !message.model || !Array.isArray(message.changes) || !message.changes.length) {
-      return;
-    }
-    const result = await this.source.modelCommit({ app: message.app, changes: message.changes, columns: Array.isArray(message.columns) ? message.columns : [], model: message.model });
-    this.logger?.log("model.query.commit.related", { model: `${message.app}.${message.model}`, ok: result.ok, saved: result.saved });
-    this.post({ result, type: "commit" });
+    const panel = this.panel;
+    const response = await modelCommitResponse(message, Array.isArray(message.columns) ? message.columns : [], (query) => this.source.modelCommit(query));
+    if (panel === this.panel) { this.post(response); }
   }
 
   /** Fetches related rows for one result row (forward FK or reverse FK / M2M) and returns them. */
@@ -449,25 +467,20 @@ export class ModelQueryConsole implements vscode.Disposable {
     if (!this.current || !message.relation || message.pk === undefined) {
       return;
     }
-    const query: ModelRelatedQuery = { app: this.current.app, limit: this.pageSize, model: this.current.model, pk: message.pk, relation: message.relation, single: message.single, value: message.value };
+    const query: ModelRelatedQuery = { app: this.current.app, database: this.current.database, limit: this.pageSize, model: this.current.model, pk: message.pk, relation: message.relation, single: message.single, value: message.value };
     const result = await this.source.modelRelated(query);
     this.post({ requestId: message.requestId, result, type: "related" });
   }
 
-  /** Re-runs the last query when the attached runtime changes. */
+  /** Invalidates a replaced backend without replaying arbitrary query code on namespace notifications. */
   private handleRuntimeChange(): void {
     if (this.overlay) { void this.updateOverlayPrelude(this.overlay); }
-    this.nextOffset = null;
-    const rerun = (): void => {
-      if (this.panel && this.panelReady && this.lastCode && !this.queryRun.active) {
-        void this.runQuery(this.lastCode, true);
-      }
-    };
-    if (this.queryRun.active) {
-      void this.queryRun.cancel("modelQuery.cancel").then(rerun);
-      return;
-    }
-    rerun();
+    if (!this.source.modelRuntimeId) { return; }
+    const runtimeId = this.source.modelRuntimeId();
+    if (runtimeId === this.runtimeId) { return; }
+    this.runtimeId = runtimeId;
+    void this.queryRun.cancel("modelQuery.cancel");
+    this.invalidateResult();
   }
 
   /** Posts the active transport and the user's transport preference to the webview. */

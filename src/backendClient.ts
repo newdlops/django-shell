@@ -1,13 +1,16 @@
 // Socket client for executing Python code through the in-process Django shell backend.
 
 import * as net from "net";
+import { randomUUID } from "crypto";
+import { AsyncLocalStorage } from "async_hooks";
+import { BackendSocketFailure } from "./backendSocketFailure";
 import { BackendEndpoint } from "./backendBootstrap";
 import { hotReloadTransportError, parseHotReloadResponse, type BackendHotReloadResult } from "./backendHotReloadProtocol";
 import { recipeAggregateValidationFailure, recipeCountValidationFailure, recipeRowsValidationFailure, withRecipeResult } from "./backendClientRecipeResults";
 import { DiagnosticLogger } from "./diagnostics";
 import type { ModelQueryRecipeV2 } from "./modelQueryRecipe";
 import { ModelQueryMetadataIndex } from "./modelQueryRecipeMetadata";
-import { buildRecipeCountOrm, buildRecipeRowsOrm, buildRecipeSummaryOrm } from "./modelQueryRecipeOrm";
+import { buildRecipeComputedOrm, buildRecipeCountOrm, buildRecipeRowsOrm, buildRecipeSummaryOrm } from "./modelQueryRecipeOrm";
 import {
   BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder,
   BackendModelQuery, BackendModelRelatedRows, BackendModelRelation, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange, ModelCommitQuery,
@@ -32,6 +35,7 @@ const TCP_CONNECT_TIMEOUT_MS = 1500;
 const TCP_RETRY_COOLDOWN_MS = 15000;
 const PARALLEL_READ_RESPONSE_TIMEOUT_MS = 6000;
 const HOT_RELOAD_RESPONSE_TIMEOUT_MS = 15000;
+const INTERRUPT_RESPONSE_TIMEOUT_MS = 4000;
 // Max length of a reconstructed ORM cell we'll TYPE into the shell. A literal cell is written as one line, and a tty
 // input queue (MAX_INPUT, ~1KB on macOS) silently drops bytes past it → the cell arrives truncated, IPython sits at a
 // continuation prompt, and the serialized PTY queue hangs. Reads whose cell exceeds this fall back to the socket/`_djs_rpc`
@@ -207,6 +211,9 @@ export interface BackendRequestPayload {
   cursor?: unknown;
   data?: string;
   digest?: string;
+  database?: string;
+  executionId?: string;
+  resultId?: string;
   expectedVersion?: string;
   exclude?: string[];
   filename?: string;
@@ -235,7 +242,7 @@ export interface BackendRequestPayload {
   value?: unknown;
 }
 
-export type BackendFallbackTransport = (payload: BackendRequestPayload) => Promise<string>;
+export type BackendFallbackTransport = (payload: BackendRequestPayload, signal?: AbortSignal) => Promise<string>;
 export type BackendTransport = "none" | "pty" | "tcp";
 // "orm": model-browser reads run as the user's literal ORM cells (audit-friendly); other kinds behave like "auto".
 // "pty": forces the terminal and likewise reconstructs reads as ORM cells (no `_djs_rpc`); metadata kinds suppressed.
@@ -243,13 +250,15 @@ export type BackendTransportMode = "auto" | "orm" | "pty" | "tcp";
 
 /** Sends execution requests to the backend running inside the Django shell process. */
 export class BackendClient {
+  readonly runtimeId = randomUUID();
+  private readonly queryRequests = new Map<string, AbortController>();
   private activeTransport: BackendTransport = "none";
   private featureLoader: (() => Promise<void>) | undefined;
   private featureReady: Promise<void> | undefined;
   private forwardedEndpoint: { host: string; port: number } | undefined;
   private modelList: BackendModelList | undefined; private modelListInFlight: Promise<BackendModelList> | undefined;
   private modelListInFlightRefresh = false; private modelRefreshInFlight: Promise<BackendModelList> | undefined;
-  private parallelModelReads = false;
+  private readonly parallelReadContext = new AsyncLocalStorage<boolean>();
   private remoteSocketUnavailable = false;
   private tcpFailedAt = 0;
   private mode: BackendTransportMode = "orm";
@@ -286,14 +295,11 @@ export class BackendClient {
 
   /** Runs model-browser reads through the socket while a Python cell owns the terminal stream. */
   async withParallelModelReads<T>(enabled: boolean, task: () => Promise<T>): Promise<T> {
-    const previous = this.parallelModelReads;
-    this.parallelModelReads = enabled || previous;
-    try {
-      return await task();
-    } finally {
-      this.parallelModelReads = previous;
-    }
+    return this.parallelReadContext.run(enabled || this.parallelModelReads, task);
   }
+
+  /** Returns the parallel-read policy of this asynchronous request rather than a shared mutable flag. */
+  private get parallelModelReads(): boolean { return this.parallelReadContext.getStore() ?? false; }
 
   /** Marks the loopback socket unreachable so requests skip it and use the PTY — e.g. a remote SSH/kubectl shell whose 127.0.0.1 is the pod's, not ours. */
   markSocketUnavailable(): void {
@@ -313,7 +319,7 @@ export class BackendClient {
   }
 
   /** Returns whether reads reconstruct as readable ORM cells (ORM + Terminal modes) instead of `_djs_rpc` plumbing. */
-  private get reconstructsViaOrmCell(): boolean { return this.mode === "pty" || (this.mode === "orm" && !this.parallelModelReads); }
+  private get reconstructsViaOrmCell(): boolean { return (this.mode === "pty" || this.mode === "orm") && !this.parallelModelReads; }
 
   /** Returns whether runtime-tree metadata truly needs the interactive shell because no local socket path is available or Terminal mode was explicitly selected. */
   private get reconstructsRuntimeInspectionViaOrmCell(): boolean { return this.mode === "pty" || (this.mode === "orm" && this.socketUnavailable); }
@@ -448,10 +454,12 @@ export class BackendClient {
   }
 
   /** Interrupts the current user execution over TCP without queueing behind the terminal fallback. */
-  interrupt(reason?: string): Promise<BackendInterruptResult> {
+  interrupt(reason?: string, executionId?: string): Promise<BackendInterruptResult> {
     const started = Date.now();
-    const payload = { kind: "interrupt", reason };
-    return this.socketRequest(payload).then(
+    if (executionId) { this.queryRequests.get(executionId)?.abort(); }
+    if (reason?.startsWith("modelQuery.") && !executionId) { return Promise.resolve({ error: "Query cancellation requires its execution identifier.", interrupted: false, ok: false, reason }); }
+    const payload = { executionId, kind: "interrupt", reason };
+    return this.socketRequest(payload, INTERRUPT_RESPONSE_TIMEOUT_MS).then(
       (buffer) => {
         const parsed = parseInterruptResponse(buffer);
         this.activeTransport = "tcp";
@@ -583,7 +591,7 @@ export class BackendClient {
     if (this.reconstructsViaOrmCell) {
       const single = typeof query.single === "boolean" ? query.single : query.value !== undefined && query.value !== null;
       const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
-      return this.ormCell(buildRelatedOrm(query.app, query.model, query.pk, query.relation, limit), (buffer) => parseOrmRelatedResponse(buffer, limit, single));
+      return this.ormCell(buildRelatedOrm(query.app, query.model, query.pk, query.relation, limit, query.database), (buffer) => ({ ...parseOrmRelatedResponse(buffer, limit, single), database: query.database }));
     }
     return this.request({ ...query, kind: "related" }, parseModelRelatedResponse);
   }
@@ -603,8 +611,11 @@ export class BackendClient {
     await this.ensureModelBrowserFeature();
     const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 50;
     if (query.recipe) {
-      // Phase 2 has rows/count/summary ORM facades; a property fetch needs the Recipe-aware Python implementation.
-      // `request` uses the healthy socket in ORM mode and otherwise returns the normal bounded transport error, never a legacy broad query.
+      if (this.reconstructsViaOrmCell) {
+        const compiled = buildRecipeComputedOrm(query.recipe, query.field, this.recipeOrmContext(query, limit));
+        if (!compiled.validation.ok || !compiled.cell) { return { error: compiled.validation.issues.find((issue) => issue.severity === "error")?.message, ok: false, values: {} }; }
+        return this.ormCell(compiled.cell, parseOrmComputedResponse);
+      }
       const { recipeMetadata: _recipeMetadata, ...wireQuery } = query;
       return this.request({ ...wireQuery, kind: "computed", limit }, parseModelComputedResponse);
     }
@@ -617,11 +628,15 @@ export class BackendClient {
 
   /** Evaluates user-written ORM code and returns its tabulated result for the grid. */
   async modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery> {
-    await this.ensureModelBrowserFeature();
-    // Unlike model reads, a user query must always use the backend request channel. A literal terminal cell depends on
-    // an IPython post-execute marker and cannot be interrupted by the backend while that marker is missing; routing it
-    // through `query` keeps Run/Interrupt/timeout lifecycle ownership in one observable execution thread.
-    return this.request({ ...query, kind: "query" }, parseModelQueryResponse);
+    const executionId = query.executionId ?? randomUUID();
+    if (this.queryRequests.has(executionId)) { throw new Error("This query execution is already pending."); }
+    const controller = new AbortController();
+    this.queryRequests.set(executionId, controller);
+    try {
+      await this.ensureModelBrowserFeature();
+      if (controller.signal.aborted) { throw new Error("Query cancelled before execution."); }
+      return await this.request({ ...query, executionId, kind: "query" }, parseModelQueryResponse);
+    } finally { this.queryRequests.delete(executionId); }
   }
 
   /** Returns the row count for the current filter set, computed on demand. */
@@ -663,7 +678,8 @@ export class BackendClient {
   /** Applies staged cell edits in one atomic transaction and returns per-row results. */
   async modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult> {
     await this.ensureModelBrowserFeature();
-    if (this.reconstructsViaOrmCell && Array.isArray(query.changes) && query.changes.length) { return this.ormCell(buildCommitOrm(query.app, query.model, query.changes, query.columns), (buffer) => parseOrmCommitResponse(buffer, query.changes.length)); }
+    if (query.changes.some((change) => typeof change.pk === "number" && Number.isInteger(change.pk) && !Number.isSafeInteger(change.pk))) { throw new Error("An imprecise integer primary key cannot be saved. Reload the rows before editing."); }
+    if (this.reconstructsViaOrmCell && Array.isArray(query.changes) && query.changes.length) { return this.ormCell(buildCommitOrm(query.app, query.model, query.changes, query.columns, query.database), (buffer) => parseOrmCommitResponse(buffer, query.changes.length)); }
     return this.request({ ...query, kind: "commit" }, parseModelCommitResponse);
   }
 
@@ -694,6 +710,13 @@ export class BackendClient {
         return parsed;
       },
       (error: unknown) => {
+        if (error instanceof BackendSocketFailure && error.submitted) {
+          this.activeTransport = "none";
+          this.tcpFailedAt = Date.now();
+          const message = `The request was sent, but its result could not be confirmed. It was not retried. Check the result before running it again. ${error.message}`;
+          if (log) { this.logRequest(payload.kind, started, undefined, 0, message, "tcp"); }
+          return parse(kindErrorResponse(payload.kind, message));
+        }
         if (this.mode === "tcp" && !this.fallback) {
           // Socket forced but unreachable and no terminal fallback exists: report the failure.
           this.activeTransport = "none";
@@ -724,6 +747,7 @@ export class BackendClient {
       const socket = net.createConnection({ host, port: this.forwardedEndpoint?.port ?? this.endpoint.port });
       let buffer = "";
       let settled = false;
+      let submitted = false;
       let responseTimer: ReturnType<typeof setTimeout> | undefined;
       const connectTimer = setTimeout(() => {
         fail(new Error(`Timed out connecting to Django shell backend after ${TCP_CONNECT_TIMEOUT_MS}ms.`));
@@ -737,7 +761,11 @@ export class BackendClient {
             fail(new Error(`Django shell backend did not answer within ${responseTimeoutMs}ms while handling ${payload.kind}.`));
           }, responseTimeoutMs);
         }
-        socket.write(`${JSON.stringify({ ...payload, token: this.endpoint.token })}\n`);
+        try {
+          const wire = `${JSON.stringify({ ...payload, token: this.endpoint.token })}\n`;
+          submitted = true;
+          socket.write(wire);
+        } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }
       });
       socket.on("data", (chunk) => {
         buffer += chunk;
@@ -763,7 +791,7 @@ export class BackendClient {
         clearTimeout(connectTimer);
         clearTimeout(responseTimer);
         socket.destroy();
-        reject(error);
+        reject(new BackendSocketFailure(error.message, submitted));
       }
 
       /** Resolves the socket request once and closes the socket. */
@@ -815,7 +843,9 @@ export class BackendClient {
       return parsed;
     }
     const fallbackStarted = Date.now();
-    const buffer = await this.fallback(ptyFallbackPayload(payload));
+    const signal = payload.kind === "query" && payload.executionId ? this.queryRequests.get(payload.executionId)?.signal : undefined;
+    if (signal?.aborted) { throw new Error("Query cancelled before execution."); }
+    const buffer = await this.fallback(ptyFallbackPayload(payload), signal);
     const parsed = parse(buffer);
     this.activeTransport = "pty";
     if (log) {

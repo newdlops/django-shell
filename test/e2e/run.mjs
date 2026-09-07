@@ -28,6 +28,8 @@ async function main() {
   const manifest = JSON.parse(fs.readFileSync(path.join(extensionPath, "package.json"), "utf8"));
   fs.mkdirSync(path.join(workspace, ".vscode"), { recursive: true });
   fs.writeFileSync(path.join(workspace, ".vscode", "settings.json"), JSON.stringify({
+    "extensions.autoCheckUpdates": false,
+    "extensions.autoUpdate": false,
     "djangoOrmIntellisense.autoStart": false,
     "djangoOrmIntellisense.diagnostics.enabled": false,
     "djangoOrmIntellisense.logLevel": "debug",
@@ -45,7 +47,7 @@ async function main() {
     extensionDevelopmentPath: modelBrowserOnly ? extensionPath : [extensionPath, nativeProviderFixturePath],
     extensionTestsEnv: { DJANGO_SHELL_E2E: "1", DJANGO_SHELL_E2E_EXTENSION_ID: `${manifest.publisher}.${manifest.name}`, ...(process.env.DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY === "1" ? { DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_HOVER_ONLY === "1" ? { DJANGO_SHELL_E2E_HOVER_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY === "1" ? { DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_THEME_ONLY === "1" ? { DJANGO_SHELL_E2E_THEME_ONLY: "1" } : {}), ...(python ? { DJANGO_SHELL_E2E_PYTHON: python } : {}), ...(testShell ? { SHELL: testShell } : {}) },
     extensionTestsPath: path.join(ROOT, "test", "e2e", "suite", "index.js"),
-    launchArgs: [...(inspectorPort ? [`--inspect=${inspectorPort}`] : []), "--force-disable-user-env", `--user-data-dir=${userData}`, workspace],
+    launchArgs: [...(inspectorPort ? [`--inspect=${inspectorPort}`] : []), "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--force-disable-user-env", `--user-data-dir=${userData}`, `--extensions-dir=${path.join(ROOT, ".vscode-test", "extensions")}`, workspace],
     reuseMachineInstall: Boolean(process.env.VSCODE_E2E_EXECUTABLE),
     vscodeExecutablePath: vscodeExecutablePath()
   });

@@ -1,0 +1,85 @@
+# Retains bounded query result handles so paging and refresh never re-execute submitted Python code.
+from collections import OrderedDict as _QueryOrderedDict
+
+_QUERY_RESULTS = _QueryOrderedDict()
+_QUERY_RESULT_LIMIT = 8
+_QUERY_RESULT_TTL = 1800
+_QUERY_PAGE_LIMIT = 2000
+_QUERY_STREAM_PAGES = 8
+
+
+def _query_remember_result(namespace, value, code, expression):
+    """Retains the evaluated result and its database provenance under a fresh backend-local handle."""
+    import uuid
+    from django.db.models import Model, QuerySet
+
+    now = time.monotonic()
+    for key, record in list(_QUERY_RESULTS.items()):
+        if now - record["updated"] > _QUERY_RESULT_TTL:
+            del _QUERY_RESULTS[key]
+    result_id = uuid.uuid4().hex
+    record = {"namespace": namespace, "value": value, "result": _browse_query_result(value, code, expression), "updated": now, "pages": _QueryOrderedDict()}
+    if isinstance(value, QuerySet):
+        record["database"] = value._db
+        record["value"] = value.using(value.db)
+    elif isinstance(value, Model):
+        record["database"] = value._state.db
+    elif isinstance(value, (list, tuple)) and value and all(isinstance(item, Model) for item in value):
+        targets = {(type(item), item._state.db) for item in value}
+        record["readonly"] = len(targets) != 1 or next(iter(targets))[1] is None
+    elif not isinstance(value, (str, bytes, list, tuple)) and hasattr(value, "__iter__"):
+        record.update({"iterator": iter(value), "lookahead": [], "position": 0})
+    _QUERY_RESULTS[result_id] = record
+    while len(_QUERY_RESULTS) > _QUERY_RESULT_LIMIT:
+        _QUERY_RESULTS.popitem(last=False)
+    return result_id
+
+
+def _query_result_page(namespace, result_id, offset, limit, refresh=False):
+    """Returns another page of one retained result or fails without executing the original code."""
+    from django.db.models import Model
+
+    record = _QUERY_RESULTS.get(result_id) if isinstance(result_id, str) else None
+    if record is None or record["namespace"] is not namespace or time.monotonic() - record["updated"] > _QUERY_RESULT_TTL:
+        _QUERY_RESULTS.pop(result_id, None) if isinstance(result_id, str) else None
+        raise ValueError("This query result is no longer available. Use Run to execute the query again.")
+    record["updated"] = time.monotonic()
+    _QUERY_RESULTS.move_to_end(result_id)
+    if "iterator" in record:
+        payload = _query_stream_page(record, offset, limit)
+        record["readonly"] = True
+    else:
+        value = record["value"]
+        if refresh and isinstance(value, Model) and value._state.db and not value._state.adding:
+            value.refresh_from_db(using=value._state.db)
+        elif refresh and isinstance(value, (list, tuple)) and not record.get("readonly"):
+            for item in value[offset:offset + limit + 1]:
+                if isinstance(item, Model) and item._state.db and not item._state.adding:
+                    item.refresh_from_db(using=item._state.db)
+        payload = _browse_tabulate(value, offset, limit)
+    if "database" in record:
+        payload["database"] = record["database"]
+    if record.get("readonly"):
+        payload["editable"] = False
+        payload["columns"] = [dict(column, editable=False) for column in payload.get("columns", [])]
+    return dict(payload, result=record["result"], resultId=result_id, nextOffset=offset + len(payload.get("rows", [])) if payload.get("hasMore") else None)
+
+
+def _query_stream_page(record, offset, limit):
+    """Advances one iterator once and retains a bounded set of already serialized pages for refresh."""
+    import itertools
+
+    pages = record["pages"]
+    if offset in pages:
+        return dict(pages[offset])
+    if offset != record["position"]:
+        raise ValueError("This iterator page is no longer retained. Use Run to start a new query result.")
+    source = itertools.chain(record["lookahead"], record["iterator"])
+    items = list(itertools.islice(source, limit + 1))
+    record["lookahead"] = items[limit:]
+    record["position"] += min(limit, len(items))
+    payload = _browse_tabulate_items(items, limit)
+    pages[offset] = payload
+    while len(pages) > _QUERY_STREAM_PAGES:
+        pages.popitem(last=False)
+    return dict(payload)

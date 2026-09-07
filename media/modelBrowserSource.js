@@ -11,6 +11,8 @@ import { createGridViewport, DOM_CELL_BUDGET, logicalColumns } from "./gridViewp
 import { installGridKeyboard } from "./gridKeyboard.js";
 import { reportGridRender } from "./gridDiagnostics.js";
 import { createGridHeaderRenderer } from "./gridRenderer.js";
+import { createPropertyValues, propertyLoadAction } from "./gridPropertyValues.js";
+import { runModelStabilityE2eProbe } from "./modelStabilityE2eProbe.js";
 import { installLogDrawer, toggleLogPanel } from "./modelBrowserLogDrawer.js";
 import { codicon } from "./modelBrowserIcons.js";
 import { createQueryRunUi } from "./queryRunUi.js";
@@ -71,13 +73,14 @@ let relRequestId = 0; let progressLabel = ""; let progressStartedAt = 0; let pro
 let gridSnapshot; let gridViewport;
 let detailTrigger;
 let commitInFlight = false;
+let relatedTable;
 const editor = createEditor({
   post: (message) => vscode.postMessage(message),
   reload: () => send({ type: "reload" }),
   paintCell: (td) => paintCell(td),
   onChange: (count) => updateEditButtons(count),
   onCommitEnd: () => { commitInFlight = false; setCommitBlocked(false); updateEditButtons(editor.pendingCount()); },
-  onCommitStart: (count) => { commitInFlight = true; setCommitBlocked(true); els.status.textContent = `Committing ${count} changes…`; announcer.announceStatus(`Committing ${count} changes…`); },
+  onCommitStart: (count) => { commitInFlight = true; setCommitBlocked(true); updateEditButtons(count); els.status.textContent = `Committing ${count} changes…`; announcer.announceStatus(`Committing ${count} changes…`); },
   notify: (text) => { els.status.textContent = text; }
 });
 const virtual = createVirtualRows({
@@ -96,6 +99,12 @@ gridViewport = createGridViewport({
   widths: () => state.widths
 });
 const queryRunUi = createQueryRunUi({ announcer, post: (message) => vscode.postMessage(message), status: els.status });
+const propertyValues = createPropertyValues({
+  onChange: refreshPropertyValues,
+  onError: (message) => { els.status.textContent = message; announcer.announceError(message); },
+  onSuccess: reportPropertyValues,
+  post: (message) => vscode.postMessage(message), state
+});
 const gridHeader = createGridHeaderRenderer({ el, relationKindLabel, relationModelName, state });
 window.addEventListener("message", (event) => handleMessage(event.data));
 els.reload.addEventListener("click", () => send({ type: "reload" }));
@@ -127,7 +136,8 @@ function handleMessage(message) {
     return;
   }
   if (message.type === "e2eQueryBuilderProbe") {
-    void runModelQueryBuilderE2eProbe({ document, postMessage: (value) => vscode.postMessage(value), requestId: message.requestId }).catch(() => vscode.postMessage({ requestId: message.requestId, snapshot: { error: "Query Builder E2E probe bootstrap failed." }, type: "e2eQueryBuilderProbeResult" }));
+    const probe = message.suite === "stability" ? runModelStabilityE2eProbe : runModelQueryBuilderE2eProbe;
+    void probe({ document, postMessage: (value) => vscode.postMessage(value), requestId: message.requestId }).catch(() => vscode.postMessage({ requestId: message.requestId, snapshot: { error: "Model Browser E2E probe bootstrap failed." }, type: "e2eQueryBuilderProbeResult" }));
     return;
   }
   if (queryController.onMessage(message)) {
@@ -146,12 +156,13 @@ function handleMessage(message) {
   } else if (message.type === "filterFields") {
     // Recipe metadata editor requests are introduced by the next builder phase.
   } else if (message.type === "computed") {
-    onComputed(message);
+    propertyValues.accept(message);
   } else if (message.type === "count") {
     onQueryCount(message, queryController.getSnapshot());
   } else if (message.type === "commit") {
-    logSql(`commit ${state.model}`, message.result && message.result.sql, message.result && message.result.orm);
-    editor.handleResult(message.result);
+    if (editor.handleResult(message) || relatedTable?.handleCommit(message)) {
+      logSql(`commit ${message.model || state.model}`, message.result && message.result.sql, message.result && message.result.orm);
+    }
   } else if (message.type === "transport") {
     els.transport.value = message.mode || "auto";
     els.transportInfo.innerHTML = message.mode === "orm" ? '<span class="pty">● ORM cell</span>' : message.active === "tcp" ? '<span class="on">● socket</span>' : message.active === "pty" ? '<span class="pty">● terminal</span>' : '<span class="off">○ not connected</span>';
@@ -164,6 +175,12 @@ function handleMessage(message) {
     setQueryDraft(message.code);
   } else if (message.type === "queryStarted") {
     queryRunUi.render({ startedAt: Date.now(), state: "running" });
+  } else if (message.type === "queryInvalidated") {
+    closeOpenDetail();
+    editor.reset();
+    state.hasMore = false;
+    els.more.disabled = true;
+    onSchema({ columns: [], model: "query", ok: true, relations: [] });
   } else if (message.type === "queryRunState") {
     queryRunUi.render(message.snapshot || { state: "idle" });
   } else if (message.type === "overlayRunPython") {
@@ -214,8 +231,7 @@ function onSchema(schema) {
     state.order = [];
     state.sortPending = false;
     state.pinned = new Set();
-    state.computed = {};
-    state.computedActive = new Set();
+    propertyValues.reset();
     // A different model has a different column coordinate system. Starting it at the prior model's horizontal
     // offset can place the row-number gutter at the far edge and initially expose only reverse relations.
     els.gridwrap.scrollLeft = 0;
@@ -266,7 +282,7 @@ function updateEditButtons(count) {
 }
 /** Disables actions that could race an atomic staged-edit commit, preserving their prior disabled state. */
 function setCommitBlocked(blocked) {
-  for (const control of [els.reload, els.more, els.pageSize, els.count, els.transport, document.getElementById("queryApply"), document.getElementById("queryDrawerApply")]) {
+  for (const control of [els.reload, els.more, els.pageSize, els.count, els.transport, document.getElementById("runQuery"), document.getElementById("queryApply"), document.getElementById("queryDrawerApply")]) {
     if (!control) { continue; }
     if (blocked) {
       control.dataset.commitDisabled = control.disabled ? "preserve" : "restore";
@@ -343,11 +359,7 @@ function onRows(message, snapshot) {
   }
   updateSortIndicators();
   state.rowCount = virtual.setRows(rows.rows || [], Boolean(message.append));
-  if (message.append) {
-    for (const field of state.computedActive) {
-      vscode.postMessage({ type: "loadComputed", field });
-    }
-  }
+  propertyValues.rowsChanged(message);
   state.hasMore = Boolean(rows.hasMore);
   els.more.disabled = !state.hasMore;
   const loaded = state.rowCount ? `${state.rowCount} row${state.rowCount === 1 ? "" : "s"} loaded${state.hasMore ? " · more available" : ""}` : "No rows.";
@@ -358,6 +370,7 @@ function onRows(message, snapshot) {
   } else {
     els.status.textContent = loaded;
   }
+  if (editor.pendingCount()) { updateEditButtons(editor.pendingCount()); }
   if (completedSort) {
     announcer.announceStatus(state.order.length ? `Rows sorted by ${state.order.map((term) => `${term.field} ${term.desc ? "descending" : "ascending"}`).join(", then ")}.` : "Rows restored to primary-key ascending order.");
   }
@@ -482,12 +495,15 @@ function paintComputedCell(td, column, pk) {
     td._cell = store[key];
     td.appendChild(renderValue(store[key]));
     td.title = "Computed @property (read-only)";
-  } else if (state.computedActive.has(column.attname)) {
+  } else if (state.computedErrors[column.attname]) {
+    td.appendChild(el("span", { className: "cellnull" }, "Error"));
+    td.title = `${state.computedErrors[column.attname]} Use Retry in the header.`;
+  } else if (state.computedPending.has(column.attname)) {
     td.appendChild(el("span", { className: "cellnull" }, "…"));
     td.title = "Loading @property…";
   } else {
-    td.appendChild(el("span", { className: "cellnull" }, "·"));
-    td.title = "Computed @property — use Load in the header (lazy)";
+    td.appendChild(el("span", { className: "cellnull" }, state.computedActive.has(column.attname) ? "Unavailable" : "·"));
+    td.title = "Computed @property — use Load or Reload in the header";
   }
 }
 function paintCell(td) {
@@ -566,7 +582,7 @@ function onTableClick(event) {
     togglePin(data.col, node, state, els.gridwrap);
     gridViewport.refresh(true);
   } else if (data.act === "loadComputed") {
-    toggleComputed(data.field, node);
+    propertyValues.load(data.field);
   } else if (data.act === "sort") {
     toggleSort(data.col);
   } else if (data.act === "open") {
@@ -599,35 +615,22 @@ function toggleSort(col) {
   setGridSortPending(true);
   updateSortIndicators();
 }
-/** Activates (loads) or deactivates a lazy @property column, updating its header button in place and repainting cells. */
-function toggleComputed(field, button) {
-  const active = !state.computedActive.has(field);
-  if (active) {
-    state.computedActive.add(field);
-    vscode.postMessage({ type: "loadComputed", field });
-  } else {
-    state.computedActive.delete(field);
-    delete state.computed[field];
-  }
-  if (button) {
+/** Repaints property cells and keeps their header actions consistent without moving focus. */
+function refreshPropertyValues() {
+  for (const button of els.gridwrap.querySelectorAll("button.loadbtn")) {
+    const field = button.dataset.field;
+    const active = state.computedActive.has(field);
+    const action = propertyLoadAction(state, field);
+    button.disabled = state.computedPending.has(field);
+    button.ariaLabel = `${action} ${field} computed values`;
     button.classList.toggle("active", active);
     button.replaceChildren(codicon(active ? "refresh" : "triangle-right"));
-    button.title = active ? "Reload computed values for loaded rows" : "Load this @property for loaded rows (lazy — not auto-computed)";
+    button.title = `${action} this @property for loaded rows`;
   }
   virtual.refresh();
 }
-/** Stores a fetched @property column's values (pk→cell) and repaints, ignoring late responses for a since-deactivated column. */
-function onComputed(message) {
-  stopProgress();
-  if (!state.computedActive.has(message.field)) {
-    return;
-  }
-  if (!message.ok) {
-    els.status.textContent = `Could not compute ${message.field}: ${message.error ? String(message.error).split("\n").pop() : "failed"}`;
-    return;
-  }
-  state.computed[message.field] = message.values || {};
-  virtual.refresh();
+/** Reports the measured cost of a completed property read in the existing status strip. */
+function reportPropertyValues(message) {
   if (typeof message.queryCount === "number") {
     const rows = typeof message.rowCount === "number" ? message.rowCount : Object.keys(message.values || {}).length;
     const shape = message.queryCount > rows ? " · N+1 (per-row property queries)" : message.queryCount <= 2 ? " · batched" : "";
@@ -738,9 +741,10 @@ function expandInto(button, request) {
     return;
   }
   const body = el("div", { className: "nestedscroll" }, "Loading…");
+  relatedTable = undefined;
   els.detailDrawer.hidden = false; els.detailContent.replaceChildren(nestedPanel(request.relation, button, body));
   const requestId = (relRequestId += 1);
-  pendingRelated.set(requestId, { body, label: request.relation });
+  pendingRelated.set(requestId, { body, label: request.relation, request });
   button.dataset.open = "1";
   detailTrigger = button;
   vscode.postMessage({ type: "expandRelated", requestId, relation: request.relation, pk: request.pk, value: request.value, single: request.single });
@@ -761,6 +765,7 @@ function closeDetail(button) {
   els.detailDrawer.hidden = true; els.detailContent.innerHTML = "";
   button.dataset.open = "";
   detailTrigger = undefined; button.focus();
+  relatedTable = undefined;
 }
 /** Closes the currently opened related-rows drawer for keyboard Escape handling. */
 function closeOpenDetail() { if (!detailTrigger) { return false; } closeDetail(detailTrigger); return true; }
@@ -771,9 +776,11 @@ function onRelated(message) {
   }
   pendingRelated.delete(message.requestId);
   const container = pending.body;
-  container.innerHTML = "";
+  if (!container.isConnected) { return; }
   const result = message.result || {};
   logSql(`related ${pending.label}`, result.sql, result.orm);
+  if (pending.table) { if (pending.table.refreshRequestId === message.requestId) { pending.table.refreshRows(result); } return; }
+  container.innerHTML = "";
   if (!result.ok) {
     container.appendChild(el("span", { className: "err" }, result.error || "Could not load related rows."));
     return;
@@ -782,7 +789,13 @@ function onRelated(message) {
     container.appendChild(el("span", { className: "tag" }, "No related rows."));
     return;
   }
-  container.appendChild(buildEditableRelatedTable(result, { el, post: (message) => vscode.postMessage(message), renderValue }));
+  relatedTable = buildEditableRelatedTable(result, { el, post: (message) => vscode.postMessage(message), renderValue, reload: (table) => {
+    const requestId = ++relRequestId;
+    table.refreshRequestId = requestId;
+    pendingRelated.set(requestId, { ...pending, table });
+    vscode.postMessage({ ...pending.request, requestId, type: "expandRelated" });
+  } });
+  container.appendChild(relatedTable);
 }
 function renderError(messageText) {
   stopProgress();

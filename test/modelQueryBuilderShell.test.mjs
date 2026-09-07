@@ -104,7 +104,8 @@ test("Model Browser keeps the E2E probe in its isolated QA module", () => {
   const probe = read("media/modelQueryBuilderE2eProbe.js");
 
   assert.match(source, /import \{ runModelQueryBuilderE2eProbe \} from "\.\/modelQueryBuilderE2eProbe\.js";/);
-  assert.match(source, /void runModelQueryBuilderE2eProbe\(\{ document, postMessage: \(value\) => vscode\.postMessage\(value\), requestId: message\.requestId \}\)\.catch\(\(\) => vscode\.postMessage\(\{ requestId: message\.requestId, snapshot: \{ error: "Query Builder E2E probe bootstrap failed\." \}, type: "e2eQueryBuilderProbeResult" \}\)\);/);
+  assert.match(source, /import \{ runModelStabilityE2eProbe \} from "\.\/modelStabilityE2eProbe\.js";/);
+  assert.match(source, /void probe\(\{ document, postMessage: \(value\) => vscode\.postMessage\(value\), requestId: message\.requestId \}\)\.catch\(\(\) => vscode\.postMessage\(\{ requestId: message\.requestId, snapshot: \{ error: "Model Browser E2E probe bootstrap failed\." \}, type: "e2eQueryBuilderProbeResult" \}\)\);/);
   assert.equal(source.includes("waitForE2eField"), false, "the production source delegates rather than retaining probe helpers");
   assert.match(probe, /export async function runModelQueryBuilderE2eProbe/);
   assert.match(probe, /AI Assist/);

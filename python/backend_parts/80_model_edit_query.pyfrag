@@ -3,53 +3,67 @@ def _browse_commit(request):
     """Applies staged cell edits in one atomic transaction; validates everything first (all-or-nothing)."""
     with _EXECUTION_LOCK:
         try:
-            from django.core.exceptions import ValidationError
-            from django.db import connection, transaction
+            from django.db import connections, router, transaction
             from django.test.utils import CaptureQueriesContext
 
             model = _browse_resolve_model(request)
             changes = request.get("changes")
             if not isinstance(changes, list) or not changes:
                 return {"error": "No changes to commit.", "ok": False, "results": []}
-            editable = {field.attname: field for field in model._meta.concrete_fields if getattr(field, "editable", False) and not field.primary_key and not _browse_is_auto(field)}
-            field_names = [field.name for field in model._meta.fields]
-            prepared, results, has_error = [], [], False
-            for change in changes:
-                if not isinstance(change, dict):
-                    continue
-                pk = change.get("pk")
-                fields = change.get("fields") if isinstance(change.get("fields"), dict) else {}
-                instance = model._base_manager.filter(pk=pk).first()
-                if instance is None:
-                    results.append({"error": "Row not found.", "ok": False, "pk": pk})
-                    has_error = True
-                    continue
-                applied = []
-                for attname, value in fields.items():
-                    field = editable.get(attname)
-                    if field is None:
-                        continue
-                    setattr(instance, attname, _browse_coerce_edit_value(field, value))
-                    applied.append(field.name)
-                if not applied:
-                    continue
-                try:
-                    instance.full_clean(exclude=[name for name in field_names if name not in applied])
-                except ValidationError as error:
-                    results.append({"fieldErrors": _browse_field_errors(error), "ok": False, "pk": pk})
-                    has_error = True
-                    continue
-                results.append({"ok": True, "pk": pk})
-                prepared.append((instance, applied))
-            if has_error:
-                return {"ok": False, "results": results, "saved": 0}
-            with CaptureQueriesContext(connection) as ctx:
-                with transaction.atomic():
+            explicit_alias = request.get("database")
+            if explicit_alias is not None and (not isinstance(explicit_alias, str) or explicit_alias not in connections):
+                raise ValueError("Unknown save database.")
+            alias = explicit_alias if explicit_alias is not None else router.db_for_write(model)
+            with CaptureQueriesContext(connections[alias]) as ctx:
+                with transaction.atomic(using=alias):
+                    prepared, results, has_error = _browse_prepare_commit(model, changes, alias, explicit_alias is not None)
+                    if has_error:
+                        transaction.set_rollback(True, using=alias)
+                        return {"ok": False, "results": results, "saved": 0}
                     for instance, applied in prepared:
-                        instance.save(update_fields=applied)
-            return {"ok": True, "orm": _browse_orm_commit(model, prepared), "results": results, "saved": len(prepared), "sql": _browse_sql(ctx)}
+                        instance.save(using=alias, update_fields=applied)
+            return {"ok": True, "orm": _browse_orm_commit(model, prepared, alias), "results": results, "saved": len(prepared), "sql": _browse_sql(ctx)}
         except Exception:
             return {"error": traceback.format_exc(), "ok": False, "results": []}
+
+
+def _browse_prepare_commit(model, changes, alias, explicit_alias=False):
+    """Locks and validates all edited rows on one write database before any save occurs."""
+    from django.core.exceptions import ValidationError
+    from django.db import router
+
+    editable = {field.attname: field for field in model._meta.concrete_fields if getattr(field, "editable", False) and not field.primary_key and not _browse_is_auto(field)}
+    field_names = [field.name for field in model._meta.fields]
+    prepared, results, has_error = [], [], False
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        pk = change.get("pk")
+        fields = change.get("fields") if isinstance(change.get("fields"), dict) else {}
+        instance = model._base_manager.using(alias).select_for_update().filter(pk=pk).first()
+        if instance is None:
+            results.append({"error": "Row not found.", "ok": False, "pk": pk})
+            has_error = True
+            continue
+        applied = []
+        for attname, value in fields.items():
+            field = editable.get(attname)
+            if field is not None:
+                setattr(instance, attname, _browse_coerce_edit_value(field, value))
+                applied.append(field.name)
+        if not applied:
+            continue
+        if not explicit_alias and router.db_for_write(model, instance=instance) != alias:
+            raise ValueError("One commit cannot span multiple databases.")
+        try:
+            instance.full_clean(exclude=[name for name in field_names if name not in applied])
+        except ValidationError as error:
+            results.append({"fieldErrors": _browse_field_errors(error), "ok": False, "pk": pk})
+            has_error = True
+            continue
+        results.append({"ok": True, "pk": pk})
+        prepared.append((instance, applied))
+    return prepared, results, has_error
 
 
 def _browse_is_auto(field):
@@ -87,11 +101,11 @@ def _browse_field_errors(error):
         return {"__all__": [str(message) for message in getattr(error, "messages", [str(error)])]}
 
 
-def _browse_orm_commit(model, prepared):
+def _browse_orm_commit(model, prepared, alias="default"):
     """Builds a readable ORM expression mirroring the committed saves."""
-    lines = ["with transaction.atomic():"]
+    lines = [f"with transaction.atomic(using={alias!r}):"]
     for instance, applied in prepared:
-        lines.append(f"    {model.__name__}(pk={instance.pk!r}).save(update_fields={applied!r})")
+        lines.append(f"    {model.__name__}(pk={instance.pk!r}).save(using={alias!r}, update_fields={applied!r})")
     return "\n".join(lines)
 
 
@@ -163,28 +177,34 @@ def _browse_lookup_row(item, pk_attname, label_fields):
 
 
 def _browse_query(namespace, request):
-    """Evaluates user-written ORM code in the live shell namespace and tabulates the final
-    expression's value into grid rows. Multi-line code is allowed (last expression is tabulated);
-    assignments/imports mutate the shell namespace, exactly like the interactive shell."""
+    """Executes explicit Run once; subsequent requests only read its retained result handle."""
     code = request.get("code")
-    if not isinstance(code, str) or not code.strip():
+    result_id = request.get("resultId")
+    if result_id is None and (not isinstance(code, str) or not code.strip()):
         return {"columns": [], "editable": False, "error": "Query code must be a non-empty string.", "hasMore": False, "ok": False, "rows": []}
-    limit = _browse_limit(request.get("limit"), maximum=None)
+    limit = _browse_limit(request.get("limit"), maximum=_QUERY_PAGE_LIMIT)
     offset = request.get("offset")
     offset = offset if isinstance(offset, int) and offset > 0 else 0
-    with _EXECUTION_LOCK:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            try:
-                value, expression = _browse_eval_last(namespace, code)
+    stdout, stderr = io.StringIO(), io.StringIO()
+    created = None
+    try:
+        with _query_execution_scope(request) as execution:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                if result_id is None:
+                    value, expression = _browse_eval_last(namespace, code)
+                    result_id = created = _query_remember_result(namespace, value, code, expression)
+                if execution["cancel"].is_set():
+                    raise _ExecutionInterrupted("Query cancelled.")
                 with _browse_capture() as ctx:
-                    payload = _browse_tabulate(value, offset, limit)
-                payload["result"] = _browse_query_result(value, code, expression)
-                payload.update({"ok": True, "orm": code, "sql": _browse_sql(ctx), "stderr": stderr.getvalue(), "stdout": stdout.getvalue()})
+                    payload = _query_result_page(namespace, result_id, offset, limit, refresh=created is None)
+                if execution["cancel"].is_set():
+                    raise _ExecutionInterrupted("Query cancelled.")
+                payload.update({"ok": True, "orm": code if created else "# Existing query result page", "sql": _browse_sql(ctx), "stderr": stderr.getvalue(), "stdout": stdout.getvalue()})
                 return payload
-            except Exception:
-                return {"columns": [], "editable": False, "error": traceback.format_exc(), "hasMore": False, "ok": False, "rows": [], "stderr": stderr.getvalue(), "stdout": stdout.getvalue()}
+    except (Exception, KeyboardInterrupt, _ExecutionInterrupted):
+        if created:
+            _QUERY_RESULTS.pop(created, None)
+        return {"columns": [], "editable": False, "error": traceback.format_exc(), "hasMore": False, "ok": False, "rows": [], "stderr": stderr.getvalue(), "stdout": stdout.getvalue()}
 
 
 def _browse_eval_last(namespace, code):
@@ -262,7 +282,7 @@ def _browse_tabulate_instances(queryset, model, offset, limit):
     columns = _browse_columns(model)
     attnames = [column["attname"] for column in columns]
     raw = list(queryset[offset:offset + limit + 1].values(*attnames))
-    return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": len(raw) > limit, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [_browse_serialize_row(row) for row in raw[:limit]]}
+    return {"app": model._meta.app_label, "columns": columns, "database": queryset._db, "editable": True, "hasMore": len(raw) > limit, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [_browse_serialize_row(row) for row in raw[:limit]]}
 
 
 def _browse_tabulate_dicts(queryset, offset, limit):
@@ -288,7 +308,7 @@ def _browse_tabulate_single(instance):
     model = type(instance)
     columns = _browse_columns(model)
     row = {column["attname"]: _browse_cell(getattr(instance, column["attname"], None)) for column in columns}
-    return {"app": model._meta.app_label, "columns": columns, "editable": True, "hasMore": False, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [row]}
+    return {"app": model._meta.app_label, "columns": columns, "database": instance._state.db, "editable": bool(instance._state.db), "hasMore": False, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [row]}
 
 
 def _browse_tabulate_items(items, limit):
@@ -300,13 +320,17 @@ def _browse_tabulate_items(items, limit):
     if items and all(isinstance(item, Model) and type(item) is type(items[0]) for item in items):
         model = type(items[0])
         columns = _browse_columns(model)
+        aliases = {item._state.db for item in items}
+        database = next(iter(aliases)) if len(aliases) == 1 else None
+        if not database:
+            columns = [dict(column, editable=False) for column in columns]
         concrete = {column["attname"] for column in columns}
         # Surface per-row annotation values Django stored on the instance (e.g. an annotate() over a @property-filtered
         # stream) — they live in __dict__ as non-underscore keys outside the concrete columns.
         ann_names = [name for name in vars(items[0]) if isinstance(name, str) and not name.startswith("_") and name not in concrete]
         rows = [_browse_serialize_row(dict({column["attname"]: getattr(item, column["attname"], None) for column in columns}, **{name: getattr(item, name, None) for name in ann_names})) for item in items]
         ann_cols = [{"annotation": True, "attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "annotation"} for name in ann_names]
-        return {"app": model._meta.app_label, "columns": columns + ann_cols + _browse_computed_columns(model), "editable": True, "hasMore": has_more, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
+        return {"app": model._meta.app_label, "columns": columns + ann_cols + _browse_computed_columns(model), "database": database, "editable": bool(database), "hasMore": has_more, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
     if items and all(isinstance(item, dict) for item in items):
         names = list(dict.fromkeys(key for item in items for key in item))
         return {"columns": [{"attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": ""} for name in names], "editable": False, "hasMore": has_more, "rows": [_browse_serialize_row(item) for item in items]}
@@ -524,4 +548,3 @@ def _browse_coerce_filter_value(lookup, value, field=None, numeric=False):
     if isinstance(value, str) and field is None and value.strip().replace(".", "", 1).lstrip("-").isdigit():
         return float(value.strip()) if "." in value.strip() else int(value.strip())
     return value
-

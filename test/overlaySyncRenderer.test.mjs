@@ -134,7 +134,7 @@ test("uses native Python language features for shell and submit overlays", () =>
 
 test("uses Monaco's native type command for the automatic suggest E2E probe", () => {
   const source = readFileSync(new URL("./e2e/suite/pythonCellBehavior.js", import.meta.url), "utf8");
-  assert.match(source, /editor\.trigger\("django-shell-e2e-suggest-burst","type",\{text\}\)/);
+  assert.match(source, /editor\.trigger\("keyboard","type",\{text\}\)/);
   assert.equal(source.includes('editor.executeEdits("django-shell-e2e-suggest-burst"'), false);
   assert.equal(source.includes("editor.action.triggerSuggest"), false);
 });

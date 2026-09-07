@@ -32,6 +32,18 @@ test("a rejected task releases its key while unrelated keys run independently", 
   assert.ok(order.indexOf("recovery") > order.indexOf("failure"));
 });
 
+test("cancelling a key rejects both waiting priority lanes without running them or affecting other keys", async () => {
+  const queue = new SerializedAsyncQueue(), gate = deferred(), order = [];
+  const active = queue.run("backend", () => gate.promise);
+  const pending = Promise.allSettled([queue.run("backend", async () => order.push("normal")), queue.run("backend", async () => order.push("high"), "high")]);
+  queue.cancel("backend", new Error("runtime changed"));
+  assert.ok((await pending).every((result) => result.status === "rejected"));
+  assert.equal(await queue.run("other", async () => 1), 1);
+  const fresh = queue.run("backend", async () => order.push("fresh"));
+  gate.resolve(); await active; await fresh;
+  assert.deepEqual(order, ["fresh"]);
+});
+
 /** Creates a manually settled promise for deterministic queue tests. */
 function deferred() {
   let resolve;

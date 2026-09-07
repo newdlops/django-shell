@@ -80,7 +80,8 @@ async function assertNativeSuggestAcceptance(extension, installOverlayDocument) 
     const redo = await waitForRendererState(nativeModelSnapshotExpression(), (state) => state.text === ACCEPTED_SOURCE);
     assert.equal(redo.text, ACCEPTED_SOURCE, `one redo did not restore the completion and its import together: ${JSON.stringify({ redo, redoAction })}`);
   } finally {
-    await rendererJson(nativeSuggestionCleanupExpression());
+    const restored = await rendererJson(nativeSuggestionCleanupExpression());
+    assert.deepEqual(restored.quickSuggestions, started.quickSuggestions, "native provider probe must restore the original automatic completion options");
   }
   assertProviderCalls(await providerSnapshot(), "suggest acceptance", 1);
   await waitForDocumentText(overlayUri(), ACCEPTED_SOURCE);
@@ -152,7 +153,7 @@ async function waitForDocumentText(uri, expected) {
 
 /** Builds a synchronous renderer probe that starts native suggestion loading. */
 function nativeSuggestionStartExpression() {
-  return `(function(){const root=document.getElementById("django-shell-overlay"),editor=root&&root.__djangoShellEditor,model=editor&&editor.getModel&&editor.getModel();if(!root||!editor||!model){return JSON.stringify({ok:false,reason:"missing-overlay"});}root.__dsoNativeProviderE2E={priorQuick:editor.getRawOptions&&editor.getRawOptions().quickSuggestions,startedAt:Date.now()};editor.updateOptions&&editor.updateOptions({quickSuggestions:false});model.setValue(${JSON.stringify(SOURCE)});const line=model.getLineCount(),column=model.getLineMaxColumn(line);editor.setPosition&&editor.setPosition({lineNumber:line,column});editor.focus&&editor.focus();const relocationsBefore=Number(root.__dsoNativeCompletionRelocations||0);editor.trigger&&editor.trigger("django-shell-e2e-native-provider","editor.action.triggerSuggest",{});return JSON.stringify({ok:true,relocationsBefore});})()`;
+  return `(function(){const root=document.getElementById("django-shell-overlay"),editor=root&&root.__djangoShellEditor,model=editor&&editor.getModel&&editor.getModel();if(!root||!editor||!model){return JSON.stringify({ok:false,reason:"missing-overlay"});}const quick=editor.getRawOptions&&editor.getRawOptions().quickSuggestions,priorQuick=quick&&typeof quick==="object"?{...quick}:quick;root.__dsoNativeProviderE2E={priorQuick,startedAt:Date.now()};editor.updateOptions&&editor.updateOptions({quickSuggestions:false});model.setValue(${JSON.stringify(SOURCE)});const line=model.getLineCount(),column=model.getLineMaxColumn(line);editor.setPosition&&editor.setPosition({lineNumber:line,column});editor.focus&&editor.focus();const relocationsBefore=Number(root.__dsoNativeCompletionRelocations||0);editor.trigger&&editor.trigger("django-shell-e2e-native-provider","editor.action.triggerSuggest",{});return JSON.stringify({ok:true,quickSuggestions:priorQuick,relocationsBefore});})()`;
 }
 
 /** Builds a synchronous renderer snapshot of the native suggestion widget. */
@@ -172,7 +173,7 @@ function nativeModelSnapshotExpression() {
 
 /** Builds a renderer probe that restores the editor option changed by the fixture. */
 function nativeSuggestionCleanupExpression() {
-  return `(function(){const root=document.getElementById("django-shell-overlay"),editor=root&&root.__djangoShellEditor,state=root&&root.__dsoNativeProviderE2E;if(editor&&editor.updateOptions&&state&&state.priorQuick!==undefined){editor.updateOptions({quickSuggestions:state.priorQuick});}if(root){root.__dsoNativeProviderE2E=null;}return JSON.stringify({ok:true});})()`;
+  return `(function(){const root=document.getElementById("django-shell-overlay"),editor=root&&root.__djangoShellEditor,state=root&&root.__dsoNativeProviderE2E;if(editor&&editor.updateOptions&&state&&state.priorQuick!==undefined){editor.updateOptions({quickSuggestions:state.priorQuick});}if(root){root.__dsoNativeProviderE2E=null;}return JSON.stringify({ok:true,quickSuggestions:editor&&editor.getRawOptions().quickSuggestions});})()`;
 }
 
 /** Evaluates one renderer expression and parses its JSON result. */

@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { BackendClient, HAS_DJANGO, PYTHON, buildComputedOrm, buildRowsOrm, ormBuilders, runBackend } from "./modelBrowserHelpers.mjs";
 
-const SUPPORT_LAYER_CELL = /apps\.get_model\(|django\.apps|__import__\("django\.apps"|json\.dumps|_djs_backend_module/;
+const SUPPORT_LAYER_CELL = /json\.dumps|_djs_backend_module/;
 
 test("serializes non-primitive cells into JSON-safe tagged values", { skip: !PYTHON }, () => {
   const payload = runBackend([
@@ -157,7 +157,7 @@ test("streams Python-side property filters across chunk boundaries without dropp
   assert.deepEqual(payload.window, [1002, 2001]);
 });
 
-test("builds visible ORM cells with bare model names, not app-registry plumbing", () => {
+test("builds visible ORM cells with explicit app and model identity", () => {
   const columns = [
     { attname: "name", computed: false, type: "CharField" },
     { attname: "is_active", computed: false, type: "BooleanField" },
@@ -175,7 +175,7 @@ test("builds visible ORM cells with bare model names, not app-registry plumbing"
   ];
   const pythonPropertyCell = buildRowsOrm({ app: "db", columns, filters: [{ field: "has_paid_subscription", lookup: "exact", value: "true" }], limit: 50, model: "Company" });
 
-  assert.equal(cells[0], 'Company._base_manager.filter(**{"name__icontains": "acme"}).order_by(\'-name\')[0:51]');
+  assert.equal(cells[0], '__import__("django.apps", fromlist=["apps"]).apps.get_model("db", "Company")._base_manager.filter(**{"name__icontains": "acme"}).order_by(\'-name\')[0:51]');
   assert.match(pythonPropertyCell, /import itertools as _it/);
   assert.match(pythonPropertyCell, /\.iterator\(chunk_size=1000\)/);
   assert.match(pythonPropertyCell, /getattr\(__o, "has_paid_subscription", None\)/);
@@ -194,7 +194,7 @@ test("builds visible ORM cells with bare model names, not app-registry plumbing"
   const reverseRel = [{ kind: "reverse-fk", name: "order_set", queryName: "order", single: false, target: "db.Order" }];
   assert.match(buildRowsOrm({ app: "db", columns, filters: [{ field: "order", lookup: "isnull", value: "false" }], limit: 50, model: "Company", relations: reverseRel }), /\.filter\(\*\*\{"order__isnull": False\}\)\.distinct\(\)/);
   for (const cell of [...cells, pythonPropertyCell, traversalCell]) {
-    assert.match(cell, /\bCompany\._base_manager\b/);
+    assert.match(cell, /get_model\("db", "Company"\)\._base_manager\b/);
     assert.doesNotMatch(cell, SUPPORT_LAYER_CELL);
   }
   assert.equal(ormBuilders.buildModelsOrm(), "len(apps.get_models())");
@@ -220,12 +220,13 @@ test("builds single-line injection-proof aggregate ORM cells (grouped, global, e
   const relCount = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "g", distinct: true, field: "members", func: "count" }], app: "db", columns: cols, groupBy: ["status"], model: "Company", relations: [{ kind: "m2m", name: "members", queryName: "members", single: false, target: "db.Member" }] });
   const computedCols = [{ attname: "id", computed: false, pk: true, type: "AutoField" }, { annotated: false, attname: "score", computed: true, type: "property" }];
 
-  assert.equal(groupedExistsOnly, "[Company._base_manager.aggregate()]");
-  assert.equal(allInvalidFields, "[Company._base_manager.aggregate()]");
-  assert.equal(relCount, 'Company._base_manager.values("status").annotate(g=models.Count("members", distinct=True)).order_by("status")[0:1001]');
+  const company = '__import__("django.apps", fromlist=["apps"]).apps.get_model("db", "Company")';
+  assert.equal(groupedExistsOnly, `[${company}._base_manager.aggregate()]`);
+  assert.equal(allInvalidFields, `[${company}._base_manager.aggregate()]`);
+  assert.equal(relCount, `${company}._base_manager.values("status").annotate(g=models.Count("members", distinct=True)).order_by("status")[0:1001]`);
   // A lookup on an aggregate alias becomes a HAVING (.filter after .annotate), not a WHERE.
   const havingAgg = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "n", field: "*", func: "count" }], app: "db", columns: cols, filters: [{ field: "n", lookup: "gte", value: "5" }], groupBy: ["status"], model: "Company" });
-  assert.equal(havingAgg, 'Company._base_manager.values("status").annotate(n=models.Count("pk")).filter(**{"n__gte": 5}).order_by("status")[0:1001]');
+  assert.equal(havingAgg, `${company}._base_manager.values("status").annotate(n=models.Count("pk")).filter(**{"n__gte": 5}).order_by("status")[0:1001]`);
   // FK drill-in: a traversal group-by and Count/Sum over a relation path are emitted as the joined path.
   const drill = ormBuilders.buildAggregateOrm({ aggregates: [{ alias: "n", distinct: true, field: "orders__id", func: "count" }, { alias: "rev", field: "orders__amount", func: "sum" }], app: "db", columns: cols, groupBy: ["category__name"], model: "Company" });
   assert.match(drill, /\.values\("category__name"\)/);
@@ -236,16 +237,16 @@ test("builds single-line injection-proof aggregate ORM cells (grouped, global, e
   assert.equal(ormBuilders.aggregatesNeedPython([{ field: "score", func: "avg" }], computedCols), true);
   assert.equal(ormBuilders.aggregatesNeedPython([{ field: "id", func: "count" }], computedCols), false);
   assert.equal(ormBuilders.aggregatesNeedPython([{ func: "exists" }], computedCols), false);
-  assert.equal(grouped, 'Company._base_manager.values("status").annotate(amount_sum=models.Sum("amount"), n=models.Count("pk")).order_by("status")[0:1001]');
-  assert.equal(globalAgg, '[Company._base_manager.aggregate(avg_amount=models.Avg("amount"))]');
-  assert.equal(distinctAgg, '[Company._base_manager.aggregate(d=models.Count("status", distinct=True))]');
-  assert.equal(existsOnly, '[{"any": Company._base_manager.exists()}]');
-  assert.equal(mixed, '[dict(Company._base_manager.aggregate(n=models.Count("pk")), **{"any": Company._base_manager.exists()})]');
+  assert.equal(grouped, `${company}._base_manager.values("status").annotate(amount_sum=models.Sum("amount"), n=models.Count("pk")).order_by("status")[0:1001]`);
+  assert.equal(globalAgg, `[${company}._base_manager.aggregate(avg_amount=models.Avg("amount"))]`);
+  assert.equal(distinctAgg, `[${company}._base_manager.aggregate(d=models.Count("status", distinct=True))]`);
+  assert.equal(existsOnly, `[{"any": ${company}._base_manager.exists()}]`);
+  assert.equal(mixed, `[dict(${company}._base_manager.aggregate(n=models.Count("pk")), **{"any": ${company}._base_manager.exists()})]`);
   // Unknown group-by/aggregate fields are dropped (never injected); with nothing left it falls back to an empty global aggregate.
   assert.doesNotMatch(injected, /DROP|import os/);
   for (const cell of [grouped, globalAgg, distinctAgg, existsOnly, mixed, injected]) {
     assert.doesNotMatch(cell, /\n/, "aggregate cells must stay single-line so they type into any shell (plain REPL has no multi-line cells)");
-    assert.match(cell, /\bCompany\._base_manager\b/);
+    assert.match(cell, /get_model\("db", "Company"\)\._base_manager\b/);
     assert.doesNotMatch(cell, SUPPORT_LAYER_CELL);
   }
 });
@@ -265,8 +266,8 @@ test("adds per-row annotation columns to the rows ORM cell (raw annotate, relati
 
   assert.match(raw, /\.annotate\(copy=models\.F\("amount"\)\)/);
   assert.match(subquery, /\.annotate\(first_group=models\.Subquery\(User\.groups\.through\.objects\.filter\(user_id=models\.OuterRef\("pk"\)\)\.order_by\("group__name"\)\.values\("group__name"\)\[:1\]\)\)/);
-  assert.match(easySubquery, /\.annotate\(first_group_easy=models\.Subquery\(User\.groups\.through\.objects\.filter\(\*\*\{"user_id": models\.OuterRef\("pk"\)\}\)\.order_by\("group__name"\)\.values\("group__name"\)\[:1\]\)\)/);
-  assert.match(customSubquery, /\.annotate\(matching_group=models\.Subquery\(Group\._base_manager\.filter\(\*\*\{"name": models\.OuterRef\("amount"\)\}\)\.order_by\("id"\)\.values\("name"\)\[:1\]\)\)/);
+  assert.match(easySubquery, /get_model\("auth", "User"\)\.groups\.through\.objects\.filter\(\*\*\{"user_id": models\.OuterRef\("pk"\)\}\)\.order_by\("group__name"\)\.values\("group__name"\)\[:1\]/);
+  assert.match(customSubquery, /get_model\("auth", "Group"\)\._base_manager\.filter\(\*\*\{"name": models\.OuterRef\("amount"\)\}\)\.order_by\("id"\)\.values\("name"\)\[:1\]/);
   const keywordAlias = buildRowsOrm({ annotations: [{ alias: "class", field: "groups", func: "count", kind: "aggregate" }], app: "auth", columns: cols, limit: 50, model: "User", relations: rels });
   const constExpr = buildRowsOrm({ annotations: [{ alias: "k", kind: "expr", left: "5", op: "/", right: "0" }], app: "auth", columns: cols, limit: 50, model: "User" });
   const propCols = [...cols, { annotated: false, attname: "flag", computed: true, type: "property" }];
@@ -300,7 +301,7 @@ test("adds per-row annotation columns to the rows ORM cell (raw annotate, relati
   assert.doesNotMatch(winFilter, /rn__lte/);
   for (const cell of [raw, subquery, easySubquery, customSubquery, relCount, win, expr, injected, injectedRaw]) {
     assert.doesNotMatch(cell, /\n/, "annotation row cells must stay single-line");
-    assert.match(cell, /\bUser\._base_manager\b/);
+    assert.match(cell, /get_model\("auth", "User"\)\._base_manager\b/);
     assert.doesNotMatch(cell, SUPPORT_LAYER_CELL);
   }
 });

@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 import type { BackendInterruptResult, BackendTransport, BackendTransportMode } from "./backendClient";
 import type { BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRelation, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { modelBrowserHtml } from "./modelBrowserHtml";
+import { modelCommitResponse } from "./modelCommitResponse";
 import { DiagnosticLogger } from "./diagnostics";
 import { buildRecipeCountOrm, buildRecipeRowsOrm, buildRecipeSummaryOrm } from "./modelQueryRecipeOrm";
 import { cloneModelQueryRecipe, createEmptyModelQueryRecipe, isModelQueryRecipeV2, type ModelQueryRecipeV2, type QueryModelRef } from "./modelQueryRecipe";
@@ -26,7 +27,8 @@ export interface ModelDataSource {
   modelLookup(query: ModelLookupQuery): Promise<BackendModelLookup>;
   modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery>;
   /** Interrupts an active custom ORM query without queueing another shell request. */
-  interruptModelQuery(reason: string): Promise<BackendInterruptResult>;
+  interruptModelQuery(reason: string, executionId?: string): Promise<BackendInterruptResult>;
+  modelRuntimeId?(): string | undefined;
   /** Returns hidden runtime imports used to analyze custom ORM query input. */
   modelQueryPrelude?(): Promise<string[]>;
   modelRelated(query: ModelRelatedQuery): Promise<BackendModelRelatedRows>;
@@ -47,6 +49,9 @@ interface ModelTarget {
 }
 
 interface IncomingMessage {
+  database?: string;
+  commitId?: string;
+  editorId?: string;
   aggregates?: ModelAggregateTerm[];
   annotations?: ModelAnnotationSpec[];
   app?: string;
@@ -134,10 +139,10 @@ export class ModelBrowser implements vscode.Disposable {
   }
 
   /** Opens an isolated model panel, probes its rendered Query Builder, and closes only that panel. */
-  async e2eProbeQueryBuilder(target: ModelTarget): Promise<Record<string, unknown>> {
+  async e2eProbeQueryBuilder(target: ModelTarget, suite: "queryBuilder" | "stability" = "queryBuilder"): Promise<Record<string, unknown>> {
     const panel = this.createPanel(target);
     try {
-      return await panel.e2eProbeQueryBuilder();
+      return await panel.e2eProbeQueryBuilder(suite);
     } finally {
       panel.dispose();
     }
@@ -267,7 +272,7 @@ class ModelBrowserPanel {
   }
 
   /** Requests one non-selecting Query Builder DOM probe from the loaded webview. */
-  async e2eProbeQueryBuilder(): Promise<Record<string, unknown>> {
+  async e2eProbeQueryBuilder(suite: "queryBuilder" | "stability" = "queryBuilder"): Promise<Record<string, unknown>> {
     await this.waitForE2eInitialLoad();
     if (this.disposed) { throw new Error("Model Browser E2E panel closed before its probe."); }
     const requestId = `query-builder-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -276,9 +281,9 @@ class ModelBrowserPanel {
       const timer = setTimeout(() => {
         const probe = this.e2eProbes.get(requestId); this.e2eProbes.delete(requestId);
         reject(new Error(`Timed out waiting for the Model Browser Query Builder E2E probe at ${probe?.stage || "bootstrap"} after ${probe?.elapsedMs() || Date.now() - started}ms.`));
-      }, 30000);
+      }, 90000);
       this.e2eProbes.set(requestId, { elapsedMs: () => Date.now() - started, reject, resolve, stage: "bootstrap", timer });
-      void this.panel.webview.postMessage({ requestId, type: "e2eQueryBuilderProbe" }).then((accepted) => {
+      void this.panel.webview.postMessage({ requestId, suite, type: "e2eQueryBuilderProbe" }).then((accepted) => {
         if (accepted || !this.e2eProbes.has(requestId)) { return; }
         clearTimeout(timer);
         this.e2eProbes.delete(requestId);
@@ -628,7 +633,8 @@ class ModelBrowserPanel {
     } else if (message.type === "aggregate") {
       await this.requestAggregate(message);
     } else if (message.type === "loadComputed" && typeof message.field === "string") {
-      await this.loadComputed(message.field);
+      if (!this.isRequestedRecipeRevisionCurrent(message)) { return; }
+      await this.loadComputed(message.field, message.requestId);
     } else if (message.type === "commitEdits") {
       await this.commitEdits(message);
     } else if (message.type === "commitRelated") {
@@ -696,16 +702,19 @@ class ModelBrowserPanel {
   }
 
   /** Lazily fetches one @property column's values for the currently-loaded rows (user activated the column). */
-  private async loadComputed(field: string): Promise<void> {
+  private async loadComputed(field: string, requestId?: number | string): Promise<void> {
     const revision = this.appliedRecipeRevision;
+    const generation = this.loadGeneration;
     const query: ModelComputedQuery = { annotations: this.annotations, app: this.target.app, columns: this.columns, field, filters: this.filters, limit: Math.max(this.loadedRowCount, 1), model: this.target.model, order: this.order, relations: this.relations };
     if (this.recipeMetadata) { query.recipe = this.appliedRecipe; query.recipeMetadata = this.recipeMetadata.toBundle(); }
-    const result = await this.source.modelComputed(query);
-    if (this.disposed || revision !== this.appliedRecipeRevision) {
+    let result: BackendModelComputed;
+    try { result = await this.source.modelComputed(query); }
+    catch (error) { result = { error: errorMessage(error), ok: false, values: {} }; }
+    if (!this.isCurrentRecipeLoad(generation, revision)) {
       return;
     }
     this.logger?.log("model.browser.computed", { field, model: `${this.target.app}.${this.target.model}`, ok: result.ok, queries: result.queryCount, rows: result.rowCount });
-    this.post({ error: result.error, field, ok: result.ok, queryCount: result.queryCount, revision, rowCount: result.rowCount, type: "computed", values: result.values });
+    this.post({ error: result.error, field, ok: result.ok, queryCount: result.queryCount, requestId, revision, rowCount: result.rowCount, type: "computed", values: result.values });
   }
 
   /** Computes and returns the total row count for the current filter set. */
@@ -742,22 +751,19 @@ class ModelBrowserPanel {
 
   /** Commits staged cell edits in one transaction and returns the result to the webview. */
   private async commitEdits(message: IncomingMessage): Promise<void> {
-    if (!Array.isArray(message.changes) || !message.changes.length) {
-      return;
-    }
-    const result = await this.source.modelCommit({ app: this.target.app, changes: message.changes, columns: this.columns, model: this.target.model });
-    this.logger?.log("model.browser.commit", { model: `${this.target.app}.${this.target.model}`, ok: result.ok, saved: result.saved });
-    this.post({ result, type: "commit" });
+    await this.performCommit(message, this.target.app, this.target.model, this.columns);
   }
 
   /** Commits staged edits made inside an expanded related table against that related model. */
   private async commitRelated(message: IncomingMessage): Promise<void> {
-    if (!message.app || !message.model || !Array.isArray(message.changes) || !message.changes.length) {
-      return;
-    }
-    const result = await this.source.modelCommit({ app: message.app, changes: message.changes, columns: Array.isArray(message.columns) ? message.columns : [], model: message.model });
-    this.logger?.log("model.browser.commit.related", { model: `${message.app}.${message.model}`, ok: result.ok, saved: result.saved });
-    this.post({ result, type: "commit" });
+    await this.performCommit(message, message.app, message.model, Array.isArray(message.columns) ? message.columns : []);
+  }
+
+  /** Always returns a correlated save outcome, retaining unconfirmed edits after transport exceptions. */
+  private async performCommit(message: IncomingMessage, app: string | undefined, model: string | undefined, columns: BackendModelColumn[]): Promise<void> {
+    const response = await modelCommitResponse({ ...message, app, database: message.type === "commitRelated" ? message.database : undefined, model }, columns, (query) => this.source.modelCommit(query));
+    this.logger?.log("model.browser.commit", { model: response.model, ok: response.result.ok, saved: response.result.saved });
+    this.post(response);
   }
 
   /** Fetches related rows for one source row and returns them to the webview. */

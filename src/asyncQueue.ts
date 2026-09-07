@@ -6,20 +6,39 @@ export type AsyncQueuePriority = "high" | "normal";
 interface QueueState { active: boolean; high: QueuedTask[]; normal: QueuedTask[] }
 
 /** Wraps one task so the queue can start it without knowing its result type. */
-interface QueuedTask { start(): void }
+interface QueuedTask { reject(error: Error): void; start(): void }
 
 /** Runs keyed async tasks one at a time while allowing unrelated keys to proceed. */
 export class SerializedAsyncQueue {
   private readonly queues = new Map<string, QueueState>();
 
   /** Runs one task after active work, allowing high-priority work to pass queued normal tasks. */
-  run<T>(key: string, task: () => Promise<T>, priority: AsyncQueuePriority = "normal"): Promise<T> {
+  run<T>(key: string, task: () => Promise<T>, priority: AsyncQueuePriority = "normal", signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) { return Promise.reject(new Error("Queued request cancelled.")); }
     const state = this.queues.get(key) ?? { active: false, high: [], normal: [] };
     this.queues.set(key, state);
     return new Promise<T>((resolve, reject) => {
-      state[priority].push({ start: () => { void this.execute(key, state, task, resolve, reject); } });
+      const cleanup = (): void => signal?.removeEventListener("abort", abort);
+      const queued: QueuedTask = { reject: (error) => { cleanup(); reject(error); }, start: () => { cleanup(); void this.execute(key, state, task, resolve, reject); } };
+      const abort = (): void => {
+        const index = state[priority].indexOf(queued);
+        if (index < 0) { return; }
+        state[priority].splice(index, 1);
+        queued.reject(new Error("Queued request cancelled."));
+        this.drain(key, state);
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      state[priority].push(queued);
       this.drain(key, state);
     });
+  }
+
+  /** Rejects waiting tasks while leaving active-task cleanup under its owner's control. */
+  cancel(key: string, error: Error): void {
+    const state = this.queues.get(key);
+    if (!state) { return; }
+    for (const task of [...state.high.splice(0), ...state.normal.splice(0)]) { task.reject(error); }
+    if (!state.active) { this.queues.delete(key); }
   }
 
   /** Starts the next queued task when this key is idle. */

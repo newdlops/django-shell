@@ -1,4 +1,4 @@
-// Builds validated Recipe v2 rows, summary, and count ORM cells with readable previews.
+// Builds validated Recipe v2 rows, summary, count, and lazy-property ORM cells with readable previews.
 
 import type { BackendModelColumn, BackendModelRelation } from "./modelBackend";
 import type { BackendTransport } from "./backendClient";
@@ -43,22 +43,51 @@ export function buildRecipeCountOrm(recipe: ModelQueryRecipeV2, context: ModelQu
   return build(recipe, context, "count");
 }
 
+/** Compiles one lazy model-property read against the complete applied Rows recipe. */
+export function buildRecipeComputedOrm(recipe: ModelQueryRecipeV2, field: string, context: ModelQueryOrmCompileContext): ModelQueryOrmCompileResult {
+  return build(recipe, context, "property", field);
+}
+
 /** Produces one v2 execution expression after the authoritative TypeScript validator succeeds. */
-function build(recipe: ModelQueryRecipeV2, context: ModelQueryOrmCompileContext, intent: "rows" | "summary" | "count"): ModelQueryOrmCompileResult {
+function build(recipe: ModelQueryRecipeV2, context: ModelQueryOrmCompileContext, intent: "rows" | "summary" | "count" | "property", field = ""): ModelQueryOrmCompileResult {
   const validation = validateModelQueryRecipe(recipe, { columns: context.columns, metadata: context.metadata, source: context.source, transport: context.transport });
   if (!validation.ok || !validation.normalized) { return { cell: "", preview: "", validation }; }
   const normalized = validation.normalized;
+  if (intent === "property" && (normalized.mode !== "rows" || !context.columns.some((column) => column.computed && column.attname === field))) {
+    const issue: ModelQueryIssue = { code: "FIELD_PATH_INVALID", fix: "Select a model property in Rows mode.", message: "Model property values require a property column and individual model rows.", path: "/field", severity: "error" };
+    return { cell: "", preview: "", validation: { ...validation, humanSummary: "1 query error", issues: [...validation.issues, issue], ok: false } };
+  }
   const where = compileModelQueryPredicate(normalized.where, normalized.source, { metadata: context.metadata, source: normalized.source });
   const computed = compileModelQueryComputed(normalized.computed, { metadata: context.metadata, source: normalized.source });
   const annotations = computed.length ? `.annotate(${computed.map((spec) => `${spec.alias}=${spec.expression}`).join(", ")})` : "";
   const post = compileModelQueryPredicate(normalized.postFilter, normalized.source, { metadata: context.metadata, source: normalized.source });
   const sourceBase = `${modelQueryOrmModelExpression(normalized.source)}._base_manager.filter(${where.expression})${where.toMany ? ".distinct()" : ""}`;
   const rowsBase = `${sourceBase}${annotations}${normalized.postFilter.children.length ? `.filter(${post.expression})` : ""}`;
-  const cell = intent === "summary" ? summaryCell(normalized, sourceBase, context) : intent === "count" ? countCell(normalized, normalized.mode === "summary" ? sourceBase : rowsBase, context) : rowsCell(normalized, rowsBase, context);
+  const cell = intent === "property" ? propertyCell(normalized, rowsBase, field, context) : intent === "summary" ? summaryCell(normalized, sourceBase, context) : intent === "count" ? countCell(normalized, normalized.mode === "summary" ? sourceBase : rowsBase, context) : rowsCell(normalized, rowsBase, context);
   if (cell.length > MODEL_QUERY_RECIPE_LIMITS.generatedOrmCellCharacters) {
     return { cell: "", preview: "", validation: withGeneratedLimit(validation) };
   }
   return { cell, preview: prettyPreview(cell), validation: { ...validation, ormPreview: prettyPreview(cell) } };
+}
+
+/** Reads one property per displayed row, or its declared SQL annotation, without pagination lookahead. */
+function propertyCell(recipe: ModelQueryRecipeV2, base: string, field: string, context: ModelQueryOrmCompileContext): string {
+  const limit = Number.isInteger(context.limit) && context.limit > 0 ? context.limit : 50;
+  const ordered = `${base}.order_by(${orderArguments(recipe.orderBy, "pk")})`;
+  if (context.columns.some((column) => column.attname === field && column.annotated)) {
+    const declared = `${modelQueryOrmModelExpression(recipe.source)}.djshell_annotations`;
+    const expression = `(lambda __a: __a() if callable(__a) else __a)(${declared})[${modelQueryOrmString(field)}]`;
+    return `${ordered}.annotate(__djs=${expression}).values("pk", "__djs")[0:${limit}]`;
+  }
+  return [
+    "def _djs_property_value(__o):",
+    '    """Reads the requested property, retaining rows whose getter raises."""',
+    "    try:",
+    `        return getattr(__o, ${modelQueryOrmString(field)})`,
+    "    except Exception:",
+    "        return None",
+    `[{"pk": __o.pk, "value": _djs_property_value(__o)} for __o in ${ordered}[0:${limit}]]`
+  ].join("\n");
 }
 
 /** Builds a bounded ordered page with one additional row for has-more detection. */

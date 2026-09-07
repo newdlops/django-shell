@@ -14,9 +14,13 @@ async function assertModelQueryBuilderWebview(extension) {
   const source = fixture.source;
   const assistant = createAssistantFixture(createEmptyModelQueryRecipe);
   const browser = new ModelBrowser(extension.extensionPath, source, undefined, assistant.service);
+  let progressSubscription;
   try {
-    const snapshot = await browser.e2eProbeQueryBuilder({ app: "db", label: "Application user", model: "AppUser" });
-    assert.equal(snapshot.error, undefined, JSON.stringify(snapshot));
+    const started = Date.now();
+    const pending = browser.e2eProbeQueryBuilder({ app: "db", label: "Application user", model: "AppUser" });
+    progressSubscription = [...browser.panels][0]?.panel.webview.onDidReceiveMessage((message) => { if (message.type === "e2eQueryBuilderProbeProgress") { console.log(`Query Builder probe ${Date.now() - started}ms: ${message.stage}`); } });
+    const snapshot = await pending;
+    assert.equal(snapshot.error, undefined, JSON.stringify({ ...snapshot, calls: fixture.calls }));
     assert.equal(snapshot.drawerOpen, true);
     assert.equal(snapshot.conditionCount, 1);
     assert.equal(snapshot.disabled, false);
@@ -25,6 +29,8 @@ async function assertModelQueryBuilderWebview(extension) {
     assert.equal(snapshot.placeholderDisabled, true);
     assert.equal(snapshot.selectedValue, "");
     assert.deepEqual(snapshot.sortCycle, ["ascending", "descending", "none"]);
+    assert.deepEqual(snapshot.propertyLoads, ["property 1", "Error", "property 3", "property 4", "property 5", "property 6"]);
+    assert.equal(fixture.calls.modelComputed, 6, "property Load, Reload/Retry, and every sort reach the host");
     assert.ok(snapshot.enabledOptionCount >= 2);
     assert.deepEqual(snapshot.optionGroups, ["Fields", "Relations", "Relationship checks"]);
     assert.equal(snapshot.applyDisabled, true);
@@ -47,6 +53,7 @@ async function assertModelQueryBuilderWebview(extension) {
     assert.equal(fixture.calls.modelRows, 4, "only the initial load and three header-sort states reload fixture rows");
     assert.deepEqual(fixture.calls.orders, ["default", "username:asc", "username:desc", "default"]);
   } finally {
+    progressSubscription?.dispose();
     browser.dispose();
     runtimeChange.dispose();
   }
@@ -108,29 +115,30 @@ function modelFixtureSource(onDidChangeRuntime) {
   const columns = [
     { attname: "id", editable: false, label: "ID", name: "id", null: false, pk: true, type: "AutoField" },
     { attname: "status", choices: [["active", "Active"]], editable: true, label: "Status", name: "status", null: false, pk: false, type: "CharField" },
-    { attname: "username", editable: true, label: "Username", name: "username", null: false, pk: false, type: "CharField" }
+    { attname: "username", editable: true, label: "Username", name: "username", null: false, pk: false, type: "CharField" },
+    { attname: "display_name", computed: true, editable: false, name: "display_name", null: true, pk: false, type: "property" }
   ];
   const relations = [{ filterField: "company_id", kind: "reverse-fk", name: "memberships", outerField: "id", queryName: "memberships", single: false, target: "db.Membership" }];
   const fieldTree = {
-    fields: columns.map((column) => ({ attname: column.attname, label: column.label, name: column.name, null: column.null, pk: column.pk, type: column.type })),
+    fields: columns.filter((column) => !column.computed).map((column) => ({ attname: column.attname, label: column.label, name: column.name, null: column.null, pk: column.pk, type: column.type })),
     ok: true,
     pk: "id",
     relations
   };
   const membershipTree = { fields: [{ attname: "company_id", label: "Company ID", name: "company_id", null: false, pk: false, type: "IntegerField" }, { attname: "id", label: "ID", name: "id", null: false, pk: true, type: "AutoField" }], ok: true, pk: "id", relations: [] };
-  const calls = { modelAggregate: 0, modelCommit: 0, modelRows: 0, orders: [] };
+  const calls = { modelAggregate: 0, modelCommit: 0, modelComputed: 0, modelRows: 0, orders: [] };
   const source = {
     interruptModelQuery: async () => ({ interrupted: false, ok: true }),
     listModels: async () => ({ models: [{ app: "db", label: "Application user", model: "AppUser", table: "db_appuser" }, { app: "db", label: "Membership", model: "Membership", table: "db_membership" }], ok: true }),
     modelAggregate: async () => { calls.modelAggregate += 1; return { columns: [], ok: true, orm: "", rows: [], sql: [] }; },
     modelCommit: async () => { calls.modelCommit += 1; return { ok: false, error: "E2E fixture is read-only." }; },
-    modelComputed: async () => ({ columns, ok: true, orm: "", rows: [], sql: [] }),
+    modelComputed: async () => { calls.modelComputed += 1; if (calls.modelComputed === 2) { throw new Error("Temporary property failure"); } return { ok: true, queryCount: 1, rowCount: 1, values: { 1: `property ${calls.modelComputed}` } }; },
     modelCount: async () => ({ count: 0, ok: true, orm: "", sql: [] }),
     modelFilterFields: async (_app, model) => model === "Membership" ? membershipTree : fieldTree,
     modelLookup: async () => ({ columns: [], ok: true, rows: [], sql: [] }),
     modelQuery: async () => ({ columns, ok: true, orm: "", rows: [], sql: [] }),
     modelRelated: async () => ({ columns: [], hasMore: false, ok: true, orm: "", rows: [], single: false, sql: [] }),
-    modelRows: async (query) => { calls.modelRows += 1; const term = query.recipe?.orderBy?.[0]; calls.orders.push(term ? `${term.ref.path || term.ref.alias}:${term.direction}` : "default"); return { columns, hasMore: false, nextOffset: null, ok: true, orm: "db.AppUser.objects.all()", pk: "id", relations, rows: [], sql: [] }; },
+    modelRows: async (query) => { calls.modelRows += 1; const term = query.recipe?.orderBy?.[0]; calls.orders.push(term ? `${term.ref.path || term.ref.alias}:${term.direction}` : "default"); return { columns, hasMore: false, nextOffset: null, ok: true, orm: "db.AppUser.objects.all()", pk: "id", relations, rows: [{ id: 1, status: "active", username: "demo" }], sql: [] }; },
     modelSchema: async () => ({ app: "db", columns, label: "Application user", model: "AppUser", ok: true, pk: "id", relations, table: "db_appuser" }),
     modelTransportInfo: () => ({ active: "tcp", mode: "auto" }),
     onDidChangeRuntime,

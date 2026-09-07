@@ -24,10 +24,11 @@ let customConsoleRuntime: Promise<CustomDjangoConsole> | undefined;
 let deprecatedNotebookRuntime: Promise<DjangoNotebookConsole> | undefined;
 
 /** Bridges the runtime tree to a custom console that may not be loaded yet. */
-class LazyRuntimeSource implements vscode.Disposable {
+export class LazyRuntimeSource implements vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   private console: CustomDjangoConsole | undefined;
   private consoleSubscription: vscode.Disposable | undefined;
+  private readonly queryBackends = new Map<string, BackendClient>();
 
   readonly onDidChangeRuntime = this.changeEmitter.event;
 
@@ -103,14 +104,22 @@ class LazyRuntimeSource implements vscode.Disposable {
   }
 
   /** Runs a custom ORM query or returns an idle status without starting a shell. */
-  modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery> {
-    return this.console?.activeBackend?.modelQuery(query) ?? Promise.resolve({ columns: [], editable: false, error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, orm: "", relations: [], rows: [], sql: [] });
+  async modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery> {
+    const backend = this.console?.activeBackend;
+    if (!backend) { return { columns: [], editable: false, error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, orm: "", relations: [], rows: [], sql: [] }; }
+    if (query.executionId) { this.queryBackends.set(query.executionId, backend); }
+    try { return await backend.modelQuery(query); }
+    finally { if (query.executionId && this.queryBackends.get(query.executionId) === backend) { this.queryBackends.delete(query.executionId); } }
   }
 
-  /** Interrupts the active custom ORM query or reports that no Django Shell runtime is available. */
-  interruptModelQuery(reason: string): Promise<BackendInterruptResult> {
-    return this.console?.activeBackend?.interrupt(reason) ?? Promise.resolve({ error: MODEL_IDLE_MESSAGE, interrupted: false, ok: false, reason });
+  /** Interrupts the backend captured by this query, even after the selected runtime changes. */
+  interruptModelQuery(reason: string, executionId?: string): Promise<BackendInterruptResult> {
+    const backend = executionId ? this.queryBackends.get(executionId) : undefined;
+    return backend?.interrupt(reason, executionId) ?? Promise.resolve({ error: "No matching query is running.", interrupted: false, ok: false, reason });
   }
+
+  /** Identifies the attached backend independently of ordinary namespace refresh events. */
+  modelRuntimeId(): string | undefined { return this.console?.activeBackend?.runtimeId; }
 
   /** Returns imports/declarations that expose the live shell namespace to query IntelliSense. */
   async modelQueryPrelude(): Promise<string[]> {

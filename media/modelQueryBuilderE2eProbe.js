@@ -49,6 +49,38 @@ function assistantSettingsReady(document, expected) {
   return provider?.value === expected.provider && !provider.disabled && model?.value === (expected.automatic ? "" : expected.model) && !model?.disabled && reasoning?.value === expected.reasoning && !reasoning.disabled && !refresh?.disabled;
 }
 
+/** Waits for a rendered property value and its enabled reload control. */
+async function propertyResult(document, expected) {
+  try {
+    await waitFor(() => {
+      const cell = document.querySelector('td[data-key="display_name"]');
+      const load = document.querySelector('button[data-field="display_name"]');
+      return cell?.textContent === expected && load && !load.disabled;
+    }, `property result ${expected}`);
+  } catch (error) {
+    const cell = document.querySelector('td[data-key="display_name"]');
+    const load = document.querySelector('button[data-field="display_name"]');
+    throw new Error(`${error.message} ${JSON.stringify({ action: load?.getAttribute("aria-label"), cell: cell?.textContent, disabled: load?.disabled, status: document.getElementById("status")?.textContent, title: cell?.title })}`);
+  }
+  return document.querySelector('td[data-key="display_name"]').textContent;
+}
+
+/** Exercises property loading, a failed reload, and retry through the real webview/host boundary. */
+async function propertyLoadCycle(document) {
+  const results = [];
+  document.querySelector('button[data-field="display_name"]').click();
+  results.push(await propertyResult(document, "property 1"));
+  const reload = document.querySelector('button[data-field="display_name"]');
+  if (reload.getAttribute("aria-label") !== "Reload display_name computed values") { throw new Error("Property reload action is missing."); }
+  reload.click();
+  results.push(await propertyResult(document, "Error"));
+  const retry = document.querySelector('button[data-field="display_name"]');
+  if (retry.getAttribute("aria-label") !== "Retry display_name computed values") { throw new Error("Property retry action is missing."); }
+  retry.click();
+  results.push(await propertyResult(document, "property 3"));
+  return results;
+}
+
 /** Exercises the progressive examples, assistant lifecycle, and existing picker DOM without product state. */
 export async function runModelQueryBuilderE2eProbe({ document, postMessage, requestId }) {
   let selectPrototype; let originalShowPicker; let showPickerCalls = 0; let terminal = false; const view = document.defaultView || globalThis.window;
@@ -63,12 +95,14 @@ export async function runModelQueryBuilderE2eProbe({ document, postMessage, requ
     selectPrototype = HTMLSelectElement.prototype; originalShowPicker = Object.getOwnPropertyDescriptor(selectPrototype, "showPicker");
     progress("examples");
     Object.defineProperty(selectPrototype, "showPicker", { configurable: true, value() { showPickerCalls += 1; } });
-    const sortCycle = [];
+    const sortCycle = []; const propertyLoads = [];
     const drawer = document.getElementById("queryDrawer"); if (drawer?.hidden) { document.getElementById("queryDrawerToggle")?.click(); }
     const examples = [...document.querySelectorAll("#queryExamples button")];
     if (examples.length !== 4 || !examples[0].getAttribute("aria-label")?.includes("Aggregate summary") || !examples[1].getAttribute("aria-label")?.includes("Correlated Exists") || !examples[2].getAttribute("aria-label")?.includes("Chained Formula") || !examples[3].getAttribute("aria-label")?.includes("Window RowNumber")) { throw new Error("Progressive examples are missing or unordered."); }
     progress("example-aggregate-apply"); examples[0].click(); await waitFor(() => document.getElementById("queryComputedList")?.textContent?.includes("row_count") && document.getElementById("queryPostFilterRoot")?.textContent?.includes("row_count"), "aggregate example controls"); await waitFor(() => previewIsReady(document), "aggregate preview");
     if (typeof document.querySelector === "function") {
+      progress("property-load-retry");
+      propertyLoads.push(...await propertyLoadCycle(document));
       let usernameSort = document.querySelector('button[data-act="sort"][data-col="username"]');
       if (!usernameSort) { throw new Error("Username grid sort is unavailable."); }
       for (const expected of ["ascending", "descending", "none"]) {
@@ -80,6 +114,7 @@ export async function runModelQueryBuilderE2eProbe({ document, postMessage, requ
           return header?.getAttribute("aria-sort") === expected && usernameSort && !usernameSort.disabled;
         }, `grid sort ${expected}`);
         sortCycle.push(expected);
+        propertyLoads.push(await propertyResult(document, `property ${sortCycle.length + 3}`));
       }
       if (!document.getElementById("queryComputedList")?.textContent?.includes("row_count") || document.getElementById("queryDraftStatus")?.textContent !== "Draft changes are not applied") { throw new Error("Grid sorting changed the unrelated Query Builder draft."); }
     }
@@ -90,11 +125,14 @@ export async function runModelQueryBuilderE2eProbe({ document, postMessage, requ
     progress("example-exists-undo-click"); click(document, "Undo"); await waitFor(() => examplesRestored(document), "Exists undo"); progress("example-exists-undo-restored");
     progress("example-formula-apply"); click(document, "3 · Normalize Username; Length ≥ 8"); await waitFor(() => document.getElementById("queryComputedList")?.textContent?.includes("normalized_username") && document.getElementById("queryComputedList")?.textContent?.includes("username_length") && document.getElementById("queryPostFilterRoot")?.textContent?.includes("username_length") && document.getElementById("queryOrderBy")?.textContent?.includes("username_length") && document.getElementById("queryOrderBy")?.textContent?.includes("normalized_username"), "Formula example controls"); await waitFor(() => previewIsReady(document), "Formula preview"); if (document.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") { throw new Error("Formula example changed applied filters."); } progress("example-formula-undo-click"); click(document, "Undo"); await waitFor(() => examplesRestored(document), "Formula undo"); progress("example-formula-undo-restored");
     progress("example-window-apply"); click(document, "4 · Top 3 ID per Status"); await waitFor(() => document.getElementById("queryComputedList")?.textContent?.includes("rank_within_status") && document.getElementById("queryComputedList")?.textContent?.includes("Window: row_number") && document.getElementById("queryPostFilterRoot")?.textContent?.includes("rank_within_status") && document.getElementById("queryOrderBy")?.textContent?.includes("status") && document.getElementById("queryOrderBy")?.textContent?.includes("rank_within_status"), "Window example controls"); await waitFor(() => previewIsReady(document), "Window preview"); if (document.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") { throw new Error("Window example changed applied filters."); } progress("example-window-undo-click"); click(document, "Undo"); await waitFor(() => examplesRestored(document), "Window undo"); progress("example-window-undo-restored"); await waitFor(() => document.getElementById("queryDrawerStatus")?.textContent === "Applied query is current.", "restored draft preview");
-    progress("assistant-settings"); click(document, "AI Assist"); const assistant = await waitFor(() => document.getElementById("queryAssistantPanel")?.hidden === false ? document.getElementById("queryAssistantPanel") : undefined, "AI Assist panel");
+    progress("assistant-settings"); click(document, "AI Assist"); progress("assistant-open-clicked"); const assistant = await waitFor(() => document.getElementById("queryAssistantPanel")?.hidden === false ? document.getElementById("queryAssistantPanel") : undefined, "AI Assist panel");
     const provider = await waitFor(() => document.getElementById("queryAssistantProvider"), "assistant provider selector"); const instructions = document.getElementById("queryAssistantInstructions"); const model = document.getElementById("queryAssistantModel"); const reasoning = document.getElementById("queryAssistantReasoning");
     if (!instructions || model?.value !== "" || model?.disabled || reasoning?.value !== "" || !assistant.textContent?.includes("Row data is excluded") || provider.options.length !== 2 || !button(document, "Generate suggestion")?.disabled) { throw new Error("AI Assist automatic default state is incomplete."); }
+    progress("assistant-model-save");
     let modelControl = document.getElementById("queryAssistantModel"); modelControl.value = "sonnet"; modelControl.dispatchEvent(new Event("change", { bubbles: true })); await waitFor(() => assistantSettingsReady(document, { automatic: false, model: "sonnet", provider: "claude", reasoning: "" }), "Claude direct model save");
+    progress("assistant-reasoning-save");
     let reasoningControl = document.getElementById("queryAssistantReasoning"); reasoningControl.value = "high"; reasoningControl.dispatchEvent(new Event("change", { bubbles: true })); await waitFor(() => assistantSettingsReady(document, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "Claude reasoning save");
+    progress("assistant-provider-switch");
     let providerControl = document.getElementById("queryAssistantProvider"); providerControl.value = "codex"; providerControl.dispatchEvent(new Event("change", { bubbles: true })); await waitFor(() => assistantSettingsReady(document, { automatic: true, model: "", provider: "codex", reasoning: "" }), "Codex provider acknowledgement");
     modelControl = document.getElementById("queryAssistantModel"); modelControl.value = "gpt-5"; modelControl.dispatchEvent(new Event("change", { bubbles: true })); await waitFor(() => assistantSettingsReady(document, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "" }), "Codex model save");
     reasoningControl = document.getElementById("queryAssistantReasoning"); reasoningControl.value = "xhigh"; reasoningControl.dispatchEvent(new Event("change", { bubbles: true })); await waitFor(() => assistantSettingsReady(document, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "xhigh" }), "Codex supported reasoning save");
@@ -111,7 +149,7 @@ export async function runModelQueryBuilderE2eProbe({ document, postMessage, requ
     click(document, "Undo"); await waitFor(() => document.getElementById("queryDraftStatus")?.textContent === "Draft matches applied query", "assistant acceptance undo");
     progress("legacy-picker"); click(document, "1. Filter Rows"); const pickerAdd = await waitFor(() => conditionAdd(document), "legacy picker condition control"); pickerAdd.click(); const select = await waitForE2eField(document, (candidate) => !candidate.disabled);
     const optionGroups = [...select.querySelectorAll("optgroup")].map((group) => group.label); const options = [...select.querySelectorAll("option")]; const overflow = assistantOverflow(document);
-    finish({ appliedFilters: document.getElementById("queryAppliedFiltersEmpty")?.textContent || "", applyDisabled: document.getElementById("queryDrawerApply")?.disabled === true, assistantOverflow: overflow, conditionCount: document.querySelectorAll('select[aria-label="Condition field"]').length, disabled: select.disabled, drawerOpen: drawer?.hidden === false, enabledOptionCount: options.filter((option) => !option.disabled && option.value).length, exampleCount: examples.length, focused: document.activeElement === select, optionGroups, placeholderDisabled: options[0]?.disabled === true, selectedValue: select.value, showPickerCalls, sortCycle });
+    finish({ appliedFilters: document.getElementById("queryAppliedFiltersEmpty")?.textContent || "", applyDisabled: document.getElementById("queryDrawerApply")?.disabled === true, assistantOverflow: overflow, conditionCount: document.querySelectorAll('select[aria-label="Condition field"]').length, disabled: select.disabled, drawerOpen: drawer?.hidden === false, enabledOptionCount: options.filter((option) => !option.disabled && option.value).length, exampleCount: examples.length, focused: document.activeElement === select, optionGroups, placeholderDisabled: options[0]?.disabled === true, propertyLoads, selectedValue: select.value, showPickerCalls, sortCycle });
   } catch (error) { finish({ error: String(error?.message || error), showPickerCalls }); }
   finally { view?.removeEventListener?.("error", terminalError); view?.removeEventListener?.("unhandledrejection", terminalError); try { if (selectPrototype && originalShowPicker) { Object.defineProperty(selectPrototype, "showPicker", originalShowPicker); } else if (selectPrototype) { delete selectPrototype.showPicker; } } catch { /* Terminal output was already emitted. */ } }
 }

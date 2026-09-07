@@ -51,6 +51,10 @@ export class NotebookPtySession implements vscode.Disposable {
   private readonly progressEmitter = new vscode.EventEmitter<BackendProgressSnapshot>();
   private displayText = "";
   private generation = 0;
+  private disposed = false;
+  private requestEpoch = 0;
+  private lastLiteralSequence = 0;
+  private retiredResponse: { complete: boolean; id?: string } | undefined;
   private inputTracker = new InputLineTracker();
   private keepaliveInFlight = false;
   private keepaliveTimer: NodeJS.Timeout | undefined;
@@ -97,7 +101,7 @@ export class NotebookPtySession implements vscode.Disposable {
 
   /** Starts the interactive login shell used for setup prompts. */
   start(): void {
-    if (this.started) {
+    if (this.started || this.disposed) {
       return;
     }
     this.started = true;
@@ -138,10 +142,24 @@ export class NotebookPtySession implements vscode.Disposable {
       if (generation !== this.generation) {
         return;
       }
+      this.generation += 1;
+      this.requestEpoch += 1;
+      this.process = undefined;
+      this.client = undefined;
+      this.started = false;
+      this.token = "";
+      this.cellCapture = false;
+      this.ipython = false;
+      this.retiredResponse = undefined;
+      this.lastLiteralSequence = 0;
+      this.mode = "shell";
       this.suppressBackendOutput = false;
       this.stopKeepalive();
+      this.clearBootstrapWriteTimers();
+      this.clearBackendPortForward();
+      this.clearDebugpyPortForward();
       this.rejectPtyRequests("Django shell PTY process exited.");
-      this.state = this.client ? "ready" : "closed";
+      this.state = "closed";
       this.options.diagnosticLogger?.log("terminal.exit", {
         exitCode: event.exitCode,
         sessionId: this.options.sessionId,
@@ -155,6 +173,7 @@ export class NotebookPtySession implements vscode.Disposable {
 
   /** Writes renderer input to the embedded PTY. */
   write(data: string): void {
+    if (!this.process || this.disposed) { return; }
     if (data) {
       this.lastTerminalInputAt = Date.now();
     }
@@ -176,10 +195,7 @@ export class NotebookPtySession implements vscode.Disposable {
 
   /** Restarts the embedded PTY so environment-only settings changes take effect. */
   restart(): void {
-    if (!this.started) {
-      this.fireChange();
-      return;
-    }
+    if (this.disposed) { return; }
     this.options.diagnosticLogger?.log("terminal.restart", {
       djangoSettingsSelected: this.options.djangoSettingsModule,
       sessionId: this.options.sessionId
@@ -198,12 +214,19 @@ export class NotebookPtySession implements vscode.Disposable {
 
   /** Stops the embedded PTY and releases listeners. */
   dispose(): void {
+    if (this.disposed) { return; }
+    this.disposed = true;
     this.generation += 1;
+    this.requestEpoch += 1;
+    const previous = this.process;
+    this.process = undefined;
+    this.client = undefined;
+    this.state = "closed";
     this.stopKeepalive();
     this.clearDebugpyPortForward();
     this.clearBackendPortForward();
     this.clearBootstrapWriteTimers();
-    this.process?.kill();
+    previous?.kill();
     this.rejectPtyRequests("Django shell PTY session disposed.");
     this.dataEmitter.dispose();
     this.changeEmitter.dispose();
@@ -359,16 +382,17 @@ export class NotebookPtySession implements vscode.Disposable {
     if (!this.firstOutputAt) { this.firstOutputAt = this.lastOutputAt; this.options.diagnosticLogger?.log("terminal.firstOutput", { sessionId: this.options.sessionId, sinceSpawnMs: this.firstOutputAt - this.spawnedAt }); }
     if (this.options.diagnosticLogger?.enabled()) { this.shellLogTail = appendShellTranscript(this.options.diagnosticLogger, this.shellLogTail, data); }
     const previousMode = this.mode;
-    const suppressVisible = this.suppressBackendOutput || this.ptyRequests.size > 0 || this.pendingCell !== undefined;
+    const suppressVisible = this.suppressBackendOutput || this.ptyRequests.size > 0 || this.pendingCell !== undefined || this.retiredResponse !== undefined;
     this.outputTail = `${this.outputTail}${data}`.slice(-4000);
     if (detectPrimaryPythonPrompt(this.outputTail)) {
       this.lastPrimaryPromptAt = this.lastOutputAt;
     }
-    if (this.ptyRequests.size || this.pendingCell) {
-      this.ptyRequestBuffer = `${this.ptyRequestBuffer}${data}`;
+    this.ptyRequestBuffer = `${this.ptyRequestBuffer}${data}`;
+    this.inspectPtyResponses();
+    if (this.retiredResponse?.complete && detectPrimaryPythonPrompt(this.outputTail)) { this.retiredResponse = undefined; }
+    if (this.ptyRequests.size || this.pendingCell || this.retiredResponse) {
       this.ptyProgressBuffer = `${this.ptyProgressBuffer}${data}`;
       this.inspectPtyProgress();
-      this.inspectPtyResponses();
     } else if (this.ptyProgressBuffer || data.includes(BACKEND_PROGRESS_PREFIX)) {
       this.ptyProgressBuffer = `${this.ptyProgressBuffer}${data}`;
       this.inspectPtyProgress();
@@ -482,7 +506,8 @@ export class NotebookPtySession implements vscode.Disposable {
       this.suppressBackendOutput = false;
       this.ipython = Boolean(ready.ipython);
       this.cellCapture = Boolean(ready.cellCapture);
-      this.client = new BackendClient(ready, this.options.diagnosticLogger, (payload) => this.requestViaPty(payload));
+      const epoch = this.requestEpoch;
+      this.client = new BackendClient(ready, this.options.diagnosticLogger, (payload, signal) => epoch === this.requestEpoch ? this.requestViaPty(payload, signal) : Promise.reject(new Error("Django shell runtime has changed.")));
       const preferred = vscode.workspace.getConfiguration("djangoShell").get<string>("modelBrowser.transport", "pty");
       if (["orm", "auto", "tcp", "pty"].includes(preferred)) { this.client.setTransportMode(preferred as BackendTransportMode); }
       // Inline bootstrap was used → remote shell (SSH/kubectl): the backend's 127.0.0.1 socket isn't reachable directly, so
@@ -533,12 +558,14 @@ export class NotebookPtySession implements vscode.Disposable {
   }
 
   /** Sends a backend request through the interactive PTY when TCP loopback is unreachable. */
-  private requestViaPty(payload: BackendRequestPayload): Promise<string> {
+  private requestViaPty(payload: BackendRequestPayload, signal?: AbortSignal): Promise<string> {
     const queuedAt = Date.now();
+    const epoch = this.requestEpoch;
     return this.ptyQueue.run("backend", () => new Promise<string>((resolve, reject) => {
       const started = Date.now();
-      if (!this.process) {
-        reject(new Error("Django shell PTY is not running."));
+      const unavailable = this.ptyRequestError(epoch);
+      if (unavailable || !this.process) {
+        reject(unavailable ?? new Error("Django shell PTY is not running."));
         return;
       }
       // Type the user's literal code as the cell so the shell's raw_cell stays pure; the bootstrap-installed
@@ -554,8 +581,8 @@ export class NotebookPtySession implements vscode.Disposable {
           // reconstruction cells: interactive Console execution remains user-controlled and may legitimately run long.
           cell.timer = setTimeout(() => {
             if (this.pendingCell !== cell) { return; }
-            this.pendingCell = undefined;
-            cell.reject(new Error(`Django Shell did not return an ORM cell result after ${LITERAL_ORM_CELL_TIMEOUT_MS}ms.`));
+            this.retiredResponse = { complete: false };
+            this.rejectPtyRequests(`Django Shell did not return an ORM cell result after ${LITERAL_ORM_CELL_TIMEOUT_MS}ms. The result is unconfirmed; wait for the shell prompt or restart the shell before retrying.`);
           }, LITERAL_ORM_CELL_TIMEOUT_MS);
         }
         this.options.diagnosticLogger?.log("backend.pty.request", { code: typeof payload.code === "string" ? payload.code.slice(0, 200) : undefined, kind: payload.kind, literalCell: true, queueMs: started - queuedAt, sessionId: this.options.sessionId });
@@ -565,31 +592,49 @@ export class NotebookPtySession implements vscode.Disposable {
       const id = `${Date.now().toString(36)}-${this.ptyRequestSeq++}`;
       this.ptyRequestBuffer = "";
       this.ptyProgressBuffer = "";
-      this.ptyRequests.set(id, { reject, resolve });
+      const timer = payload.kind === "ormcell" ? setTimeout(() => this.expirePtyRequest(id), LITERAL_ORM_CELL_TIMEOUT_MS) : undefined;
+      const abort = (): void => {
+        if (payload.kind === "query" && epoch === this.requestEpoch && this.ptyRequests.has(id)) { this.process?.write("\x03"); }
+      };
+      const cleanup = (): void => signal?.removeEventListener("abort", abort);
+      this.ptyRequests.set(id, { reject: (error) => { cleanup(); reject(error); }, resolve: (buffer) => { cleanup(); resolve(buffer); }, timer });
+      signal?.addEventListener("abort", abort, { once: true });
       this.options.diagnosticLogger?.log("backend.pty.request", { code: typeof payload.code === "string" ? payload.code.slice(0, 200) : undefined, id, kind: payload.kind, lightweight: payload.lightweight, queueMs: started - queuedAt, sessionId: this.options.sessionId });
       this.process.write(buildPtyBackendRequest(id, payload, this.token));
-    }), payload.kind === "execute" ? "high" : "normal");
+    }), payload.kind === "execute" ? "high" : "normal", signal);
   }
 
   /** Writes a generated multi-line PTY command in paced chunks and resolves through the normal response marker path. */
   private writePacedPtyRequest(id: string, command: string, timeoutMs: number, kind: string): Promise<string> {
     const queuedAt = Date.now();
+    const epoch = this.requestEpoch;
     return this.ptyQueue.run("backend", () => new Promise<string>((resolve, reject) => {
       const started = Date.now();
-      if (!this.process) {
-        reject(new Error("Django shell PTY is not running."));
+      const unavailable = this.ptyRequestError(epoch);
+      if (unavailable || !this.process) {
+        reject(unavailable ?? new Error("Django shell PTY is not running."));
         return;
       }
       this.ptyRequestBuffer = "";
       this.ptyProgressBuffer = "";
-      const timer = setTimeout(() => {
-        this.ptyRequests.delete(id);
-        reject(new Error(`Django shell PTY request timed out after ${timeoutMs}ms. ${id}`));
-      }, timeoutMs);
+      const timer = setTimeout(() => this.expirePtyRequest(id), timeoutMs);
       this.ptyRequests.set(id, { reject, resolve, timer });
       this.options.diagnosticLogger?.log("backend.pty.request", { id, kind, queueMs: started - queuedAt, sessionId: this.options.sessionId });
       this.writePtyCommandPaced(id, command);
     }));
+  }
+
+  /** Prevents stale work and ambiguous terminal streams from accepting another backend command. */
+  private ptyRequestError(epoch: number): Error | undefined {
+    if (this.disposed || epoch !== this.requestEpoch || !this.process) { return new Error("Django shell PTY request cancelled because its runtime is no longer available."); }
+    return this.retiredResponse ? new Error("Waiting for the previous terminal request to finish. Wait for its result and shell prompt, or restart the shell before retrying.") : undefined;
+  }
+
+  /** Retires an ID-matched request without allowing its late output to satisfy a subsequent literal cell. */
+  private expirePtyRequest(id: string): void {
+    if (!this.ptyRequests.has(id)) { return; }
+    this.retiredResponse = { complete: false, id };
+    this.rejectPtyRequests("Django shell PTY request timed out. The result is unconfirmed; wait for the shell prompt or restart the shell before retrying.");
   }
 
   /** Types one generated PTY command line-by-line so remote terminals do not drop a large queued paste. */
@@ -663,7 +708,8 @@ export class NotebookPtySession implements vscode.Disposable {
   /** Resolves pending PTY backend requests from response markers in raw terminal output. */
   private inspectPtyResponses(): void {
     const parsed = parseBackendResponseMarkers(this.ptyRequestBuffer);
-    this.ptyRequestBuffer = parsed.rest;
+    const markerIndex = parsed.rest.indexOf(BACKEND_RESPONSE_PREFIX);
+    this.ptyRequestBuffer = markerIndex >= 0 ? parsed.rest.slice(markerIndex) : parsed.rest.slice(-(BACKEND_RESPONSE_PREFIX.length - 1));
     if (!parsed.markers.length) {
       return;
     }
@@ -685,6 +731,7 @@ export class NotebookPtySession implements vscode.Disposable {
 
   /** Handles one complete PTY response marker, assembling chunked responses when needed. */
   private handlePtyResponseMarker(marker: BackendPtyResponse): void {
+    if (!marker || typeof marker.id !== "string") { return; }
     if (marker.chunk) {
       const response = this.assemblePtyResponseChunk(marker);
       if (response === undefined) {
@@ -715,11 +762,22 @@ export class NotebookPtySession implements vscode.Disposable {
       }
     }
     this.ptyResponseChunks.delete(marker.id);
-    return JSON.parse(entry.chunks.join(""));
+    try { return JSON.parse(entry.chunks.join("")); }
+    catch { return { error: "Invalid terminal response.", ok: false, stderr: "Invalid terminal response." }; }
   }
 
   /** Resolves a pending PTY backend request from one parsed response payload. */
   private resolvePtyResponse(id: string, response: unknown): void {
+    const match = /^_djs_cell-(\d+)$/.exec(id);
+    if (match) {
+      const sequence = Number(match[1]);
+      if (!Number.isSafeInteger(sequence) || sequence <= this.lastLiteralSequence) { return; }
+      this.lastLiteralSequence = sequence;
+    }
+    if (this.retiredResponse) {
+      if (id === this.retiredResponse.id || (!this.retiredResponse.id && match)) { this.retiredResponse.complete = true; }
+      return;
+    }
     const pending = this.ptyRequests.get(id);
     if (pending) {
       if (pending.timer) { clearTimeout(pending.timer); }
@@ -728,7 +786,7 @@ export class NotebookPtySession implements vscode.Disposable {
       return;
     }
     // A literal-cell execute has no extension-assigned id; the run-cell hook's marker resolves it (FIFO).
-    if (this.pendingCell) {
+    if (this.pendingCell && match) {
       const cell = this.pendingCell;
       this.pendingCell = undefined;
       if (cell.timer) { clearTimeout(cell.timer); }
@@ -738,6 +796,7 @@ export class NotebookPtySession implements vscode.Disposable {
 
   /** Rejects and clears every pending PTY backend request. */
   private rejectPtyRequests(message: string): void {
+    this.ptyQueue.cancel("backend", new Error(message));
     for (const [id, pending] of this.ptyRequests) {
       if (pending.timer) { clearTimeout(pending.timer); }
       pending.reject(new Error(`${message} ${id}`));
@@ -759,6 +818,9 @@ export class NotebookPtySession implements vscode.Disposable {
 
   /** Resets in-memory runtime state before a fresh PTY launch. */
   private resetRuntimeState(): void {
+    this.requestEpoch += 1;
+    this.retiredResponse = undefined;
+    this.lastLiteralSequence = 0;
     this.stopKeepalive();
     this.clearBootstrapWriteTimers();
     this.clearDebugpyPortForward();
@@ -834,6 +896,9 @@ export class NotebookPtySession implements vscode.Disposable {
 
   /** Drops the attached backend when the user leaves the Python shell. */
   private detachBackendForShellExit(): void {
+    this.requestEpoch += 1;
+    this.retiredResponse = undefined;
+    this.lastLiteralSequence = 0;
     this.stopKeepalive(); this.clearBackendPortForward(); this.client = undefined; this.ipython = false; this.cellCapture = false; this.suppressBackendOutput = false; this.token = ""; this.state = "starting"; this.rejectPtyRequests("Django shell backend detached."); this.fireChange();
   }
 }

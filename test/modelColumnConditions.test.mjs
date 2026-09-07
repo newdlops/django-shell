@@ -69,7 +69,7 @@ test("reconstructs all/any conditional aggregates with literal, F, and negated p
     model: "User",
     relations: USER_RELATIONS
   });
-  assert.equal(grouped, 'User._base_manager.values("is_staff").annotate(conditional=models.Count("pk", filter=(models.Q(**{"username__exact": models.F("first_name")}) | ~models.Q(**{"id__gt": 2})))).order_by("is_staff")[0:1001]');
+  assert.equal(grouped, '__import__("django.apps", fromlist=["apps"]).apps.get_model("auth", "User")._base_manager.values("is_staff").annotate(conditional=models.Count("pk", filter=(models.Q(**{"username__exact": models.F("first_name")}) | ~models.Q(**{"id__gt": 2})))).order_by("is_staff")[0:1001]');
 
   const exists = ormBuilders.buildAggregateOrm({
     aggregates: [{ alias: "has_ops", conditions: { terms: [{ field: "username", lookup: "startswith", rhs: { kind: "value", value: "op" } }] }, func: "exists" }],
@@ -77,7 +77,7 @@ test("reconstructs all/any conditional aggregates with literal, F, and negated p
     columns: USER_COLUMNS,
     model: "User"
   });
-  assert.equal(exists, '[{"has_ops": User._base_manager.filter(models.Q(**{"username__startswith": "op"})).exists()}]', "a missing join defaults to an AND group for conditional exists");
+  assert.equal(exists, '[{"has_ops": __import__("django.apps", fromlist=["apps"]).apps.get_model("auth", "User")._base_manager.filter(models.Q(**{"username__startswith": "op"})).exists()}]', "a missing join defaults to an AND group for conditional exists");
 });
 
 test("wraps a raw annotation in Case/When without changing its safe expression", () => {
@@ -95,7 +95,7 @@ test("wraps a raw annotation in Case/When without changing its safe expression",
     relations: USER_RELATIONS
   });
 
-  assert.equal(orm, 'User._base_manager.annotate(staff_name=models.Case(models.When(models.Q(**{"is_staff__exact": True}), then=models.F("username")), default=models.Value(None))).order_by(\'pk\')[0:51]');
+  assert.equal(orm, '__import__("django.apps", fromlist=["apps"]).apps.get_model("auth", "User")._base_manager.annotate(staff_name=models.Case(models.When(models.Q(**{"is_staff__exact": True}), then=models.F("username")), default=models.Value(None))).order_by(\'pk\')[0:51]');
 });
 
 test("keeps Subquery correlation outside an OR group and prefixes M2M through-table paths", () => {
@@ -171,7 +171,7 @@ test("drops an entire column spec for malformed, empty, oversized, or injected c
   ];
   const orm = buildRowsOrm({ annotations, app: "auth", columns: USER_COLUMNS, limit: 50, model: "User", relations: USER_RELATIONS });
 
-  assert.equal(orm, 'User._base_manager.annotate(good=models.F("username")).order_by(\'pk\')[0:51]');
+  assert.equal(orm, '__import__("django.apps", fromlist=["apps"]).apps.get_model("auth", "User")._base_manager.annotate(good=models.F("username")).order_by(\'pk\')[0:51]');
   assert.doesNotMatch(orm, /bad_|import os/);
 
   const grouped = ormBuilders.buildAggregateOrm({
@@ -185,7 +185,7 @@ test("drops an entire column spec for malformed, empty, oversized, or injected c
     model: "User",
     relations: USER_RELATIONS
   });
-  assert.equal(grouped, 'User._base_manager.values("is_staff").annotate(good=models.Count("pk")).order_by("is_staff")[0:1001]');
+  assert.equal(grouped, '__import__("django.apps", fromlist=["apps"]).apps.get_model("auth", "User")._base_manager.values("is_staff").annotate(good=models.Count("pk")).order_by("is_staff")[0:1001]');
 });
 
 test("executes conditional columns and rejects invalid groups in one Django socket fixture", { skip: !HAS_DJANGO }, () => {

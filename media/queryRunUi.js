@@ -29,7 +29,7 @@ export function createQueryRunUi(ctx) {
     if (snapshot.state === "running") { return `Running query · ${seconds}s`; }
     if (snapshot.state === "slow") { return `Still running in the live Django shell · ${seconds}s`; }
     if (snapshot.state === "cancelling") { return "Interrupting query…"; }
-    if (snapshot.state === "timedOut") { return `Query interrupted after ${Math.round((snapshot.timeoutMs || 0) / 1000)}s.`; }
+    if (snapshot.state === "timedOut") { return snapshot.interruptConfirmed ? `Query interrupted after ${Math.round((snapshot.timeoutMs || 0) / 1000)}s.` : snapshot.error || `Query timed out after ${Math.round((snapshot.timeoutMs || 0) / 1000)}s. Interrupt requested.`; }
     if (snapshot.state === "cancelled") { return snapshot.error ? "Interrupt could not be confirmed. Open Django Shell and use Restart Kernel." : "Query interrupted."; }
     return snapshot.error || "";
   }
@@ -45,16 +45,18 @@ export function createQueryRunUi(ctx) {
     interrupt.disabled = next?.state === "cancelling";
     interrupt.setAttribute("aria-hidden", String(!active));
     if (openConsole) {
-      const needsRecovery = next?.state === "cancelled" && Boolean(next.error);
+      const needsRecovery = ["cancelled", "timedOut"].includes(next?.state) && Boolean(next.error);
       openConsole.hidden = !needsRecovery;
       openConsole.setAttribute("aria-hidden", String(!needsRecovery));
     }
     for (const control of guarded) {
       if (active) {
-        control.dataset.queryRunDisabled = control.disabled ? "preserve" : "restore";
+        if (control.dataset.queryRunDisabled === undefined) { control.dataset.queryRunDisabled = control.disabled ? "preserve" : "restore"; }
         control.disabled = true;
       } else if (control.dataset.queryRunDisabled === "restore") {
         control.disabled = false;
+        delete control.dataset.queryRunDisabled;
+      } else {
         delete control.dataset.queryRunDisabled;
       }
     }

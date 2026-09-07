@@ -120,32 +120,34 @@ def _browse_related(request):
             columns = _browse_columns(target)
             attnames = [column["attname"] for column in columns]
             source_pk = request.get("pk")
+            database = request.get("database")
             limit = _browse_limit(request.get("limit"))
             with _browse_capture() as ctx:
                 if field.many_to_one or (field.one_to_one and not field.auto_created):
-                    result = _browse_related_single(model, field, target, attnames, columns, source_pk, request.get("value"))
+                    result = _browse_related_single(model, field, target, attnames, columns, source_pk, request.get("value"), database)
                 else:
-                    result = _browse_related_many(model, field, columns, attnames, source_pk, limit)
+                    result = _browse_related_many(model, field, columns, attnames, source_pk, limit, database)
+            result.update({"app": target._meta.app_label, "database": database, "model": target._meta.object_name, "pk": target._meta.pk.attname})
             result["sql"] = _browse_sql(ctx)
             return result
         except Exception:
             return {"columns": [], "error": traceback.format_exc(), "rows": []}
 
 
-def _browse_related_single(model, field, target, attnames, columns, source_pk, value):
+def _browse_related_single(model, field, target, attnames, columns, source_pk, value, database=None):
     """Fetches one forward foreign-key or one-to-one related row with at most two queries."""
     if value is None:
-        value = model._base_manager.filter(pk=source_pk).values_list(field.attname, flat=True).first()
-    raw = list(target._base_manager.filter(pk=value).values(*attnames)[:1]) if value is not None else []
+        value = model._base_manager.using(database).filter(pk=source_pk).values_list(field.attname, flat=True).first()
+    raw = list(target._base_manager.using(database).filter(pk=value).values(*attnames)[:1]) if value is not None else []
     orm = f"{target.__name__}._base_manager.filter(pk={value!r}).values({_orm_args(attnames)})[:1]"
     return {"columns": columns, "hasMore": False, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row) for row in raw], "single": True}
 
 
-def _browse_related_many(model, field, columns, attnames, source_pk, limit):
+def _browse_related_many(model, field, columns, attnames, source_pk, limit, database=None):
     """Fetches a bounded page of reverse foreign-key or many-to-many related rows."""
     accessor_name = _browse_relation_name(field)
     orm = f"{model.__name__}._base_manager.get(pk={source_pk!r}).{accessor_name}.all().values({_orm_args(attnames)})[:{limit + 1}]"
-    instance = model._base_manager.filter(pk=source_pk).first()
+    instance = model._base_manager.using(database).filter(pk=source_pk).first()
     if instance is None:
         return {"columns": columns, "error": "Source row not found.", "ok": False, "rows": []}
     try:
@@ -153,9 +155,9 @@ def _browse_related_many(model, field, columns, attnames, source_pk, limit):
     except Exception:
         return {"columns": columns, "hasMore": False, "ok": True, "orm": orm, "rows": [], "single": bool(field.one_to_one)}
     if not hasattr(accessor, "all"):
-        raw = list(type(accessor)._base_manager.filter(pk=accessor.pk).values(*attnames)[:1]) if accessor is not None else []
+        raw = list(type(accessor)._base_manager.using(database).filter(pk=accessor.pk).values(*attnames)[:1]) if accessor is not None else []
         return {"columns": columns, "hasMore": False, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row) for row in raw], "single": True}
-    raw = list(accessor.all().values(*attnames)[: limit + 1])
+    raw = list(accessor.all().using(database).values(*attnames)[: limit + 1])
     has_more = len(raw) > limit
     return {"columns": columns, "hasMore": has_more, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row) for row in raw[:limit]], "single": False}
 
@@ -381,7 +383,7 @@ def _browse_relation_subquery_meta(model, field):
             else:
                 source_name = relation_field.m2m_field_name()
                 target_name = relation_field.m2m_reverse_field_name()
-            meta.update({"throughOwner": owner_model.__name__, "throughRelation": relation_field.name, "throughSource": source_name, "throughTarget": target_name})
+            meta.update({"throughOwner": owner_model._meta.label, "throughRelation": relation_field.name, "throughSource": source_name, "throughTarget": target_name})
         elif getattr(field, "auto_created", False) and not getattr(field, "concrete", False):
             forward = getattr(field, "field", None)
             if forward is not None:
@@ -524,6 +526,8 @@ def _browse_cell(value):
     import decimal
     import uuid
 
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) > 9007199254740991:
+        return str(value)
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, decimal.Decimal):
@@ -625,6 +629,8 @@ def _browse_json_edit_text(value):
 
 def _browse_jsonable(value):
     """Returns a JSON-safe scalar for cursors and choice keys."""
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) > 9007199254740991:
+        return str(value)
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     return str(value)

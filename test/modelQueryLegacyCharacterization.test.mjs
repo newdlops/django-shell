@@ -24,7 +24,7 @@ test("legacy flat filters are ANDed and a negated term is emitted as exclude", (
     model: "Company"
   });
 
-  assert.equal(orm, 'Company._base_manager.filter(**{"name__icontains": "acme"}).exclude(**{"amount__gt": "10"}).order_by(\'pk\')[0:51]');
+  assert.equal(orm, '__import__("django.apps", fromlist=["apps"]).apps.get_model("db", "Company")._base_manager.filter(**{"name__icontains": "acme"}).exclude(**{"amount__gt": "10"}).order_by(\'pk\')[0:51]');
 });
 
 test("legacy annotation aliases become post-annotation filters", () => {

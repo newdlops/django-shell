@@ -72,7 +72,8 @@ test("routes ORM Query through the interruptible backend query request instead o
   const result = await client.modelQuery({ code: "Company.objects.all()", limit: 50, offset: 0 });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(payload, { code: "Company.objects.all()", kind: "query", limit: 25, offset: 0 });
+  assert.match(payload.executionId, /^[a-f0-9-]{36}$/);
+  assert.deepEqual(payload, { code: "Company.objects.all()", executionId: payload.executionId, kind: "query", limit: 25, offset: 0 });
 });
 
 test("sends built-in hot reload over the authenticated backend socket", async () => {

@@ -4,6 +4,8 @@
 // reconstructed expressions cannot inject code.
 
 import type { BackendModelColumn, BackendModelFilter, BackendModelOrder, BackendModelRelation, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange, ModelConditionGroup } from "./modelBackend";
+import { buildValidatedCommitOrm } from "./modelCommitOrm";
+import { modelQueryOrmModelExpression } from "./modelQueryPredicateOrm";
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PYTHON_KEYWORDS = new Set(["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"]);
@@ -39,9 +41,9 @@ function safeName(value: string | undefined, fallback = "pk"): string {
   return typeof value === "string" && IDENTIFIER.test(value) ? value : fallback;
 }
 
-/** Returns the bare model class name used in visible ORM cells; startup auto-import/shell_plus must bind it so the audit stays real ORM, not app-registry plumbing. */
+/** Resolves an app-qualified model independently of ambiguous or rebound shell names. */
 function modelRef(app: string | undefined, model: string | undefined): string {
-  return safeName(model, "Model");
+  return app ? modelQueryOrmModelExpression({ app, model: safeName(model, "Model") }) : safeName(model, "Model");
 }
 
 /** Encodes a string as a Python string literal (double-quoted; JSON escaping is valid Python). */
@@ -407,7 +409,7 @@ const ANNOTATION_BLOCKED_METHODS = /\.(?:bulk_create|bulk_update|create|cursor|d
 const ANNOTATION_BLOCKED_MODULES = /\b(?:builtins|ctypes|importlib|os|pathlib|shutil|socket|subprocess|sys)\b/;
 
 /** Returns a safe single-line annotation expression for one per-row column spec via the `models` namespace, or null. */
-function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relationNames: Set<string>, sourceModel: string): string | null {
+function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relationNames: Set<string>, sourceModel: string, sourceApp?: string): string | null {
   const kind = item ? String(item.kind) : "";
   if (item?.conditions !== undefined && !["aggregate", "annotate", "subquery"].includes(kind)) {
     return null;
@@ -421,7 +423,7 @@ function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relati
     return condition.expr ? `models.Case(models.When(${condition.expr}, then=${expression}), default=models.Value(None))` : expression;
   }
   if (kind === "subquery") {
-    return subqueryAnnotationExpr(item, sourceModel, attnames, relationNames);
+    return subqueryAnnotationExpr(item, sourceModel, attnames, relationNames, sourceApp);
   }
   if (kind === "aggregate") {
     const func = String(item.func);
@@ -492,13 +494,13 @@ function annotationExpr(item: ModelAnnotationSpec, attnames: Set<string>, relati
 }
 
 /** Returns a safe single-line Subquery expression for the structured Subquery column builder. */
-function subqueryAnnotationExpr(item: ModelAnnotationSpec, sourceModel: string, attnames: Set<string>, relationNames: Set<string>): string | null {
+function subqueryAnnotationExpr(item: ModelAnnotationSpec, sourceModel: string, attnames: Set<string>, relationNames: Set<string>, sourceApp?: string): string | null {
   const valuePath = safeFilterPath(String(item.field ?? ""));
   if (!valuePath) {
     return null;
   }
   if (item.relationKind === "m2m") {
-    const owner = safeName(item.throughOwner, safeName(sourceModel, ""));
+    const owner = targetModelName(item.throughOwner || sourceModel, sourceApp);
     const relation = safeName(item.throughRelation, "");
     const source = safeName(item.throughSource, "");
     const target = safeName(item.throughTarget, "");
@@ -529,10 +531,11 @@ function subqueryAnnotationExpr(item: ModelAnnotationSpec, sourceModel: string, 
   return `models.Subquery(${targetModel}._base_manager.filter(**{${pyStr(filterField)}: models.OuterRef(${pyStr(outerField)})})${filter}.order_by(${order}).values(${pyStr(valuePath)})[:1])`;
 }
 
-/** Returns a safe model class name from an app-qualified label. */
-function targetModelName(target: string | undefined): string | null {
-  const name = String(target ?? "").split(".").pop() ?? "";
-  return IDENTIFIER.test(name) ? name : null;
+/** Resolves a structured annotation model without discarding its app label. */
+function targetModelName(target: string | undefined, fallbackApp?: string): string | null {
+  const parts = String(target ?? "").split(".");
+  if (parts.length > 2 || !parts.every((part) => IDENTIFIER.test(part))) { return null; }
+  return modelRef(parts.length === 2 ? parts[0] : fallbackApp, parts.at(-1));
 }
 
 /** Returns a comma-separated `.order_by()` argument list for a structured Subquery. */
@@ -597,11 +600,11 @@ function exprOperand(raw: string | number | undefined, attnames: Set<string>): {
 }
 
 /** Returns safe {alias, expr, window} annotation specs (allowlisted, unique aliases) for the rows query. */
-function buildRowAnnotations(annotations: ModelAnnotationSpec[] | undefined, attnames: Set<string>, relationNames: Set<string>, sourceModel: string): Array<{ alias: string; expr: string; window: boolean }> {
+function buildRowAnnotations(annotations: ModelAnnotationSpec[] | undefined, attnames: Set<string>, relationNames: Set<string>, sourceModel: string, sourceApp?: string): Array<{ alias: string; expr: string; window: boolean }> {
   const specs: Array<{ alias: string; expr: string; window: boolean }> = [];
   const used = new Set<string>();
   for (const item of annotations ?? []) {
-    const expr = annotationExpr(item, attnames, relationNames, sourceModel);
+    const expr = annotationExpr(item, attnames, relationNames, sourceModel, sourceApp);
     if (expr) {
       const label = item.kind === "expr" ? "expr" : item.kind === "annotate" ? "annotate" : String(item.func || item.kind || "col");
       const arg = typeof item.field === "string" && item.field && item.field !== "*" ? item.field : "col";
@@ -657,7 +660,7 @@ export function buildRowsOrm(params: OrmRowsParams): string {
   const offset = Number.isInteger(params.offset) && (params.offset as number) > 0 ? (params.offset as number) : 0;
   const limit = Number.isInteger(params.limit) && params.limit > 0 ? params.limit : 50;
   const attnames = concreteAttnames(params.columns);
-  const annotations = buildRowAnnotations(params.annotations, attnames, relationQueryNames(params.relations, params.columns), params.model);
+  const annotations = buildRowAnnotations(params.annotations, attnames, relationQueryNames(params.relations, params.columns), params.model, params.app);
   const annotate = annotations.length ? `.annotate(${annotations.map((spec) => `${spec.alias}=${spec.expr}`).join(", ")})` : "";
   // A lookup on a (non-window) annotation alias filters AFTER .annotate() (HAVING / WHERE-on-expression); window aliases can't be filtered.
   const allAliases = new Set(annotations.map((spec) => spec.alias));
@@ -677,7 +680,7 @@ export function buildRowsOrm(params: OrmRowsParams): string {
 export function buildComputedOrm(app: string | undefined, model: string, field: string, filters: BackendModelFilter[] | undefined, order: BackendModelOrder[] | undefined, limit: number, columns: BackendModelColumn[] | undefined, relations?: BackendModelRelation[], annotations?: ModelAnnotationSpec[]): string {
   const attnames = concreteAttnames(columns);
   const cap = Number.isInteger(limit) && limit > 0 ? limit : 50;
-  const rowAnnotations = buildRowAnnotations(annotations, attnames, relationQueryNames(relations, columns), model);
+  const rowAnnotations = buildRowAnnotations(annotations, attnames, relationQueryNames(relations, columns), model, app);
   const annotate = rowAnnotations.length ? `.annotate(${rowAnnotations.map((spec) => `${spec.alias}=${spec.expr}`).join(", ")})` : "";
   const allAliases = new Set(rowAnnotations.map((spec) => spec.alias));
   const havingAliases = new Set(rowAnnotations.filter((spec) => !spec.window).map((spec) => spec.alias));
@@ -866,10 +869,10 @@ export function buildLookupOrm(app: string | undefined, model: string, q: string
 }
 
 /** Builds a related-rows ORM that works for any relation: getattr the accessor (None if missing/orphaned, never raising), then .all() a bounded page only when it is a manager/queryset, else use the single object as-is. */
-export function buildRelatedOrm(app: string | undefined, model: string, pk: unknown, relation: string, limit: number): string {
+export function buildRelatedOrm(app: string | undefined, model: string, pk: unknown, relation: string, limit: number, database?: string): string {
   const cap = (Number.isInteger(limit) && limit > 0 ? limit : 50) + 1;
   return [
-    `_rel = getattr(${modelRef(app, model)}._base_manager.get(pk=${pyScalar(pk)}), ${pyStr(safeName(relation, "pk"))}, None)`,
+    `_rel = getattr(${modelRef(app, model)}._base_manager${database ? `.using(${pyStr(database)})` : ""}.get(pk=${pyScalar(pk)}), ${pyStr(safeName(relation, "pk"))}, None)`,
     `_rel.all()[0:${cap}] if hasattr(_rel, "all") else _rel`
   ].join("\n");
 }
@@ -942,24 +945,8 @@ function editValue(column: BackendModelColumn | undefined, value: unknown): stri
 }
 
 /** Builds an atomic save ORM for staged edits: per row, get → set fields → save (audit shows real ORM). */
-export function buildCommitOrm(app: string | undefined, model: string, changes: ModelCommitChange[], columns: BackendModelColumn[] | undefined): string {
-  const byAttname = new Map((columns ?? []).map((column) => [column.attname, column]));
-  const name = modelRef(app, model);
-  const lines = ["import django.db.transaction as _t", `with _t.atomic():`];
-  changes.forEach((change, index) => {
-    if (!change || !change.fields) {
-      return;
-    }
-    const variable = `_o${index}`;
-    lines.push(`    ${variable} = ${name}._base_manager.get(pk=${pyScalar(change.pk)})`);
-    for (const [attname, value] of Object.entries(change.fields)) {
-      if (IDENTIFIER.test(attname)) {
-        lines.push(`    ${variable}.${attname} = ${editValue(byAttname.get(attname), value)}`);
-      }
-    }
-    lines.push(`    ${variable}.save()`);
-  });
-  return lines.join("\n");
+export function buildCommitOrm(app: string | undefined, model: string, changes: ModelCommitChange[], columns: BackendModelColumn[] | undefined, database?: string): string {
+  return buildValidatedCommitOrm(modelRef(app, model), changes, columns ?? [], editValue, pyScalar, database);
 }
 
 export const __test = { aggregatesNeedPython, buildAggregateOrm, buildCommitOrm, buildCountOrm, buildInspectOrm, buildLookupOrm, buildModelsOrm, buildRelatedOrm, editValue, filterChain, orderArgs, safeName };

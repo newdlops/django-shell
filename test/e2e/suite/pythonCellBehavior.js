@@ -249,7 +249,7 @@ async function installOverlayDocument(text) {
   const visibleText = markerIndex >= 0 ? text.slice(markerIndex + marker.length) : text;
   const analysisText = markerIndex >= 0 ? `${text.slice(0, markerIndex)}${visibleText}` : text;
   await replaceDocument(uris.editor, visibleText);
-  await replaceDocument(uris.analysis, analysisText);
+  await vscode.workspace.fs.writeFile(uris.analysis, Buffer.from(analysisText, "utf8"));
   return await waitForOpenDocumentText((value) => value === visibleText);
 }
 
@@ -418,11 +418,14 @@ async function assertSuggestionWidgetSurvivesTypingBurst() {
   const warm = await installOverlayDocument(`${PRELUDE}${INPUT_MARKER}\nupper = 1\n\n\nclient = WidgetImportedCli`);
   await warmCompletionLabel(overlayUris().editor, warm, "client = WidgetImportedCli", "WidgetImportedClient");
   await installOverlayDocument(`${PRELUDE}${INPUT_MARKER}\nupper = 1\n\n\nclient = WidgetImp`);
+  const focused = await vscode.commands.executeCommand("djangoShell.e2eDispatchOverlayMouse", { points: [{ x: 1, y: 1 }] });
+  assert.equal(focused.ok, true, `automatic suggestion probe must focus its workbench window: ${JSON.stringify(focused)}`);
   let result = JSON.parse(await evalInWorkbench(undefined, suggestionWidgetBurstStartExpression()));
   for (let attempt = 0; attempt < 75 && !result.ok && result.reason !== "missing-overlay" && result.elapsedMs <= 1500; attempt++) {
     await delay(40);
     result = JSON.parse(await evalInWorkbench(undefined, suggestionWidgetSnapshotExpression()));
   }
+  if (!result.ok) { result.editorState = JSON.parse(await evalInWorkbench(undefined, `(function(){const root=document.getElementById("django-shell-overlay"),editor=root&&root.__djangoShellEditor,controller=editor&&editor.getContribution("editor.contrib.suggestController");return JSON.stringify({documentFocus:document.hasFocus(),quickSuggestions:editor&&editor.getRawOptions().quickSuggestions,textFocus:editor&&editor.hasTextFocus(),suggestState:controller&&controller.model&&controller.model.state});})()`)); }
   assert.equal(result.ok, true, `suggest widget lost a known completion during typing: ${JSON.stringify(result)}`);
   assert.equal(result.sawNoSuggestions, false, `suggest widget exposed a false empty result: ${JSON.stringify(result)}`);
   assert.ok(result.elapsedMs <= 250, `suggest widget exceeded the 250ms warm latency budget: ${JSON.stringify(result)}`);
@@ -587,7 +590,7 @@ function suggestionWidgetBurstStartExpression() {
     state.scan=()=>{const widget=Array.from(document.querySelectorAll(".suggest-widget")).find(visible),text=String(widget&&widget.textContent||""),controller=editor.getContribution&&editor.getContribution("editor.contrib.suggestController");let focused=null;try{focused=controller&&controller.widget&&controller.widget.value&&controller.widget.value.getFocusedItem&&controller.widget.value.getFocusedItem();}catch(error){}const completion=focused&&focused.item&&focused.item.completion;state.focusedLabel=String(completion&&completion.label&&typeof completion.label==="object"?completion.label.label:completion&&completion.label||"");if(text){state.lastText=text;}else if(state.focusedLabel){state.lastText=state.focusedLabel;}if(state.tracking){state.sawNoSuggestions=state.sawNoSuggestions||/no suggestions/i.test(text);}if(String(model.getValue&&model.getValue()||"").endsWith("WidgetImportedCli")&&(text.includes("WidgetImportedClient")||state.focusedLabel==="WidgetImportedClient")){state.candidateSeen=true;state.candidateAt=state.candidateAt||Date.now();}};
     state.observer=new MutationObserver(state.scan);state.observer.observe(document.body,{attributes:true,characterData:true,childList:true,subtree:true});window.__dsoSuggestionProbe=state;
     const line=model.getLineCount(),startColumn=model.getLineMaxColumn(line),chunks=["orted","Cl","i"];editor.focus&&editor.focus();editor.setPosition&&editor.setPosition({lineNumber:line,column:startColumn});state.tracking=true;
-    for(let index=0;index<chunks.length;index++){const text=chunks[index];await delay(8);editor.trigger("django-shell-e2e-suggest-burst","type",{text});if(index===chunks.length-1){state.finalTypedAt=Date.now();}}
+    for(let index=0;index<chunks.length;index++){const text=chunks[index];await delay(8);editor.trigger("keyboard","type",{text});if(index===chunks.length-1){state.finalTypedAt=Date.now();}}
     state.scan();const elapsedMs=state.candidateSeen?Math.max(0,state.candidateAt-state.finalTypedAt):0;return JSON.stringify({elapsedMs,focusedLabel:state.focusedLabel,lastText:state.lastText.slice(0,500),modelTail:String(model.getValue&&model.getValue()||"").slice(-120),ok:state.candidateSeen,sawNoSuggestions:state.sawNoSuggestions});
   })()`;
 }
