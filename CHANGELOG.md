@@ -2,12 +2,25 @@
 
 All notable user-facing changes to the **Django Shell** VS Code extension.
 
-This extension uses a `0.0.x` running build number rather than strict semantic
-versioning; the `0.0.9xx` series is the current line (it follows `0.0.8`, with no
-`0.0.9`/`0.0.90` in between). The format is loosely based on
+This extension uses a running build number; the current release line is `1.1.x`.
+Earlier `0.0.x` entries are retained below. The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
+
+## [1.1.1000050] — 2026-09-08
+
+### Fixed
+- Computed `@property` values now appear in Model Data and stay aligned with the loaded rows when refreshed or retried.
+- ORM Query executes submitted Python only on an explicit Run. Paging and Reload reuse the evaluated result; runtime notifications, transport changes, and reopening the panel no longer repeat writes in the query source.
+- Query cancellation identifies the exact execution and original runtime, prevents cancelled queued work from starting, and preserves unrelated Console execution. Unconfirmed interruption is reported accurately.
+- Generated ORM preserves app-qualified model identity. Large integer primary keys, cursors, and foreign-key selections retain their exact values, and explicit query database choices survive related reads and saves.
+- Model Browser and ORM Query share correlated save responses, retain newer and related-table drafts, and recover controls after failed saves. Datetime edits preserve their stored offset and precision.
+- Socket requests are not replayed after delivery becomes uncertain. PTY timeouts, restarts, and exits retire stale work and prevent late responses from satisfying new requests.
+- Socket and generated ORM saves validate every edited row before an atomic write on the intended database, and parallel reads keep independent request state.
+- VSIX packaging excludes local Port Manager environment files and agent configuration.
+
+## Earlier development notes
 
 ### Added
 - **Built-in experimental debugger engine** — `djangoShell.debug.engine` can start the bundled dependency-free tracer directly inside a live shell while keeping debugpy as the default. No companion extension, package install, or Python runtime Setup step is required. Its workspace watcher also deep-reloads changed loaded modules while retaining live function, decorator, class-method, property, and URL-conf references.

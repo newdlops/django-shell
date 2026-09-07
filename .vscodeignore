@@ -1,4 +1,10 @@
 .claude/**
+.agents/**
+.codex/**
+.portmanager/**
+**/.env
+**/.env.*
+**/*.env
 .codeidx/**
 .django-shell/**
 .git/**
@@ -8,6 +14,8 @@
 .vscode-test/**
 .zoek-rs/**
 AGENTS.md
+CRITICAL_REVIEW.md
+STABILITY_REVIEW.md
 DEPLOYMENT.md
 FRONTEND_CHANGE.md
 HANDOVER.md
