@@ -235,6 +235,8 @@ def start(namespace, token):
         namespace["_djs_backend_initial_names"] = server.initial_names
         namespace["_djs_rpc"] = lambda _djs_r, _djs_i: _pty_serve(namespace, token, _djs_r, _djs_i, namespace.get("_djs_backend_initial_names", set()))
         ready = {"autoImported": autoimported, "cellCapture": bool(capture), "host": _connect_host(host), "ipython": ipython, "pid": os.getpid(), "port": port, "readyMs": int((time.monotonic() - started_at) * 1000), "readyPhases": phases, "token": token}
+        if "capabilities" in _STATE:
+            ready.update({"capabilities": sorted(_STATE["capabilities"]), "bootstrapCached": bool(_STATE.get("bootstrap_cached"))})
         if warmup is not None:
             ready["warmupPending"] = True
         _print_marker(_READY_PREFIX, ready)
@@ -286,7 +288,8 @@ def _warmup_backend_components(namespace):
     if _autoimport_enabled():
         autoimported += _autoimport_django_namespace(namespace)
     _register_transform_lookups()
-    _install_queryset_progress()
+    if "_install_queryset_progress" in globals():
+        _install_queryset_progress()
     return autoimported
 
 
@@ -584,4 +587,3 @@ def _run_request(namespace, token, request, initial_names):
             source_text if isinstance(source_text, str) else None,
             breakpoint_lines if isinstance(breakpoint_lines, list) else None,
         )
-

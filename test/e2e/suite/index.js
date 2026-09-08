@@ -19,11 +19,13 @@ async function run() {
   await writePreActivationStaleOverlayFiles();
   await extension.activate();
   await focusTestWorkbench(extension);
-  await assertModelQueryBuilderWebview(extension);
-  await assertModelStabilityWebview(extension);
-  await assertModelStabilityWebview(extension, "query");
-  await assertModelIntegrityWebview(extension);
-  await assertModelIntegrityWebview(extension, "query");
+  if (process.env.DJANGO_SHELL_E2E_HOVER_ONLY !== "1") {
+    await assertModelQueryBuilderWebview(extension);
+    await assertModelStabilityWebview(extension);
+    await assertModelStabilityWebview(extension, "query");
+    await assertModelIntegrityWebview(extension);
+    await assertModelIntegrityWebview(extension, "query");
+  }
   if (process.env.DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY === "1") { return; }
   await vscode.commands.executeCommand("djangoShell.openConsole");
   const opened = await waitForSnapshot((snapshot) => snapshot.panelOpen && snapshot.hasEditorAnchor);

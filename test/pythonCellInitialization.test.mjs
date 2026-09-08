@@ -92,7 +92,7 @@ test("setup prompt and Python editor initialize ahead of backend metadata withou
   assert.ok((debug.match(/runtimeOperationCurrent\(attachGeneration, backend\)/g) ?? []).length >= 5, "each slow attach phase rejects a restarted backend");
   assert.ok(injectedPrelude.indexOf("this.runtimePrelude.invalidate()") < injectedPrelude.indexOf("this.ensureOverlay()"), "an explicit prelude invalidates an older runtime refresh before installing its source");
   assert.ok(clientSource.includes('snapshot.mode === "django" && snapshot.state === "attaching"'), "failed attachment restores the setup terminal instead of hiding it");
-  assert.ok(ptySource.includes('failed && this.state !== "failed"') && ptySource.includes("this.dataEmitter.fire(visibleFailure)"), "a hidden bootstrap failure streams to an already-mounted terminal exactly once");
+  assert.ok(ptySource.includes('if (this.client || this.state === "failed")') && ptySource.includes("this.dataEmitter.fire(visibleFailure)"), "a hidden bootstrap failure streams to an already-mounted terminal exactly once");
 });
 
 test("runtime prelude output stays bounded without starving late model imports", () => {

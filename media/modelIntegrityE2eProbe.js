@@ -11,12 +11,15 @@ async function waitFor(predicate, label) {
 }
 
 /** Waits for the newly opened webview's focus and grid geometry to settle before typing. */
-async function stableForeignKeyCell(document) {
-  let previous, signature = "", since = 0;
+async function stableForeignKeyCell(document, requestFocus) {
+  let previous, signature = "", since = 0, requestedFocus = false;
   return waitFor(() => {
     const cell = document.querySelector('#tbody td[data-attname="company_id"]');
-    if (cell && !document.hasFocus()) { window.focus(); cell.focus(); }
     const rect = cell?.getBoundingClientRect();
+    if (rect?.width > 0 && rect?.height > 0 && !requestedFocus) {
+      requestedFocus = true;
+      requestFocus({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+    }
     const current = rect ? [rect.x, rect.y, rect.width, rect.height].join(":") : "";
     if (cell !== previous || current !== signature || !document.hasFocus()) { previous = cell; signature = current; since = performance.now(); }
     return cell && rect.width > 0 && rect.height > 0 && document.hasFocus() && performance.now() - since >= 200 ? cell : undefined;
@@ -29,7 +32,7 @@ export async function runModelIntegrityE2eProbe({ document, postMessage, request
   let debugCell, debugInput;
   try {
     const cell = (field) => document.querySelector(`#tbody td[data-attname="${field}"]`);
-    const fk = await stableForeignKeyCell(document); debugCell = fk;
+    const fk = await stableForeignKeyCell(document, (point) => postMessage({ requestId, point, type: "e2eFocusIntegrityCell" })); debugCell = fk;
     progress("fk-search-states");
     fk.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     const input = await waitFor(() => fk.querySelector("input"), "foreign-key input"); debugInput = input;
@@ -40,8 +43,14 @@ export async function runModelIntegrityE2eProbe({ document, postMessage, request
       await waitFor(() => fk.textContent.includes(expected), `FK search ${text}`);
     }
     await search("empty", "No matching rows");
+    postMessage({ requestId, type: "e2eBlurIntegrityCell" });
+    await waitFor(() => !document.hasFocus(), "webview focus departure");
     await search("fail", "Search failed");
     await search("Beta", "#2 · Beta");
+    if (!input.isConnected || cell("company_id").dataset.staged !== undefined) { throw new Error("Losing webview focus staged an unconfirmed FK search."); }
+    const inputRect = input.getBoundingClientRect();
+    postMessage({ requestId, point: { x: inputRect.left + inputRect.width / 2, y: inputRect.top + inputRect.height / 2 }, type: "e2eFocusIntegrityCell" });
+    await waitFor(() => document.hasFocus() && document.activeElement === input, "foreign-key focus return");
     if (input.getAttribute("aria-expanded") !== "true" || !input.getAttribute("aria-activedescendant")) { throw new Error("FK keyboard selection is not exposed."); }
     input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
     if (cell("company_id").dataset.staged !== "001") { throw new Error("FK selection lost its alternate key or leading zeros."); }

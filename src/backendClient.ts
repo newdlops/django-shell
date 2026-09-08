@@ -6,6 +6,8 @@ import { randomUUID } from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
 import { BackendSocketFailure } from "./backendSocketFailure";
 import { BackendEndpoint } from "./backendBootstrap";
+import type { BackendCapability } from "./backendCapabilities";
+import { usesLiteralPtyCell } from "./backendPtyExecution";
 import { hotReloadTransportError, parseHotReloadResponse, type BackendHotReloadResult } from "./backendHotReloadProtocol";
 import { recipeAggregateValidationFailure, recipeCountValidationFailure, recipeRowsValidationFailure, withRecipeResult } from "./backendClientRecipeResults";
 import { DiagnosticLogger } from "./diagnostics";
@@ -33,6 +35,7 @@ import {
 export { parseLoadFeatureResponse } from "./backendClientResponses";
 
 const TCP_CONNECT_TIMEOUT_MS = 1500;
+const FEATURE_LOAD_RESPONSE_TIMEOUT_MS = 3000;
 const TCP_RETRY_COOLDOWN_MS = 15000;
 const PARALLEL_READ_RESPONSE_TIMEOUT_MS = 6000;
 const HOT_RELOAD_RESPONSE_TIMEOUT_MS = 15000;
@@ -203,6 +206,8 @@ export interface BackendRuntimePathSegment {
 }
 
 export interface BackendRequestPayload {
+  feature?: BackendCapability;
+  requires?: BackendCapability[];
   aggregates?: ModelAggregateTerm[];
   annotations?: ModelAnnotationSpec[];
   app?: string;
@@ -255,6 +260,7 @@ export class BackendClient {
   private readonly queryRequests = new Map<string, AbortController>();
   private activeTransport: BackendTransport = "none";
   private featureLoader: (() => Promise<void>) | undefined;
+  private capabilityLoader: ((feature: BackendCapability) => Promise<void>) | undefined;
   private featureReady: Promise<void> | undefined;
   private forwardedEndpoint: { host: string; port: number } | undefined;
   private modelList: BackendModelList | undefined; private modelListInFlight: Promise<BackendModelList> | undefined;
@@ -352,6 +358,7 @@ export class BackendClient {
     if (this.remoteSocketUnavailable) {
       return nativeDebuggerTransportError("The built-in experimental debugger requires a backend socket on the current VS Code host.");
     }
+    await this.capabilityLoader?.("extras");
     const started = Date.now();
     try {
       const buffer = await this.socketRequest(payload);
@@ -373,6 +380,7 @@ export class BackendClient {
     if (this.remoteSocketUnavailable) {
       return hotReloadTransportError("Built-in hot reload requires a backend socket on the current VS Code host.");
     }
+    await this.capabilityLoader?.("extras");
     const started = Date.now();
     try {
       const buffer = await this.socketRequest(payload, HOT_RELOAD_RESPONSE_TIMEOUT_MS);
@@ -394,10 +402,11 @@ export class BackendClient {
   }
 
   /** Uploads the compressed debugpy bundle in one socket request; rejects when the socket is unreachable so the caller can fall back to typed PTY staging. */
-  stageDebugpyUpload(digest: string, data: string): Promise<BackendStageDebugpyResult> {
+  async stageDebugpyUpload(digest: string, data: string): Promise<BackendStageDebugpyResult> {
     if (this.socketUnavailable) {
       return Promise.reject(new Error("Backend socket is unavailable for the debugpy bundle upload."));
     }
+    await this.capabilityLoader?.("extras");
     const started = Date.now();
     const payload: BackendRequestPayload = { data, digest, kind: "stagedebugpy" };
     return this.socketRequest(payload).then((buffer) => {
@@ -413,13 +422,13 @@ export class BackendClient {
   }
 
   /** Loads the deferred model-browser feature over the socket in one request; rejects when the socket is unreachable so the caller can fall back to typed PTY delivery. */
-  loadFeature(data: string): Promise<BackendLoadFeatureResult> {
+  loadFeature(data?: string, digest?: string, feature?: BackendCapability, requires?: BackendCapability[]): Promise<BackendLoadFeatureResult> {
     if (this.socketUnavailable) {
       return Promise.reject(new Error("Backend socket is unavailable for the model browser feature load."));
     }
     const started = Date.now();
-    const payload: BackendRequestPayload = { data, kind: "loadfeature" };
-    return this.socketRequest(payload).then((buffer) => {
+    const payload: BackendRequestPayload = { data, digest, feature, requires, kind: "loadfeature" };
+    return this.socketRequest(payload, FEATURE_LOAD_RESPONSE_TIMEOUT_MS).then((buffer) => {
       const parsed = parseLoadFeatureResponse(buffer);
       this.activeTransport = "tcp";
       this.logRequest(payload.kind, started, parsed, buffer.length, undefined, "tcp");
@@ -436,8 +445,14 @@ export class BackendClient {
     this.featureLoader = loader;
   }
 
+  /** Registers independently loadable capabilities for a small remote runtime. */
+  setCapabilityLoader(loader: (feature: BackendCapability) => Promise<void>): void {
+    this.capabilityLoader = loader;
+  }
+
   /** Loads the deferred model-browser feature once before the first browse request. A failed delivery clears the memo so a later browse retries, and the request proceeds into the backend's still-loading guard instead of failing here. */
-  private ensureModelBrowserFeature(): Promise<void> {
+  private ensureModelBrowserFeature(feature: BackendCapability = "grid"): Promise<void> {
+    if (this.capabilityLoader) { return this.capabilityLoader(feature === "grid" && !this.reconstructsViaOrmCell ? "models" : feature); }
     if (!this.featureLoader) { return Promise.resolve(); }
     if (!this.featureReady) {
       const attempt: Promise<void> = this.featureLoader().catch((error: unknown) => {
@@ -505,7 +520,8 @@ export class BackendClient {
   }
 
   /** Returns safe summaries for variables and modules in the attached runtime. */
-  inspect(): Promise<BackendRuntimeInspection> {
+  async inspect(): Promise<BackendRuntimeInspection> {
+    await this.capabilityLoader?.("inspection");
     if (this.reconstructsRuntimeInspectionViaOrmCell) { return this.ormCell(buildInspectOrm(), parseOrmInspectResponse); }
     return this.request({ kind: "inspect" }, parseInspectionResponse);
   }
@@ -521,7 +537,8 @@ export class BackendClient {
   }
 
   /** Returns safe child summaries for one inspected runtime value path using pure Python probe cells in ORM/terminal mode. */
-  children(path: BackendRuntimePathSegment[], kind?: string): Promise<BackendRuntimeChildren> {
+  async children(path: BackendRuntimePathSegment[], kind?: string): Promise<BackendRuntimeChildren> {
+    await this.capabilityLoader?.("inspection");
     if (this.reconstructsRuntimeInspectionViaOrmCell) {
       const expression = buildInspectChildrenOrm(path, kind);
       if (expression) { return this.ormCell(expression, (buffer) => parseOrmInspectChildren(buffer, path)); }
@@ -531,7 +548,7 @@ export class BackendClient {
 
   /** Returns the catalog once per attached backend, coalescing concurrent loads; an explicit refresh bypasses a completed cache. */
   async models(refresh = false): Promise<BackendModelList> {
-    await this.ensureModelBrowserFeature();
+    await this.ensureModelBrowserFeature("base");
     if (this.modelListInFlight) {
       if (!refresh || this.modelListInFlightRefresh) { return this.modelListInFlight; }
       if (!this.modelRefreshInFlight) { const active = this.modelListInFlight; const queued = active.catch(() => undefined).then(() => this.loadModels(true)).finally(() => { if (this.modelRefreshInFlight === queued) { this.modelRefreshInFlight = undefined; } }); this.modelRefreshInFlight = queued; }
@@ -551,13 +568,13 @@ export class BackendClient {
 
   /** Returns column and relation metadata for one model without querying rows. */
   async modelSchema(app: string, model: string): Promise<BackendModelSchema> {
-    await this.ensureModelBrowserFeature();
+    await this.ensureModelBrowserFeature("schema");
     return this.request({ app, kind: "schema", model }, parseModelSchemaResponse);
   }
 
   /** Returns the filterable field/relation tree for one model so the filter UI can drill across relations (metadata RPC; suppressed in ORM/Terminal mode like schema). */
   async modelFilterFields(app: string, model: string): Promise<BackendFilterFieldTree> {
-    await this.ensureModelBrowserFeature();
+    await this.ensureModelBrowserFeature("schema");
     return this.request({ app, kind: "filterfields", model }, parseFilterFieldsResponse);
   }
 
@@ -634,7 +651,7 @@ export class BackendClient {
     const controller = new AbortController();
     this.queryRequests.set(executionId, controller);
     try {
-      await this.ensureModelBrowserFeature();
+      await this.ensureModelBrowserFeature("query");
       if (controller.signal.aborted) { throw new Error("Query cancelled before execution."); }
       return await this.request({ ...query, executionId, kind: "query" }, parseModelQueryResponse);
     } finally { this.queryRequests.delete(executionId); }
@@ -683,14 +700,14 @@ export class BackendClient {
 
   /** Applies staged cell edits in one atomic transaction and returns per-row results. */
   async modelCommit(query: ModelCommitQuery): Promise<BackendCommitResult> {
-    await this.ensureModelBrowserFeature();
+    await this.ensureModelBrowserFeature("commit");
     if (query.changes.some((change) => typeof change.pk === "number" && Number.isInteger(change.pk) && !Number.isSafeInteger(change.pk))) { throw new Error("An imprecise integer primary key cannot be saved. Reload the rows before editing."); }
     if (this.reconstructsViaOrmCell && Array.isArray(query.changes) && query.changes.length) { return this.ormCell(buildCommitOrm(query.app, query.model, query.changes, query.columns, query.database), (buffer) => parseOrmCommitResponse(buffer, query.changes.length)); }
     return this.request({ ...query, kind: "commit" }, parseModelCommitResponse);
   }
 
   /** Sends one JSON request to the backend and parses the single-line response. */
-  private request<T>(
+  private async request<T>(
     payload: BackendRequestPayload,
     parse: (buffer: string) => T,
     log = true
@@ -698,6 +715,14 @@ export class BackendClient {
     const started = Date.now();
     if (Buffer.byteLength(JSON.stringify({ ...payload, token: this.endpoint.token })) + 1 > BACKEND_REQUEST_BYTES) {
       return Promise.resolve(parse(kindErrorResponse(payload.kind, "Backend request exceeds the 4 MiB input limit.")));
+    }
+    if (this.capabilityLoader) {
+      const capability: BackendCapability | undefined = ["inspect", "children", "prelude", "environment"].includes(payload.kind) ? "inspection"
+        : ["rows", "count", "related", "lookup", "computed", "aggregate"].includes(payload.kind) ? "models"
+          : ["schema", "filterfields"].includes(payload.kind) ? "schema"
+            : payload.kind === "query" ? "query" : payload.kind === "commit" ? "commit"
+              : ["debugpy", "stagedebugpy"].includes(payload.kind) ? "extras" : undefined;
+      if (capability) { await this.capabilityLoader(capability); }
     }
     // The extracted PTY payload helper preserves `hasDebugExecutionPayload(payload) ? payload` and
     // `payload.kind === "execute" && Array.isArray(payload.breakpointLines)` so breakpoint metadata stays intact.
@@ -710,6 +735,7 @@ export class BackendClient {
     if (this.mode === "pty" || (this.socketUnavailable && this.fallback)) {
       return this.requestFallback(payload, parse, started, undefined, log, false);
     }
+    if (payload.kind === "execute") { await this.capabilityLoader?.("execution"); }
     return this.socketRequest(payload, this.parallelReadResponseTimeout(payload)).then(
       (buffer) => {
         const parsed = parse(buffer);
@@ -858,6 +884,11 @@ export class BackendClient {
       return parsed;
     }
     const fallbackStarted = Date.now();
+    if (payload.kind === "execute" && this.capabilityLoader) {
+      const capability = usesLiteralPtyCell(payload, Boolean(this.endpoint.cellCapture), Boolean(this.endpoint.ipython))
+        ? (/^\s*(?:dir|len)\s*\(/.test(payload.code ?? "") ? "inspection" : "base") : "execution";
+      await this.capabilityLoader(capability);
+    }
     const signal = payload.kind === "query" && payload.executionId ? this.queryRequests.get(payload.executionId)?.signal : undefined;
     if (signal?.aborted) { throw new Error("Query cancelled before execution."); }
     const buffer = await this.fallback(ptyFallbackPayload(payload), signal);

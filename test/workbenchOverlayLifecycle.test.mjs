@@ -783,8 +783,8 @@ test("debug variable analysis previews bounded QuerySet result lists", () => {
 test("PTY fallback preserves debug metadata instead of typing overlay debug cells literally", () => {
   assert.ok(backendClientSource.includes("hasDebugExecutionPayload(payload) ? payload"));
   assert.ok(backendClientSource.includes('payload.kind === "execute" && Array.isArray(payload.breakpointLines)'));
-  assert.ok(notebookPtySessionSource.includes("!wantsPtyDebugWrapper(payload)"));
-  assert.ok(notebookPtySessionSource.includes("function wantsPtyDebugWrapper"));
+  const { usesLiteralPtyCell } = require("../out/backendPtyExecution.js");
+  assert.equal(usesLiteralPtyCell({ kind: "execute", code: "2 + 3", breakpointLines: [] }, true, true), false);
 });
 
 test("full debug teardown (stop/restart/close) interrupts the backend and disconnects", () => {

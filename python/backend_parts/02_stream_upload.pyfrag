@@ -1,0 +1,167 @@
+# Receives capability payloads as terminal data rather than executing encoded chunks as Python cells.
+_BACKEND_CAPABILITIES = ("base", "grid", "schema", "inspection", "query", "models", "commit", "execution", "extras")
+
+
+def _djs_upload_marker(request_id, stage, size):
+    """Signals that the terminal reader owns stdin before the extension writes any payload bytes."""
+    import json
+
+    print("__DJANGO_SHELL_UPLOAD_READY__" + json.dumps({"id": request_id, "stage": stage, "size": size}), flush=True)
+
+
+def _djs_upload_read_exact(descriptor, size, deadline):
+    """Reads a bounded frame under one absolute deadline without evaluating its contents as shell input."""
+    import os
+    import select
+    import time
+
+    if not isinstance(size, int) or not 0 < size <= 1024 * 1024:
+        raise ValueError("Invalid backend upload size.")
+    chunks = []
+    remaining = size
+    while remaining:
+        wait = deadline - time.monotonic()
+        if wait <= 0 or not select.select([descriptor], [], [], wait)[0]:
+            raise TimeoutError("Backend upload timed out.")
+        chunk = os.read(descriptor, min(remaining, 16384))
+        if not chunk:
+            raise EOFError("Backend upload ended before the frame was complete.")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _djs_upload_cached(feature, digest, size):
+    """Reuses only regular, bounded cache files matching the payload identity supplied in the data frame."""
+    import hashlib
+    import os
+    import stat
+    import tempfile
+
+    slot = "core" if feature == "base" else feature
+    target = os.path.join(tempfile.gettempdir(), "django-shell-backend-" + str(getattr(os, "getuid", lambda: "user")()), slot + ".b64")
+    try:
+        descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return None
+            data = stream.read(size + 1)
+        if len(data) == size and hashlib.sha256(data).hexdigest() == digest:
+            return data.decode("ascii")
+    except (OSError, ValueError, UnicodeError):
+        pass
+    return None
+
+
+def _djs_read_upload(header_size, request_id, feature):
+    """Receives a header and optional payload with echo disabled, restoring terminal settings on every exit."""
+    import hashlib
+    import json
+    import sys
+    import termios
+    import time
+
+    if feature not in _BACKEND_CAPABILITIES or not isinstance(header_size, int) or not 0 < header_size <= 4096:
+        raise ValueError("Invalid backend upload header.")
+    descriptor = sys.__stdin__.fileno()
+    previous = termios.tcgetattr(descriptor)
+    current = list(previous)
+    current[6] = list(previous[6])
+    current[3] &= ~(termios.ECHO | termios.ICANON)
+    current[6][termios.VMIN] = 1
+    current[6][termios.VTIME] = 0
+    try:
+        termios.tcsetattr(descriptor, termios.TCSANOW, current)
+        deadline = time.monotonic() + 15
+        _djs_upload_marker(request_id, "header", header_size)
+        header = json.loads(_djs_upload_read_exact(descriptor, header_size, deadline))
+        size, digest = header.get("size"), header.get("digest")
+        if header.get("feature") != feature or not isinstance(size, int) or not 0 < size <= 1024 * 1024:
+            raise ValueError("Backend upload capability or size does not match.")
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("Invalid backend upload checksum.")
+        data = _djs_upload_cached(feature, digest, size)
+        header["cached"] = data is not None
+        if data is None:
+            _djs_upload_marker(request_id, "payload", size)
+            raw = _djs_upload_read_exact(descriptor, size, deadline)
+            if hashlib.sha256(raw).hexdigest() != digest:
+                raise ValueError("Backend upload checksum does not match.")
+            data = raw.decode("ascii")
+        header["data"] = data
+        return header
+    finally:
+        termios.tcsetattr(descriptor, termios.TCSANOW, previous)
+
+
+def _djs_bootstrap(header_size, request_id, namespace):
+    """Starts only the base capability, leaving unrelated backend functionality unloaded."""
+    import base64
+    import json
+    import traceback
+    import types
+    import zlib
+
+    try:
+        import termios
+    except ImportError:
+        print("__DJANGO_SHELL_BACKEND_NEEDS_INLINE__", flush=True)
+        return
+    try:
+        packet = _djs_read_upload(header_size, request_id, "base")
+        module = types.ModuleType("django_shell_backend")
+        exec(compile(zlib.decompress(base64.b64decode(packet["data"])), "<django-shell-backend>", "exec"), module.__dict__)
+        if not packet["cached"]:
+            module._backend_cache_write("core", packet["data"])
+        module._STATE["bootstrap_cached"] = packet["cached"]
+        namespace["_djs_backend_module"] = module
+        module.start(namespace, packet["token"])
+        module._pty_history_scrub(None)
+    except BaseException:
+        print("__DJANGO_SHELL_BACKEND_FAILED__" + json.dumps({"error": traceback.format_exc()}), flush=True)
+
+
+def _load_capability_from_stdin(feature, header_size, request_id):
+    """Installs one requested capability through the current terminal reader and emits a correlated response."""
+    try:
+        packet = _djs_read_upload(header_size, request_id, feature)
+        result = _install_backend_capability(packet)
+    except (TimeoutError, EOFError, KeyboardInterrupt):
+        result = {"ok": False, "restartRequired": True, "error": "Backend upload was incomplete. Restart the shell to restore terminal communication.", "traceback": traceback.format_exc()}
+    except BaseException:
+        result = {"ok": False, "error": "Backend capability transfer failed.", "traceback": traceback.format_exc()}
+    _print_marker(_RESPONSE_PREFIX, {"id": request_id, "response": result})
+    _pty_history_scrub(None)
+
+
+def _install_backend_capability(request):
+    """Installs one verified, dependency-ordered capability once while preserving existing module state."""
+    import base64
+    import hashlib
+    import zlib
+
+    feature = request.get("feature")
+    if feature not in _BACKEND_CAPABILITIES or feature == "base":
+        return {"ok": False, "error": "Unknown backend capability."}
+    with _FEATURE_LOAD_LOCK:
+        loaded = _STATE.get("capabilities", set())
+        if feature in loaded:
+            return {"ok": True, "reused": True}
+        if any(name not in loaded for name in request.get("requires", [])):
+            return {"ok": False, "error": "Backend capability dependencies are not ready."}
+        data, digest = request.get("data"), request.get("digest")
+        if not isinstance(data, str) or not data:
+            data = _backend_cache_read(feature, digest)
+        if not data:
+            return {"ok": False, "error": "Backend capability is not cached."}
+        try:
+            if hashlib.sha256(data.encode("ascii")).hexdigest() != digest:
+                return {"ok": False, "error": "Backend capability checksum does not match."}
+            exec(compile(zlib.decompress(base64.b64decode(data)), "<django-shell-backend>", "exec"), globals())
+            loaded.add(feature)
+            _backend_cache_write(feature, data)
+            if feature == "execution":
+                _install_queryset_progress()
+            return {"ok": True, "reused": bool(request.get("cached"))}
+        except Exception:
+            return {"ok": False, "error": "Backend capability could not be installed.", "traceback": traceback.format_exc()}

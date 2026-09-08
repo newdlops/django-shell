@@ -2,6 +2,11 @@
 import * as fs from "fs";
 import * as path from "path";
 import { deflateSync } from "zlib";
+import { randomBytes } from "crypto";
+import { backendCacheProbePython } from "./backendPayloadCache";
+import { backendCapabilityPayload } from "./backendCapabilities";
+import { renderPythonTemplate } from "./pythonTemplate";
+import type { BackendUploadFrame } from "./backendUploadChannel";
 
 export const BACKEND_READY_PREFIX = "__DJANGO_SHELL_BACKEND_READY__";
 export const BACKEND_FAILED_PREFIX = "__DJANGO_SHELL_BACKEND_FAILED__";
@@ -13,6 +18,8 @@ export const BACKEND_PROGRESS_PREFIX = "__DJANGO_SHELL_BACKEND_PROGRESS__";
 export const BACKEND_NEEDS_INLINE_PREFIX = "__DJANGO_SHELL_BACKEND_NEEDS_INLINE__";
 
 export interface BackendEndpoint {
+  bootstrapCached?: boolean;
+  capabilities?: string[];
   autoImported?: number;
   cellCapture?: boolean;
   host: string;
@@ -50,7 +57,8 @@ export interface BackendProgressParseResult {
 export interface BackendBootstrapCommand {
   bytes: number;
   command: string;
-  mode: "env" | "inline";
+  mode: "env" | "cache" | "inline" | "seed";
+  upload?: BackendUploadFrame;
 }
 
 const INLINE_BOOTSTRAP_CHUNK_SIZE = 900;
@@ -67,7 +75,7 @@ export const BACKEND_AUTOIMPORT_ENV = "DJANGO_SHELL_AUTOIMPORT_MODELS";
 export const BACKEND_FEATURE_MARKER = "# --- Model data browser";
 
 /** Reads the backend source, composing an ordered sibling fragment manifest when one is present. */
-function readBackendSource(runtimePath: string): string | undefined {
+export function readBackendSource(runtimePath: string): string | undefined {
   const runtimeDirectory = path.dirname(runtimePath);
   const manifestPath = path.join(runtimeDirectory, "django_shell_backend.parts.json");
   try {
@@ -108,7 +116,7 @@ function backendFeatureSource(source: string): string {
 /** Returns the deflate+base64 whole backend source for the spawn env payload (local delivery ships everything), or undefined when unreadable. */
 export function backendBootstrapPayload(runtimePath: string): string | undefined {
   const source = readBackendSource(runtimePath);
-  return source ? deflateSync(Buffer.from(source, "utf8")).toString("base64") : undefined;
+  return source ? compressBackendSource(source) : undefined;
 }
 
 /** Returns the deflate+base64 of the deferred model-browser feature source for a socket "loadfeature" request, or undefined when absent/unreadable. */
@@ -118,7 +126,12 @@ export function backendFeaturePayload(runtimePath: string): string | undefined {
     return undefined;
   }
   const feature = backendFeatureSource(source);
-  return feature ? deflateSync(Buffer.from(feature, "utf8")).toString("base64") : undefined;
+  return feature ? compressBackendSource(feature) : undefined;
+}
+
+/** Compresses backend source consistently for both transfer and cross-session cache identity. */
+function compressBackendSource(source: string): string {
+  return deflateSync(Buffer.from(source, "utf8"), { level: 9 }).toString("base64");
 }
 
 /** Builds the one-line Python command injected into the interactive Django shell. */
@@ -128,14 +141,12 @@ export function buildBackendBootstrap(runtimePath: string, token: string): strin
 
 /** Builds the short bootstrap command: loads backend source from the spawn env payload (else the on-disk runtime file), so the typed cell carries no large blob into the shell-audit log. On a remote shell (no env payload AND no local file) it prints a clean NEEDS_INLINE signal instead of raising FileNotFoundError, so the audit stays clean and the inline retry is armed. */
 export function buildBackendBootstrapCommand(runtimePath: string, token: string): BackendBootstrapCommand {
-  const load = backendLoadStatements(token);
-  const python = [
-    "import os as _djs_o,types as _djs_t,base64 as _djs_b,zlib as _djs_z",
-    `_djs_e=_djs_o.environ.get(${pythonString(BACKEND_PAYLOAD_ENV)}); _djs_p=${pythonString(runtimePath)}`,
-    `_djs_src=_djs_z.decompress(_djs_b.b64decode(_djs_e)).decode("utf-8") if _djs_e else (open(_djs_p,encoding="utf-8").read() if _djs_o.path.exists(_djs_p) else None)`,
-    `if _djs_src is None: print(${pythonString(BACKEND_NEEDS_INLINE_PREFIX)})`,
-    `else: ${load}`
-  ].join("\n");
+  const python = renderPythonTemplate("env_bootstrap.py.tmpl", {
+    LOAD: backendLoadStatements(token),
+    NEEDS_INLINE_PREFIX: pythonString(BACKEND_NEEDS_INLINE_PREFIX),
+    PAYLOAD_ENV: pythonString(BACKEND_PAYLOAD_ENV),
+    RUNTIME_PATH: pythonString(runtimePath)
+  });
   const command = `exec(${pythonString(python)})\r`;
   return { bytes: command.length, command, mode: "env" };
 }
@@ -147,27 +158,61 @@ export function buildInlineBackendBootstrapCommand(runtimePath: string, token: s
     return undefined;
   }
   // Type only the CORE half inline; the model-browser feature follows over the socket (or typed fallback) after ready.
-  const payload = deflateSync(Buffer.from(backendCoreSource(source), "utf8")).toString("base64");
+  const payload = compressBackendSource(backendCoreSource(source));
   const partsKey = `_djs_inline_parts_${token}`;
   const partsLiteral = pythonString(partsKey);
-  const python = [
-    "import types as _djs_t,base64 as _djs_b,zlib as _djs_z",
-    `_djs_payload="".join(globals().pop(${partsLiteral},[]))`,
-    `_djs_src=_djs_z.decompress(_djs_b.b64decode(_djs_payload)).decode("utf-8")`,
-    backendLoadStatements(token)
-  ].join("; ");
+  const python = renderPythonTemplate("inline_bootstrap.py.tmpl", {
+    LOAD: backendLoadStatements(token, true),
+    PARTS_LITERAL: partsLiteral
+  });
   const initLine = `globals()[${partsLiteral}]=[]`;
   const chunkLines = payloadChunks(payload).map((chunk) => `globals().setdefault(${partsLiteral},[]).append(${pythonString(chunk)})`);
   const command = `${initLine}\r${chunkLines.join("\r")}\rexec(${pythonString(python)})\r`;
   return { bytes: command.length, command, mode: "inline" };
 }
 
+/** Probes the remote core cache using short paced lines before sending the full inline payload. */
+export function buildCachedBackendBootstrapCommand(runtimePath: string, token: string): BackendBootstrapCommand | undefined {
+  const source = readBackendSource(runtimePath);
+  if (!source) { return undefined; }
+  const python = backendCacheProbePython(compressBackendSource(backendCoreSource(source)), backendLoadStatements(token), BACKEND_NEEDS_INLINE_PREFIX);
+  const parts = pythonString(`_djs_cache_parts_${token}`);
+  const payload = compressBackendSource(python);
+  const direct = `${renderPythonTemplate("cache_direct.py.tmpl", { PAYLOAD: pythonString(payload) })}\r`;
+  if (Buffer.byteLength(direct, "utf8") <= 1000) {
+    return { bytes: Buffer.byteLength(direct, "utf8"), command: direct, mode: "cache" };
+  }
+  const lines = [
+    `globals()[${parts}]=[]`,
+    ...payloadChunks(payload).map((chunk) => `globals().setdefault(${parts},[]).append(${pythonString(chunk)})`),
+    renderPythonTemplate("cache_parts_tail.py.tmpl", { PARTS: parts })
+  ];
+  const command = `${lines.join("\r")}\r`;
+  return { bytes: command.length, command, mode: "cache" };
+}
+
+/** Installs a readable stdin receiver, then transfers only the base capability as data after its acknowledgement. */
+export function buildStreamBackendBootstrapCommand(runtimePath: string, token: string): BackendBootstrapCommand | undefined {
+  const source = readBackendSource(runtimePath);
+  const payload = source ? backendCapabilityPayload(runtimePath, source, "base") : undefined;
+  if (!payload) { return undefined; }
+  const seed = fs.readFileSync(path.join(path.dirname(runtimePath), "backend_parts/02_stream_upload.pyfrag"), "utf8").split("\ndef _load_capability_from_stdin(")[0];
+  const header = JSON.stringify({ digest: payload.digest, feature: "base", size: payload.data.length, token });
+  const id = `boot-${randomBytes(4).toString("hex")}`;
+  const lines = ['_djs_seed_parts=[]'];
+  // These few readable source chunks define the receiver; bulk encoded code never becomes a Python cell.
+  for (let start = 0; start < seed.length; start += 650) { lines.push(`_djs_seed_parts.append(${pythonString(seed.slice(start, start + 650))})`); }
+  lines.push(`_djs_seed={};exec(''.join(_djs_seed_parts),_djs_seed);del _djs_seed_parts;_djs_seed['_djs_bootstrap'](${Buffer.byteLength(header)},${pythonString(id)},globals())`);
+  const command = `${lines.join("\r")}\r`;
+  return { bytes: Buffer.byteLength(command), command, mode: "seed", upload: { id, header, data: payload.data } };
+}
+
 /** Shell-namespace key staging the typed feature chunks that a `loadfeature` PTY request consumes via `partsKey`. */
 export const BACKEND_FEATURE_PARTS_KEY = "_djs_feature_parts";
 
 /** Builds the typed PTY fallback that stages the deferred feature source in short append lines and finishes with the given `_djs_rpc` loadfeature line — used only when the socket "loadfeature" is unavailable (a pure-PTY remote with no tunnel). The rpc tail is capture-skipped by the backend hook, so its id-correlated response marker prints straight to the terminal. Returns undefined when there is no feature section. */
-export function buildFeatureLoadPtyCommand(runtimePath: string, rpcTailLine: string): string | undefined {
-  const payload = backendFeaturePayload(runtimePath);
+export function buildFeatureLoadPtyCommand(runtimePath: string, rpcTailLine: string, data?: string): string | undefined {
+  const payload = data ?? backendFeaturePayload(runtimePath);
   if (!payload) {
     return undefined;
   }
@@ -187,14 +232,11 @@ function payloadChunks(payload: string): string[] {
 }
 
 /** The shared `_djs_src`-loading tail: build the module, run start() (which wires `_djs_rpc`/initial names into the namespace), expose the module, and scrub the bootstrap line from history (kept LAST so IPython does not re-record it). */
-function backendLoadStatements(token: string): string {
-  return [
-    '_djs_m=_djs_t.ModuleType("django_shell_backend")',
-    'exec(compile(_djs_src,"<django-shell-backend>","exec"),_djs_m.__dict__)',
-    `_djs_m.start(globals(), ${pythonString(token)})`,
-    'globals()["_djs_backend_module"]=_djs_m',
-    "_djs_m._pty_history_scrub(None)"
-  ].join("; ");
+function backendLoadStatements(token: string, cache = false): string {
+  return renderPythonTemplate("load_statements.py.tmpl", {
+    CACHE_WRITE: cache ? 'getattr(_djs_m,"_backend_cache_write",lambda *args:None)("core",_djs_payload); ' : "",
+    TOKEN: pythonString(token)
+  });
 }
 
 /** Parses a backend-ready marker from terminal output. */
@@ -210,7 +252,7 @@ export function parseBackendFailedMarker(output: string): string | undefined {
 
 /** Returns whether the env/disk bootstrap signalled it needs the inline (source-embedded) bootstrap — a remote shell. */
 export function parseBackendNeedsInline(output: string): boolean {
-  return output.lastIndexOf(BACKEND_NEEDS_INLINE_PREFIX) >= 0;
+  return output.split(/[\r\n]/).some((line) => line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").trim() === BACKEND_NEEDS_INLINE_PREFIX);
 }
 
 /** Parses a PTY backend response marker from terminal output. */

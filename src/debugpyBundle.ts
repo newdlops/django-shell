@@ -3,6 +3,7 @@ import { createHash } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { deflateSync } from "zlib";
+import { renderPythonTemplate } from "./pythonTemplate";
 
 export interface DebugpyBundleInstallCommand {
   bytes: number;
@@ -117,40 +118,13 @@ function shouldBundleDebugpyFile(filename: string): boolean {
 
 /** Builds the remote Python installer body used after payload chunks have been staged. */
 function buildInstallerPython(digest: string, fileCount: number, partsKey: string, requestId: string, responsePrefix: string): string {
-  return [
-    "import base64 as _djs_b,json as _djs_j,os as _djs_o,sys as _djs_s,tempfile as _djs_t,traceback as _djs_tb,zlib as _djs_z",
-    `_djs_prefix=${pythonString(responsePrefix)}; _djs_id=${pythonString(requestId)}; _djs_key=${pythonString(partsKey)}; _djs_digest=${pythonString(digest)}; _djs_count=${fileCount}`,
-    "def _djs_emit(_djs_response):",
-    "    print(_djs_prefix + _djs_j.dumps({'id': _djs_id, 'response': _djs_response}), flush=True)",
-    "try:",
-    "    _djs_root = _djs_o.path.join(_djs_t.gettempdir(), 'django-shell-debugpy-' + _djs_digest[:16])",
-    "    _djs_init = _djs_o.path.join(_djs_root, 'debugpy', '__init__.py')",
-    "    if not _djs_o.path.exists(_djs_init):",
-    "        _djs_payload = ''.join(globals().pop(_djs_key, []))",
-    "        if not _djs_payload:",
-    "            raise RuntimeError('Bundled debugpy payload was empty.')",
-    "        _djs_files = _djs_j.loads(_djs_z.decompress(_djs_b.b64decode(_djs_payload)).decode('utf-8'))",
-    "        _djs_root_norm = _djs_o.path.normpath(_djs_root)",
-    "        _djs_i = 0",
-    "        while _djs_i < len(_djs_files):",
-    "            _djs_rel, _djs_data = _djs_files[_djs_i]",
-    "            _djs_target = _djs_o.path.normpath(_djs_o.path.join(_djs_root_norm, *_djs_rel.split('/')))",
-    "            if not (_djs_target == _djs_root_norm or _djs_target.startswith(_djs_root_norm + _djs_o.sep)):",
-    "                raise RuntimeError('Unsafe debugpy bundle path: ' + _djs_rel)",
-    "            _djs_o.makedirs(_djs_o.path.dirname(_djs_target), exist_ok=True)",
-    "            with open(_djs_target, 'wb') as _djs_file:",
-    "                _djs_file.write(_djs_b.b64decode(_djs_data))",
-    "            _djs_i += 1",
-    "    else:",
-    "        globals().pop(_djs_key, None)",
-    "    if _djs_root not in _djs_s.path:",
-    "        _djs_s.path.insert(0, _djs_root)",
-    "    _djs_emit({'files': _djs_count, 'ok': True, 'path': _djs_root})",
-    "except Exception:",
-    "    _djs_emit({'error': _djs_tb.format_exc(), 'ok': False})",
-    "finally:",
-    "    globals().pop(_djs_key, None)"
-  ].join("\n");
+  return renderPythonTemplate("debugpy_installer.py.tmpl", {
+    DIGEST: pythonString(digest),
+    FILE_COUNT: String(fileCount),
+    PARTS_KEY: pythonString(partsKey),
+    REQUEST_ID: pythonString(requestId),
+    RESPONSE_PREFIX: pythonString(responsePrefix)
+  });
 }
 
 /** Splits one base64 payload into terminal-safe line chunks. */

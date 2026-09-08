@@ -5,16 +5,18 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runTests } from "@vscode/test-electron";
-import { prepareDevelopmentExtension } from "./developmentExtension.mjs";
+import { withE2eArtifacts } from "./artifacts.mjs";
 import { findAvailableInspectorPort } from "./inspectorPort.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 /** Runs the VS Code extension host E2E suite. */
 async function main() {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "django-shell-e2e-"));
-  const userData = fs.mkdtempSync(path.join(os.tmpdir(), "django-shell-e2e-user-"));
-  const extensionPath = prepareDevelopmentExtension(ROOT);
+  await withE2eArtifacts(ROOT, runSuite);
+}
+
+/** Starts VS Code using artifacts whose lifetime is managed by the calling runner. */
+async function runSuite({ workspace, userData, extensionPath }) {
   const nativeProviderFixturePath = path.join(ROOT, "test", "e2e", "fixtures", "native-provider");
   const python = pythonExecutablePath();
   const modelBrowserOnly = process.env.DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY === "1";
@@ -26,10 +28,13 @@ async function main() {
     copyInstalledExtension("newdlops.django-orm-intellisense-");
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(extensionPath, "package.json"), "utf8"));
+  fs.mkdirSync(path.join(userData, "User"), { recursive: true });
+  fs.writeFileSync(path.join(userData, "User", "settings.json"), JSON.stringify({
+    "extensions.autoCheckUpdates": false,
+    "extensions.autoUpdate": false
+  }, null, 2));
   fs.mkdirSync(path.join(workspace, ".vscode"), { recursive: true });
   fs.writeFileSync(path.join(workspace, ".vscode", "settings.json"), JSON.stringify({
-    "extensions.autoCheckUpdates": false,
-    "extensions.autoUpdate": false,
     "djangoOrmIntellisense.autoStart": false,
     "djangoOrmIntellisense.diagnostics.enabled": false,
     "djangoOrmIntellisense.logLevel": "debug",

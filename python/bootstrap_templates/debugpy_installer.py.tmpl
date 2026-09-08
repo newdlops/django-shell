@@ -1,0 +1,32 @@
+import base64 as _djs_b,json as _djs_j,os as _djs_o,sys as _djs_s,tempfile as _djs_t,traceback as _djs_tb,zlib as _djs_z
+_djs_prefix={{RESPONSE_PREFIX}}; _djs_id={{REQUEST_ID}}; _djs_key={{PARTS_KEY}}; _djs_digest={{DIGEST}}; _djs_count={{FILE_COUNT}}
+def _djs_emit(_djs_response):
+    print(_djs_prefix + _djs_j.dumps({'id': _djs_id, 'response': _djs_response}), flush=True)
+try:
+    _djs_root = _djs_o.path.join(_djs_t.gettempdir(), 'django-shell-debugpy-' + _djs_digest[:16])
+    _djs_init = _djs_o.path.join(_djs_root, 'debugpy', '__init__.py')
+    if not _djs_o.path.exists(_djs_init):
+        _djs_payload = ''.join(globals().pop(_djs_key, []))
+        if not _djs_payload:
+            raise RuntimeError('Bundled debugpy payload was empty.')
+        _djs_files = _djs_j.loads(_djs_z.decompress(_djs_b.b64decode(_djs_payload)).decode('utf-8'))
+        _djs_root_norm = _djs_o.path.normpath(_djs_root)
+        _djs_i = 0
+        while _djs_i < len(_djs_files):
+            _djs_rel, _djs_data = _djs_files[_djs_i]
+            _djs_target = _djs_o.path.normpath(_djs_o.path.join(_djs_root_norm, *_djs_rel.split('/')))
+            if not (_djs_target == _djs_root_norm or _djs_target.startswith(_djs_root_norm + _djs_o.sep)):
+                raise RuntimeError('Unsafe debugpy bundle path: ' + _djs_rel)
+            _djs_o.makedirs(_djs_o.path.dirname(_djs_target), exist_ok=True)
+            with open(_djs_target, 'wb') as _djs_file:
+                _djs_file.write(_djs_b.b64decode(_djs_data))
+            _djs_i += 1
+    else:
+        globals().pop(_djs_key, None)
+    if _djs_root not in _djs_s.path:
+        _djs_s.path.insert(0, _djs_root)
+    _djs_emit({'files': _djs_count, 'ok': True, 'path': _djs_root})
+except Exception:
+    _djs_emit({'error': _djs_tb.format_exc(), 'ok': False})
+finally:
+    globals().pop(_djs_key, None)

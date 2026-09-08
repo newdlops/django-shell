@@ -284,7 +284,7 @@ test("remote SSH/kubectl shells tunnel the backend socket for parallel model rea
   // The remote-ready path starts a backend tunnel beside the PTY instead of leaving the socket off for the session,
   // and only REGISTERS the deferred feature loader — nothing is exchanged until the first browse request needs it.
   assert.ok(notebookPtySessionSource.includes("const forward = this.forwardBackendSocket(ready.port, client)"));
-  assert.ok(notebookPtySessionSource.includes("client.setModelBrowserFeatureLoader(() => forward.then(() => this.deliverModelBrowserFeature(client)))"));
+  assert.ok(notebookPtySessionSource.includes("client.setModelBrowserFeatureLoader(() => this.deliverModelBrowserFeature(client, forward))"));
   assert.ok(backendClientSource.includes("ensureModelBrowserFeature"));
   assert.ok(notebookPtySessionSource.includes("startKubectlPortForward(kubectl, remotePort"));
   assert.ok(notebookPtySessionSource.includes("startSshPortForward(ssh as SshExecTarget, remotePort"));
@@ -330,7 +330,7 @@ test("streamed backend progress markers are parsed outside PTY request mode", ()
   assert.ok(notebookPtySessionSource.includes("progressMarkerTail(data)"));
   assert.ok(notebookPtySessionSource.includes("progressMarkerTail(parsed.rest)"));
   assert.ok(notebookPtySessionSource.includes("this.inspectPtyProgress();"));
-  assert.ok(notebookPtySessionSource.includes("\\btqdm\\s*\\("));
+  assert.equal(require("../out/backendPtyExecution.js").usesLiteralPtyCell({ kind: "execute", code: "tqdm(items)" }, true, true), false);
 });
 
 test("remote PTY stdout and stderr progress chunks stay visible in running output", () => {

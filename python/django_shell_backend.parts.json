@@ -1,5 +1,7 @@
 [
   "backend_parts/00_bootstrap.pyfrag",
+  "backend_parts/01_payload_cache.pyfrag",
+  "backend_parts/02_stream_upload.pyfrag",
   "backend_parts/05_transport_limits.pyfrag",
   "backend_parts/10_inspection.pyfrag",
   "backend_parts/20_execution_hot_reload.pyfrag",

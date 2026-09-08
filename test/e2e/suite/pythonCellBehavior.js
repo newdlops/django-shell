@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const vscode = require("vscode");
 const { assertNativeProviderParticipation } = require("./nativeProviderParticipation.js");
 const { assertGoldenPythonExecution } = require("./pythonCellGolden.js");
-const { assertOverlayHoverPointerHandoff } = require("./overlayHoverPointer.js");
+const { assertOverlayHoverPointerHandoff, assertOverlayHoverViewports } = require("./overlayHoverPointer.js");
 
 const INPUT_MARKER = "# --- django shell input ---";
 const SHELL_LANGUAGE_ID = "python";
@@ -30,7 +30,7 @@ async function assertPythonCellBehavior(extension) {
   await withStageTimeout("native provider participation", assertNativeProviderParticipation({ extension, installOverlayDocument, restoreDocumentText: generatedText, restorePrelude: ["from orm_runtime.models import Company"] }), 45000);
   await assertGeneratedOverlayFilesHidden("native provider participation");
   if (process.env.DJANGO_SHELL_E2E_HOVER_ONLY === "1") {
-    await withStageTimeout("renderer hover pointer handoff", assertOverlayHoverPointerHandoff(extension), 30000);
+    await withStageTimeout("renderer hover viewports", assertOverlayHoverViewports(extension), 90000);
     await assertGeneratedOverlayFilesHidden("renderer hover pointer handoff");
     return;
   }

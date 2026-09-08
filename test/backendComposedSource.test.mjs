@@ -31,6 +31,8 @@ const PYTHON = pythonExecutable();
 test("manifest preserves the fixed backend fragment order and line budget", () => {
   assert.deepEqual(manifest, [
     "backend_parts/00_bootstrap.pyfrag",
+    "backend_parts/01_payload_cache.pyfrag",
+    "backend_parts/02_stream_upload.pyfrag",
     "backend_parts/05_transport_limits.pyfrag",
     "backend_parts/10_inspection.pyfrag",
     "backend_parts/20_execution_hot_reload.pyfrag",
@@ -57,6 +59,7 @@ test("manifest preserves the fixed backend fragment order and line budget", () =
 test("extension package rules retain the composed backend manifest and fragments", () => {
   const ignored = fs.readFileSync(vscodeIgnorePath, "utf8").split(/\r?\n/);
   assert.equal(ignored.includes("python/django_shell_backend.parts.json"), false);
+  assert.equal(ignored.includes("python/django_shell_backend.runtime.json"), false);
   assert.equal(ignored.includes("python/backend_parts/**"), false);
   assert.equal(ignored.includes("python/**/*.pyfrag"), false);
 });

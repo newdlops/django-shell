@@ -2,7 +2,7 @@
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const vscode = require("vscode");
-const { focusTestWorkbench } = require("./focusTestWorkbench.js");
+const { focusTestWorkbench, focusTestWebview, captureTestWorkbench } = require("./focusTestWorkbench.js");
 
 /** Runs rendered picker and array controls through each production host without touching an application database. */
 async function assertModelIntegrityWebview(extension, surface = "model") {
@@ -36,16 +36,31 @@ async function assertModelIntegrityWebview(extension, surface = "model") {
     }
   };
   const host = surface === "model" ? new ModelBrowser(extension.extensionPath, source) : new ModelQueryConsole(extension.extensionPath, source);
+  let focusListener; const focusErrors = [];
+  /** Routes this fixture's measured cell to the real pointer bridge before synthetic typing begins. */
+  function wireCellFocus() {
+    const panel = surface === "model" ? [...host.panels][0]?.panel : host.panel;
+    assert.ok(panel, "Integrity fixture must own its rendered panel before requesting cell focus.");
+    focusListener = panel.webview.onDidReceiveMessage((message) => {
+      if (message.type === "e2eFocusIntegrityCell") {
+        void focusTestWebview(extension, message.point).catch((error) => focusErrors.push(String(error)));
+      } else if (message.type === "e2eBlurIntegrityCell") {
+        void vscode.commands.executeCommand("workbench.action.focusPanel").then(undefined, (error) => focusErrors.push(String(error)));
+      }
+    });
+  }
   try {
     let result;
     if (surface === "model") {
-      const pending = host.e2eProbeQueryBuilder({ app: "fixture", model: "Record" }, "integrity");
+      await host.openModel({ app: "fixture", model: "Record" });
+      wireCellFocus();
       await focusTestWorkbench(extension);
       await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
-      result = await pending;
+      result = await [...host.panels][0].e2eProbeQueryBuilder("integrity");
     }
     else {
       host.open();
+      wireCellFocus();
       const deadline = Date.now() + 15000;
       while (!host.panelReady && Date.now() < deadline) { await new Promise((resolve) => setTimeout(resolve, 25)); }
       assert.equal(host.panelReady, true);
@@ -61,6 +76,7 @@ async function assertModelIntegrityWebview(extension, surface = "model") {
         void host.panel.webview.postMessage({ requestId: "query-integrity", suite: "integrity", type: "e2eQueryBuilderProbe" });
       });
     }
+    assert.deepEqual(focusErrors, []);
     assert.equal(result.error, undefined, JSON.stringify({ result, calls, lookups }));
     assert.equal(result.exactJson, true); assert.deepEqual(result.fkStates, ["pending", "empty", "error", "selected", "saved"]);
     const edited = text.replace('"name":"old"', '"name":"edited"');
@@ -68,7 +84,10 @@ async function assertModelIntegrityWebview(extension, surface = "model") {
     assert.equal(result.arrayPageSize, 50); assert.equal(result.arrayPaging, true);
     assert.ok(lookups.every((query) => query.valueField === "code" && query.database === (surface === "query" ? "archive" : undefined)));
     console.log(`${surface} integrity webview passed at ${result.viewport.width} x ${result.viewport.height}`);
-  } finally { host.dispose(); runtime.dispose(); }
+  } catch (error) {
+    await captureTestWorkbench(extension, path.resolve(__dirname, `../../../.vscode-test/results/integrity-${surface}-failed.png`)).catch((captureError) => console.warn(String(captureError)));
+    throw error;
+  } finally { focusListener?.dispose(); host.dispose(); runtime.dispose(); }
 }
 
 module.exports = { assertModelIntegrityWebview };

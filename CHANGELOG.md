@@ -6,7 +6,18 @@ This extension uses a running build number; the current release line is `1.1.x`.
 Earlier `0.0.x` entries are retained below. The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## [1.1.1000052] — 2026-09-08
+
+### Fixed
+- Foreign-key search preserves the active picker when focus moves to another VS Code pane or application. Unconfirmed search text is no longer staged as a relation key on that focus change.
+- VS Code E2E runs clean up their temporary development extension, workspace, and profile after completion or failure, including the runner's explicit exit after Ctrl+C.
+
+### Improved
+- Remote attachment starts a small runtime for Console execution and the model catalog. Grid rendering, inspection, query execution, editing, and debugging load independently when requested instead of blocking attachment on the full backend.
+- POSIX remote terminals receive compressed source and checksums as acknowledged stdin data with echo disabled. Encoded payloads no longer appear as executed Python cells in shell audit logs or as extension diagnostic transcript noise; ordinary user cells remain auditable.
+- Each capability reuses a verified, bounded private cache across connections. Concurrent requests share installation, and terminal delivery can proceed while a socket tunnel starts. Failed transfers restore terminal settings and stale queued writes are cancelled on restart.
+- Incomplete source transfers require a shell restart before further backend terminal requests, preventing late payload bytes from mixing with queued commands. Explicit bootstrap failures stop automatic source retries.
+- Python bootstrap and debugger installer templates ship as separate resources loaded at runtime instead of embedding interpreter-loader source strings in compiled JavaScript.
 
 ## [1.1.1000051] — 2026-09-08
 

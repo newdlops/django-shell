@@ -1,5 +1,4 @@
-// Unit tests for bounded workbench renderer mouse input expressions.
-
+// Verifies bounded native mouse sequences and failed-drag cleanup for the isolated E2E workbench.
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
@@ -7,37 +6,50 @@ import test from "node:test";
 const require = createRequire(import.meta.url);
 const { mainProcessMouseInputExpression } = require("../out/workbenchMouseInput.js");
 
-test("builds a parseable CDP mouse path for one cached workbench window", () => {
-  const expression = mainProcessMouseInputExpression(17, [{ x: 12.5, y: 20 }, { x: 30, y: 45.25 }]);
+/** Runs the generated main-process expression against observable Electron window/input contracts. */
+async function dispatch(points, { failMove = false, missing = false } = {}) {
+  const events = [], selected = [], focus = [];
+  const win = { isDestroyed: () => false, show: () => focus.push("show"), focus: () => focus.push("window"), webContents: {
+    isDestroyed: () => false, focus: () => focus.push("contents"),
+    sendInputEvent: (event) => { events.push(event); if (failMove && event.type === "mouseMove") { throw new Error("controlled input failure"); } },
+    get debugger() { throw new Error("native input must not wait for renderer debugger acknowledgements"); }
+  } };
+  const electron = { app: { focus: () => focus.push("app") }, BrowserWindow: { fromId: (id) => { selected.push(id); return missing ? undefined : win; } } };
+  const result = await Function("require", "setTimeout", `return ${mainProcessMouseInputExpression(17, points)}`)(() => electron, (callback) => callback());
+  return { events, selected, focus, result };
+}
 
-  assert.doesNotThrow(() => Function(`return ${expression}`));
-  assert.ok(expression.includes("BrowserWindow.fromId(17)"));
-  assert.ok(expression.includes('sendCommand("Input.dispatchMouseEvent"'));
-  assert.ok(expression.includes('type: "mouseMoved"'));
-  assert.ok(expression.includes('[{"x":12.5,"y":20},{"x":30,"y":45.25}]'));
+test("native pointer input targets only the cached window and focuses it before dispatch", async () => {
+  const f = await dispatch([{ x: 12.5, y: 20 }, { x: 30, y: 45.25 }]);
+  assert.deepEqual(f.selected, [17]);
+  assert.deepEqual(f.focus, ["app", "show", "window", "contents"]);
+  assert.deepEqual(f.events, [{ type: "mouseMove", x: 13, y: 20 }, { type: "mouseMove", x: 30, y: 45 }]);
+  assert.deepEqual(f.result, { ok: true, points: [{ x: 13, y: 20 }, { x: 30, y: 45 }] });
 });
 
-test("bounds invalid coordinates and path length before embedding renderer input", () => {
-  const points = Array.from({ length: 40 }, (_item, index) => ({ x: index === 0 ? -50 : index, y: index === 1 ? Number.POSITIVE_INFINITY : index }));
-  const expression = mainProcessMouseInputExpression(2, points);
-  const embedded = JSON.parse(expression.match(/const points = (\[[^;]+\]);/)?.[1] ?? "[]");
-
-  assert.equal(embedded.length, 32);
-  assert.deepEqual(embedded[0], { x: 0, y: 0 });
-  assert.deepEqual(embedded[1], { x: 1, y: 0 });
+test("bounds invalid coordinates and path length before sending native input", async () => {
+  const f = await dispatch(Array.from({ length: 40 }, (_item, index) => ({ x: index === 0 ? -50 : index, y: index === 1 ? Infinity : index })));
+  assert.equal(f.events.length, 32);
+  assert.deepEqual(f.result.points.slice(0, 2), [{ x: 0, y: 0 }, { x: 1, y: 0 }]);
 });
 
-test("builds one held-button CDP sequence for a real sash drag", () => {
-  const expression = mainProcessMouseInputExpression(9, [
-    { action: "down", x: 320, y: 180 },
-    { action: "move", x: 280, y: 210 },
-    { action: "up", x: 280, y: 210 }
-  ]);
-  const embedded = JSON.parse(expression.match(/const points = (\[[^;]+\]);/)?.[1] ?? "[]");
+test("a native sash drag retains the pressed button until mouseup", async () => {
+  const f = await dispatch([{ action: "down", x: 320, y: 180 }, { action: "move", x: 280, y: 210 }, { action: "up", x: 280, y: 210 }]);
+  assert.deepEqual(f.events.map((event) => event.type), ["mouseDown", "mouseMove", "mouseUp"]);
+  assert.deepEqual(f.events[1].modifiers, ["leftbuttondown"]);
+  assert.equal(f.events[2].modifiers, undefined);
+  assert.equal(f.result.ok, true);
+});
 
-  assert.deepEqual(embedded.map((point) => point.action), ["down", "move", "up"]);
-  assert.ok(expression.includes('type: "mousePressed"'));
-  assert.ok(expression.includes('buttons: pressed ? 1 : 0'));
-  assert.ok(expression.includes('type: "mouseReleased"'));
-  assert.ok(expression.includes("if (pressed && lastPoint)"), "failed drags must release the left button before debugger detach");
+test("a failed native drag releases its button and reports the original error", async () => {
+  const f = await dispatch([{ action: "down", x: 20, y: 20 }, { action: "move", x: 40, y: 40 }], { failMove: true });
+  assert.equal(f.result.ok, false);
+  assert.match(f.result.error, /controlled input failure/);
+  assert.deepEqual(f.events.at(-1), { button: "left", clickCount: 1, type: "mouseUp", x: 40, y: 40 });
+});
+
+test("a missing workbench never receives input", async () => {
+  const f = await dispatch([{ x: 20, y: 20 }], { missing: true });
+  assert.equal(f.result.reason, "missing-workbench-window");
+  assert.deepEqual(f.events, []);
 });

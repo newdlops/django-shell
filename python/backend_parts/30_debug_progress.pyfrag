@@ -1,25 +1,39 @@
 # Feature loading, debug wrapping, progress, and capture helpers for the composed Django shell backend.
 def _load_feature(request, namespace=None):
-    """Loads a deferred backend feature (the model browser) into this module's globals from a deflate+base64 source blob.
+    """Serializes feature installation so concurrent cache probes and uploads cannot execute its definitions twice."""
+    if request.get("feature"):
+        return _install_backend_capability(request)
+    with _FEATURE_LOAD_LOCK:
+        return _load_feature_payload(request, namespace)
 
-    Keeps the initial remote bootstrap small: the core backend is typed in first, then the browser half is delivered
-    on first use over the socket, or typed as staged shell-namespace chunks referenced here via `partsKey`.
-    Idempotent — a second call after the browser is present is a no-op."""
-    if "_browse_models" in globals():
-        return {"ok": True, "reused": True}
+
+def _load_feature_payload(request, namespace):
+    """Loads an exact cached feature or a transferred payload, then retains only its source for the next shell."""
     import base64
+    import hashlib
     import zlib
 
     data = request.get("data")
     parts_key = request.get("partsKey")
     if (not isinstance(data, str) or not data) and isinstance(parts_key, str) and parts_key and isinstance(namespace, dict):
         data = "".join(namespace.pop(parts_key, []) or [])
+    if "_browse_models" in globals():
+        return {"ok": True, "reused": True}
+    digest = request.get("digest")
+    cached = False
+    if (not isinstance(data, str) or not data) and digest:
+        data = _backend_cache_read("feature", digest)
+        cached = bool(data)
     if not isinstance(data, str) or not data:
         return {"ok": False, "error": "loadfeature requires a deflate+base64 source payload."}
     try:
+        if digest is not None and hashlib.sha256(data.encode("ascii")).hexdigest() != digest:
+            return {"ok": False, "error": "Model browser payload checksum does not match."}
         source = zlib.decompress(base64.b64decode(data)).decode("utf-8")
         exec(compile(source, "<django-shell-backend>", "exec"), globals())
-        return {"ok": True, "reused": False}
+        if digest and not cached:
+            _backend_cache_write("feature", data)
+        return {"ok": True, "reused": cached}
     except Exception:
         return {"ok": False, "error": "loadfeature failed to install the model browser.", "traceback": traceback.format_exc()}
 
@@ -809,4 +823,3 @@ def _progress_queryset_label(queryset):
         return model_label or "QuerySet"
     except Exception:
         return "QuerySet"
-

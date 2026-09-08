@@ -242,7 +242,11 @@ In the ORM query console: **Ctrl/Cmd+Enter** runs the query.
 
 ### Backend bootstrap
 
-When the shell prompt is detected, the extension injects a short **one-line `exec(...)`** command (`src/backendBootstrap.ts`) that loads the `zlib`+base64 `python/django_shell_backend.py` source from the spawn env payload (`DJANGO_SHELL_BACKEND_B64`), else from the on-disk runtime file, decompresses and `exec`s it into the shell's `globals()`, then calls `start(globals(), token)`. On a remote shell (SSH, `kubectl`/`docker exec`) where neither the env payload nor the local file crosses the boundary, the stub prints a clean `__DJANGO_SHELL_BACKEND_NEEDS_INLINE__` signal instead of raising, and the extension retries with an **inline** bootstrap that embeds the compressed source directly in the typed command (also retried when a traceback precedes the ready marker). The backend prints a `__DJANGO_SHELL_BACKEND_READY__` marker carrying `{host, port, token, …}` (or a `__..._FAILED__` marker with a traceback).
+When the shell prompt is detected, a short command (`src/backendBootstrap.ts`) first tries the spawn environment payload (`DJANGO_SHELL_BACKEND_B64`) or the local backend file. If neither crosses an SSH, `kubectl`, or `docker exec` boundary, a small readable receiver starts the remote path. It acknowledges ownership of stdin, disables terminal echo during the transfer, and receives the header and compressed source as data. Payloads and checksums are never typed as Python statements on this path, so they do not fill `pre_run_cell` audit logs. The extension also omits its own transfer traffic from diagnostic transcripts. User cells and server audit hooks keep their normal behavior.
+
+The remote **base capability** makes ordinary Console cells and the model catalog available first. Grid rendering, schema, inspection, queries, model operations, saves, and instrumented execution/debugging are added only when needed; each request waits for its own prerequisites. A ready socket carries these modules out of band, otherwise a short receiver call uses the serialized PTY without waiting for tunnel startup. The build-generated `python/django_shell_backend.runtime.json` indexes the original Python definitions and verifies their source identity, preserving the live namespace, locks, and query state during upgrades.
+
+Before requesting source bytes, the receiver checks a **SHA-256-verified capability cache**. Replaceable slots of at most 1 MiB live in the remote Python temporary directory under a private `django-shell-backend-<uid>` directory. They hold compressed extension source only; tokens, query results, and application data are not cached. Missing, stale, corrupt, or unavailable entries trigger transfer of that capability. Reads have size and time bounds, terminal settings are restored on every exit, and session replacement cancels pending writes. Terminals without POSIX `termios` support retain the older inline fallback, whose encoded source can still appear in server audit logs.
 
 At attach time `start()` binds `django`/`apps`/`settings`/`models` and every registered model class (straight from `apps.get_models()`) into the shell namespace **before** snapshotting the initial names. With `djangoShell.autoImportModels` enabled, it also scans already-loaded model modules for managers/enums using their static dictionaries; missing modules and dynamic module hooks are never invoked during startup.
 
@@ -296,24 +300,30 @@ All requests carry the auth token and run under a single `_EXECUTION_LOCK` (seri
 
 - **Extension host (`src/`, TypeScript → `out/`):** `extension.ts` (activation, lazy runtime source), `customConsole.ts` + `customConsoleHtml.ts` (console panel), `workbenchOverlay*.ts` (overlay editor + renderers), `pythonShadow.ts` / `pythonFeatureBridge.ts` / `overlayPythonFeatureBridge.ts` (IntelliSense bridge), `runtimeInspector.ts` (tree view), `backendBootstrap.ts` + `backendClient.ts` (attach + transport), `modelOrm.ts` (reconstructs grid/query reads as literal Django ORM cells for the ORM/Terminal transports), `modelBackend.ts` (wire types/parsers), `modelBrowser.ts` + `modelBrowserHtml.ts` (grid panel), `modelQueryConsole.ts` (query panel), `modelCatalog.ts` + `modelCatalogHtml.ts` (Models view), `djangoProject.ts` / `shellLaunch.ts` / `terminalState.ts` / `shellTranscript.ts` (project, terminal detection + history scrubbing), `notebook*.ts` (deprecated notebook).
 - **Webview frontends (`media/`, bundled by esbuild into `media/dist/`):** `terminalRendererSource.js`, `customConsoleSource.js`, `modelCatalogSource.js`, and `modelBrowserSource.js` — the model browser composes `gridQueryRecipeStore.js` (immutable draft/applied Recipe revisions), `gridQueryController.js` (apply/preview/result lifecycle), `gridQuerySummary.js`, `gridQueryValidationView.js`, specialized predicate/computed/result builders, `gridQuerySummaryTable.js`, `gridEdit.js` (staged editing + type-aware editors, which imports `gridFkPicker.js` for FK search), `gridRelated.js` (editable nested related tables), `gridVirtual.js` (row windowing), `gridResize.js` (column resizing), `gridPin.js` (column pinning), `gridQuery.js` (custom ORM-query mode), and `sqlHighlight.js` (log formatting). Legacy filter/aggregate modules remain only for one-release compatibility and characterization tests; the Model Data UI no longer sends legacy query payloads.
-- **Backend (`python/django_shell_backend.py`):** the single in-process module covering every request kind above; embedded into the bootstrap and not imported separately.
+- **Backend (`python/django_shell_backend.py`, `python/backend_parts/`):** ordered source fragments compose one in-process module. The generated runtime index splits remote delivery into capabilities without duplicating their implementations.
 - Repository code follows a ≤1000-line-per-file, purpose-comment-per-file, JSDoc-on-declarations guideline (`scripts/check-code-guidelines.mjs`).
 
 ---
 
 ## Development
 
+Building requires Node.js and Python 3.9+ for the standard-library capability index generator. The installed extension does not require Python on the local VS Code host for remote attachment.
+
 ```sh
 npm install
 npm run check        # guideline checks + unit tests
-npm run compile      # tsc + esbuild webview bundles
+npm run compile      # capability index + tsc + esbuild webview bundles
 npm run test:e2e     # extension-host E2E tests
 npm run package      # build a VSIX (filtered by .vscodeignore)
 ```
 
 Backend unit tests (`test/modelBrowser.test.mjs`) spawn Python and run the real Django ORM in an in-memory SQLite database; they skip automatically when Django is not importable. Point them at a specific interpreter with `DJANGO_SHELL_E2E_PYTHON`.
 
-`.vscodeignore` filters the VSIX so sources, tests, logs, generated indexes, source maps, Python caches, native debug symbols, and the raw (pre-bundle) webview modules are excluded.
+After compiling, `node --test test/remoteBootstrapPty.integration.mjs` tests cold/cached attachment, lazy capability upgrades, audit output, and terminal restoration through real local PTYs and an isolated database. Set `DJANGO_SHELL_E2E_PYTHON` to an interpreter with Django and IPython installed; unavailable runtimes are skipped. The test requires local PTY and loopback socket access and reports input bytes and first-query timing. It simulates remote file/environment boundaries, not WAN latency.
+
+VS Code E2E runs remove their own temporary development extension, workspace, and user profile on completion or failure, including the runner's explicit exit after Ctrl+C. Hover screenshots and a bounded event trace overwrite the latest files in `.vscode-test/results/`. Set `DJANGO_SHELL_E2E_HOVER_ONLY=1` to run the Python provider and hover scenarios at three desktop window widths without the model grid scenarios. These tests drive a real VS Code window; keep manual pointer input and other desktop automation idle while pointer scenarios run.
+
+`.vscodeignore` filters the VSIX so development sources, tests, logs, development indexes, source maps, Python caches, native debug symbols, and raw webview modules are excluded. Backend fragments, the manifest, and the capability index are retained.
 
 ---
 

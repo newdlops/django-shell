@@ -1,0 +1,12 @@
+import os as _djs_o,stat as _djs_s,tempfile as _djs_f,hashlib as _djs_h,types as _djs_t,base64 as _djs_b,zlib as _djs_z
+_djs_cached=None
+try:
+    _djs_path=_djs_o.path.join(_djs_f.gettempdir(),'django-shell-backend-'+str(getattr(_djs_o,'getuid',lambda:'user')()),'core.b64')
+    _djs_fd=_djs_o.open(_djs_path,_djs_o.O_RDONLY|getattr(_djs_o,'O_NONBLOCK',0)|getattr(_djs_o,'O_NOFOLLOW',0))
+    with _djs_o.fdopen(_djs_fd,'rb') as _djs_file:
+        if _djs_s.S_ISREG(_djs_o.fstat(_djs_file.fileno()).st_mode): _djs_cached=_djs_file.read({{READ_SIZE}})
+except (OSError,ValueError): pass
+if _djs_cached is not None and _djs_h.sha256(_djs_cached).hexdigest()=={{DIGEST}}:
+    _djs_src=_djs_z.decompress(_djs_b.b64decode(_djs_cached)).decode('utf-8')
+    {{LOAD}}
+else: print({{NEEDS_INLINE_PREFIX}})

@@ -887,7 +887,15 @@ function openFkPicker(td, column, start, host) {
       finish(null);
     }
   });
-  input.addEventListener("blur", () => setTimeout(() => finish(input.value.trim()), 0));
+  input.addEventListener("blur", () => setTimeout(() => {
+    if (state2.settled) {
+      return;
+    }
+    if (document.activeElement === input || typeof document.hasFocus === "function" && !document.hasFocus()) {
+      return;
+    }
+    finish(input.value.trim());
+  }, 0));
   query(true);
   return {
     /** Cancels an obsolete picker before another result or editor replaces its cell. */
@@ -2140,15 +2148,15 @@ async function waitFor2(predicate, label) {
   }
   throw new Error(`Timed out at ${label}.`);
 }
-async function stableForeignKeyCell(document2) {
-  let previous, signature = "", since = 0;
+async function stableForeignKeyCell(document2, requestFocus) {
+  let previous, signature = "", since = 0, requestedFocus = false;
   return waitFor2(() => {
     const cell = document2.querySelector('#tbody td[data-attname="company_id"]');
-    if (cell && !document2.hasFocus()) {
-      window.focus();
-      cell.focus();
-    }
     const rect = cell?.getBoundingClientRect();
+    if (rect?.width > 0 && rect?.height > 0 && !requestedFocus) {
+      requestedFocus = true;
+      requestFocus({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+    }
     const current = rect ? [rect.x, rect.y, rect.width, rect.height].join(":") : "";
     if (cell !== previous || current !== signature || !document2.hasFocus()) {
       previous = cell;
@@ -2163,7 +2171,7 @@ async function runModelIntegrityE2eProbe({ document: document2, postMessage, req
   let debugCell, debugInput;
   try {
     const cell = (field) => document2.querySelector(`#tbody td[data-attname="${field}"]`);
-    const fk = await stableForeignKeyCell(document2);
+    const fk = await stableForeignKeyCell(document2, (point) => postMessage({ requestId: requestId2, point, type: "e2eFocusIntegrityCell" }));
     debugCell = fk;
     progress("fk-search-states");
     fk.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
@@ -2178,8 +2186,16 @@ async function runModelIntegrityE2eProbe({ document: document2, postMessage, req
       await waitFor2(() => fk.textContent.includes(expected), `FK search ${text2}`);
     }
     await search("empty", "No matching rows");
+    postMessage({ requestId: requestId2, type: "e2eBlurIntegrityCell" });
+    await waitFor2(() => !document2.hasFocus(), "webview focus departure");
     await search("fail", "Search failed");
     await search("Beta", "#2 \xB7 Beta");
+    if (!input.isConnected || cell("company_id").dataset.staged !== void 0) {
+      throw new Error("Losing webview focus staged an unconfirmed FK search.");
+    }
+    const inputRect = input.getBoundingClientRect();
+    postMessage({ requestId: requestId2, point: { x: inputRect.left + inputRect.width / 2, y: inputRect.top + inputRect.height / 2 }, type: "e2eFocusIntegrityCell" });
+    await waitFor2(() => document2.hasFocus() && document2.activeElement === input, "foreign-key focus return");
     if (input.getAttribute("aria-expanded") !== "true" || !input.getAttribute("aria-activedescendant")) {
       throw new Error("FK keyboard selection is not exposed.");
     }

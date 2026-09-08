@@ -121,7 +121,11 @@ export function openFkPicker(td, column, start, host) {
       finish(null);
     }
   });
-  input.addEventListener("blur", () => setTimeout(() => finish(input.value.trim()), 0));
+  input.addEventListener("blur", () => setTimeout(() => {
+    if (state.settled) { return; }
+    if (document.activeElement === input || typeof document.hasFocus === "function" && !document.hasFocus()) { return; }
+    finish(input.value.trim());
+  }, 0));
 
   query(true);
 

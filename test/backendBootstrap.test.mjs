@@ -24,8 +24,14 @@ const {
   parseBackendFailedMarker,
   parseBackendProgressMarkers,
   parseBackendReadyMarker,
+  parseBackendNeedsInline,
   parseBackendResponseMarkers
 } = require("../out/backendBootstrap.js");
+
+test("inline fallback reacts only to a real marker line, never to echoed receiver source", () => {
+  assert.equal(parseBackendNeedsInline('exec("print(\\"__DJANGO_SHELL_BACKEND_NEEDS_INLINE__\\")")\r\n>>> '), false);
+  assert.equal(parseBackendNeedsInline('>>> \r\n__DJANGO_SHELL_BACKEND_NEEDS_INLINE__\r\n>>> '), true);
+});
 
 test("remote inline bootstrap types only the core half; the model browser ships separately", () => {
   const realPath = path.resolve("python/django_shell_backend.py");

@@ -10,6 +10,13 @@ The existing `UNLICENSED` manifest and proprietary `LICENSE` describe the curren
 
 The activity bar icon remains `media/django-shell.svg`. Do not use the colored deployment icon there because VS Code activity icons are expected to be theme-colored SVGs.
 
+### 1.1.1000052 validation record — 2026-09-08
+
+- `npm run check`: 1,010 tests passed with no failures or skips.
+- The local PTY integration suite passed both cold/cached bootstrap and terminal restoration scenarios; actual SSH/WAN behavior remains unverified.
+- Full VS Code E2E still fails at `focused and stable foreign-key cell` with `focus: false`. Preserve this open verification item when installing this version locally.
+- SentinelOne detection status requires confirmation from the managed endpoint's administrator.
+
 ## Preflight
 
 Run these checks from the repository root before packaging:
@@ -45,13 +52,13 @@ npm run package
 This produces a file like:
 
 ```text
-django-shell-1.1.1000051.vsix
+django-shell-1.1.1000052.vsix
 ```
 
 Install it into VS Code:
 
 ```sh
-code --install-extension django-shell-1.1.1000051.vsix --force
+code --install-extension django-shell-1.1.1000052.vsix --force
 ```
 
 After installation, reload VS Code and run `Django Shell: Open Console` from the command palette.
@@ -82,7 +89,7 @@ After the checks pass, commit and push the release, package the VSIX, and instal
 
 ```sh
 npx @vscode/vsce login <publisher-id>
-npx @vscode/vsce publish --packagePath django-shell-1.1.1000051.vsix
+npx @vscode/vsce publish --packagePath django-shell-1.1.1000052.vsix
 ```
 
 Use `npx @vscode/vsce publish patch`, `minor`, or `major` only when you want VSCE to bump the version automatically.

@@ -54,6 +54,7 @@ export function hostHarness() {
     processes.push(process); return process;
   }
   const vscode = {
+    env: {},
     EventEmitter: class {
       /** Initializes a minimal synchronous event stream. */
       constructor() { this.listeners = []; this.event = (listener) => { this.listeners.push(listener); return { dispose() {} }; }; }

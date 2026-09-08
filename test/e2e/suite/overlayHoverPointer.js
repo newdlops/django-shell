@@ -2,11 +2,26 @@
 
 const assert = require("node:assert/strict");
 const vscode = require("vscode");
+const { withHoverDiagnostics, captureHoverStage } = require("./overlayHoverDiagnostics.js");
+const { withTestWorkbenchSize } = require("./focusTestWorkbench.js");
 
 const HOVER_SELECTOR = ".monaco-resizable-hover,.monaco-hover,.monaco-editor-hover";
 
 /** Verifies a mouse-triggered hover survives the editor-to-body-portal pointer handoff. */
 async function assertOverlayHoverPointerHandoff(extension) {
+  return withHoverDiagnostics(extension, () => checkOverlayHoverPointerHandoff(extension, "default"));
+}
+
+/** Checks representative desktop editor widths without changing the user's own workbench. */
+async function assertOverlayHoverViewports(extension) {
+  for (const width of [1100, 1440, 1740]) {
+    await withTestWorkbenchSize(extension, width, 900, () => withHoverDiagnostics(extension,
+      () => checkOverlayHoverPointerHandoff(extension, `width-${width}`), `width-${width}`));
+  }
+}
+
+/** Exercises real pointer entry and sash dragging while diagnostics observe native events. */
+async function checkOverlayHoverPointerHandoff(extension, label) {
   await vscode.commands.executeCommand("djangoShell.showOverlayEditor");
   await dispatchOverlayMouse([{ x: 6, y: 6 }], "initial mouse reset");
   await delay(650);
@@ -28,6 +43,7 @@ async function assertOverlayHoverPointerHandoff(extension) {
   assert.equal(after.pointerInsideHover, true, `renderer pointer did not land inside the surviving hover: ${JSON.stringify(after)}`);
   assert.equal(after.keeperHeld, true, `detached hover keeper was not held inside the portal: ${JSON.stringify(after)}`);
   assert.equal(after.keeperPointerInside, true, `detached hover keeper missed the portal pointer: ${JSON.stringify(after)}`);
+  await captureHoverStage(extension, `${label}-shown`);
 
   const resizeReady = JSON.parse(await evalInWorkbench(extension, hoverStateExpression(shown.entryPoint)));
   assert.ok(resizeReady.resizePoint, `hover must expose a hit-testable enabled resize sash: ${JSON.stringify(resizeReady)}`);
@@ -46,6 +62,8 @@ async function assertOverlayHoverPointerHandoff(extension) {
   const dimensionDelta = resizeBefore.resizeAxis === "vertical" ? Math.abs(resized.hoverRect.width - resizeBefore.hoverRect.width) : Math.abs(resized.hoverRect.height - resizeBefore.hoverRect.height);
   assert.ok(dimensionDelta >= 12, `native sash drag did not resize the surviving hover: delta=${dimensionDelta} before=${JSON.stringify(resizeBefore)} after=${JSON.stringify(resized)}`);
   assert.equal(resized.resizeActive, false, `resize ownership was not released after mouseup: ${JSON.stringify(resized)}`);
+  await captureHoverStage(extension, `${label}-resized`);
+  console.log(`Overlay hover ${label} passed: ${JSON.stringify({ symbol: symbol.symbolRect, viewport: resized.viewport, hover: resized.hoverRect })}`);
 
   await dispatchOverlayMouse([{ x: 6, y: 6 }], "hover cleanup");
   await evalInWorkbench(extension, `(function(){const root=document.getElementById("django-shell-overlay");const editor=root&&root.__djangoShellEditor;const controller=editor&&editor.getContribution&&editor.getContribution("editor.contrib.contentHover");controller&&controller.hideContentHover&&controller.hideContentHover();return "hover-cleaned";})()`);
@@ -54,12 +72,14 @@ async function assertOverlayHoverPointerHandoff(extension) {
 
 /** Waits until the visible overlay editor exposes one rendered symbol rectangle. */
 async function waitForSymbolGeometry(extension, symbol, lineFragment) {
-  let last = {};
+  let last = {}, previous = "";
   for (let attempt = 0; attempt < 50; attempt++) {
     last = JSON.parse(await evalInWorkbench(extension, symbolGeometryExpression(symbol, lineFragment)));
-    if (last.symbolRect) {
+    const signature = last.symbolRect && JSON.stringify(last.symbolRect);
+    if (signature && signature === previous && last.targetInsideEditor) {
       return last;
     }
+    previous = signature || "";
     await vscode.commands.executeCommand("djangoShell.showOverlayEditor");
     await delay(120);
   }
@@ -68,10 +88,12 @@ async function waitForSymbolGeometry(extension, symbol, lineFragment) {
 
 /** Waits for a visible, hit-testable Monaco hover inside the overlay-owned body portal. */
 async function waitForPortalHover(extension) {
-  let last = {};
+  let last = {}, signature = "", since = 0;
   for (let attempt = 0; attempt < 80; attempt++) {
     last = JSON.parse(await evalInWorkbench(extension, hoverStateExpression()));
-    if (last.visible && last.portalContainsHover && last.entryPoint) {
+    const current = JSON.stringify([last.hoverToken, last.hoverRect, last.text]);
+    if (current !== signature) { signature = current; since = Date.now(); }
+    if (last.visible && last.portalContainsHover && last.entryPoint && !/^Loading[.…]*$/.test(last.text) && Date.now() - since >= 300) {
       return last;
     }
     await delay(150);
@@ -79,12 +101,12 @@ async function waitForPortalHover(extension) {
   throw new Error(`Timed out waiting for mouse-triggered overlay hover: ${JSON.stringify(last)}`);
 }
 
-/** Dispatches actual Chromium mouse movement through the test-only workbench input bridge. */
+/** Dispatches native renderer mouse movement through the test-only workbench input bridge. */
 async function dispatchOverlayMouse(points, stage) {
   const normalized = points.map(roundPoint);
   const result = await vscode.commands.executeCommand("djangoShell.e2eDispatchOverlayMouse", { points: normalized });
-  assert.equal(result?.ok, true, `${stage} CDP mouse dispatch failed: ${JSON.stringify(result)}`);
-  assert.deepEqual(result?.points, normalized, `${stage} CDP mouse path changed: ${JSON.stringify(result)}`);
+  assert.equal(result?.ok, true, `${stage} native mouse dispatch failed: ${JSON.stringify(result)}`);
+  assert.deepEqual(result?.points, normalized, `${stage} native mouse path changed: ${JSON.stringify(result)}`);
   return result;
 }
 
@@ -118,9 +140,9 @@ function centerPoint(rect) {
   return roundPoint({ x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2) });
 }
 
-/** Rounds one renderer point to stable subpixel coordinates. */
+/** Rounds one renderer point to Electron's integer CSS pixel coordinates. */
 function roundPoint(point) {
-  const rounded = { x: Math.round(Number(point.x) * 100) / 100, y: Math.round(Number(point.y) * 100) / 100 };
+  const rounded = { x: Math.round(Number(point.x)), y: Math.round(Number(point.y)) };
   if (point.action === "down" || point.action === "move" || point.action === "up") { rounded.action = point.action; }
   return rounded;
 }
@@ -146,4 +168,4 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-module.exports = { assertOverlayHoverPointerHandoff };
+module.exports = { assertOverlayHoverPointerHandoff, assertOverlayHoverViewports };

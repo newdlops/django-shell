@@ -28,6 +28,7 @@ async function assertGoldenPythonExecution({ extension, generatedText, importLin
       { text: completionSuffix }
     ]);
     await visibility.assertClean();
+    await revealGoldenCode(extension);
     const loaded = JSON.parse(await evalInWorkbench(extension, goldenInputSnapshotExpression(code)));
     assert.equal(loaded.ok, true, `golden input failed: ${JSON.stringify(loaded)}`);
     assert.equal(loaded.modelHasPrelude, false, `golden prelude occupied editor model: ${JSON.stringify(loaded)}`);
@@ -50,6 +51,7 @@ async function assertGoldenPythonExecution({ extension, generatedText, importLin
     assert.equal(rendered.sawShellPrompt, false, `golden webview cell leaked raw shell prompt: ${JSON.stringify(rendered)}`);
     assert.equal(rendered.outputVisible, true, `golden output panel was not visible: ${JSON.stringify(rendered)}`);
     assert.ok(Number(rendered.outputCount) > 0, `golden output panel did not render an output item: ${JSON.stringify(rendered)}`);
+    await revealGoldenCode(extension);
     const postRun = JSON.parse(await evalInWorkbench(extension, goldenPostRunOverlayExpression(code)));
     assert.equal(postRun.ok, true, `golden overlay lost visible input after run: ${JSON.stringify(postRun)}`);
     const output = JSON.parse(await evalInWorkbench(extension, overlayOutputExpression(marker)));
@@ -475,3 +477,9 @@ function delay(ms) {
 }
 
 module.exports = { assertGoldenPythonExecution };
+
+/** Reveals the exact code being visually asserted when a narrow editor clips the long fixture line. */
+async function revealGoldenCode(extension) {
+  const result = JSON.parse(await evalInWorkbench(extension, `(function(){const root=document.getElementById("django-shell-overlay"),editor=root&&root.__djangoShellEditor,model=editor&&editor.getModel();if(!model){return JSON.stringify({ok:false,reason:"missing-model"});}const offset=model.getValue().indexOf("Company.objects.filter");if(offset<0){return JSON.stringify({ok:false,reason:"missing-code"});}const start=model.getPositionAt(offset),end=model.getPositionAt(offset+"Company.objects.filter".length);editor.revealRange({startLineNumber:start.lineNumber,startColumn:start.column,endLineNumber:end.lineNumber,endColumn:end.column},1);editor.render(true);return JSON.stringify({ok:true});})()`));
+  assert.equal(result.ok, true, `golden code could not be revealed: ${JSON.stringify(result)}`);
+}

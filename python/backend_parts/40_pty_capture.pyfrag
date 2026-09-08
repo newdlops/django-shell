@@ -376,7 +376,7 @@ def _pty_install_ipython_capture(shell):
     def _pre(info):
         """Waits for backend warmup, then starts capturing one IPython cell."""
         _wait_for_warmup()
-        if str(getattr(info, "raw_cell", "") or "").lstrip().startswith("_djs_rpc("):
+        if str(getattr(info, "raw_cell", "") or "").lstrip().startswith(("_djs_rpc(", "_djs_backend_module._load_capability_from_stdin(")):
             state["skip"] = True  # plumbing cell: let its own marker print through untouched
             return
         state["skip"] = False
@@ -702,6 +702,5 @@ def _pty_scrub_readline(visible):
 def _pty_is_rpc_line(line):
     """Returns whether a history line is django-shell RPC/bootstrap plumbing (never a user command)."""
     text = str(line or "").lstrip()
-    return text.startswith("_djs_rpc(") or (text.startswith("exec(") and "_djs_" in text)
-
+    return text.startswith(("_djs_rpc(", "_djs_backend_module._load_capability_from_stdin(")) or (text.startswith("exec(") and "_djs_" in text)
 
