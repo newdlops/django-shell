@@ -16,6 +16,7 @@ Earlier `0.0.x` entries are retained below. The format is loosely based on
 - Query results keep the requested `values_list()` column order, named and flat result shapes, and read-only annotation columns.
 - Backend connections have bounded admission, input deadlines, request/response sizes, and output capture. Reserved control capacity remains available during busy work, and an oversized response never silently replays a submitted request.
 - AI assistant output preserves UTF-8 characters across stream chunks. Cancellation, timeout, and output-limit failures terminate owned processes and their descendants.
+- VSIX packages exclude development-only MCP configuration, planning files, and internal review documents.
 
 ### Improved
 - Query result handles expire while idle, enforce estimated retention budgets, and are explicitly released on the original backend when replaced or discarded. Reopening a panel still reuses its retained result without executing the query again.
