@@ -57,7 +57,7 @@ test("field metadata and typed RHS restrictions preserve backend-safe contexts",
   assert.equal(defaultLookup({ role: "field", type: "CharField" }), "icontains");
   assert.deepEqual(rhsKindsFor({ context: "aggregateFilter", field: date, lookup: "gt" }), ["literal", "field"]);
   assert.deepEqual(rhsKindsFor({ context: "subquery", field: date, lookup: "gt" }), ["literal", "field", "outerField", "relativeTime"]);
-  assert.deepEqual(rhsKindsFor({ context: "where", field: date, lookup: "in" }), ["literal"]);
+  assert.deepEqual(rhsKindsFor({ context: "where", field: date, lookup: "in" }), ["list"]);
   assert.equal(scalarFromInput({ type: "IntegerField" }, "12"), 12);
   assert.equal(scalarFromInput({ type: "BooleanField" }, "false"), false);
 });
