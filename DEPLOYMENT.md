@@ -10,6 +10,14 @@ The existing `UNLICENSED` manifest and proprietary `LICENSE` describe the curren
 
 The activity bar icon remains `media/django-shell.svg`. Do not use the colored deployment icon there because VS Code activity icons are expected to be theme-colored SVGs.
 
+### 1.1.1000054 validation record — 2026-09-09
+
+- `npm run check`: 1,022 tests passed with no failures or skips, including direct input quarantine, independent E2E extension directories, cross-process inspector reservations, and reservation release after process termination.
+- Full VS Code E2E passed on VS Code 1.136.1, macOS arm64, after using the verified test-process activation helper for the automatic-completion probe. The previous hover verification failure is resolved in this release.
+- Separate native hover checks passed at 1100×900, 1440×900, and 1740×900. Requested pointer delivery, portal retention, sash resizing, and cleanup were verified; the 1440px run recorded 24 unrelated pointer events that were isolated by the test guard.
+- The recovery notice uses the existing terminal output and a single native VS Code warning so the instruction remains available while the setup terminal is minimized. After shortening its text, the final native notification and Model Browser E2E passed again; a 1440×900 screenshot confirmed the complete recovery instruction is visible without truncation.
+- Actual SSH/WAN bootstrap behavior and the managed endpoint's SentinelOne detection status remain unverified. The versioned records below describe earlier releases.
+
 ### 1.1.1000053 validation record — 2026-09-08
 
 - `npm run check`: 1,016 tests passed with no failures or skips.
@@ -36,9 +44,13 @@ npm run check
 npm run test:e2e
 ```
 
-`npm run check` enforces code guidelines, compiles TypeScript, bundles the renderer assets, and runs unit tests. `npm run test:e2e` launches VS Code and validates Model Browser, ORM Query, the custom console, overlay documents, restart reset behavior, and renderer guards. The test runner uses its own extensions directory, disables extension updates and background timer throttling, and focuses its own window for input probes; it must not load or update unrelated user extensions. Set `VSCODE_E2E_EXECUTABLE` to an existing VS Code executable when using a cached installation.
+`npm run check` enforces code guidelines, compiles TypeScript, bundles the renderer assets, and runs unit tests. `npm run test:e2e` launches VS Code and validates Model Browser, ORM Query, the custom console, overlay documents, restart reset behavior, and renderer guards. Each run owns a separate extensions directory, workspace, profile, and development extension; cleanup preserves other runs and the installed provider extensions. The runner disables extension updates and background timer throttling and focuses only its own window. Set `VSCODE_E2E_EXECUTABLE` to an existing VS Code executable when using a cached installation.
 
 Both E2E entrypoints reserve an inspector port and verify the owning test process before activating its single workbench window. On macOS, activation targets that verified process ID. Webview focus uses Chromium pointer input, and typing waits for focus and stable geometry; completion timing records the first visible frame inside the renderer so inspector round trips do not inflate the 500ms budget.
+
+Inspector candidates in 9229–9268 use companion loopback reservations in 9269–9308. The companion socket remains open for the run, preventing concurrent runners from choosing the same candidate before VS Code binds it. The OS releases the reservation when the runner exits, including abrupt termination; unrelated listeners are preserved.
+
+Hover checks temporarily filter pointer events outside the requested path in the isolated test window. They require native endpoint, press, and release delivery before asserting hover retention and resizing. Diagnostics record ignored events, and cleanup always restores ordinary input. This guard runs only in the test harness.
 
 The overlay checks require a Node inspector belonging to the test's VS Code process. If an injected local port-routing hook causes `address already in use` or `main inspector did not open`, run the test process without that hook and its runtime shims. Keep other applications and their listeners running.
 
@@ -61,13 +73,13 @@ npm run package
 This produces a file like:
 
 ```text
-django-shell-1.1.1000053.vsix
+django-shell-1.1.1000054.vsix
 ```
 
 Install it into VS Code:
 
 ```sh
-code --install-extension django-shell-1.1.1000053.vsix --force
+code --install-extension django-shell-1.1.1000054.vsix --force
 ```
 
 After installation, reload VS Code and run `Django Shell: Open Console` from the command palette.
@@ -98,7 +110,7 @@ After the checks pass, commit and push the release, package the VSIX, and instal
 
 ```sh
 npx @vscode/vsce login <publisher-id>
-npx @vscode/vsce publish --packagePath django-shell-1.1.1000053.vsix
+npx @vscode/vsce publish --packagePath django-shell-1.1.1000054.vsix
 ```
 
 Use `npx @vscode/vsce publish patch`, `minor`, or `major` only when you want VSCE to bump the version automatically.

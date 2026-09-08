@@ -3,17 +3,26 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vscode = require("vscode");
 const { captureTestWorkbench } = require("./focusTestWorkbench.js");
+const { installHoverInputGuard } = require("./overlayHoverInputGuard.js");
 
 const RESULTS = path.resolve(__dirname, "../../../.vscode-test/results");
 
 /** Starts a scoped renderer trace and always restores native methods after one hover probe. */
 async function withHoverDiagnostics(extension, run, label = "default") {
   await vscode.commands.executeCommand("djangoShell.e2eEvaluateOverlay", `(${installHoverTrace.toString()})()`);
-  try { return await run(); }
+  try {
+    await vscode.commands.executeCommand("djangoShell.e2eEvaluateOverlay", `(${installHoverInputGuard.toString()})()`);
+    return await run();
+  }
   catch (error) {
     await captureHoverStage(extension, `${label}-failed`).catch((captureError) => console.warn(String(captureError)));
     throw error;
   } finally {
+    try {
+      const input = await vscode.commands.executeCommand("djangoShell.e2eEvaluateOverlay", `(function(){const guard=window.__dsoE2eHoverInput;const state=guard&&guard.snapshot();guard&&guard.cleanup();delete window.__dsoE2eHoverInput;return JSON.stringify(state||{});})()`);
+      fs.mkdirSync(RESULTS, { recursive: true });
+      fs.writeFileSync(path.join(RESULTS, `overlay-hover-${label}-input.json`), input);
+    } catch (error) { console.warn(`Hover input cleanup failed: ${String(error)}`); }
     try {
       const trace = await vscode.commands.executeCommand("djangoShell.e2eEvaluateOverlay", `(function(){const trace=window.__dsoE2eHoverTrace;trace&&trace.cleanup();delete window.__dsoE2eHoverTrace;return JSON.stringify(trace&&trace.events||[]);})()`);
       fs.mkdirSync(RESULTS, { recursive: true });

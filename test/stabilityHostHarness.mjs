@@ -47,7 +47,7 @@ export async function withClock(run) {
 /** Loads host classes with fake application APIs and returns their observable message boundary. */
 export function hostHarness() {
   const Module = require("node:module"), originalLoad = Module._load;
-  const posted = [], processes = [];
+  const posted = [], processes = [], warnings = [];
   /** Creates a process that records writes without starting a shell. */
   function processFixture() {
     const process = { writes: [], killed: false, write(data) { this.writes.push(data); }, kill() { this.killed = true; }, resize() {}, onData(callback) { this.dataCallback = callback; }, onExit(callback) { this.exitCallback = callback; } };
@@ -67,7 +67,7 @@ export function hostHarness() {
     ViewColumn: { Active: 1 },
     commands: { executeCommand: async () => undefined, registerCommand: () => ({ dispose() {} }) },
     workspace: { getConfiguration: () => ({ get: (_key, fallback) => fallback }) },
-    window: { createWebviewPanel: (_viewType, title) => ({
+    window: { showWarningMessage: async (message) => { warnings.push(message); }, createWebviewPanel: (_viewType, title) => ({
       dispose() { this.close?.(); }, onDidDispose(callback) { this.close = callback; return { dispose() {} }; }, title,
       webview: { asWebviewUri: (value) => value, cspSource: "vscode-webview:", html: "", onDidReceiveMessage() { return { dispose() {} }; }, postMessage: async (message) => { posted.push(structuredClone(message)); return true; } }
     }) }
@@ -85,7 +85,7 @@ export function hostHarness() {
     const { ModelQueryConsole } = require("../out/modelQueryConsole.js");
     const { LazyRuntimeSource } = require("../out/extension.js");
     const { BackendClient } = require("../out/backendClient.js");
-    return { BackendClient, ModelBrowser, ModelQueryConsole, LazyRuntimeSource, posted, processes, processFixture,
+    return { BackendClient, ModelBrowser, ModelQueryConsole, LazyRuntimeSource, posted, processes, processFixture, warnings,
       session() {
         const session = new NotebookPtySession({ autoActivateWorkspaceVenv: false, backendRuntimePath: path.resolve("missing-stability-runtime.py"), cwd: process.cwd(), djangoSettingsModule: "stability_fixture.settings", sessionId: "stability-fixture" });
         session.process = processFixture(); session.started = true; session.cellCapture = true; session.ipython = true;

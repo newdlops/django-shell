@@ -6,26 +6,25 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runTests } from "@vscode/test-electron";
 import { withE2eArtifacts } from "./artifacts.mjs";
-import { findAvailableInspectorPort } from "./inspectorPort.mjs";
+import { withInspectorPort } from "./inspectorPort.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 /** Runs the VS Code extension host E2E suite. */
 async function main() {
-  await withE2eArtifacts(ROOT, runSuite);
+  await withE2eArtifacts(ROOT, (artifacts) => withInspectorPort((inspectorPort) => runSuite(artifacts, inspectorPort)));
 }
 
 /** Starts VS Code using artifacts whose lifetime is managed by the calling runner. */
-async function runSuite({ workspace, userData, extensionPath }) {
+async function runSuite({ workspace, userData, extensionsDir, extensionPath }, inspectorPort) {
   const nativeProviderFixturePath = path.join(ROOT, "test", "e2e", "fixtures", "native-provider");
   const python = pythonExecutablePath();
   const modelBrowserOnly = process.env.DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY === "1";
-  const inspectorPort = await findAvailableInspectorPort();
   const testShell = process.platform === "win32" ? process.env.SHELL : "/bin/sh";
   if (!modelBrowserOnly) {
-    copyInstalledExtension("ms-python.python-");
-    copyInstalledExtension("ms-python.vscode-pylance-");
-    copyInstalledExtension("newdlops.django-orm-intellisense-");
+    copyInstalledExtension("ms-python.python-", extensionsDir);
+    copyInstalledExtension("ms-python.vscode-pylance-", extensionsDir);
+    copyInstalledExtension("newdlops.django-orm-intellisense-", extensionsDir);
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(extensionPath, "package.json"), "utf8"));
   fs.mkdirSync(path.join(userData, "User"), { recursive: true });
@@ -52,21 +51,18 @@ async function runSuite({ workspace, userData, extensionPath }) {
     extensionDevelopmentPath: modelBrowserOnly ? extensionPath : [extensionPath, nativeProviderFixturePath],
     extensionTestsEnv: { DJANGO_SHELL_E2E: "1", DJANGO_SHELL_E2E_EXTENSION_ID: `${manifest.publisher}.${manifest.name}`, ...(process.env.DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY === "1" ? { DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_HOVER_ONLY === "1" ? { DJANGO_SHELL_E2E_HOVER_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY === "1" ? { DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY: "1" } : {}), ...(process.env.DJANGO_SHELL_E2E_THEME_ONLY === "1" ? { DJANGO_SHELL_E2E_THEME_ONLY: "1" } : {}), ...(python ? { DJANGO_SHELL_E2E_PYTHON: python } : {}), ...(testShell ? { SHELL: testShell } : {}) },
     extensionTestsPath: path.join(ROOT, "test", "e2e", "suite", "index.js"),
-    launchArgs: [...(inspectorPort ? [`--inspect=${inspectorPort}`] : []), "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--force-disable-user-env", `--user-data-dir=${userData}`, `--extensions-dir=${path.join(ROOT, ".vscode-test", "extensions")}`, workspace],
+    launchArgs: [`--inspect=${inspectorPort}`, "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--force-disable-user-env", `--user-data-dir=${userData}`, `--extensions-dir=${extensionsDir}`, workspace],
     reuseMachineInstall: Boolean(process.env.VSCODE_E2E_EXECUTABLE),
     vscodeExecutablePath: vscodeExecutablePath()
   });
 }
 
 /** Copies one installed extension into the VS Code E2E extension directory. */
-function copyInstalledExtension(prefix) {
+function copyInstalledExtension(prefix, extensionsDir) {
   const installed = latestInstalledExtension(prefix);
   if (!installed) {
     throw new Error(`${prefix} is required for strict Python cell E2E coverage.`);
   }
-  const extensionsDir = path.join(ROOT, ".vscode-test", "extensions");
-  fs.mkdirSync(extensionsDir, { recursive: true });
-  removeExistingExtensionDirs(extensionsDir, prefix);
   const target = path.join(extensionsDir, path.basename(installed));
   fs.cpSync(installed, target, { dereference: true, recursive: true });
   writeExtensionCacheEntry(extensionsDir, target);
@@ -80,13 +76,6 @@ function latestInstalledExtension(prefix) {
   }
   const matches = fs.readdirSync(extensionsDir).filter((name) => name.startsWith(prefix)).sort();
   return matches.length ? path.join(extensionsDir, matches[matches.length - 1]) : undefined;
-}
-
-/** Removes old copied extension directories with one prefix. */
-function removeExistingExtensionDirs(extensionsDir, prefix) {
-  for (const name of fs.readdirSync(extensionsDir).filter((entry) => entry.startsWith(prefix))) {
-    fs.rmSync(path.join(extensionsDir, name), { force: true, recursive: true });
-  }
 }
 
 /** Adds one copied extension to VS Code's extension cache manifest. */

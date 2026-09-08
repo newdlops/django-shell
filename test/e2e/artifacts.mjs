@@ -20,8 +20,9 @@ export async function withE2eArtifacts(root, run, temporaryRoot = os.tmpdir()) {
   try {
     const workspace = own(fs.mkdtempSync(path.join(temporaryRoot, "django-shell-e2e-")));
     const userData = own(fs.mkdtempSync(path.join(temporaryRoot, "django-shell-e2e-user-")));
+    const extensionsDir = own(fs.mkdtempSync(path.join(temporaryRoot, "django-shell-e2e-extensions-")));
     const extensionPath = own(prepareDevelopmentExtension(root));
-    return await run({ workspace, userData, extensionPath });
+    return await run({ workspace, userData, extensionsDir, extensionPath });
   } finally {
     for (const directory of owned.reverse()) {
       try { await fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); }

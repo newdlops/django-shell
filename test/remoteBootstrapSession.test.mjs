@@ -160,3 +160,33 @@ test("an incomplete receiver response arriving after the host timeout cannot reo
     assert.deepEqual(session.process.writes, ["read_capability()\r"]);
   } finally { session.dispose(); }
 }));
+
+test("incomplete uploads block direct typing and paste, show one recovery notice, and reopen input only after restart", async () => withClock(async () => {
+  const session = sessionFixture(), notices = [];
+  const warningCount = harness.warnings.length;
+  try {
+    session.onDidData((data) => notices.push(data));
+    const frame = { id: "guarded-upload", header: "{}", data: "source" };
+    const pending = session.writePacedPtyRequest(frame.id, "read_capability()\r", 60000, "capability.grid", frame);
+    await flush();
+    session.write("held_before_failure\r");
+    session.handleOutput('__DJANGO_SHELL_BACKEND_RESPONSE__{"id":"guarded-upload","response":{"ok":false,"restartRequired":true}}\r\n>>> ');
+    await pending;
+    const oldProcess = session.process;
+    session.write("p"); session.write("rint(1)\r"); session.write("\x1b[200~private pasted text\rprint(2)\r\x1b[201~"); session.write("\x03");
+    assert.deepEqual(oldProcess.writes, ["read_capability()\r"]);
+    assert.equal(notices.filter((notice) => notice.includes("Select Restart Kernel")).length, 1);
+    assert.equal(harness.warnings.length, warningCount + 1);
+    assert.match(harness.warnings.at(-1), /Select Restart Kernel/);
+    assert.match(session.snapshot().text, /Upload incomplete/);
+    assert.doesNotMatch(session.snapshot().text, /private pasted text|held_before_failure/);
+    session.handleOutput('__DJANGO_SHELL_BACKEND_RESPONSE__{"id":"guarded-upload","response":{"ok":true}}\r\n>>> ');
+    session.write("late_input\r");
+    await assert.rejects(session.requestViaPty({ kind: "execute", code: "backend_input" }), /Restart the shell/);
+    assert.deepEqual(oldProcess.writes, ["read_capability()\r"]);
+    session.restart();
+    session.write("print(3)\r"); session.write("\x03");
+    assert.deepEqual(session.process.writes, ["print(3)\r", "\x03"]);
+    assert.deepEqual(oldProcess.writes, ["read_capability()\r"]);
+  } finally { session.dispose(); }
+}));

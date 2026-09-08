@@ -99,4 +99,4 @@ function evaluate(url, expression) {
   });
 }
 
-module.exports = { focusTestWorkbench, focusTestWebview, captureTestWorkbench, withTestWorkbenchSize };
+module.exports = { focusTestWorkbench, focusTestWebview, captureTestWorkbench, withTestWorkbenchSize, evaluateTestWorkbench };

@@ -49,11 +49,16 @@ test("cleaning one E2E run preserves another run that is still active", async ()
   const root = fixture();
   try {
     await withE2eArtifacts(root, async (first) => {
+      fs.writeFileSync(path.join(first.extensionsDir, "provider.txt"), "first run provider");
       await withE2eArtifacts(root, async (second) => {
         assert.notEqual(first.extensionPath, second.extensionPath);
+        assert.notEqual(first.extensionsDir, second.extensionsDir);
+        fs.writeFileSync(path.join(second.extensionsDir, "provider.txt"), "second run provider");
+        assert.equal(fs.readFileSync(path.join(first.extensionsDir, "provider.txt"), "utf8"), "first run provider");
         assert.ok(fs.existsSync(first.extensionPath) && fs.existsSync(second.extensionPath));
       }, path.join(root, "temporary"));
       assert.ok(Object.values(first).every((directory) => fs.existsSync(directory)));
+      assert.equal(fs.readFileSync(path.join(first.extensionsDir, "provider.txt"), "utf8"), "first run provider");
     }, path.join(root, "temporary"));
     assert.deepEqual(fs.readdirSync(path.join(root, ".vscode-test")), []);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }

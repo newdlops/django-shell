@@ -59,7 +59,7 @@ export class NotebookPtySession implements vscode.Disposable {
   private disposed = false;
   private requestEpoch = 0;
   private lastLiteralSequence = 0;
-  private retiredResponse: { complete: boolean; id?: string; restartRequired?: boolean } | undefined;
+  private retiredResponse: { complete: boolean; id?: string; restartRequired?: boolean; inputNoticeShown?: boolean } | undefined;
   private inputTracker = new InputLineTracker();
   private keepaliveInFlight = false;
   private keepaliveTimer: NodeJS.Timeout | undefined;
@@ -182,6 +182,16 @@ export class NotebookPtySession implements vscode.Disposable {
   /** Writes renderer input to the embedded PTY. */
   write(data: string): void {
     if (!this.process || this.disposed) { return; }
+    if (this.retiredResponse?.restartRequired) {
+      if (data && !this.retiredResponse.inputNoticeShown) {
+        this.retiredResponse.inputNoticeShown = true;
+        const notice = "\r\nUpload incomplete. Select Restart Kernel to restore input.\r\n";
+        this.displayText = trimTerminalText(this.displayText + notice);
+        this.dataEmitter.fire(notice);
+        void vscode.window.showWarningMessage(notice.trim());
+      }
+      return;
+    }
     if (this.uploadChannel.holdInput(data)) { return; }
     if (data) {
       this.lastTerminalInputAt = Date.now();

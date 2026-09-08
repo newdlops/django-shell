@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const vscode = require("vscode");
 const { withHoverDiagnostics, captureHoverStage } = require("./overlayHoverDiagnostics.js");
-const { withTestWorkbenchSize } = require("./focusTestWorkbench.js");
+const { focusTestWorkbench, withTestWorkbenchSize } = require("./focusTestWorkbench.js");
 
 const HOVER_SELECTOR = ".monaco-resizable-hover,.monaco-hover,.monaco-editor-hover";
 
@@ -22,6 +22,7 @@ async function assertOverlayHoverViewports(extension) {
 
 /** Exercises real pointer entry and sash dragging while diagnostics observe native events. */
 async function checkOverlayHoverPointerHandoff(extension, label) {
+  await focusTestWorkbench(extension);
   await vscode.commands.executeCommand("djangoShell.showOverlayEditor");
   await dispatchOverlayMouse([{ x: 6, y: 6 }], "initial mouse reset");
   await delay(650);
@@ -104,9 +105,19 @@ async function waitForPortalHover(extension) {
 /** Dispatches native renderer mouse movement through the test-only workbench input bridge. */
 async function dispatchOverlayMouse(points, stage) {
   const normalized = points.map(roundPoint);
+  const armed = await vscode.commands.executeCommand("djangoShell.e2eEvaluateOverlay", `(function(){window.__dsoE2eHoverInput.setPath(${JSON.stringify(normalized)});return "hover-input-path-set";})()`);
+  assert.equal(armed, "hover-input-path-set", `${stage} input guard failed: ${armed}`);
   const result = await vscode.commands.executeCommand("djangoShell.e2eDispatchOverlayMouse", { points: normalized });
   assert.equal(result?.ok, true, `${stage} native mouse dispatch failed: ${JSON.stringify(result)}`);
   assert.deepEqual(result?.points, normalized, `${stage} native mouse path changed: ${JSON.stringify(result)}`);
+  let delivery;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    delivery = JSON.parse(await vscode.commands.executeCommand("djangoShell.e2eEvaluateOverlay", "JSON.stringify(window.__dsoE2eHoverInput.snapshot())"));
+    assert.equal(delivery.armed, true, `${stage} input guard was removed before delivery`);
+    if (!delivery.pending.length) { break; }
+    await delay(25);
+  }
+  assert.deepEqual(delivery.pending, [], `${stage} native pointer did not arrive: ${JSON.stringify(delivery)}`);
   return result;
 }
 

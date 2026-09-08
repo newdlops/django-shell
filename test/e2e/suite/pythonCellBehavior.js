@@ -5,6 +5,7 @@ const vscode = require("vscode");
 const { assertNativeProviderParticipation } = require("./nativeProviderParticipation.js");
 const { assertGoldenPythonExecution } = require("./pythonCellGolden.js");
 const { assertOverlayHoverPointerHandoff, assertOverlayHoverViewports } = require("./overlayHoverPointer.js");
+const { focusTestWorkbench } = require("./focusTestWorkbench.js");
 
 const INPUT_MARKER = "# --- django shell input ---";
 const SHELL_LANGUAGE_ID = "python";
@@ -35,7 +36,7 @@ async function assertPythonCellBehavior(extension) {
     return;
   }
   if (process.env.DJANGO_SHELL_E2E_AUTO_IMPORT_ONLY === "1") {
-    await withStageTimeout("unit-local auto import", assertUnitLocalAutoImport(generatedText), 45000);
+    await withStageTimeout("unit-local auto import", assertUnitLocalAutoImport(generatedText, extension), 45000);
     await assertGeneratedOverlayFilesHidden("unit-local auto import");
     return;
   }
@@ -60,7 +61,7 @@ async function assertPythonCellBehavior(extension) {
   await assertGeneratedOverlayFilesHidden("provider feature checks");
   await withStageTimeout("cross-unit workspace context", assertCrossUnitWorkspaceContext(generatedText), 45000);
   await assertGeneratedOverlayFilesHidden("cross-unit workspace context");
-  await withStageTimeout("unit-local auto import", assertUnitLocalAutoImport(generatedText), 45000);
+  await withStageTimeout("unit-local auto import", assertUnitLocalAutoImport(generatedText, extension), 45000);
   await assertGeneratedOverlayFilesHidden("unit-local auto import");
   await withStageTimeout("renderer theme checks", assertRendererTheme(extension), 30000);
   await assertGeneratedOverlayFilesHidden("renderer theme checks");
@@ -402,10 +403,10 @@ async function assertCrossUnitWorkspaceContext(originalText) {
 }
 
 /** Verifies Pylance auto-imports and full-source fallback imports target only the focused unit. */
-async function assertUnitLocalAutoImport(originalText) {
+async function assertUnitLocalAutoImport(originalText, extension) {
   try {
     await assertAutoImportForSource("upper = 1\n\n\nclient = AutoImportedCli");
-    await assertSuggestionWidgetSurvivesTypingBurst();
+    await assertSuggestionWidgetSurvivesTypingBurst(extension);
     await assertAutoImportForSource("upper = 1\n\n\nclient = AutoImportedClient", 1);
     await assertAutoImportForSource("from workspace_context import AutoImportedClient\nupper = AutoImportedClient()\n\n\nclient = AutoImportedClient", 1);
   } finally {
@@ -414,12 +415,11 @@ async function assertUnitLocalAutoImport(originalText) {
 }
 
 /** Verifies a live suggest widget keeps compatible candidates while the active prefix grows. */
-async function assertSuggestionWidgetSurvivesTypingBurst() {
+async function assertSuggestionWidgetSurvivesTypingBurst(extension) {
   const warm = await installOverlayDocument(`${PRELUDE}${INPUT_MARKER}\nupper = 1\n\n\nclient = WidgetImportedCli`);
   await warmCompletionLabel(overlayUris().editor, warm, "client = WidgetImportedCli", "WidgetImportedClient");
   await installOverlayDocument(`${PRELUDE}${INPUT_MARKER}\nupper = 1\n\n\nclient = WidgetImp`);
-  const focused = await vscode.commands.executeCommand("djangoShell.e2eDispatchOverlayMouse", { points: [{ x: 1, y: 1 }] });
-  assert.equal(focused.ok, true, `automatic suggestion probe must focus its workbench window: ${JSON.stringify(focused)}`);
+  await focusTestWorkbench(extension);
   let result = JSON.parse(await evalInWorkbench(undefined, suggestionWidgetBurstStartExpression()));
   for (let attempt = 0; attempt < 75 && !result.ok && result.reason !== "missing-overlay" && result.elapsedMs <= 1500; attempt++) {
     await delay(40);

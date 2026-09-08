@@ -11,6 +11,7 @@ const { assertModelIntegrityWebview } = require("./modelIntegrityWebview.js");
 const { assertPythonCellBehavior } = require("./pythonCellBehavior.js");
 const { assertWorkbenchModelLanguageSelection } = require("./workbenchOverlayModelLanguage.js");
 const { focusTestWorkbench } = require("./focusTestWorkbench.js");
+const { assertTerminalRecoveryNotice } = require("./terminalRecovery.js");
 
 /** Runs the extension host E2E suite. */
 async function run() {
@@ -19,6 +20,7 @@ async function run() {
   await writePreActivationStaleOverlayFiles();
   await extension.activate();
   await focusTestWorkbench(extension);
+  await assertTerminalRecoveryNotice(extension);
   if (process.env.DJANGO_SHELL_E2E_HOVER_ONLY !== "1") {
     await assertModelQueryBuilderWebview(extension);
     await assertModelStabilityWebview(extension);

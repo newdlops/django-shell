@@ -6,6 +6,13 @@ This extension uses a running build number; the current release line is `1.1.x`.
 Earlier `0.0.x` entries are retained below. The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.1000054] — 2026-09-09
+
+### Fixed
+- Incomplete backend uploads now block direct terminal typing and pasted input until Restart Kernel, with one recovery notice in the terminal and VS Code notifications. Late responses cannot reopen the blocked input.
+- Concurrent VS Code E2E runs use separate provider-extension directories and clean them after success or failure. Inspector reservations remain held for the run and are also released when its process is terminated.
+- Native hover E2E checks isolate unrelated pointer movement in the test window, verify actual delivery of the requested input, and restore normal input after each check.
+
 ## [1.1.1000053] — 2026-09-08
 
 ### Improved
