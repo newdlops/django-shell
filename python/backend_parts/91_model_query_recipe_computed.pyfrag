@@ -341,6 +341,7 @@ def _browse_recipe_prepare(request, namespace=None):
     state = _browse_recipe_validate(request)
     if not state.get("ok"):
         return state, []
+    state["database"] = request.get("database")
     specs = _browse_recipe_computed_specs(state, namespace)
     state["ok"] = not any(item["severity"] == "error" for item in state["issues"])
     return state, specs
@@ -352,7 +353,7 @@ def _browse_recipe_base_queryset(state, specs, include_post=True):
     state["predicate_annotations"] = []
     state["predicate_number"] = 0
     where = _browse_recipe_predicate(state, recipe["where"], model, {}, None, "where")
-    queryset = model._base_manager.all()
+    queryset = _browse_queryset(model, state)
     if state["predicate_annotations"]:
         queryset = queryset.annotate(**dict(state["predicate_annotations"]))
     queryset = queryset.filter(where)
@@ -403,13 +404,13 @@ def _browse_recipe_rows(namespace, request):
         cursor = request.get("cursor")
         if keyset_capable and cursor is not None:
             queryset = queryset.filter(**{f"{model._meta.pk.attname}__gt": cursor})
-        with _browse_capture() as ctx:
+        with _browse_capture(request.get("database")) as ctx:
             raw = list(queryset[offset:offset + limit + 1].values(*[field.attname for field in model._meta.concrete_fields], *[item["alias"] for item in specs]))
         has_more, raw = len(raw) > limit, raw[:limit]
         columns = _browse_columns(model) + [{"annotation": True, "attname": item["alias"], "editable": False, "name": item["alias"], "null": True, "pk": False, "type": item["kind"]} for item in specs] + _browse_computed_columns(model)
         next_cursor = raw[-1][model._meta.pk.attname] if keyset_capable and has_more and raw else None
         next_offset = offset + limit if not keyset_capable and has_more else None
-        return {"columns": columns, "hasMore": has_more, "issues": state["issues"], "nextCursor": _browse_jsonable(next_cursor), "nextOffset": next_offset, "ok": True, "orm": _browse_recipe_orm_log(state, "rows", order), "pk": model._meta.pk.attname, "recipeVersion": 2, "rows": [_browse_serialize_row(row) for row in raw], "sql": _browse_sql(ctx)}
+        return {"columns": columns, "hasMore": has_more, "issues": state["issues"], "nextCursor": _browse_jsonable(next_cursor), "nextOffset": next_offset, "ok": True, "orm": _browse_recipe_orm_log(state, "rows", order), "pk": model._meta.pk.attname, "recipeVersion": 2, "rows": [_browse_serialize_row(row, columns) for row in raw], "sql": _browse_sql(ctx)}
     except Exception:
         state["issues"].append({"code": "VALUE_INVALID", "fix": "Review the query and retry.", "message": "Recipe query could not be compiled by Django.", "path": "/recipe", "severity": "error"})
         return _browse_recipe_failure(state, True)
@@ -428,7 +429,7 @@ def _browse_recipe_summary(request):
         queryset, _ = _browse_recipe_base_queryset(state, [], False)
         aggregates = {item["alias"]: item["expr"] for item in specs if item["kind"] == "aggregate"}
         group_by = [_browse_recipe_ref_path(item) for item in recipe.get("groupBy", ())]
-        with _browse_capture() as ctx:
+        with _browse_capture(request.get("database")) as ctx:
             if group_by:
                 query = queryset.values(*group_by).annotate(**aggregates)
                 if _browse_recipe_group_has_children(recipe["postFilter"]):
@@ -453,7 +454,7 @@ def _browse_recipe_count(request):
         if recipe.get("mode") == "summary" and not recipe.get("groupBy"):
             return {"count": 1, "issues": state["issues"], "ok": True, "orm": _browse_recipe_orm_log(state, "count"), "recipeVersion": 2, "sql": []}
         queryset, _ = _browse_recipe_base_queryset(state, specs if recipe.get("mode") == "rows" else [], recipe.get("mode") == "rows")
-        with _browse_capture() as ctx:
+        with _browse_capture(request.get("database")) as ctx:
             if recipe.get("mode") == "summary":
                 aggregate = {item["alias"]: item["expr"] for item in specs if item["kind"] == "aggregate"}
                 query = queryset.values(*[_browse_recipe_ref_path(item) for item in recipe.get("groupBy", ())]).annotate(**aggregate)
@@ -483,7 +484,7 @@ def _browse_recipe_computed(namespace, request):
         queryset, _ = _browse_recipe_base_queryset(state, specs)
         limit = _browse_limit(request.get("limit"), maximum=None)
         annotations = _browse_declared_annotations(model)
-        with _browse_capture() as ctx:
+        with _browse_capture(request.get("database")) as ctx:
             if field in annotations:
                 raw = queryset.annotate(__djs=annotations[field]).values_list("pk", "__djs")[:limit]
                 values = {_browse_jsonable(pk): _browse_cell(value) for pk, value in raw}
@@ -504,6 +505,8 @@ def _browse_recipe_orm_log(state, operation, order=()):
     """Returns a readable, non-executable summary of the strict v2 pipeline without interpolating raw user code."""
     source = state["recipe"]["source"]
     base = f'apps.get_model({source["app"]!r}, {source["model"]!r})._base_manager'
+    if state.get("database") is not None:
+        base += f'.using({state["database"]!r})'
     details = [base, f"# Recipe v2 {operation}"]
     if order:
         details.append(".order_by(" + ", ".join(repr(item) for item in order) + ")")

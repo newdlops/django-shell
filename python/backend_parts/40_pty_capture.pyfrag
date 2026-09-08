@@ -310,7 +310,7 @@ def _pty_tabulate_result(value, code=None):
             # Surface per-row annotation columns (e.g. annotate(Count('books')) / Window(...)) that Django sets on the
             # instance, skipping the internal djs_/__ aliases used for declared-@property filters.
             ann_names = [name for name in getattr(value.query, "annotation_select", {}) or {} if isinstance(name, str) and not name.startswith("djs_") and not name.startswith("__")]
-            rows = [_browse_serialize_row(dict({attname: getattr(instance, attname, None) for attname in concrete_names}, **{name: getattr(instance, name, None) for name in ann_names})) for instance in itertools.islice(value, _PTY_ORM_TABULATE_LIMIT + 1)]
+            rows = [_browse_serialize_row(dict({attname: getattr(instance, attname, None) for attname in concrete_names}, **{name: getattr(instance, name, None) for name in ann_names}), _browse_columns(model)) for instance in itertools.islice(value, _PTY_ORM_TABULATE_LIMIT + 1)]
             has_more = len(rows) > _PTY_ORM_TABULATE_LIMIT
             rows = rows[:_PTY_ORM_TABULATE_LIMIT]
             columns = _browse_columns(model) + [{"annotation": True, "attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "annotation"} for name in ann_names] + _browse_computed_columns(model)
@@ -318,7 +318,7 @@ def _pty_tabulate_result(value, code=None):
         if isinstance(value, Model):
             model = type(value)
             concrete_names = [column["attname"] for column in _browse_columns(model)]
-            row = _browse_serialize_row({attname: getattr(value, attname, None) for attname in concrete_names})
+            row = _browse_serialize_row({attname: getattr(value, attname, None) for attname in concrete_names}, _browse_columns(model))
             return {"app": model._meta.app_label, "columns": _browse_columns(model) + _browse_computed_columns(model), "editable": True, "hasMore": False, "model": model._meta.object_name, "ok": True, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "result": _browse_query_result(value, code) if isinstance(code, str) else None, "rows": [row]}
         if isinstance(value, QuerySet):
             payload = _browse_tabulate(list(itertools.islice(value, _PTY_ORM_TABULATE_LIMIT + 1)), 0, _PTY_ORM_TABULATE_LIMIT)
@@ -385,7 +385,7 @@ def _pty_install_ipython_capture(shell):
             _autoimport_registered_models(shell.user_ns)
         # Introspection plumbing (inspect/children call a backend helper): capture+emit its marker like a normal cell, but drop it from history afterwards so it stays out of the interactive shell.
         state["scrub"] = "_djs_backend_module._pty_orm_" in state["raw"]
-        state["out"], state["err"] = io.StringIO(), io.StringIO()
+        state["out"], state["err"] = _BoundedTextCapture(), _BoundedTextCapture()
         state["save"] = (sys.stdout, sys.stderr)
         sys.stdout, sys.stderr = state["out"], state["err"]
         _pty_sql_begin(state)
@@ -703,6 +703,5 @@ def _pty_is_rpc_line(line):
     """Returns whether a history line is django-shell RPC/bootstrap plumbing (never a user command)."""
     text = str(line or "").lstrip()
     return text.startswith("_djs_rpc(") or (text.startswith("exec(") and "_djs_" in text)
-
 
 

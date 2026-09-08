@@ -9,7 +9,7 @@ import type {
 } from "./backendClient";
 
 const INSPECT_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const PTY_FALLBACK_KINDS = new Set(["children", "complete", "debugpy", "environment", "execute", "inspect", "prelude", "models", "schema", "filterfields", "rows", "related", "count", "aggregate", "commit", "lookup", "query", "stagedebugpy"]); // helpers: scrubbed _djs_rpc; execute: literal cell; stagedebugpy: probe-sized only (uploads are socket-only).
+const PTY_FALLBACK_KINDS = new Set(["children", "complete", "debugpy", "environment", "execute", "inspect", "prelude", "models", "schema", "filterfields", "rows", "related", "count", "aggregate", "commit", "lookup", "query", "releaseQuery", "stagedebugpy"]); // helpers: scrubbed _djs_rpc; execute: literal cell; stagedebugpy: probe-sized only (uploads are socket-only).
 /** Marks model reads that require a parallel backend connection while Python is busy. */
 export const PARALLEL_MODEL_READ_KINDS = new Set(["models", "schema", "filterfields", "rows", "related", "computed", "lookup", "count", "aggregate"]);
 /** Marks metadata requests that ORM and terminal modes must never type into the shell. */

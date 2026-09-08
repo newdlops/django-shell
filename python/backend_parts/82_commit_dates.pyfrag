@@ -1,0 +1,27 @@
+# Validates Django date-scoped uniqueness against the final staged rows and their selected write database.
+def _browse_validate_commit_dates(prepared, alias):
+    """Checks changed date-uniqueness rules before saving, including collisions within the same batch."""
+    from django.core.exceptions import ValidationError
+
+    for instance, applied in prepared:
+        for field in instance._meta.fields:
+            for lookup_type in ("date", "month", "year"):
+                date_name = getattr(field, "unique_for_" + lookup_type, None)
+                if not date_name or not ({field.name, date_name} & set(applied)):
+                    continue
+                value, date = getattr(instance, field.attname), getattr(instance, date_name)
+                if value is None or date is None:
+                    continue
+                parts = ("day", "month", "year") if lookup_type == "date" else (lookup_type,)
+                lookup = {field.name: value, **{date_name + "__" + part: getattr(date, part) for part in parts}}
+                pk_name = field.model._meta.pk.attname
+                replaced = [getattr(other, pk_name) for other, _ in prepared]
+                conflict = field.model._default_manager.using(alias).filter(**lookup).exclude(pk__in=replaced).exists()
+                for other, _ in prepared:
+                    other_date = getattr(other, date_name)
+                    if getattr(other, pk_name) != getattr(instance, pk_name) and getattr(other, field.attname) == value and other_date is not None:
+                        conflict = conflict or all(getattr(other_date, part) == getattr(date, part) for part in parts)
+                if conflict:
+                    error = ValidationError({field.name: [instance.date_error_message(lookup_type, field.name, date_name)]})
+                    error._djs_pk = instance.pk
+                    raise error

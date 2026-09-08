@@ -1,0 +1,146 @@
+# Expires and releases retained query handles with bounded traversal and memory accounting.
+_QUERY_CACHE_LOCK = threading.RLock()
+_QUERY_CACHE_TIMER = None
+_QUERY_CACHE_DEADLINE = None
+_QUERY_CACHE_BYTES = 64 * 1024 * 1024
+_QUERY_RESULT_BYTES = 32 * 1024 * 1024
+_QUERY_SIZE_VISITS = 100000
+
+
+def _query_value_bytes(value):
+    """Estimates shallow storage without invoking a result object's custom size hooks."""
+    for base in type(value).__mro__:
+        method = vars(base).get("__sizeof__")
+        if isinstance(method, (types.MethodDescriptorType, types.WrapperDescriptorType)):
+            return method(value)
+    return type(value).__basicsize__
+
+
+def _query_retained_bytes(record):
+    """Estimates owned values and pages without evaluating querysets, properties, or iterators."""
+    from django.db.models import Model, QuerySet
+
+    total, visits, seen = 0, 0, set()
+    stack = [iter([record.get("value"), record.get("pages"), record.get("lookahead")])]
+    while stack:
+        item = next(stack[-1], _MISSING)
+        if item is _MISSING:
+            stack.pop()
+            continue
+        visits += 1
+        if visits > _QUERY_SIZE_VISITS:
+            return _QUERY_RESULT_BYTES + 1
+        identity = id(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        total += _query_value_bytes(item)
+        if total > _QUERY_RESULT_BYTES:
+            return total
+        if isinstance(item, dict):
+            stack.append(iter(dict.values(item)))
+            stack.append(iter(dict.keys(item)))
+        elif isinstance(item, list):
+            stack.append(list.__iter__(item))
+        elif isinstance(item, tuple):
+            stack.append(tuple.__iter__(item))
+        elif isinstance(item, set):
+            stack.append(set.__iter__(item))
+        elif isinstance(item, frozenset):
+            stack.append(frozenset.__iter__(item))
+        elif isinstance(item, QuerySet):
+            stack.append(iter([vars(item).get("_result_cache")]))
+        elif isinstance(item, Model):
+            stack.append(iter([vars(item)]))
+    return total
+
+
+def _query_prune_results():
+    """Drops idle expired results and bounds both entry count and estimated retained bytes."""
+    now = time.monotonic()
+    for key, record in list(_QUERY_RESULTS.items()):
+        if not record.get("busy") and now - record["updated"] >= _QUERY_RESULT_TTL:
+            del _QUERY_RESULTS[key]
+    total = sum(record.get("bytes", 0) for record in _QUERY_RESULTS.values())
+    for key, record in list(_QUERY_RESULTS.items()):
+        if len(_QUERY_RESULTS) <= _QUERY_RESULT_LIMIT and total <= _QUERY_CACHE_BYTES:
+            break
+        if not record.get("busy"):
+            total -= record.get("bytes", 0)
+            del _QUERY_RESULTS[key]
+
+
+def _query_expire_results():
+    """Runs idle cleanup independently of future user queries and schedules the next expiry."""
+    global _QUERY_CACHE_TIMER, _QUERY_CACHE_DEADLINE
+    with _QUERY_CACHE_LOCK:
+        _QUERY_CACHE_TIMER = _QUERY_CACHE_DEADLINE = None
+        _query_prune_results()
+        _query_schedule_expiry()
+
+
+def _query_schedule_expiry():
+    """Maintains one debugger-exempt daemon timer for the earliest unpinned result expiry."""
+    global _QUERY_CACHE_TIMER, _QUERY_CACHE_DEADLINE
+    deadlines = [record["updated"] + _QUERY_RESULT_TTL for record in _QUERY_RESULTS.values() if not record.get("busy")]
+    deadline = min(deadlines) if deadlines else None
+    if deadline is not None and _QUERY_CACHE_TIMER is not None and _QUERY_CACHE_DEADLINE <= deadline:
+        return
+    if _QUERY_CACHE_TIMER is not None:
+        _QUERY_CACHE_TIMER.cancel()
+    _QUERY_CACHE_TIMER = None
+    _QUERY_CACHE_DEADLINE = deadline
+    if deadline is not None:
+        timer = threading.Timer(max(0.01, deadline - time.monotonic()), _query_expire_results)
+        timer.daemon = True
+        _QUERY_CACHE_TIMER = timer
+        _debugger_exempt_thread(timer).start()
+
+
+def _query_forget_result(result_id, namespace=None):
+    """Releases an owned handle without evaluating or closing user-owned iterator objects."""
+    with _QUERY_CACHE_LOCK:
+        record = _QUERY_RESULTS.get(result_id)
+        if record is not None and (namespace is None or record["namespace"] is namespace):
+            _QUERY_RESULTS.pop(result_id, None)
+        _query_schedule_expiry()
+
+
+def _query_register_result(result_id, record):
+    """Admits a result only after bounded size inspection and arms its idle expiry."""
+    record["bytes"] = _query_retained_bytes(record)
+    if record["bytes"] > _QUERY_RESULT_BYTES:
+        raise ValueError("Query result exceeds the retention budget. Return a smaller slice or an iterator.")
+    with _QUERY_CACHE_LOCK:
+        _query_prune_results()
+        _QUERY_RESULTS[result_id] = record
+        _query_prune_results()
+        _query_schedule_expiry()
+
+
+@contextlib.contextmanager
+def _query_cached_result(namespace, result_id):
+    """Pins a live result while a page is being read, then updates its memory and expiry budgets."""
+    with _QUERY_CACHE_LOCK:
+        record = _QUERY_RESULTS.get(result_id) if isinstance(result_id, str) else None
+        if record is None or record["namespace"] is not namespace or time.monotonic() - record["updated"] >= _QUERY_RESULT_TTL:
+            if record is not None and record["namespace"] is namespace:
+                _QUERY_RESULTS.pop(result_id, None)
+            _query_schedule_expiry()
+            raise ValueError("This query result is no longer available. Use Run to execute the query again.")
+        record["busy"] = record.get("busy", 0) + 1
+        _QUERY_RESULTS.move_to_end(result_id)
+    try:
+        yield record
+    finally:
+        with _QUERY_CACHE_LOCK:
+            record["busy"] -= 1
+            record["updated"] = time.monotonic()
+            record["bytes"] = _query_retained_bytes(record)
+            oversized = record["bytes"] > _QUERY_RESULT_BYTES
+            if oversized:
+                _QUERY_RESULTS.pop(result_id, None)
+            _query_prune_results()
+            _query_schedule_expiry()
+        if oversized:
+            raise ValueError("Query result exceeds the retention budget. Return a smaller slice or an iterator.")

@@ -51,6 +51,16 @@ def _browse_schema(request):
             return {"ok": False, "error": traceback.format_exc()}
 
 
+def _browse_queryset(model, request):
+    """Keeps an explicit browser database on every read while preserving implicit router selection."""
+    from django.db import connections
+
+    database = request.get("database")
+    if database is not None and (not isinstance(database, str) or database not in connections):
+        raise ValueError("Unknown model database.")
+    return model._base_manager.using(database)
+
+
 def _browse_rows(namespace, request):
     """Returns one bounded page of rows (concrete columns only — no JOIN, no N+1), plus any per-row annotation columns
     (raw annotate expressions, relation/field aggregates, window functions, F-expression arithmetic) defined by the column builder."""
@@ -78,7 +88,7 @@ def _browse_rows(namespace, request):
             # their frames on every page, so any window annotation forces offset pagination. Ordering by an annotation alias
             # likewise can't keyset on pk, so it falls through to offset paging (order != [pk]).
             keyset_capable = order == [pk_attname] and not has_window
-            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all(), model, base_filters, attnames)
+            queryset, property_terms = _browse_apply_db_filters(_browse_queryset(model, request), model, base_filters, attnames)
             if ann_exprs:
                 queryset = queryset.annotate(**ann_exprs)
             if having_filters:
@@ -92,7 +102,7 @@ def _browse_rows(namespace, request):
                 queryset = queryset.filter(**{f"{pk_attname}__gt": cursor})
             elif not keyset_capable and base_offset and not property_terms:
                 queryset = queryset[base_offset:]
-            with _browse_capture() as ctx:
+            with _browse_capture(request.get("database")) as ctx:
                 if property_terms:
                     objects = list(_browse_islice(_browse_python_filter_iter(queryset, property_terms), base_offset, base_offset + limit + 1))
                     raw = [dict({attname: getattr(obj, attname, None) for attname in attnames}, **{alias: getattr(obj, alias, None) for alias in ann_aliases}) for obj in objects]
@@ -102,8 +112,8 @@ def _browse_rows(namespace, request):
             raw = raw[:limit]
             next_cursor = raw[-1][pk_attname] if keyset_capable and has_more and raw else None
             next_offset = base_offset + limit if not keyset_capable and has_more else None
-            orm = _browse_orm_rows(model, order, base_filters, attnames, pk_attname, keyset_capable, cursor, base_offset, limit, annotations, having_filters)
-            return {"columns": columns, "hasMore": has_more, "nextCursor": _browse_jsonable(next_cursor), "nextOffset": next_offset, "ok": True, "orm": orm, "pk": pk_attname, "rows": [_browse_serialize_row(row) for row in raw], "sql": _browse_sql(ctx)}
+            orm = _browse_orm_rows(model, order, base_filters, attnames, pk_attname, keyset_capable, cursor, base_offset, limit, annotations, having_filters, request.get("database"))
+            return {"columns": columns, "hasMore": has_more, "nextCursor": _browse_jsonable(next_cursor), "nextOffset": next_offset, "ok": True, "orm": orm, "pk": pk_attname, "rows": [_browse_serialize_row(row, columns) for row in raw], "sql": _browse_sql(ctx)}
         except Exception:
             return {"ok": False, "columns": [], "error": traceback.format_exc(), "rows": []}
 
@@ -122,7 +132,7 @@ def _browse_related(request):
             source_pk = request.get("pk")
             database = request.get("database")
             limit = _browse_limit(request.get("limit"))
-            with _browse_capture() as ctx:
+            with _browse_capture(request.get("database")) as ctx:
                 if field.many_to_one or (field.one_to_one and not field.auto_created):
                     result = _browse_related_single(model, field, target, attnames, columns, source_pk, request.get("value"), database)
                 else:
@@ -138,9 +148,10 @@ def _browse_related_single(model, field, target, attnames, columns, source_pk, v
     """Fetches one forward foreign-key or one-to-one related row with at most two queries."""
     if value is None:
         value = model._base_manager.using(database).filter(pk=source_pk).values_list(field.attname, flat=True).first()
-    raw = list(target._base_manager.using(database).filter(pk=value).values(*attnames)[:1]) if value is not None else []
-    orm = f"{target.__name__}._base_manager.filter(pk={value!r}).values({_orm_args(attnames)})[:1]"
-    return {"columns": columns, "hasMore": False, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row) for row in raw], "single": True}
+    target_key = field.target_field.attname
+    raw = list(target._base_manager.using(database).filter(**{target_key: value}).values(*attnames)[:1]) if value is not None else []
+    orm = f"{target.__name__}._base_manager.filter({target_key}={value!r}).values({_orm_args(attnames)})[:1]"
+    return {"columns": columns, "hasMore": False, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row, columns) for row in raw], "single": True}
 
 
 def _browse_related_many(model, field, columns, attnames, source_pk, limit, database=None):
@@ -156,10 +167,10 @@ def _browse_related_many(model, field, columns, attnames, source_pk, limit, data
         return {"columns": columns, "hasMore": False, "ok": True, "orm": orm, "rows": [], "single": bool(field.one_to_one)}
     if not hasattr(accessor, "all"):
         raw = list(type(accessor)._base_manager.using(database).filter(pk=accessor.pk).values(*attnames)[:1]) if accessor is not None else []
-        return {"columns": columns, "hasMore": False, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row) for row in raw], "single": True}
+        return {"columns": columns, "hasMore": False, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row, columns) for row in raw], "single": True}
     raw = list(accessor.all().using(database).values(*attnames)[: limit + 1])
     has_more = len(raw) > limit
-    return {"columns": columns, "hasMore": has_more, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row) for row in raw[:limit]], "single": False}
+    return {"columns": columns, "hasMore": has_more, "ok": True, "orm": orm, "rows": [_browse_serialize_row(row, columns) for row in raw[:limit]], "single": False}
 
 
 def _browse_resolve_model(request):
@@ -283,7 +294,7 @@ def _browse_computed(namespace, request):
             base_filters, having_filters = _browse_split_having(request.get("filters"), ann_aliases, having_aliases)
             order = _browse_order(request.get("order"), attnames, pk_attname, ann_aliases)
             limit = _browse_limit(request.get("limit"), maximum=None)
-            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all(), model, base_filters, attnames)
+            queryset, property_terms = _browse_apply_db_filters(_browse_queryset(model, request), model, base_filters, attnames)
             if ann_exprs:
                 queryset = queryset.annotate(**ann_exprs)
             if having_filters:
@@ -296,14 +307,14 @@ def _browse_computed(namespace, request):
             if field in annotations:
                 # The model declared a DB annotation for this field → compute it in ONE SQL query instead of per-row Python.
                 if property_terms:
-                    with _browse_capture() as ctx:
+                    with _browse_capture(request.get("database")) as ctx:
                         values = {_browse_jsonable(obj.pk): _browse_cell(_pty_safe_getattr(obj, field)) for obj in _browse_islice(_browse_python_filter_iter(queryset, property_terms), 0, limit)}
                     return {"field": field, "ok": True, "queryCount": len(ctx.captured_queries), "rowCount": len(values), "values": values}
-                with _browse_capture() as ctx:
+                with _browse_capture(request.get("database")) as ctx:
                     rows = list(queryset.annotate(__djs=annotations[field]).values_list("pk", "__djs")[:limit])
                 values = {_browse_jsonable(pk): _browse_cell(value) for pk, value in rows}
                 return {"annotated": True, "field": field, "ok": True, "queryCount": len(ctx.captured_queries), "rowCount": len(values), "values": values}
-            with _browse_capture() as ctx:
+            with _browse_capture(request.get("database")) as ctx:
                 source = _browse_python_filter_iter(queryset, property_terms) if property_terms else queryset[:limit]
                 values = {_browse_jsonable(obj.pk): _browse_cell(_pty_safe_getattr(obj, field)) for obj in _browse_islice(source, 0, limit)}
             return {"field": field, "ok": True, "queryCount": len(ctx.captured_queries), "rowCount": len(values), "values": values}
@@ -387,9 +398,9 @@ def _browse_relation_subquery_meta(model, field):
         elif getattr(field, "auto_created", False) and not getattr(field, "concrete", False):
             forward = getattr(field, "field", None)
             if forward is not None:
-                meta.update({"filterField": forward.attname, "outerField": "pk"})
+                meta.update({"filterField": forward.attname, "outerField": "pk" if forward.target_field.primary_key else forward.target_field.attname})
         elif getattr(field, "many_to_one", False) or getattr(field, "one_to_one", False):
-            meta.update({"filterField": field.related_model._meta.pk.attname, "outerField": field.attname})
+            meta.update({"filterField": field.target_field.attname, "outerField": field.attname})
     except Exception:
         return meta
     return meta
@@ -514,9 +525,20 @@ def _browse_order(order, attnames, pk_attname, extra=None):
     return result or [pk_attname]
 
 
-def _browse_serialize_row(row):
-    """Returns one row dict with every cell converted to a JSON-safe representation."""
-    return {key: _browse_cell(value) for key, value in row.items()}
+def _browse_serialize_row(row, columns=()):
+    """Preserves JSON field types in editable text, including scalars indistinguishable from plain text."""
+    json_fields = {column["attname"] for column in columns if column.get("type") == "JSONField"}
+    return {key: _browse_json_cell(value) if key in json_fields else _browse_cell(value) for key, value in row.items()}
+
+
+def _browse_json_cell(value):
+    """Provides exact JSON editor text and cheap collection metadata for grid rendering."""
+    text = _browse_json_edit_text(value)
+    kind = "array" if isinstance(value, (list, tuple, set, frozenset)) else "object" if isinstance(value, dict) else "scalar"
+    cell = {"edit": text, "kind": kind, "t": "json", "v": _truncate(text, 400)}
+    if kind == "array":
+        cell["len"] = len(value)
+    return cell
 
 
 def _browse_cell(value):
@@ -542,8 +564,7 @@ def _browse_cell(value):
         raw = bytes(value)
         return {"len": len(raw), "t": "bytes", "v": base64.b64encode(raw[:64]).decode("ascii")}
     if isinstance(value, (list, tuple, dict, set, frozenset)):
-        edit_text = _browse_json_edit_text(value)
-        return {"edit": edit_text, "t": "json", "v": _truncate(edit_text, 400)}
+        return _browse_json_cell(value)
     object_json = _browse_object_json(value)
     if object_json is not None:
         return {"edit": object_json, "t": "json", "v": _truncate(object_json, 400)}
@@ -769,11 +790,13 @@ def _browse_count(request):
                 return _browse_recipe_count(request)
             model = _browse_resolve_model(request)
             attnames = [field.attname for field in model._meta.concrete_fields]
-            with _browse_capture() as ctx:
-                queryset, property_terms = _browse_apply_db_filters(model._base_manager.all(), model, request.get("filters"), attnames)
+            with _browse_capture(request.get("database")) as ctx:
+                queryset, property_terms = _browse_apply_db_filters(_browse_queryset(model, request), model, request.get("filters"), attnames)
                 count = sum(1 for _ in _browse_python_filter_iter(queryset, property_terms)) if property_terms else queryset.count()
             includes, excludes, annotations, distinct = _browse_orm_clauses(model, request.get("filters"), set(attnames))
             count_lines = [f"{model.__name__}._base_manager"]
+            if request.get("database") is not None:
+                count_lines.append(f"    .using({request['database']!r})")
             if annotations:
                 count_lines.append(f"    .annotate({', '.join(annotations)})")
             if includes:

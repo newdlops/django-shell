@@ -1,0 +1,81 @@
+# Bounds backend request admission, wire frames, and captured output independently of user execution time.
+_BACKEND_REQUEST_BYTES = 4 * 1024 * 1024
+_BACKEND_RESPONSE_BYTES = 16 * 1024 * 1024
+_BACKEND_CAPTURE_BYTES = 1024 * 1024
+_BACKEND_READ_SECONDS = 5.0
+_BACKEND_WRITE_SECONDS = 10.0
+_BACKEND_HANDSHAKES = 16
+_BACKEND_WORKERS = 8
+_BACKEND_CONTROLS = 4
+_BACKEND_CONTROL_KINDS = frozenset({"interrupt", "progress", "debugBreakpoints", "releaseQuery"})
+
+
+def _backend_failure(message):
+    """Returns a valid failure frame understood by every backend response parser."""
+    return {"ok": False, "error": message, "stdout": "", "stderr": message, "traceback": ""}
+
+
+def _read_backend_request(connection, reader):
+    """Reads one size-bounded JSON line under an absolute deadline that slow input cannot extend."""
+    deadline = time.monotonic() + _BACKEND_READ_SECONDS
+    data = bytearray()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Backend request input timed out.")
+            connection.settimeout(remaining)
+            chunk = reader.read1(min(65536, _BACKEND_REQUEST_BYTES + 1 - len(data)))
+            if not chunk:
+                raise ValueError("Backend request ended before its JSON line.")
+            line = chunk.split(b"\n", 1)
+            data.extend(line[0])
+            if len(data) > _BACKEND_REQUEST_BYTES:
+                raise ValueError("Backend request exceeds the 4 MiB input limit.")
+            if len(line) == 2:
+                request = json.loads(data.decode("utf-8"))
+                if not isinstance(request, dict):
+                    raise ValueError("Backend request must be a JSON object.")
+                return request
+    finally:
+        connection.settimeout(None)
+
+
+def _encode_backend_response(response):
+    """Caps encoded responses without sending incomplete JSON or silently replaying an executed request."""
+    wire = bytearray()
+    for chunk in json.JSONEncoder().iterencode(response):
+        encoded = chunk.encode("utf-8")
+        if len(wire) + len(encoded) + 1 > _BACKEND_RESPONSE_BYTES:
+            message = "Backend response exceeds the 16 MiB limit. The request may have executed; inspect its effects before running it again."
+            return (json.dumps(_backend_failure(message)) + "\n").encode("utf-8")
+        wire.extend(encoded)
+    wire.extend(b"\n")
+    return bytes(wire)
+
+
+class _BoundedTextCapture(io.StringIO):
+    """Retains bounded UTF-8 output while reporting successful writes to the executing Python code."""
+
+    def __init__(self, limit=None):
+        """Initializes an independent output budget and a visible truncation state."""
+        super().__init__()
+        self.limit = _BACKEND_CAPTURE_BYTES if limit is None else limit
+        self.bytes = 0
+        self.truncated = False
+
+    def write(self, text):
+        """Keeps only complete characters within the byte budget and discards later captured output."""
+        if not isinstance(text, str):
+            raise TypeError("write() argument must be str")
+        remaining = max(0, self.limit - self.bytes)
+        sampled = text[:remaining].encode("utf-8", errors="backslashreplace")
+        kept = sampled[:remaining].decode("utf-8", errors="ignore")
+        self.bytes += len(kept.encode("utf-8"))
+        self.truncated |= len(text) > remaining or len(sampled) > remaining
+        super().write(kept)
+        return len(text)
+
+    def getvalue(self):
+        """Appends a compact notice when captured output was shortened."""
+        return super().getvalue() + ("\n[Output truncated by Django Shell.]\n" if self.truncated else "")

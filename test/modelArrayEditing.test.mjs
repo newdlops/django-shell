@@ -77,16 +77,9 @@ test("commits a JSON array edit as an array instead of a JSON string", { skip: !
   assert.deepEqual(payload, { is_list: true, ok: true, saved: 1, value: ["new", { count: 1 }] });
 });
 
-test("reconstructs array and JSON edits as typed Python literals in ORM mode", () => {
-  const columns = [
-    { attname: "tags", null: false, type: "ArrayField" },
-    { attname: "metadata", null: false, type: "JSONField" }
-  ];
-  const orm = ormBuilders.buildCommitOrm("db", "Entry", [{
-    fields: { metadata: "{\"enabled\": true}", tags: "[\"alpha\", 2, null]" },
-    pk: 7
-  }], columns);
-
-  assert.match(orm, /_o0\.tags = \["alpha", 2, None\]/);
-  assert.match(orm, /_o0\.metadata = \{"enabled": True\}/);
+test("reconstructs array and JSON edits as typed Python values in ORM mode", { skip: !PYTHON }, () => {
+  const tags = ormBuilders.editValue({ type: "ArrayField" }, '["alpha", 2, null]');
+  const metadata = ormBuilders.editValue({ type: "JSONField" }, '{"enabled":true}');
+  const result = runBackend(["import json", `print(json.dumps({'tags': ${tags}, 'metadata': ${metadata}}))`]);
+  assert.deepEqual(result, { tags: ["alpha", 2, null], metadata: { enabled: true } });
 });

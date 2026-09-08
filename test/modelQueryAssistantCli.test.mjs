@@ -5,6 +5,18 @@ import { createRequire } from "node:module";
 import test from "node:test";
 const require = createRequire(import.meta.url);
 const cli = require("../out/modelQueryAssistantCli.js");
+
+for (const mode of ["generation", "metadata"]) {
+  test(`${mode} retains complete Korean and emoji characters across every UTF-8 chunk boundary`, async () => {
+    const expected = '{"value":"서울 😀 café"}', wire = Buffer.from(expected);
+    for (let split = 1; split < wire.length; split++) {
+      const child = fakeChild();
+      const promise = mode === "generation" ? run(child).promise : cli.runQueryAssistantMetadataCommand({ args: [], command: "fixture", cwd: "/work" }, new AbortController().signal, {}, { spawn: () => child });
+      child.stdout.emit("data", wire.subarray(0, split)); child.stdout.emit("data", wire.subarray(split)); child.emit("close", 0);
+      assert.equal(await promise, expected, `split ${split}`);
+    }
+  });
+}
 /** Builds an evented fake child process without launching any external command. */
 function fakeChild() { const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = new EventEmitter(); child.stdin.end = (value) => { child.stdinValue = value; }; child.kill = () => { child.killed = true; return true; }; child.killed = false; return child; }
 /** Runs a fake child command with injectable timers and returns its observable state. */
@@ -31,7 +43,7 @@ test("merges current, fixed login-shell, and common paths deterministically", as
   assert.ok(environment.PATH.startsWith("/existing:/login:/opt/homebrew/bin")); assert.equal(environment.NO_COLOR, "1"); assert.equal(environment.TERM, "dumb");
 });
 test("bounded child success sends exact argv, stdin, cwd, and settles once", async () => {
-  const child = fakeChild(); const result = run(child); child.stdout.emit("data", Buffer.from("recipe")); child.emit("close", 0); child.emit("error", new Error("late")); assert.equal(await result.promise, "recipe"); assert.deepEqual(result.calls[0], { args: ["exec"], command: "codex", options: { cwd: "/work", env: { PATH: "/prepared" }, shell: false, stdio: ["pipe", "pipe", "pipe"] } }); assert.equal(child.stdinValue, "prompt"); assert.equal(result.timers[0].cleared, true);
+  const child = fakeChild(); const result = run(child); child.stdout.emit("data", Buffer.from("recipe")); child.emit("close", 0); child.emit("error", new Error("late")); assert.equal(await result.promise, "recipe"); assert.deepEqual(result.calls[0], { args: ["exec"], command: "codex", options: { cwd: "/work", detached: process.platform !== "win32", env: { PATH: "/prepared" }, shell: false, stdio: ["pipe", "pipe", "pipe"] } }); assert.equal(child.stdinValue, "prompt"); assert.equal(result.timers[0].cleared, true);
 });
 test("timeout kills once and reports the timeout category", async () => {
   const child = fakeChild(); const result = run(child); result.timers[0].callback(); child.emit("close", 1); await assert.rejects(result.promise, { message: "timeout" }); assert.equal(child.killed, true);
@@ -45,7 +57,7 @@ test("abort after spawn kills once and late close or error cannot double settle"
 test("metadata capture uses no stdin payload and ignores late output after every settlement", async () => {
   const child = fakeChild(); const timers = []; const calls = []; const promise = cli.runQueryAssistantMetadataCommand({ args: ["--help"], command: "codex", cwd: "/work" }, new AbortController().signal, { PATH: "/prepared" }, { clearTimer: (timer) => { timer.cleared = true; }, setTimer: (callback) => { const timer = { callback }; timers.push(timer); return timer; }, spawn: (command, args, options) => { calls.push({ args, command, options }); return child; } });
   child.stdout.emit("data", Buffer.from("catalog")); child.emit("close", 0); child.stdout.emit("data", Buffer.from("-late")); child.stderr.emit("data", Buffer.from("-late")); child.emit("error", new Error("late"));
-  assert.equal(await promise, "catalog"); assert.deepEqual(calls[0], { args: ["--help"], command: "codex", options: { cwd: "/work", env: { PATH: "/prepared" }, shell: false, stdio: ["ignore", "pipe", "pipe"] } }); assert.equal(child.stdinValue, undefined); assert.equal(timers[0].cleared, true);
+  assert.equal(await promise, "catalog"); assert.deepEqual(calls[0], { args: ["--help"], command: "codex", options: { cwd: "/work", detached: process.platform !== "win32", env: { PATH: "/prepared" }, shell: false, stdio: ["ignore", "pipe", "pipe"] } }); assert.equal(child.stdinValue, undefined); assert.equal(timers[0].cleared, true);
 });
 test("overflow rejects before retaining output and EPIPE cannot mask unsupported stderr", async () => {
   const child = fakeChild(); const result = run(child); child.stdin.emit("error", Object.assign(new Error("closed"), { code: "EPIPE" })); child.stderr.emit("data", Buffer.from("unknown option --model")); child.emit("close", 1); await assert.rejects(result.promise, { message: "unsupported-settings" });

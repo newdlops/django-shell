@@ -60,10 +60,42 @@ class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    def __init__(self, *args, **kwargs):
+        """Separates unauthenticated input, normal execution, and reserved control capacity."""
+        super().__init__(*args, **kwargs)
+        self.handshakes = threading.BoundedSemaphore(_BACKEND_HANDSHAKES)
+        self.workers = threading.BoundedSemaphore(_BACKEND_WORKERS)
+        self.controls = threading.BoundedSemaphore(_BACKEND_CONTROLS)
+        self.pending = set()
+        self.pending_lock = threading.Lock()
+
     def process_request(self, request, client_address):
         """Serves each request on a debugger-exempt thread so model-browser reads keep answering while debugpy is paused at a breakpoint."""
-        thread = threading.Thread(target=self.process_request_thread, args=(request, client_address), daemon=True)
-        _debugger_exempt_thread(thread).start()
+        if not self.handshakes.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        with self.pending_lock:
+            self.pending.add(request)
+        try:
+            thread = threading.Thread(target=self.serve_bounded_request, args=(request, client_address), daemon=True)
+            _debugger_exempt_thread(thread).start()
+        except Exception:
+            self.release_handshake(request)
+            self.shutdown_request(request)
+
+    def release_handshake(self, request):
+        """Releases the input slot exactly once, including malformed and disconnected requests."""
+        with self.pending_lock:
+            if request in self.pending:
+                self.pending.remove(request)
+                self.handshakes.release()
+
+    def serve_bounded_request(self, request, client_address):
+        """Returns every admission slot even if request setup or execution fails."""
+        try:
+            self.process_request_thread(request, client_address)
+        finally:
+            self.release_handshake(request)
 
 
 def _debugger_exempt_thread(thread):
@@ -96,13 +128,31 @@ class _Handler(socketserver.StreamRequestHandler):
     """Handles a single JSON execution request from the VS Code extension."""
 
     def handle(self):
-        """Reads one JSON line, executes it, and writes one JSON response line."""
+        """Reads, authenticates, executes, and writes within separate bounded admission pools."""
+        acquired = None
         try:
-            request = json.loads(self.rfile.readline().decode("utf-8"))
-            response = _run_request(self.server.namespace, self.server.token, request, self.server.initial_names)
-        except Exception:
-            response = {"ok": False, "stdout": "", "stderr": "", "traceback": traceback.format_exc()}
-        self.wfile.write((json.dumps(response) + "\n").encode("utf-8"))
+            try:
+                request = _read_backend_request(self.connection, self.rfile)
+                if request.get("token") != self.server.token:
+                    response = _backend_failure("Invalid backend token.")
+                else:
+                    slots = self.server.controls if request.get("kind") in _BACKEND_CONTROL_KINDS else self.server.workers
+                    if slots.acquire(blocking=False):
+                        acquired = slots
+                        self.server.release_handshake(self.request)
+                        response = _run_request(self.server.namespace, self.server.token, request, self.server.initial_names)
+                    else:
+                        response = _backend_failure("Backend is busy. Try again after the current requests finish.")
+            except Exception as error:
+                response = _backend_failure(str(error))
+            self.connection.settimeout(_BACKEND_WRITE_SECONDS)
+            try:
+                self.wfile.write(_encode_backend_response(response))
+            except OSError:
+                pass
+        finally:
+            if acquired is not None:
+                acquired.release()
 
 
 @contextlib.contextmanager
@@ -460,6 +510,11 @@ def _run_request(namespace, token, request, initial_names):
     if request.get("token") != token:
         return {"ok": False, "stdout": "", "stderr": "Invalid backend token.", "traceback": ""}
     _wait_for_warmup()
+    if request.get("kind") == "releaseQuery":
+        result_id = request.get("resultId")
+        if isinstance(result_id, str) and "_query_forget_result" in globals():
+            _query_forget_result(result_id, namespace)
+        return {"ok": True}
     if request.get("kind") == "hotReload":
         return _hot_reload_request(request)
     if request.get("kind") == "nativeDebugger":
@@ -529,6 +584,4 @@ def _run_request(namespace, token, request, initial_names):
             source_text if isinstance(source_text, str) else None,
             breakpoint_lines if isinstance(breakpoint_lines, list) else None,
         )
-
-
 

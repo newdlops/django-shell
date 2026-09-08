@@ -27,7 +27,7 @@ def _browse_aggregate(request):
             # (a Python-@property aggregate can't be a SQL HAVING). Such filters are split out of the WHERE clause.
             having_aliases = {spec["alias"] for spec in db_specs} if group_by else set()
             base_filters, having_filters = _browse_split_having(request.get("filters"), {spec["alias"] for spec in specs}, having_aliases)
-            queryset, property_terms = _browse_apply_db_filters(model._base_manager.all(), model, base_filters, attnames)
+            queryset, property_terms = _browse_apply_db_filters(_browse_queryset(model, request), model, base_filters, attnames)
             if property_terms:
                 return {"columns": [], "error": "Aggregation cannot combine with Python @property filters; remove them first.", "ok": False, "rows": []}
             limit = _browse_limit(request.get("limit"), default=1000, maximum=None)
@@ -40,7 +40,7 @@ def _browse_aggregate(request):
                     return Count(spec["arg"], distinct=spec["distinct"], **options)
                 return builders[spec["func"]](spec["arg"], **options)
 
-            with _browse_capture() as ctx:
+            with _browse_capture(request.get("database")) as ctx:
                 if group_by:
                     by_group = {}
                     order = []
@@ -78,7 +78,7 @@ def _browse_aggregate(request):
                     rows = [_browse_serialize_row({name: result.get(name) for name in names})]
                     has_more = False
             columns = [_browse_agg_column(name, name in group_by) for name in names]
-            payload = {"columns": columns, "editable": False, "groupBy": group_by, "hasMore": has_more, "ok": True, "orm": _browse_orm_aggregate(model, base_filters, attset, group_by, specs, having_filters), "pk": None, "relations": [], "rows": rows, "sql": _browse_sql(ctx)}
+            payload = {"columns": columns, "editable": False, "groupBy": group_by, "hasMore": has_more, "ok": True, "orm": _browse_orm_aggregate(model, base_filters, attset, group_by, specs, having_filters, request.get("database")), "pk": None, "relations": [], "rows": rows, "sql": _browse_sql(ctx)}
             if py_specs:
                 payload["pythonScan"] = True
             return payload
@@ -313,5 +313,4 @@ _BROWSE_WINDOW_AGG_FUNCS = frozenset({"sum", "avg", "min", "max", "count"})
 _BROWSE_EXPR_OPS = frozenset({"+", "-", "*", "/"})
 _BROWSE_ANNOTATION_SAFE_METHODS = frozenset({"alias", "all", "annotate", "defer", "distinct", "exclude", "filter", "none", "only", "order_by", "prefetch_related", "select_related", "using", "values", "values_list"})
 _BROWSE_ANNOTATION_BLOCKED_ATTRS = frozenset({"bulk_create", "bulk_update", "create", "cursor", "delete", "execute", "executemany", "extra", "get_or_create", "raw", "save", "update", "update_or_create"})
-
 

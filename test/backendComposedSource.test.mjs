@@ -31,6 +31,7 @@ const PYTHON = pythonExecutable();
 test("manifest preserves the fixed backend fragment order and line budget", () => {
   assert.deepEqual(manifest, [
     "backend_parts/00_bootstrap.pyfrag",
+    "backend_parts/05_transport_limits.pyfrag",
     "backend_parts/10_inspection.pyfrag",
     "backend_parts/20_execution_hot_reload.pyfrag",
     "backend_parts/25_query_execution.pyfrag",
@@ -41,6 +42,8 @@ test("manifest preserves the fixed backend fragment order and line budget", () =
     "backend_parts/70_model_annotations.pyfrag",
     "backend_parts/80_model_edit_query.pyfrag",
     "backend_parts/81_query_results.pyfrag",
+    "backend_parts/82_commit_dates.pyfrag",
+    "backend_parts/83_query_cache.pyfrag",
     "backend_parts/90_model_query_recipe_predicate.pyfrag",
     "backend_parts/91_model_query_recipe_computed.pyfrag"
   ]);

@@ -16,6 +16,8 @@
 AGENTS.md
 CRITICAL_REVIEW.md
 STABILITY_REVIEW.md
+POST_RELEASE_REVIEW.md
+ADDITIONAL_REVIEW.md
 DEPLOYMENT.md
 FRONTEND_CHANGE.md
 HANDOVER.md
@@ -35,6 +37,7 @@ media/gridPin.js
 media/gridEdit.js
 media/gridFilter.js
 media/gridFkPicker.js
+media/modelIntegrityE2eProbe.js
 media/gridQuery.js
 media/gridResize.js
 media/icon.svg

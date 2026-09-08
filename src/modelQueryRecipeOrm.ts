@@ -11,6 +11,7 @@ import { MODEL_QUERY_RECIPE_LIMITS } from "./modelQueryRecipeLimits";
 
 /** Metadata and pagination available to a Recipe v2 ORM reconstruction. */
 export interface ModelQueryOrmCompileContext {
+  database?: string;
   columns: BackendModelColumn[];
   cursor?: unknown;
   limit: number;
@@ -61,7 +62,7 @@ function build(recipe: ModelQueryRecipeV2, context: ModelQueryOrmCompileContext,
   const computed = compileModelQueryComputed(normalized.computed, { metadata: context.metadata, source: normalized.source });
   const annotations = computed.length ? `.annotate(${computed.map((spec) => `${spec.alias}=${spec.expression}`).join(", ")})` : "";
   const post = compileModelQueryPredicate(normalized.postFilter, normalized.source, { metadata: context.metadata, source: normalized.source });
-  const sourceBase = `${modelQueryOrmModelExpression(normalized.source)}._base_manager.filter(${where.expression})${where.toMany ? ".distinct()" : ""}`;
+  const sourceBase = `${modelQueryOrmModelExpression(normalized.source)}._base_manager${context.database !== undefined ? `.using(${JSON.stringify(context.database)})` : ""}.filter(${where.expression})${where.toMany ? ".distinct()" : ""}`;
   const rowsBase = `${sourceBase}${annotations}${normalized.postFilter.children.length ? `.filter(${post.expression})` : ""}`;
   const cell = intent === "property" ? propertyCell(normalized, rowsBase, field, context) : intent === "summary" ? summaryCell(normalized, sourceBase, context) : intent === "count" ? countCell(normalized, normalized.mode === "summary" ? sourceBase : rowsBase, context) : rowsCell(normalized, rowsBase, context);
   if (cell.length > MODEL_QUERY_RECIPE_LIMITS.generatedOrmCellCharacters) {

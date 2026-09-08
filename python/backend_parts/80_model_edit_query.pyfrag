@@ -63,6 +63,12 @@ def _browse_prepare_commit(model, changes, alias, explicit_alias=False):
             continue
         results.append({"ok": True, "pk": pk})
         prepared.append((instance, applied))
+    if not has_error:
+        try:
+            _browse_validate_commit_dates(prepared, alias)
+        except ValidationError as error:
+            results.append({"fieldErrors": _browse_field_errors(error), "ok": False, "pk": str(error._djs_pk)})
+            has_error = True
     return prepared, results, has_error
 
 
@@ -82,11 +88,8 @@ def _browse_coerce_edit_value(field, value):
     field_type = field.get_internal_type()
     if isinstance(value, str) and field_type == "BooleanField":
         return value.strip().lower() in ("true", "1", "t", "yes", "on")
-    if isinstance(value, str) and field_type == "JSONField" and value.lstrip().startswith(("[", "{")):
-        try:
-            return json.loads(value)
-        except Exception:
-            return value
+    if isinstance(value, str) and field_type == "JSONField":
+        return json.loads(value)
     try:
         return field.to_python(value)
     except Exception:
@@ -121,18 +124,22 @@ def _browse_lookup(request):
             if model is None:
                 return {"error": "Unknown model.", "ok": False, "rows": []}
             pk_attname = model._meta.pk.attname
+            value_field = model._meta.get_field(request.get("valueField") or pk_attname)
+            if not value_field.concrete or not value_field.unique:
+                raise ValueError("Foreign-key lookup requires a unique target field.")
+            value_attname = value_field.attname
             exclude = request.get("exclude") if isinstance(request.get("exclude"), list) else []
             text_fields = _browse_text_fields(model, exclude)
             label_fields = text_fields[:2]
-            value_fields = list(dict.fromkeys([pk_attname, *label_fields]))
+            value_fields = list(dict.fromkeys([pk_attname, value_attname, *label_fields]))
             limit = _browse_limit(request.get("limit"), default=20, maximum=50)
             query = (request.get("q") or "").strip()
-            queryset = model._base_manager.all().order_by(pk_attname)
+            queryset = model._base_manager.using(request.get("database")).exclude(**{value_attname + "__isnull": True}).order_by(pk_attname)
             if query:
-                queryset = queryset.filter(_browse_lookup_filter(model, query, text_fields, pk_attname))
+                queryset = queryset.filter(_browse_lookup_filter(model, query, text_fields, value_attname))
             with _browse_capture() as ctx:
                 raw = list(queryset.values(*value_fields)[: limit + 1])
-            rows = [_browse_lookup_row(item, pk_attname, label_fields) for item in raw[:limit]]
+            rows = [_browse_lookup_row(item, pk_attname, label_fields, value_attname) for item in raw[:limit]]
             return {"hasMore": len(raw) > limit, "ok": True, "rows": rows, "sql": _browse_sql(ctx)}
         except Exception:
             return {"error": traceback.format_exc(), "ok": False, "rows": []}
@@ -157,23 +164,26 @@ def _browse_lookup_filter(model, query, text_fields, pk_attname):
     """Builds an OR query across text fields (icontains) plus an exact primary-key match when applicable."""
     from django.db.models import Q
 
-    condition = Q()
+    condition = Q(pk__in=[])
     for attname in text_fields:
         condition |= Q(**{f"{attname}__icontains": query})
-    if model._meta.pk.get_internal_type() in _BROWSE_INT_PK_TYPES:
-        if query.isdigit():
+    if model._meta.get_field(pk_attname).get_internal_type() in _BROWSE_INT_PK_TYPES:
+        if (query[1:] if query.startswith("-") else query).isdigit():
             condition |= Q(**{pk_attname: int(query)})
     else:
         condition |= Q(**{f"{pk_attname}__icontains": query})
     return condition
 
 
-def _browse_lookup_row(item, pk_attname, label_fields):
-    """Builds one {pk, label} candidate from a .values() dict without invoking __str__."""
+def _browse_lookup_row(item, pk_attname, label_fields, value_attname=None):
+    """Returns a candidate's display identity and, when different, its exact stored relation key."""
     pk = item.get(pk_attname)
     parts = [_truncate(str(item.get(attname)), 80) for attname in label_fields if item.get(attname) not in (None, "")]
     label = f"#{pk}" + (" · " + " · ".join(parts) if parts else "")
-    return {"label": label, "pk": _browse_jsonable(pk)}
+    row = {"label": label, "pk": _browse_jsonable(pk)}
+    if value_attname and value_attname != pk_attname:
+        row["value"] = _browse_jsonable(item[value_attname])
+    return row
 
 
 def _browse_query(namespace, request):
@@ -185,7 +195,7 @@ def _browse_query(namespace, request):
     limit = _browse_limit(request.get("limit"), maximum=_QUERY_PAGE_LIMIT)
     offset = request.get("offset")
     offset = offset if isinstance(offset, int) and offset > 0 else 0
-    stdout, stderr = io.StringIO(), io.StringIO()
+    stdout, stderr = _BoundedTextCapture(), _BoundedTextCapture()
     created = None
     try:
         with _query_execution_scope(request) as execution:
@@ -203,7 +213,7 @@ def _browse_query(namespace, request):
                 return payload
     except (Exception, KeyboardInterrupt, _ExecutionInterrupted):
         if created:
-            _QUERY_RESULTS.pop(created, None)
+            _query_forget_result(created, namespace)
         return {"columns": [], "editable": False, "error": traceback.format_exc(), "hasMore": False, "ok": False, "rows": [], "stderr": stderr.getvalue(), "stdout": stdout.getvalue()}
 
 
@@ -280,17 +290,25 @@ def _browse_tabulate(value, offset, limit):
 def _browse_tabulate_instances(queryset, model, offset, limit):
     """Tabulates a model-instance QuerySet as editable rows via a single bounded .values() SELECT."""
     columns = _browse_columns(model)
+    concrete = {column["attname"] for column in columns}
+    columns += [{"annotation": True, "attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "annotation"}
+                for name in queryset.query.annotation_select if name not in concrete]
     attnames = [column["attname"] for column in columns]
     raw = list(queryset[offset:offset + limit + 1].values(*attnames))
-    return {"app": model._meta.app_label, "columns": columns, "database": queryset._db, "editable": True, "hasMore": len(raw) > limit, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [_browse_serialize_row(row) for row in raw[:limit]]}
+    return {"app": model._meta.app_label, "columns": columns, "database": queryset._db, "editable": True, "hasMore": len(raw) > limit, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [_browse_serialize_row(row, columns) for row in raw[:limit]]}
 
 
 def _browse_tabulate_dicts(queryset, offset, limit):
     """Tabulates a .values()/.values_list() QuerySet as read-only rows."""
-    names = list(queryset.query.values_select) + list(getattr(queryset.query, "annotation_select", {}))
+    selected = getattr(queryset.query, "selected", None)
+    names = list(selected) if selected is not None else list(queryset._fields or ())
+    if not names:
+        names = list(queryset.query.extra_select) + list(queryset.query.values_select) + list(queryset.query.annotation_select)
     flat = queryset._iterable_class.__name__ == "FlatValuesListIterable"
-    valued = queryset._iterable_class.__name__ in ("ValuesListIterable", "FlatValuesListIterable")
+    valued = queryset._iterable_class.__name__ in ("ValuesListIterable", "FlatValuesListIterable", "NamedValuesListIterable")
     raw = list(queryset[offset:offset + limit + 1])
+    if raw and isinstance(raw[0], dict):
+        names = list(raw[0])
     if not names and raw:
         names = list(raw[0].keys()) if isinstance(raw[0], dict) else [f"col{index}" for index in range(len(raw[0]))]
     if flat:
@@ -307,7 +325,7 @@ def _browse_tabulate_single(instance):
     """Tabulates one model instance as a single editable row (attname getattr, never __str__)."""
     model = type(instance)
     columns = _browse_columns(model)
-    row = {column["attname"]: _browse_cell(getattr(instance, column["attname"], None)) for column in columns}
+    row = _browse_serialize_row({column["attname"]: getattr(instance, column["attname"], None) for column in columns}, columns)
     return {"app": model._meta.app_label, "columns": columns, "database": instance._state.db, "editable": bool(instance._state.db), "hasMore": False, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": [row]}
 
 
@@ -328,7 +346,7 @@ def _browse_tabulate_items(items, limit):
         # Surface per-row annotation values Django stored on the instance (e.g. an annotate() over a @property-filtered
         # stream) — they live in __dict__ as non-underscore keys outside the concrete columns.
         ann_names = [name for name in vars(items[0]) if isinstance(name, str) and not name.startswith("_") and name not in concrete]
-        rows = [_browse_serialize_row(dict({column["attname"]: getattr(item, column["attname"], None) for column in columns}, **{name: getattr(item, name, None) for name in ann_names})) for item in items]
+        rows = [_browse_serialize_row(dict({column["attname"]: getattr(item, column["attname"], None) for column in columns}, **{name: getattr(item, name, None) for name in ann_names}), columns) for item in items]
         ann_cols = [{"annotation": True, "attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "annotation"} for name in ann_names]
         return {"app": model._meta.app_label, "columns": columns + ann_cols + _browse_computed_columns(model), "database": database, "editable": bool(database), "hasMore": has_more, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
     if items and all(isinstance(item, dict) for item in items):

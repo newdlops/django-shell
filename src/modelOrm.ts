@@ -5,6 +5,7 @@
 
 import type { BackendModelColumn, BackendModelFilter, BackendModelOrder, BackendModelRelation, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange, ModelConditionGroup } from "./modelBackend";
 import { buildValidatedCommitOrm } from "./modelCommitOrm";
+import { buildLookupModelOrm } from "./modelLookupOrm";
 import { modelQueryOrmModelExpression } from "./modelQueryPredicateOrm";
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -291,12 +292,12 @@ function filterPlan(filters: BackendModelFilter[] | undefined, specs: Map<string
 }
 
 /** Builds a model-manager query expression, wrapping in a lambda only when annotation expressions need the model object. */
-function queryExpression(app: string | undefined, model: string | undefined, plan: OrmFilterPlan, tail = ""): string {
+function queryExpression(app: string | undefined, model: string | undefined, plan: OrmFilterPlan, tail = "", database?: string): string {
   const ref = modelRef(app, model);
   const receiver = plan.annotations.length ? "__m" : ref;
   const annotate = plan.annotations.length ? `.annotate(${plan.annotations.map((item) => `${item.alias}=${item.expression}`).join(", ")})` : "";
   const distinct = plan.distinct ? ".distinct()" : "";
-  const expression = `${receiver}._base_manager${annotate}${plan.chain}${distinct}${tail}`;
+  const expression = `${receiver}._base_manager${database !== undefined ? `.using(${pyStr(database)})` : ""}${annotate}${plan.chain}${distinct}${tail}`;
   return plan.annotations.length ? `(lambda __m: ${expression})(${ref})` : expression;
 }
 
@@ -390,6 +391,7 @@ function propertyListLiteral(value: string): string {
 
 /** Parameters for a reconstructed rows query (one bounded page of model instances). */
 export interface OrmRowsParams {
+  database?: string;
   annotations?: ModelAnnotationSpec[];
   app?: string;
   columns?: BackendModelColumn[];
@@ -671,13 +673,13 @@ export function buildRowsOrm(params: OrmRowsParams): string {
   const order = `.order_by(${orderArgs(params.order, attnames)})`;
   if (plan.pythonTerms.length) {
     // @property filter streams instances; annotate first so each instance carries the annotation attrs the capture hook surfaces.
-    return pythonFilterCell(queryExpression(params.app, params.model, plan, `${annotate}${having}${order}`), plan.pythonTerms, offset, offset + limit + 1);
+    return pythonFilterCell(queryExpression(params.app, params.model, plan, `${annotate}${having}${order}`, params.database), plan.pythonTerms, offset, offset + limit + 1);
   }
-  return queryExpression(params.app, params.model, plan, `${annotate}${having}${order}[${offset}:${offset + limit + 1}]`);
+  return queryExpression(params.app, params.model, plan, `${annotate}${having}${order}[${offset}:${offset + limit + 1}]`, params.database);
 }
 
 /** Builds a lazy single-@property fetch as a readable ORM result, returning rows/dicts directly so raw audit has no JSON-print or backend-helper layer. Per-row annotation columns are re-applied so the loaded page matches the rows grid even when it is sorted by an annotation alias. */
-export function buildComputedOrm(app: string | undefined, model: string, field: string, filters: BackendModelFilter[] | undefined, order: BackendModelOrder[] | undefined, limit: number, columns: BackendModelColumn[] | undefined, relations?: BackendModelRelation[], annotations?: ModelAnnotationSpec[]): string {
+export function buildComputedOrm(app: string | undefined, model: string, field: string, filters: BackendModelFilter[] | undefined, order: BackendModelOrder[] | undefined, limit: number, columns: BackendModelColumn[] | undefined, relations?: BackendModelRelation[], annotations?: ModelAnnotationSpec[], database?: string): string {
   const attnames = concreteAttnames(columns);
   const cap = Number.isInteger(limit) && limit > 0 ? limit : 50;
   const rowAnnotations = buildRowAnnotations(annotations, attnames, relationQueryNames(relations, columns), model, app);
@@ -689,7 +691,7 @@ export function buildComputedOrm(app: string | undefined, model: string, field: 
   const pageTail = `${annotate}${havingChain(filters, havingAliases)}.order_by(${orderArgs(order, attnames)})`;
   const plan = filterPlan(baseFilters, filterSpecs(columns, relations));
   if (plan.pythonTerms.length) {
-    const base = queryExpression(app, model, plan, pageTail);
+    const base = queryExpression(app, model, plan, pageTail, database);
     const access = IDENTIFIER.test(field) ? `__o.${field}` : `getattr(__o, ${pyStr(field)}, None)`;
     return [
       "import itertools as _it",
@@ -706,25 +708,26 @@ export function buildComputedOrm(app: string | undefined, model: string, field: 
     // ORM (annotate + values_list); a `lambda __m:` binds the model name once, keeping the typed cell compact. Resolves
     // `djshell_annotations` as a dict OR classmethod.
     plan.annotations.push({ alias: "__djs", expression: annotationExpression(field) });
-    return queryExpression(app, model, plan, `${pageTail}.values("pk", "__djs")[0:${cap}]`);
+    return queryExpression(app, model, plan, `${pageTail}.values("pk", "__djs")[0:${cap}]`, database);
   }
   const access = IDENTIFIER.test(field) ? `__o.${field}` : `getattr(__o, ${pyStr(field)}, None)`;
-  return `[{${pyStr("pk")}: __o.pk, ${pyStr("value")}: ${access}} for __o in ${queryExpression(app, model, plan, `${pageTail}[0:${cap}]`)}]`;
+  return `[{${pyStr("pk")}: __o.pk, ${pyStr("value")}: ${access}} for __o in ${queryExpression(app, model, plan, `${pageTail}[0:${cap}]`, database)}]`;
 }
 
 /** Builds the row-count ORM `Model._base_manager.filter(...).count()` for the current filter set. */
-export function buildCountOrm(app: string | undefined, model: string, filters: BackendModelFilter[] | undefined, columns: BackendModelColumn[] | undefined, relations?: BackendModelRelation[]): string {
+export function buildCountOrm(app: string | undefined, model: string, filters: BackendModelFilter[] | undefined, columns: BackendModelColumn[] | undefined, relations?: BackendModelRelation[], database?: string): string {
   const plan = filterPlan(filters, filterSpecs(columns, relations));
   if (plan.pythonTerms.length) {
-    return pythonFilterCountCell(queryExpression(app, model, plan), plan.pythonTerms);
+    return pythonFilterCountCell(queryExpression(app, model, plan, "", database), plan.pythonTerms);
   }
-  return queryExpression(app, model, plan, ".count()");
+  return queryExpression(app, model, plan, ".count()", database);
 }
 
 const AGG_FUNC_NAMES: Record<string, string> = { avg: "Avg", count: "Count", max: "Max", min: "Min", sum: "Sum" };
 
 /** Parameters for a reconstructed grouped/global aggregate query. */
 export interface OrmAggregateParams {
+  database?: string;
   aggregates: ModelAggregateTerm[];
   app?: string;
   columns?: BackendModelColumn[];
@@ -822,7 +825,7 @@ export function buildAggregateOrm(params: OrmAggregateParams): string {
   if (!specs.length) {
     // Nothing usable survived (all fields dropped, or exists-only with a group-by): emit a degenerate empty aggregate
     // that tabulates to a zero-column grid, which parseOrmAggregateResponse maps to the same error the socket returns.
-    return `[${queryExpression(params.app, params.model, plan, "")}.aggregate()]`;
+    return `[${queryExpression(params.app, params.model, plan, "", params.database)}.aggregate()]`;
   }
   if (groupBy.length) {
     const keys = groupBy.map((field) => pyStr(field)).join(", ");
@@ -830,9 +833,9 @@ export function buildAggregateOrm(params: OrmAggregateParams): string {
     const having = havingChain(params.filters, aliasSet);
     // Bound the grouped result like the socket does (limit+1) so a high-cardinality group-by can't overrun the PTY marker.
     const cap = Number.isInteger(params.limit) && (params.limit as number) > 0 ? (params.limit as number) : 1000;
-    return queryExpression(params.app, params.model, plan, `.values(${keys})${annotate}${having}.order_by(${keys})[0:${cap + 1}]`);
+    return queryExpression(params.app, params.model, plan, `.values(${keys})${annotate}${having}.order_by(${keys})[0:${cap + 1}]`, params.database);
   }
-  const base = queryExpression(params.app, params.model, plan, "");
+  const base = queryExpression(params.app, params.model, plan, "", params.database);
   const aggregates = specs.filter((spec) => spec.func !== "exists");
   const exists = specs.filter((spec) => spec.func === "exists");
   const aggregateCall = `${base}.aggregate(${aggregates.map((spec) => `${spec.alias}=${spec.expr}`).join(", ")})`;
@@ -853,27 +856,26 @@ export function buildInspectOrm(): string {
   return "len(globals())";
 }
 
-/** Builds a foreign-key picker search as a real ORM cell, returning `.values(...)` rows directly so raw audit has no JSON-print layer. */
-export function buildLookupOrm(app: string | undefined, model: string, q: string, exclude: string[], limit: number): string {
-  const excluded = `[${(exclude ?? []).filter((field) => IDENTIFIER.test(field)).map((field) => pyStr(field)).join(", ")}]`;
-  const cap = (Number.isInteger(limit) && limit > 0 ? limit : 20) + 1;
-  return [
-    "from django.db.models import Q",
-    `_search = ${pyStr(q)}`,
-    `_fields = [f.name for f in ${modelRef(app, model)}._meta.concrete_fields if f.get_internal_type() in ("CharField", "TextField", "SlugField", "EmailField") and f.name not in ${excluded}]`,
-    "_where = Q(pk=_search) if _search.isdigit() else Q()",
-    "for _name in _fields:",
-    "    _where |= Q(**{_name + '__icontains': _search})",
-    `${modelRef(app, model)}._base_manager.filter(_where).values("pk", *_fields)[:${cap}]`
-  ].join("\n");
+/** Builds a readable Django lookup cell returning candidate identities and exact relation values. */
+export function buildLookupOrm(app: string | undefined, model: string, q: string, exclude: string[], limit: number, database?: string, valueField?: string): string {
+  return buildLookupModelOrm(modelRef(app, model), q, exclude ?? [], limit, database, valueField);
 }
 
-/** Builds a related-rows ORM that works for any relation: getattr the accessor (None if missing/orphaned, never raising), then .all() a bounded page only when it is a manager/queryset, else use the single object as-is. */
+/** Builds bounded related reads using Django relation metadata and the source's explicitly selected database. */
 export function buildRelatedOrm(app: string | undefined, model: string, pk: unknown, relation: string, limit: number, database?: string): string {
   const cap = (Number.isInteger(limit) && limit > 0 ? limit : 50) + 1;
+  const name = pyStr(safeName(relation, "pk")), alias = database ? pyStr(database) : "None";
   return [
-    `_rel = getattr(${modelRef(app, model)}._base_manager${database ? `.using(${pyStr(database)})` : ""}.get(pk=${pyScalar(pk)}), ${pyStr(safeName(relation, "pk"))}, None)`,
-    `_rel.all()[0:${cap}] if hasattr(_rel, "all") else _rel`
+    `_source = ${modelRef(app, model)}._base_manager.using(${alias}).get(pk=${pyScalar(pk)})`,
+    `_field = next((f for f in _source._meta.get_fields() if f.is_relation and (f.name == ${name} or (hasattr(f, 'get_accessor_name') and f.get_accessor_name() == ${name}))), None)`,
+    "if _field is not None and (_field.many_to_one or _field.one_to_one):",
+    "    _forward = _field.field if _field.auto_created else _field",
+    "    _key = _forward.attname if _field.auto_created else _forward.target_field.attname",
+    "    _value = getattr(_source, _forward.target_field.attname if _field.auto_created else _forward.attname)",
+    `    _rel = _field.related_model._base_manager.using(${alias}).filter(**{_key: _value}).first() if _value is not None else None`,
+    "else:",
+    `    _rel = getattr(_source, ${name}, None)`,
+    `_rel.all().using(${alias})[0:${cap}] if hasattr(_rel, "all") else _rel`
   ].join("\n");
 }
 
@@ -891,6 +893,7 @@ function pyJsonValue(value: unknown): string {
     return value ? "True" : "False";
   }
   if (typeof value === "number" && Number.isFinite(value)) {
+    if (Number.isInteger(value) && !Number.isSafeInteger(value)) { throw new Error("JSON edits must preserve large integers as JSON text."); }
     return String(value);
   }
   if (typeof value === "string") {
@@ -914,15 +917,8 @@ function structuredEditValue(column: BackendModelColumn | undefined, value: unkn
     return pyJsonValue(value);
   }
   const text = value.trim();
-  if (column.type === "JSONField" && !text.startsWith("[") && !text.startsWith("{")) {
-    return undefined;
-  }
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    return column.type !== "ArrayField" || Array.isArray(parsed) ? pyJsonValue(parsed) : undefined;
-  } catch {
-    return undefined;
-  }
+  if (column.type === "ArrayField" && !text.startsWith("[")) { return undefined; }
+  return `__import__("json").loads(${pyStr(text)})`;
 }
 
 /** Returns a Python literal for an edited cell value, typed by its column (structured/bool/number/FK id/text/null). */
@@ -938,7 +934,9 @@ function editValue(column: BackendModelColumn | undefined, value: unknown): stri
   if (column && column.type === "BooleanField") {
     return TRUTHY.test(text.trim()) ? "True" : "False";
   }
-  if (column && (column.relation || NUMERIC_FIELD.test(column.type)) && /^-?\d+(\.\d+)?$/.test(text.trim())) {
+  if (column?.relation) { return pyStr(text); }
+  if (column?.type === "DecimalField") { return pyStr(text.trim()); }
+  if (column && NUMERIC_FIELD.test(column.type) && /^-?\d+(\.\d+)?$/.test(text.trim())) {
     return text.trim();
   }
   return pyStr(text);

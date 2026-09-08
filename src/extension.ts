@@ -29,6 +29,7 @@ export class LazyRuntimeSource implements vscode.Disposable {
   private console: CustomDjangoConsole | undefined;
   private consoleSubscription: vscode.Disposable | undefined;
   private readonly queryBackends = new Map<string, BackendClient>();
+  private readonly resultBackends = new Map<string, BackendClient>();
 
   readonly onDidChangeRuntime = this.changeEmitter.event;
 
@@ -108,8 +109,22 @@ export class LazyRuntimeSource implements vscode.Disposable {
     const backend = this.console?.activeBackend;
     if (!backend) { return { columns: [], editable: false, error: MODEL_IDLE_MESSAGE, hasMore: false, ok: false, orm: "", relations: [], rows: [], sql: [] }; }
     if (query.executionId) { this.queryBackends.set(query.executionId, backend); }
-    try { return await backend.modelQuery(query); }
+    try {
+      const result = await backend.modelQuery(query);
+      if (result.resultId) {
+        this.resultBackends.set(result.resultId, backend);
+        while (this.resultBackends.size > 32) { void this.releaseModelQuery(this.resultBackends.keys().next().value as string); }
+      }
+      return result;
+    }
     finally { if (query.executionId && this.queryBackends.get(query.executionId) === backend) { this.queryBackends.delete(query.executionId); } }
+  }
+
+  /** Releases a result on its original backend even after the selected runtime changes. */
+  async releaseModelQuery(resultId: string): Promise<void> {
+    const backend = this.resultBackends.get(resultId);
+    this.resultBackends.delete(resultId);
+    await backend?.releaseModelQuery(resultId).catch(() => undefined);
   }
 
   /** Interrupts the backend captured by this query, even after the selected runtime changes. */
@@ -149,6 +164,7 @@ export class LazyRuntimeSource implements vscode.Disposable {
 
   /** Releases the active runtime event listener. */
   dispose(): void {
+    for (const resultId of this.resultBackends.keys()) { void this.releaseModelQuery(resultId); }
     this.consoleSubscription?.dispose();
     this.changeEmitter.dispose();
   }

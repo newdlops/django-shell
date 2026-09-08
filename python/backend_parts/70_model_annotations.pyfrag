@@ -495,10 +495,12 @@ def _browse_having_q(filters, having_aliases):
     return query
 
 
-def _browse_orm_aggregate(model, filters, attnames, group_by, specs, having_filters=None):
+def _browse_orm_aggregate(model, filters, attnames, group_by, specs, having_filters=None, database=None):
     """Builds a readable Django ORM expression mirroring the executed aggregate query (for the command log)."""
     includes, excludes, annotations, distinct = _browse_orm_clauses(model, filters, attnames)
     lines = [f"{model.__name__}._base_manager"]
+    if database is not None:
+        lines.append(f"    .using({database!r})")
     if annotations:
         lines.append(f"    .annotate({', '.join(annotations)})")
     if includes:
@@ -543,12 +545,12 @@ def _browse_agg_expr_text(spec):
     return f"{spec['alias']}={label}({spec['arg']!r}{suffix})"
 
 
-def _browse_capture():
+def _browse_capture(database=None):
     """Returns a context manager that records the SQL executed inside it (even when DEBUG is off)."""
-    from django.db import connection
+    from django.db import connections
     from django.test.utils import CaptureQueriesContext
 
-    return CaptureQueriesContext(connection)
+    return CaptureQueriesContext(connections[database or "default"])
 
 
 def _browse_sql(ctx):
@@ -584,12 +586,14 @@ def _browse_orm_clauses(model, filters, attnames):
     return includes, excludes, annotations, distinct
 
 
-def _browse_orm_rows(model, order, filters, attnames, pk_attname, keyset_capable, cursor, base_offset, limit, annotations=None, having_filters=None):
+def _browse_orm_rows(model, order, filters, attnames, pk_attname, keyset_capable, cursor, base_offset, limit, annotations=None, having_filters=None, database=None):
     """Builds a readable Django ORM expression mirroring the executed rows query (including per-row annotation columns and any HAVING lookup on them)."""
     includes, excludes, declared, distinct = _browse_orm_clauses(model, filters, set(attnames))
     annotations = annotations or []
     column_annotations = [f"{spec['alias']}={spec['log']}" for spec in annotations]
     lines = [f"{model.__name__}._base_manager"]
+    if database is not None:
+        lines.append(f"    .using({database!r})")
     # Match execution order: declared-@property annotations (so the WHERE can use them) → base WHERE → column annotations → HAVING → order_by.
     if declared:
         lines.append(f"    .annotate({', '.join(declared)})")
@@ -614,6 +618,5 @@ def _browse_orm_rows(model, order, filters, attnames, pk_attname, keyset_capable
     end = limit + 1
     lines.append(f"    [{base_offset}:{base_offset + end}]" if (not keyset_capable and base_offset) else f"    [:{end}]")
     return "\n".join(lines)
-
 
 

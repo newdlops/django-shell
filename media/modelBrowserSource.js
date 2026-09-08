@@ -1,6 +1,6 @@
 // Webview grid frontend for the Django model data browser.
 import { appendLogEntry } from "./sqlHighlight.js";
-import { parseEditableArray } from "./gridArrayEdit.js";
+import { editableArrayLength } from "./gridArrayValue.js";
 import { repaintPins, togglePin } from "./gridPin.js";
 import { createEditor, stagedDisplay } from "./gridEdit.js";
 import { enterQueryMode, measureQueryEditor, setQueryDraft } from "./gridQuery.js";
@@ -13,6 +13,7 @@ import { reportGridRender } from "./gridDiagnostics.js";
 import { createGridHeaderRenderer } from "./gridRenderer.js";
 import { createPropertyValues, propertyLoadAction } from "./gridPropertyValues.js";
 import { runModelStabilityE2eProbe } from "./modelStabilityE2eProbe.js";
+import { runModelIntegrityE2eProbe } from "./modelIntegrityE2eProbe.js";
 import { installLogDrawer, toggleLogPanel } from "./modelBrowserLogDrawer.js";
 import { codicon } from "./modelBrowserIcons.js";
 import { createQueryRunUi } from "./queryRunUi.js";
@@ -136,7 +137,7 @@ function handleMessage(message) {
     return;
   }
   if (message.type === "e2eQueryBuilderProbe") {
-    const probe = message.suite === "stability" ? runModelStabilityE2eProbe : runModelQueryBuilderE2eProbe;
+    const probe = message.suite === "integrity" ? runModelIntegrityE2eProbe : message.suite === "stability" ? runModelStabilityE2eProbe : runModelQueryBuilderE2eProbe;
     void probe({ document, postMessage: (value) => vscode.postMessage(value), requestId: message.requestId }).catch(() => vscode.postMessage({ requestId: message.requestId, snapshot: { error: "Model Browser E2E probe bootstrap failed." }, type: "e2eQueryBuilderProbeResult" }));
     return;
   }
@@ -480,7 +481,7 @@ function buildCell(row, column, pk) {
   if (column.editable) {
     td.classList.add("editable");
     td.dataset.attname = column.attname;
-    td.title = parseEditableArray(column, cellRawText(td._cell)) ? "Double-click to edit list items" : "Double-click to edit";
+    td.title = editableArrayLength(column, td._cell) !== undefined ? "Double-click to edit list items" : "Double-click to edit";
     td._editval = cellRawText(td._cell);
   }
   paintCell(td);
@@ -520,11 +521,11 @@ function paintCell(td) {
   td.removeAttribute("aria-description");
   const cell = td._cell;
   td.appendChild(renderValue(cell));
-  appendArrayEditButton(td, column, cellRawText(cell));
+  appendArrayEditButton(td, column, cell);
   if (column.relation && rawValue(cell) !== null && rawValue(cell) !== undefined) {
     const wrap = el("span", { className: "fk" });
     wrap.appendChild(el("button", { ariaLabel: "Expand related row", className: "linkbtn", title: "Expand related row", dataset: { act: "fk", rel: column.relation.field, pk: String(td._pk), val: String(rawValue(cell)) } }, codicon("copy")));
-    wrap.appendChild(el("button", { ariaLabel: `Open ${column.relation.target} filtered to this row`, className: "linkbtn", title: `Open ${column.relation.target} filtered to this row`, dataset: { act: "open", target: column.relation.target, val: String(rawValue(cell)) } }, codicon("open-preview")));
+    wrap.appendChild(el("button", { ariaLabel: `Open ${column.relation.target} filtered to this row`, className: "linkbtn", title: `Open ${column.relation.target} filtered to this row`, dataset: { act: "open", field: column.relation.filterField || "pk", target: column.relation.target, val: String(rawValue(cell)) } }, codicon("open-preview")));
     td.appendChild(document.createTextNode(" "));
     td.appendChild(wrap);
   }
@@ -540,11 +541,11 @@ function appendArrayEditButton(td, column, text) {
   if (!column.editable) {
     return;
   }
-  const parsed = parseEditableArray(column, text);
-  if (!parsed) {
+  const length = editableArrayLength(column, text);
+  if (length === undefined) {
     return;
   }
-  const button = el("button", { className: "arrayedit-open", dataset: { act: "editArray" }, title: `Edit ${parsed.items.length} list item${parsed.items.length === 1 ? "" : "s"}` }, `▦ ${parsed.items.length}`);
+  const button = el("button", { className: "arrayedit-open", dataset: { act: "editArray" }, title: `Edit ${length} list item${length === 1 ? "" : "s"}` }, `▦ ${length}`);
   td.insertBefore(button, td.firstChild);
 }
 function renderValue(cell) {
@@ -589,7 +590,7 @@ function onTableClick(event) {
     const split = data.target.lastIndexOf(".");
     // Pass the pk as the raw string; the backend coerces it against the target model's real pk type (a numeric
     // coerce here would turn a char/slug pk like "007" into 7 and miss the row).
-    vscode.postMessage({ type: "openModel", app: data.target.slice(0, split), model: data.target.slice(split + 1), filterPk: data.val });
+    vscode.postMessage({ type: "openModel", app: data.target.slice(0, split), model: data.target.slice(split + 1), filterField: data.field || "pk", filterPk: data.val });
   } else if (data.act === "fk") {
     expandInto(node, { relation: data.rel, pk: coerce(data.pk), value: coerce(data.val), single: true });
   } else if (data.act === "rel") {
@@ -762,6 +763,7 @@ function nestedPanel(title, trigger, body) {
   return wrap;
 }
 function closeDetail(button) {
+  pendingRelated.clear();
   els.detailDrawer.hidden = true; els.detailContent.innerHTML = "";
   button.dataset.open = "";
   detailTrigger = undefined; button.focus();

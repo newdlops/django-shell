@@ -2,10 +2,10 @@
 
 import { createEmptyModelQueryRecipe, type ModelQueryRecipeV2, type QueryModelRef, type QueryScalar } from "./modelQueryRecipe";
 
-/** Creates the exact primary-key Recipe filter used when opening a model through a foreign-key link. */
-export function createInitialPkModelQueryRecipe(source: QueryModelRef, initialPk: QueryScalar): ModelQueryRecipeV2 {
+/** Creates an exact target-key Recipe filter for a primary-key or alternate-field relation link. */
+export function createInitialPkModelQueryRecipe(source: QueryModelRef, initialPk: QueryScalar, field = "pk"): ModelQueryRecipeV2 {
   const recipe = createEmptyModelQueryRecipe(source);
-  recipe.where.children.push({ kind: "comparison", lhs: { kind: "field", path: "pk" }, lookup: "exact", negated: false, nodeId: "initial-pk", rhs: { kind: "literal", value: initialPk } });
+  recipe.where.children.push({ kind: "comparison", lhs: { kind: "field", path: /^[A-Za-z_][A-Za-z0-9_]*$/.test(field) ? field : "pk" }, lookup: "exact", negated: false, nodeId: "initial-pk", rhs: { kind: "literal", value: initialPk } });
   return recipe;
 }
 

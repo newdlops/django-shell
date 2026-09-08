@@ -125,6 +125,7 @@ td.dirty{background-color:var(--vscode-inputValidation-warningBackground)!import
 .arrayedit-title{font-weight:600}.arrayedit-count{color:var(--vscode-descriptionForeground);font-size:11px}.arrayedit-close{margin-left:auto;padding:1px 6px;background:none;color:var(--vscode-foreground)}
 .arrayedit-note{padding:6px 10px;color:var(--vscode-descriptionForeground);font-size:11px;border-bottom:1px solid var(--vscode-panel-border)}
 .arrayedit-scroll{min-height:90px;overflow:auto}.arrayedit-spacer{flex:1}
+.arrayedit-pager{display:flex;align-items:center;justify-content:center;gap:8px;flex:0 0 auto;padding:6px 10px;border-top:1px solid var(--vscode-panel-border)}.arrayedit-pager[hidden]{display:none}.arrayedit-page-status{color:var(--vscode-descriptionForeground);font-size:11px}.arrayedit-foot{flex-wrap:wrap}.arrayedit-head .arrayedit-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .arrayedit-table{width:100%;min-width:max-content;border:0;font-size:12px}
 .arrayedit-table th,.arrayedit-table td{position:static;max-width:320px;overflow:visible;padding:4px 6px;background:transparent}
 .arrayedit-table th{cursor:default;background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}
@@ -138,6 +139,7 @@ td:has(.fkpick){overflow:visible}
 .fkresults{position:absolute;left:0;top:100%;z-index:30;min-width:100%;max-width:360px;max-height:240px;overflow-y:auto;background:var(--vscode-editorWidget-background,var(--vscode-editor-background));border:1px solid var(--vscode-editorWidget-border,var(--vscode-focusBorder));border-radius:2px;box-shadow:0 2px 8px var(--vscode-widget-shadow)}
 .fkopt{padding:2px 6px;white-space:nowrap;cursor:pointer}
 .fkopt.active,.fkopt:hover{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}
+.fkstatus{max-width:min(320px,70vw);padding:4px 6px;white-space:normal;color:var(--vscode-descriptionForeground)}
 .cellnull{color:var(--vscode-descriptionForeground);font-style:italic}
 .tag{color:var(--vscode-descriptionForeground)}
 .fk{display:inline-flex;align-items:center;gap:6px}

@@ -1,6 +1,7 @@
 // In-place cell editing with client-side staging: nothing is saved or sent until Commit.
 
-import { openArrayEditor, parseEditableArray } from "./gridArrayEdit.js";
+import { openArrayEditor } from "./gridArrayEdit.js";
+import { editableArrayLength } from "./gridArrayValue.js";
 import { openFkPicker } from "./gridFkPicker.js";
 import { temporalEditorLabel, temporalEditorValue, temporalStoredValue } from "./gridTemporalEdit.js";
 
@@ -149,8 +150,9 @@ export function createEditor(ctx) {
 
   /** Opens a live searchable picker for an editable foreign-key cell, staging the chosen pk. */
   function editForeignKey(td, column, start) {
+    activePicker?.cancel();
     activePicker = openFkPicker(td, column, start, {
-      allocId: () => (lookupSeq += 1),
+      allocId: () => `${editorId}:lookup:${++lookupSeq}`,
       done: () => ctx.paintCell(td),
       post: (message) => ctx.post(message),
       stage: (value) => stage(td, value)
@@ -187,7 +189,7 @@ export function createEditor(ctx) {
     }
     const column = td._column || {};
     const start = td.dataset.staged !== undefined ? td.dataset.staged : (td._editval ?? "");
-    if (parseEditableArray(column, start)) {
+    if (editableArrayLength(column, td.dataset.staged !== undefined ? start : td._cell ?? start) !== undefined) {
       editArray(td, column, start);
       return;
     }
@@ -197,6 +199,7 @@ export function createEditor(ctx) {
     }
     const control = buildControl(column, start);
     const input = control.input;
+    if (column.type === "JSONField") { input.title = "Enter a JSON value. Put strings in double quotes."; input.setAttribute("aria-label", `${column.name || column.attname || "Value"} (JSON)`); }
     td.textContent = "";
     td.appendChild(input);
     input.focus();
@@ -236,6 +239,7 @@ export function createEditor(ctx) {
   function commitEdits() {
     if (activeCommit) { return; }
     finishActiveControl?.(true);
+    activePicker?.commit();
     if (!pendingCount()) {
       return;
     }
@@ -295,6 +299,8 @@ export function createEditor(ctx) {
 
   /** Clears all staged edits without reloading (used when the table is rebuilt). */
   function reset() {
+    activePicker?.cancel();
+    activePicker = undefined;
     activeArrayEditor?.cancel();
     finishActiveControl?.(false);
     activeCommit = undefined;

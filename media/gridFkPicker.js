@@ -1,6 +1,7 @@
-// Searchable foreign-key picker: queries the target model live and stages the chosen primary key.
+// Searches foreign-key candidates and stages their exact relation values with visible request states.
 
 const DEBOUNCE_MS = 200;
+let pickerSequence = 0;
 
 /** Opens a searchable dropdown over an FK cell; stages the chosen pk via host.stage or restores via host.done. */
 export function openFkPicker(td, column, start, host) {
@@ -14,6 +15,12 @@ export function openFkPicker(td, column, start, host) {
   input.autocomplete = "off";
   const results = document.createElement("div");
   results.className = "fkresults";
+  results.id = `fk-results-${++pickerSequence}`;
+  results.setAttribute("role", "listbox");
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-label", `Search ${column.relation.target}`);
+  input.setAttribute("aria-autocomplete", "list");
+  input.setAttribute("aria-controls", results.id);
   results.hidden = true;
   wrap.appendChild(input);
   wrap.appendChild(results);
@@ -22,7 +29,10 @@ export function openFkPicker(td, column, start, host) {
   input.focus();
   input.select();
 
-  const state = { current: 0, highlight: -1, options: [], settled: false, timer: null };
+  const state = { current: 0, highlight: -1, options: [], settled: false, status: "", timer: null };
+
+  /** Returns the exact value required by the source relation, including non-primary unique keys. */
+  function storedValue(option) { return String(option.value ?? option.pk); }
 
   /** Settles the edit once: stages a real change, otherwise restores the cell. */
   function finish(value) {
@@ -45,9 +55,11 @@ export function openFkPicker(td, column, start, host) {
     if (state.timer) {
       clearTimeout(state.timer);
     }
+    state.current = host.allocId();
+    state.options = []; state.highlight = -1; state.status = "Searching…";
+    render();
     const run = () => {
-      state.current = host.allocId();
-      host.post({ q: input.value.trim(), requestId: state.current, target: column.relation.target, type: "lookupRelated" });
+      if (!state.settled) { host.post({ field: column.attname, q: input.value.trim(), requestId: state.current, target: column.relation.target, type: "lookupRelated" }); }
     };
     if (immediate) {
       run();
@@ -59,14 +71,26 @@ export function openFkPicker(td, column, start, host) {
   /** Redraws the candidate dropdown, marking the highlighted row. */
   function render() {
     results.textContent = "";
-    results.hidden = !state.options.length;
+    results.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+    input.setAttribute("aria-activedescendant", state.highlight >= 0 ? `${results.id}-${state.highlight}` : "");
+    if (state.status) {
+      const status = document.createElement("div");
+      status.className = "fkstatus";
+      status.setAttribute("role", "status");
+      status.textContent = state.status;
+      results.appendChild(status);
+    }
     state.options.forEach((option, index) => {
       const row = document.createElement("div");
       row.className = index === state.highlight ? "fkopt active" : "fkopt";
+      row.id = `${results.id}-${index}`;
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", String(index === state.highlight));
       row.textContent = option.label;
       row.addEventListener("mousedown", (event) => {
         event.preventDefault();
-        finish(String(option.pk));
+        finish(storedValue(option));
       });
       results.appendChild(row);
     });
@@ -91,7 +115,7 @@ export function openFkPicker(td, column, start, host) {
       move(-1);
     } else if (event.key === "Enter") {
       event.preventDefault();
-      finish(state.highlight >= 0 ? String(state.options[state.highlight].pk) : input.value.trim());
+      finish(state.highlight >= 0 ? storedValue(state.options[state.highlight]) : input.value.trim());
     } else if (event.key === "Escape") {
       event.preventDefault();
       finish(null);
@@ -102,6 +126,10 @@ export function openFkPicker(td, column, start, host) {
   query(true);
 
   return {
+    /** Cancels an obsolete picker before another result or editor replaces its cell. */
+    cancel() { finish(null); },
+    /** Stages direct key input before a Commit action takes its save snapshot. */
+    commit() { finish(input.value.trim()); },
     /** Renders backend candidates when they answer the latest query. */
     fill(message) {
       if (state.settled || message.requestId !== state.current) {
@@ -110,6 +138,7 @@ export function openFkPicker(td, column, start, host) {
       const result = message.result || {};
       state.options = result.ok && Array.isArray(result.rows) ? result.rows : [];
       state.highlight = state.options.length ? 0 : -1;
+      state.status = !result.ok ? "Search failed. Type again to retry." : state.options.length ? "" : "No matching rows. Enter a key directly.";
       render();
     }
   };

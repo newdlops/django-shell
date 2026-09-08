@@ -638,7 +638,7 @@ def _progress_snapshot():
     return progress
 
 
-class _StreamingCapture(io.StringIO):
+class _StreamingCapture(_BoundedTextCapture):
     """StringIO capture that can mirror live writes as progress output markers."""
 
     def __init__(self, stream_name, emit=False):
@@ -809,5 +809,4 @@ def _progress_queryset_label(queryset):
         return model_label or "QuerySet"
     except Exception:
         return "QuerySet"
-
 

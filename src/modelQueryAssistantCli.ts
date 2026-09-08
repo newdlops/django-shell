@@ -1,5 +1,7 @@
 // Shell-free executable resolution and bounded process execution for Query Builder AI assistance.
 import { constants } from "fs";
+import { StringDecoder } from "string_decoder";
+import { terminateAssistantProcess } from "./assistantProcess";
 import { access } from "fs/promises";
 import * as os from "os";
 import * as path from "path";
@@ -16,13 +18,13 @@ export interface QueryAssistantCliDependencies { access?: (candidate: string, mo
 export interface QueryAssistantRunDependencies {
   clearTimer?: (timer: unknown) => void;
   setTimer?: (callback: () => void, timeout: number) => unknown;
-  spawn?: (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; shell: false; stdio: ["pipe", "pipe", "pipe"] }) => ChildProcess;
+  spawn?: (command: string, args: string[], options: { cwd: string; detached?: boolean; env: NodeJS.ProcessEnv; shell: false; stdio: ["pipe", "pipe", "pipe"] }) => ChildProcess;
 }
 /** Injectable process seams for a metadata-only capture with ignored stdin. */
 export interface QueryAssistantMetadataDependencies {
   clearTimer?: (timer: unknown) => void;
   setTimer?: (callback: () => void, timeout: number) => unknown;
-  spawn?: (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; shell: false; stdio: ["ignore", "pipe", "pipe"] }) => ChildProcess;
+  spawn?: (command: string, args: string[], options: { cwd: string; detached?: boolean; env: NodeJS.ProcessEnv; shell: false; stdio: ["ignore", "pipe", "pipe"] }) => ChildProcess;
 }
 const LOGIN_PATH_TIMEOUT_MS = 3000;
 const COMMON_CLI_PATHS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
@@ -49,10 +51,10 @@ export function expandAssistantHome(command: string): string { return command ==
 async function executable(candidate: string, dependencies: QueryAssistantCliDependencies = {}): Promise<boolean> { try { await (dependencies.access ?? access)(candidate, constants.X_OK); return true; } catch { return false; } }
 /** Reads a fixed login-shell PATH command without interpreting configured provider values. */
 export function readQueryAssistantLoginShellPath(): Promise<string> { return new Promise((resolve) => {
-  const shell = process.env.SHELL || (process.platform === "darwin" ? "/bin/zsh" : "/bin/sh"); const child = spawn(shell, ["-lc", "printf %s \"$PATH\""], { env: process.env, shell: false, stdio: ["ignore", "pipe", "ignore"] }); let settled = false; let output = "";
+  const shell = process.env.SHELL || (process.platform === "darwin" ? "/bin/zsh" : "/bin/sh"); const child = spawn(shell, ["-lc", "printf %s \"$PATH\""], { detached: process.platform !== "win32", env: process.env, shell: false, stdio: ["ignore", "pipe", "ignore"] }); const decoder = new StringDecoder("utf8"); let settled = false; let output = "";
   /** Resolves the bounded fixed shell-path probe once. */
-  const finish = (value: string) => { if (settled) { return; } settled = true; clearTimeout(timer); if (!child.killed) { child.kill(); } resolve(value.slice(0, 30000).trim()); };
-  const timer = setTimeout(() => finish(""), LOGIN_PATH_TIMEOUT_MS); child.stdout.on("data", (chunk: Buffer) => { output = (output + chunk.toString()).slice(0, 30000); }); child.on("error", () => finish("")); child.on("close", (code) => finish(code === 0 ? output : ""));
+  const finish = (value: string) => { if (settled) { return; } settled = true; clearTimeout(timer); terminateAssistantProcess(child, process.platform !== "win32"); resolve(value.slice(0, 30000).trim()); };
+  const timer = setTimeout(() => finish(""), LOGIN_PATH_TIMEOUT_MS); child.stdout.on("data", (chunk: Buffer) => { output = (output + decoder.write(chunk)).slice(0, 30000); }); child.on("error", () => finish("")); child.on("close", (code) => finish(code === 0 ? output + decoder.end() : ""));
 }); }
 /** Merges PATH segments in priority order without duplicate directory probes. */
 export function mergeQueryAssistantPath(values: string[]): string { const seen = new Set<string>(); return values.flatMap((value) => value.split(path.delimiter)).map((value) => value.trim()).filter((value) => Boolean(value) && !seen.has(value) && Boolean(seen.add(value))).join(path.delimiter); }
@@ -74,23 +76,24 @@ export function runQueryAssistantCommand(spec: QueryAssistantCommand, prompt: st
   return new Promise((resolve, reject) => {
     if (signal.aborted) { reject(new Error("cancelled")); return; }
     let child: ChildProcess;
-    try { child = (dependencies.spawn ?? spawn)(spec.command, spec.args, { cwd: spec.cwd, env: environment, shell: false, stdio: ["pipe", "pipe", "pipe"] }); }
+    try { child = (dependencies.spawn ?? spawn)(spec.command, spec.args, { cwd: spec.cwd, detached: process.platform !== "win32", env: environment, shell: false, stdio: ["pipe", "pipe", "pipe"] }); }
     catch { reject(new Error("provider-failed")); return; }
+    const stdoutDecoder = new StringDecoder("utf8"), stderrDecoder = new StringDecoder("utf8"); let stdoutBytes = 0;
     let stdout = ""; let stderr = ""; let stderrTail = ""; let settingsRejected = false; let authentication = false; let settled = false; let timer: unknown;
-    const stdoutData = (chunk: Buffer) => { if (settled) { return; } if (Buffer.byteLength(stdout) + chunk.length > QUERY_ASSISTANT_LIMITS.output) { child.kill(); finish(new Error("output-too-large")); return; } stdout += chunk.toString(); };
-    const stderrData = (chunk: Buffer) => { if (settled) { return; } const text = chunk.toString(); const classified = `${stderrTail}${text}`.toLowerCase(); authentication ||= rejectedAssistantAuthentication(classified); settingsRejected ||= rejectedAssistantSettings(classified); stderrTail = classified.slice(-512); const remaining = QUERY_ASSISTANT_LIMITS.stderr - Buffer.byteLength(stderr); if (remaining > 0) { stderr += chunk.subarray(0, remaining).toString(); } };
+    const stdoutData = (chunk: Buffer) => { if (settled) { return; } if (stdoutBytes + chunk.length > QUERY_ASSISTANT_LIMITS.output) { finish(new Error("output-too-large")); return; } stdoutBytes += chunk.length; stdout += stdoutDecoder.write(chunk); };
+    const stderrData = (chunk: Buffer) => { if (settled) { return; } const text = stderrDecoder.write(chunk); const classified = `${stderrTail}${text}`.toLowerCase(); authentication ||= rejectedAssistantAuthentication(classified); settingsRejected ||= rejectedAssistantSettings(classified); stderrTail = classified.slice(-512); const remaining = QUERY_ASSISTANT_LIMITS.stderr - Buffer.byteLength(stderr); if (remaining > 0) { stderr += text.slice(0, remaining); } };
     const childError = (caught: NodeJS.ErrnoException) => finish(new Error(caught.code === "ENOENT" ? "provider-unavailable" : "provider-failed"));
-    const childClose = (code: number | null) => { if (code === 0) { finish(); return; } finish(new Error(settingsRejected ? "unsupported-settings" : authentication ? "authentication" : "provider-failed")); };
+    const childClose = (code: number | null) => { stdout += stdoutDecoder.end(); stderrDecoder.end(); if (code === 0) { finish(); return; } finish(new Error(settingsRejected ? "unsupported-settings" : authentication ? "authentication" : "provider-failed")); };
     const stdinError = (caught: NodeJS.ErrnoException) => { if (caught.code !== "EPIPE" && !settled) { finish(new Error("provider-failed")); } };
     /** Neutralizes late child errors after terminal completion without retaining data. */
     const ignoreError = () => undefined;
     /** Detaches all data/error listeners so late terminal-path output is inert. */
     const detach = () => { child.stdout?.removeListener("data", stdoutData); child.stderr?.removeListener("data", stderrData); child.removeListener("error", childError); child.removeListener("close", childClose); child.stdin?.removeListener("error", stdinError); child.on("error", ignoreError); child.stdin?.on("error", ignoreError); };
     /** Settles the child exactly once and detaches cancellation timing. */
-    const finish = (failure?: Error) => { if (settled) { return; } settled = true; detach(); if (timer !== undefined) { (dependencies.clearTimer ?? ((value: unknown) => clearTimeout(value as NodeJS.Timeout)))(timer); } signal.removeEventListener("abort", abort); failure ? reject(failure) : resolve(stdout); };
+    const finish = (failure?: Error) => { if (settled) { return; } settled = true; if (failure) { terminateAssistantProcess(child, process.platform !== "win32"); } detach(); if (timer !== undefined) { (dependencies.clearTimer ?? ((value: unknown) => clearTimeout(value as NodeJS.Timeout)))(timer); } signal.removeEventListener("abort", abort); failure ? reject(failure) : resolve(stdout); };
     /** Terminates a child after user cancellation without exposing its output. */
-    const abort = () => { child.kill(); finish(new Error("cancelled")); };
-    timer = (dependencies.setTimer ?? setTimeout)(() => { child.kill(); finish(new Error("timeout")); }, timeout);
+    const abort = () => { finish(new Error("cancelled")); };
+    timer = (dependencies.setTimer ?? setTimeout)(() => { finish(new Error("timeout")); }, timeout);
     signal.addEventListener("abort", abort, { once: true });
     child.stdout!.on("data", stdoutData); child.stderr!.on("data", stderrData); child.on("error", childError); child.on("close", childClose); child.stdin!.on("error", stdinError);
     child.stdin!.end(prompt);
@@ -101,21 +104,22 @@ export function runQueryAssistantMetadataCommand(spec: QueryAssistantMetadataCom
   return new Promise((resolve, reject) => {
     if (signal.aborted) { reject(new Error("cancelled")); return; }
     let child: ChildProcess;
-    try { child = (dependencies.spawn ?? spawn)(spec.command, spec.args, { cwd: spec.cwd, env: environment, shell: false, stdio: ["ignore", "pipe", "pipe"] }); }
+    try { child = (dependencies.spawn ?? spawn)(spec.command, spec.args, { cwd: spec.cwd, detached: process.platform !== "win32", env: environment, shell: false, stdio: ["ignore", "pipe", "pipe"] }); }
     catch { reject(new Error("provider-unavailable")); return; }
+    const outputDecoder = new StringDecoder("utf8"), errorDecoder = new StringDecoder("utf8"); let bytes = 0;
     let output = ""; let stderr = ""; let settled = false; let timer: unknown;
-    const append = (target: "stdout" | "stderr", chunk: Buffer) => { if (settled || Buffer.byteLength(output) + Buffer.byteLength(stderr) + chunk.length > QUERY_ASSISTANT_LIMITS.metadataOutput) { if (!settled) { child.kill(); finish(new Error("output-too-large")); } return; } if (target === "stdout") { output += chunk.toString(); } else { stderr += chunk.toString(); } };
+    const append = (target: "stdout" | "stderr", chunk: Buffer) => { if (settled || bytes + chunk.length > QUERY_ASSISTANT_LIMITS.metadataOutput) { if (!settled) { finish(new Error("output-too-large")); } return; } bytes += chunk.length; if (target === "stdout") { output += outputDecoder.write(chunk); } else { stderr += errorDecoder.write(chunk); } };
     const stdoutData = (chunk: Buffer) => append("stdout", chunk); const stderrData = (chunk: Buffer) => append("stderr", chunk);
-    const childError = () => finish(new Error("provider-unavailable")); const childClose = (code: number | null) => finish(code === 0 ? undefined : new Error("provider-failed"));
+    const childError = () => finish(new Error("provider-unavailable")); const childClose = (code: number | null) => { output += outputDecoder.end(); errorDecoder.end(); finish(code === 0 ? undefined : new Error("provider-failed")); };
     /** Neutralizes late metadata errors after terminal completion. */
     const ignoreError = () => undefined;
     /** Detaches metadata listeners after every terminal outcome. */
     const detach = () => { child.stdout?.removeListener("data", stdoutData); child.stderr?.removeListener("data", stderrData); child.removeListener("error", childError); child.removeListener("close", childClose); child.on("error", ignoreError); };
     /** Settles the metadata process exactly once. */
-    const finish = (failure?: Error) => { if (settled) { return; } settled = true; detach(); if (timer !== undefined) { (dependencies.clearTimer ?? ((value: unknown) => clearTimeout(value as NodeJS.Timeout)))(timer); } signal.removeEventListener("abort", abort); failure ? reject(failure) : resolve(output); };
+    const finish = (failure?: Error) => { if (settled) { return; } settled = true; if (failure) { terminateAssistantProcess(child, process.platform !== "win32"); } detach(); if (timer !== undefined) { (dependencies.clearTimer ?? ((value: unknown) => clearTimeout(value as NodeJS.Timeout)))(timer); } signal.removeEventListener("abort", abort); failure ? reject(failure) : resolve(output); };
     /** Kills a metadata process after cancellation without retaining output. */
-    const abort = () => { child.kill(); finish(new Error("cancelled")); };
-    timer = (dependencies.setTimer ?? setTimeout)(() => { child.kill(); finish(new Error("timeout")); }, QUERY_ASSISTANT_LIMITS.metadataTimeout);
+    const abort = () => { finish(new Error("cancelled")); };
+    timer = (dependencies.setTimer ?? setTimeout)(() => { finish(new Error("timeout")); }, QUERY_ASSISTANT_LIMITS.metadataTimeout);
     signal.addEventListener("abort", abort, { once: true });
     child.stdout!.on("data", stdoutData); child.stderr!.on("data", stderrData); child.on("error", childError); child.on("close", childClose);
   });

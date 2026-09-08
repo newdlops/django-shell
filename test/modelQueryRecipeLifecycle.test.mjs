@@ -9,7 +9,7 @@ const source = fs.readFileSync(new URL("../src/modelBrowser.ts", import.meta.url
 test("model browser keeps an applied Recipe revision and canonical initial-pk recipe", () => {
   assert.ok(source.includes("private appliedRecipe: ModelQueryRecipeV2"));
   assert.ok(source.includes("private appliedRecipeRevision = 0"));
-  assert.ok(source.includes("createInitialPkModelQueryRecipe(recipeSource, target.initialPk)"));
+  assert.ok(source.includes("createInitialPkModelQueryRecipe(recipeSource, target.initialPk, field)"));
   assert.ok(source.includes("isRecipeInitialPk(target.initialPk)"));
 });
 

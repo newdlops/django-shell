@@ -1,11 +1,16 @@
 // Generates validated, routed, atomic Django ORM edits without backend RPC calls in shell history.
 
 import type { BackendModelColumn, ModelCommitChange } from "./modelBackend";
+import { readFileSync } from "fs";
+import * as path from "path";
+
+const DATE_VALIDATION_SOURCE = readFileSync(path.join(__dirname, "..", "python", "backend_parts", "82_commit_dates.pyfrag"), "utf8").trim();
 
 /** Builds readable Django save code that validates every row before writing to the selected database. */
 export function buildValidatedCommitOrm(model: string, changes: ModelCommitChange[], columns: BackendModelColumn[], valueLiteral: (column: BackendModelColumn | undefined, value: unknown) => string, pkLiteral: (value: unknown) => string, database?: string): string {
   const byAttname = new Map(columns.map((column) => [column.attname, column]));
   const lines = [
+    DATE_VALIDATION_SOURCE,
     "from django.db import router as _router, transaction as _transaction",
     `_model = ${model}`,
     `_db = ${database ? JSON.stringify(database) : "_router.db_for_write(_model)"}`,
@@ -27,6 +32,6 @@ export function buildValidatedCommitOrm(model: string, changes: ModelCommitChang
     lines.push("    if _applied:", `        if ${database ? "False" : `_router.db_for_write(_model, instance=${variable}) != _db`}:`, "            raise ValueError('One commit cannot span multiple databases.')",
       `        ${variable}.full_clean(exclude=[f.name for f in _model._meta.fields if f.name not in _applied])`, `        _prepared.append((${variable}, _applied))`);
   }
-  lines.push("    for _instance, _fields in _prepared:", "        _instance.save(using=_db, update_fields=_fields)", "len(_prepared)");
+  lines.push("    _browse_validate_commit_dates(_prepared, _db)", "    for _instance, _fields in _prepared:", "        _instance.save(using=_db, update_fields=_fields)", "len(_prepared)");
   return lines.join("\n");
 }

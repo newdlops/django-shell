@@ -18,7 +18,7 @@ async function main() {
   const nativeProviderFixturePath = path.join(ROOT, "test", "e2e", "fixtures", "native-provider");
   const python = pythonExecutablePath();
   const modelBrowserOnly = process.env.DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY === "1";
-  const inspectorPort = modelBrowserOnly ? undefined : await findAvailableInspectorPort();
+  const inspectorPort = await findAvailableInspectorPort();
   const testShell = process.platform === "win32" ? process.env.SHELL : "/bin/sh";
   if (!modelBrowserOnly) {
     copyInstalledExtension("ms-python.python-");

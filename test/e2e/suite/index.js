@@ -7,8 +7,10 @@ const path = require("node:path");
 const vscode = require("vscode");
 const { assertModelQueryBuilderWebview } = require("./modelQueryBuilderWebview.js");
 const { assertModelStabilityWebview } = require("./modelStabilityWebview.js");
+const { assertModelIntegrityWebview } = require("./modelIntegrityWebview.js");
 const { assertPythonCellBehavior } = require("./pythonCellBehavior.js");
 const { assertWorkbenchModelLanguageSelection } = require("./workbenchOverlayModelLanguage.js");
+const { focusTestWorkbench } = require("./focusTestWorkbench.js");
 
 /** Runs the extension host E2E suite. */
 async function run() {
@@ -16,9 +18,12 @@ async function run() {
   assert.ok(extension, "Django Shell extension should be loaded in the extension host.");
   await writePreActivationStaleOverlayFiles();
   await extension.activate();
+  await focusTestWorkbench(extension);
   await assertModelQueryBuilderWebview(extension);
   await assertModelStabilityWebview(extension);
   await assertModelStabilityWebview(extension, "query");
+  await assertModelIntegrityWebview(extension);
+  await assertModelIntegrityWebview(extension, "query");
   if (process.env.DJANGO_SHELL_E2E_MODEL_BROWSER_ONLY === "1") { return; }
   await vscode.commands.executeCommand("djangoShell.openConsole");
   const opened = await waitForSnapshot((snapshot) => snapshot.panelOpen && snapshot.hasEditorAnchor);

@@ -96,7 +96,7 @@ export interface BackendSqlEntry {
 }
 
 /** A JSON-safe cell value; tagged objects describe non-primitive field types and may retain full editor text beside a truncated preview. */
-export type BackendModelCell = boolean | number | string | null | { edit?: string; len?: number; t: string; v: string };
+export type BackendModelCell = boolean | number | string | null | { edit?: string; kind?: "array" | "object" | "scalar"; len?: number; t: string; v: string };
 
 /** One serialized row keyed by column attname. */
 export type BackendModelRow = Record<string, BackendModelCell>;
@@ -254,6 +254,7 @@ export interface ModelAnnotationSpec {
 
 /** Parameters for one model rows page request. (`columns` is supplied in ORM mode for the filter/annotation allowlist.) */
 export interface ModelRowsQuery {
+  database?: string;
   annotations?: ModelAnnotationSpec[];
   app: string;
   columns?: BackendModelColumn[];
@@ -272,6 +273,7 @@ export interface ModelRowsQuery {
 
 /** Parameters for one row count request. */
 export interface ModelCountQuery {
+  database?: string;
   app: string;
   columns?: BackendModelColumn[];
   filters?: BackendModelFilter[];
@@ -294,6 +296,7 @@ export interface ModelAggregateTerm {
 
 /** Parameters for one grouped/global aggregate request. (`columns` is supplied in ORM mode for the field allowlist.) */
 export interface ModelAggregateQuery {
+  database?: string;
   aggregates: ModelAggregateTerm[];
   app: string;
   columns?: BackendModelColumn[];
@@ -359,6 +362,7 @@ export interface BackendCommitResult {
 export interface BackendModelLookupRow {
   label: string;
   pk: unknown;
+  value?: unknown;
 }
 
 /** A bounded page of foreign-key picker candidates for a target model. */
@@ -413,10 +417,12 @@ export interface BackendModelQuery {
 /** Parameters for one foreign-key picker search request. */
 export interface ModelLookupQuery {
   app: string;
+  database?: string;
   exclude?: string[];
   limit?: number;
   model: string;
   q: string;
+  valueField?: string;
 }
 
 /** Parameters for one related-rows expansion request. */
@@ -433,6 +439,7 @@ export interface ModelRelatedQuery {
 
 /** Parameters for one lazy computed-field (@property) fetch over the current filter/order page. */
 export interface ModelComputedQuery {
+  database?: string;
   annotations?: ModelAnnotationSpec[];
   app: string;
   columns?: BackendModelColumn[];
@@ -579,7 +586,7 @@ export function parseOrmLookupResponse(buffer: string, limit: number): BackendMo
   if (parsed.ok === false || !Array.isArray(rows)) {
     return { error: ormError(parsed, "Lookup failed in ORM mode."), hasMore: false, ok: false, rows: [], sql: [] };
   }
-  return { hasMore: rows.length > limit, ok: true, rows: rows.slice(0, limit).map((row) => ({ label: lookupRowLabel(row), pk: row.pk })), sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
+  return { hasMore: rows.length > limit, ok: true, rows: rows.slice(0, limit).map((row) => ({ label: typeof row.label === "string" ? row.label : lookupRowLabel(row), pk: row.pk, ...(Object.prototype.hasOwnProperty.call(row, "value") ? { value: row.value } : {}) })), sql: Array.isArray(parsed.sql) ? parsed.sql : [] };
 }
 
 /** Parses an ORM-mode count cell marker (`Model._base_manager.count()`) into a row count. */

@@ -1,6 +1,7 @@
 // Socket client for executing Python code through the in-process Django shell backend.
 
 import * as net from "net";
+import { BACKEND_REQUEST_BYTES, BACKEND_RESPONSE_BYTES } from "./backendWireLimits";
 import { randomUUID } from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
 import { BackendSocketFailure } from "./backendSocketFailure";
@@ -573,7 +574,7 @@ export class BackendClient {
         if (!compiled.validation.ok || !compiled.cell) { return recipeRowsValidationFailure(query.recipe, compiled.validation); }
         return this.ormCell(compiled.cell, (buffer) => parseOrmGridResponse(buffer, limit, offset, keyset)).then((result) => withRecipeResult(result, query.recipe as ModelQueryRecipeV2, compiled.validation));
       }
-      return this.ormCell(buildRowsOrm({ annotations: query.annotations, app: query.app, columns: query.columns, filters: query.filters, limit, model: query.model, offset, order: query.order, relations: query.relations }), (buffer) => parseOrmGridResponse(buffer, limit, offset));
+      return this.ormCell(buildRowsOrm({ annotations: query.annotations, app: query.app, database: query.database, columns: query.columns, filters: query.filters, limit, model: query.model, offset, order: query.order, relations: query.relations }), (buffer) => parseOrmGridResponse(buffer, limit, offset));
     }
     const { recipeMetadata: _recipeMetadata, ...wireQuery } = query;
     return this.request({ ...wireQuery, kind: "rows" }, parseModelRowsResponse);
@@ -601,7 +602,7 @@ export class BackendClient {
     await this.ensureModelBrowserFeature();
     if (this.reconstructsViaOrmCell) {
       const limit = typeof query.limit === "number" && query.limit > 0 ? query.limit : 20;
-      return this.ormCell(buildLookupOrm(query.app, query.model, query.q, query.exclude ?? [], limit), (buffer) => parseOrmLookupResponse(buffer, limit));
+      return this.ormCell(buildLookupOrm(query.app, query.model, query.q, query.exclude ?? [], limit, query.database, query.valueField), (buffer) => parseOrmLookupResponse(buffer, limit));
     }
     return this.request({ ...query, kind: "lookup" }, parseModelLookupResponse);
   }
@@ -620,7 +621,7 @@ export class BackendClient {
       return this.request({ ...wireQuery, kind: "computed", limit }, parseModelComputedResponse);
     }
     if (this.reconstructsViaOrmCell) {
-      return this.ormCell(buildComputedOrm(query.app, query.model, query.field, query.filters, query.order, limit, query.columns, query.relations, query.annotations), parseOrmComputedResponse);
+      return this.ormCell(buildComputedOrm(query.app, query.model, query.field, query.filters, query.order, limit, query.columns, query.relations, query.annotations, query.database), parseOrmComputedResponse);
     }
     const { recipeMetadata: _recipeMetadata, ...wireQuery } = query;
     return this.request({ ...wireQuery, kind: "computed", limit }, parseModelComputedResponse);
@@ -639,6 +640,11 @@ export class BackendClient {
     } finally { this.queryRequests.delete(executionId); }
   }
 
+  /** Releases a retained result without executing its original code. */
+  async releaseModelQuery(resultId: string): Promise<void> {
+    await this.request({ kind: "releaseQuery", resultId }, parseBackendResponse, false);
+  }
+
   /** Returns the row count for the current filter set, computed on demand. */
   async modelCount(query: ModelCountQuery): Promise<BackendModelCount> {
     await this.ensureModelBrowserFeature();
@@ -648,7 +654,7 @@ export class BackendClient {
         if (!compiled.validation.ok || !compiled.cell) { return Promise.resolve(recipeCountValidationFailure(query.recipe, compiled.validation)); }
         return this.ormCell(compiled.cell, parseOrmCountResponse).then((result) => withRecipeResult(result, query.recipe as ModelQueryRecipeV2, compiled.validation));
       }
-      return this.ormCell(buildCountOrm(query.app, query.model, query.filters, query.columns, query.relations), parseOrmCountResponse);
+      return this.ormCell(buildCountOrm(query.app, query.model, query.filters, query.columns, query.relations, query.database), parseOrmCountResponse);
     }
     const { recipeMetadata: _recipeMetadata, ...wireQuery } = query;
     return this.request({ ...wireQuery, kind: "count" }, parseModelCountResponse);
@@ -669,7 +675,7 @@ export class BackendClient {
         return Promise.resolve({ columns: [], error: "Computed-@property aggregates aren't available over the terminal — switch the Link selector to Socket or Auto.", groupBy: [], hasMore: false, ok: false, orm: "", rows: [], sql: [] });
       }
       const limit = ORM_PTY_ROW_CAP;
-      return this.ormCell(buildAggregateOrm({ aggregates: query.aggregates, app: query.app, columns: query.columns, filters: query.filters, groupBy: query.groupBy, limit, model: query.model, relations: query.relations }), (buffer) => parseOrmAggregateResponse(buffer, limit));
+      return this.ormCell(buildAggregateOrm({ aggregates: query.aggregates, app: query.app, database: query.database, columns: query.columns, filters: query.filters, groupBy: query.groupBy, limit, model: query.model, relations: query.relations }), (buffer) => parseOrmAggregateResponse(buffer, limit));
     }
     const { recipeMetadata: _recipeMetadata, ...wireQuery } = query;
     return this.request({ ...wireQuery, kind: "aggregate" }, parseModelAggregateResponse);
@@ -690,6 +696,9 @@ export class BackendClient {
     log = true
   ): Promise<T> {
     const started = Date.now();
+    if (Buffer.byteLength(JSON.stringify({ ...payload, token: this.endpoint.token })) + 1 > BACKEND_REQUEST_BYTES) {
+      return Promise.resolve(parse(kindErrorResponse(payload.kind, "Backend request exceeds the 4 MiB input limit.")));
+    }
     // The extracted PTY payload helper preserves `hasDebugExecutionPayload(payload) ? payload` and
     // `payload.kind === "execute" && Array.isArray(payload.breakpointLines)` so breakpoint metadata stays intact.
     // Debug cell runs stay on the interactive main thread (stable pydevd thread id, traced since attach): route them
@@ -732,12 +741,13 @@ export class BackendClient {
 
   /** Returns a bounded response wait for busy-time parallel reads, so a paused/suspended backend rejects instead of hanging the read forever. */
   private parallelReadResponseTimeout(payload: BackendRequestPayload): number | undefined {
+    if (payload.kind === "releaseQuery") { return 1500; }
     return this.parallelModelReads && PARALLEL_MODEL_READ_KINDS.has(payload.kind) ? PARALLEL_READ_RESPONSE_TIMEOUT_MS : undefined;
   }
 
   /** Builds the strictly metadata-backed context required by Recipe v2 ORM reconstruction. */
-  private recipeOrmContext(query: { app: string; columns?: BackendModelColumn[]; model: string; recipeMetadata?: import("./modelQueryRecipeMetadata").ModelQueryMetadataBundle; relations?: BackendModelRelation[] }, limit: number, offset?: number, cursor?: unknown): { columns: BackendModelColumn[]; cursor?: unknown; limit: number; metadata: ModelQueryMetadataIndex; offset?: number; relations: BackendModelRelation[]; source: { app: string; model: string }; transport: "orm" } {
-    return { columns: query.columns ?? [], cursor, limit, metadata: query.recipeMetadata ? ModelQueryMetadataIndex.fromBundle(query.recipeMetadata) : new ModelQueryMetadataIndex(), offset, relations: query.relations ?? [], source: { app: query.app, model: query.model }, transport: "orm" };
+  private recipeOrmContext(query: { app: string; database?: string; columns?: BackendModelColumn[]; model: string; recipeMetadata?: import("./modelQueryRecipeMetadata").ModelQueryMetadataBundle; relations?: BackendModelRelation[] }, limit: number, offset?: number, cursor?: unknown): { database?: string; columns: BackendModelColumn[]; cursor?: unknown; limit: number; metadata: ModelQueryMetadataIndex; offset?: number; relations: BackendModelRelation[]; source: { app: string; model: string }; transport: "orm" } {
+    return { database: query.database, columns: query.columns ?? [], cursor, limit, metadata: query.recipeMetadata ? ModelQueryMetadataIndex.fromBundle(query.recipeMetadata) : new ModelQueryMetadataIndex(), offset, relations: query.relations ?? [], source: { app: query.app, model: query.model }, transport: "orm" };
   }
 
   /** Sends one request through the direct TCP socket transport. */
@@ -746,6 +756,7 @@ export class BackendClient {
       const host = this.forwardedEndpoint?.host ?? connectHost(this.endpoint.host);
       const socket = net.createConnection({ host, port: this.forwardedEndpoint?.port ?? this.endpoint.port });
       let buffer = "";
+      let responseBytes = 0;
       let settled = false;
       let submitted = false;
       let responseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -763,13 +774,17 @@ export class BackendClient {
         }
         try {
           const wire = `${JSON.stringify({ ...payload, token: this.endpoint.token })}\n`;
+          if (Buffer.byteLength(wire) > BACKEND_REQUEST_BYTES) { fail(new Error("Backend request exceeds the 4 MiB input limit.")); return; }
           submitted = true;
           socket.write(wire);
         } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }
       });
       socket.on("data", (chunk) => {
+        if (settled) { return; }
+        responseBytes += Buffer.byteLength(chunk);
+        if (responseBytes > BACKEND_RESPONSE_BYTES) { fail(new Error("Backend response exceeds the 16 MiB limit. The request may have executed; inspect its effects before running it again.")); return; }
         buffer += chunk;
-        if (buffer.includes("\n")) {
+        if (chunk.includes("\n")) {
           succeed(buffer);
         }
       });

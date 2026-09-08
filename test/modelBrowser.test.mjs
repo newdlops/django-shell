@@ -194,7 +194,8 @@ test("builds visible ORM cells with explicit app and model identity", () => {
   const reverseRel = [{ kind: "reverse-fk", name: "order_set", queryName: "order", single: false, target: "db.Order" }];
   assert.match(buildRowsOrm({ app: "db", columns, filters: [{ field: "order", lookup: "isnull", value: "false" }], limit: 50, model: "Company", relations: reverseRel }), /\.filter\(\*\*\{"order__isnull": False\}\)\.distinct\(\)/);
   for (const cell of [...cells, pythonPropertyCell, traversalCell]) {
-    assert.match(cell, /get_model\("db", "Company"\)\._base_manager\b/);
+    assert.match(cell, /get_model\("db", "Company"\)/);
+    assert.match(cell, /\._base_manager\b/);
     assert.doesNotMatch(cell, SUPPORT_LAYER_CELL);
   }
   assert.equal(ormBuilders.buildModelsOrm(), "len(apps.get_models())");

@@ -9,6 +9,26 @@ const require = createRequire(import.meta.url);
 const net = require("node:net");
 const { BackendClient } = require("../out/backendClient.js");
 
+test("oversized input is rejected before either transport can execute it", async () => {
+  let sockets = 0, fallbacks = 0;
+  await withSocket(() => { sockets++; }, () => undefined, async () => {
+    const client = new BackendClient({ host: "127.0.0.1", port: 9, token: "fixture" }, undefined, async () => { fallbacks++; return JSON.stringify({ ok: true }); });
+    const result = await client.execute("x".repeat(4 * 1024 * 1024 + 1));
+    assert.equal(result.ok, false); assert.match(result.stderr || result.error, /input limit/);
+    assert.equal(sockets, 0); assert.equal(fallbacks, 0);
+  });
+});
+
+test("oversized responses close the socket and never replay a submitted operation", async () => {
+  let fallbacks = 0;
+  await withSocket((socket) => socket.emit("connect"), (socket) => queueMicrotask(() => socket.emit("data", "x".repeat(16 * 1024 * 1024 + 1))), async (sockets) => {
+    const client = new BackendClient({ host: "127.0.0.1", port: 9, token: "fixture" }, undefined, async () => { fallbacks++; return JSON.stringify({ ok: true }); });
+    const result = await client.execute("counter += 1");
+    assert.equal(result.ok, false); assert.match(result.stderr || result.error, /not retried/);
+    assert.equal(sockets[0].destroyed, true); assert.equal(fallbacks, 0);
+  });
+});
+
 /** Replaces the socket boundary while retaining the production client request and error handling. */
 async function withSocket(connect, write, run) {
   const original = net.createConnection, sockets = [];

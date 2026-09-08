@@ -66,8 +66,8 @@ export function hostHarness() {
     ViewColumn: { Active: 1 },
     commands: { executeCommand: async () => undefined, registerCommand: () => ({ dispose() {} }) },
     workspace: { getConfiguration: () => ({ get: (_key, fallback) => fallback }) },
-    window: { createWebviewPanel: () => ({
-      dispose() { this.close?.(); }, onDidDispose(callback) { this.close = callback; return { dispose() {} }; }, title: "",
+    window: { createWebviewPanel: (_viewType, title) => ({
+      dispose() { this.close?.(); }, onDidDispose(callback) { this.close = callback; return { dispose() {} }; }, title,
       webview: { asWebviewUri: (value) => value, cspSource: "vscode-webview:", html: "", onDidReceiveMessage() { return { dispose() {} }; }, postMessage: async (message) => { posted.push(structuredClone(message)); return true; } }
     }) }
   };

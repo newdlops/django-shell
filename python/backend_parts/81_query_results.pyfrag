@@ -14,9 +14,6 @@ def _query_remember_result(namespace, value, code, expression):
     from django.db.models import Model, QuerySet
 
     now = time.monotonic()
-    for key, record in list(_QUERY_RESULTS.items()):
-        if now - record["updated"] > _QUERY_RESULT_TTL:
-            del _QUERY_RESULTS[key]
     result_id = uuid.uuid4().hex
     record = {"namespace": namespace, "value": value, "result": _browse_query_result(value, code, expression), "updated": now, "pages": _QueryOrderedDict()}
     if isinstance(value, QuerySet):
@@ -29,22 +26,20 @@ def _query_remember_result(namespace, value, code, expression):
         record["readonly"] = len(targets) != 1 or next(iter(targets))[1] is None
     elif not isinstance(value, (str, bytes, list, tuple)) and hasattr(value, "__iter__"):
         record.update({"iterator": iter(value), "lookahead": [], "position": 0})
-    _QUERY_RESULTS[result_id] = record
-    while len(_QUERY_RESULTS) > _QUERY_RESULT_LIMIT:
-        _QUERY_RESULTS.popitem(last=False)
+    _query_register_result(result_id, record)
     return result_id
 
 
 def _query_result_page(namespace, result_id, offset, limit, refresh=False):
     """Returns another page of one retained result or fails without executing the original code."""
+    with _query_cached_result(namespace, result_id) as record:
+        return _query_result_payload(record, result_id, offset, limit, refresh)
+
+
+def _query_result_payload(record, result_id, offset, limit, refresh):
+    """Reads only a pinned result and preserves its source and database identity."""
     from django.db.models import Model
 
-    record = _QUERY_RESULTS.get(result_id) if isinstance(result_id, str) else None
-    if record is None or record["namespace"] is not namespace or time.monotonic() - record["updated"] > _QUERY_RESULT_TTL:
-        _QUERY_RESULTS.pop(result_id, None) if isinstance(result_id, str) else None
-        raise ValueError("This query result is no longer available. Use Run to execute the query again.")
-    record["updated"] = time.monotonic()
-    _QUERY_RESULTS.move_to_end(result_id)
     if "iterator" in record:
         payload = _query_stream_page(record, offset, limit)
         record["readonly"] = True

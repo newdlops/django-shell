@@ -140,10 +140,113 @@ function tokenClass(match) {
   return "sql-punct";
 }
 
+// media/gridJson.js
+function parseJsonExact(source) {
+  const text2 = String(source);
+  let index = 0;
+  function whitespace() {
+    while (/[ \t\r\n]/.test(text2[index] || "x")) {
+      index++;
+    }
+  }
+  function invalid() {
+    throw new SyntaxError(`Invalid JSON at position ${index}.`);
+  }
+  function string() {
+    const start = index++;
+    while (index < text2.length) {
+      const char = text2[index++];
+      if (char === "\\") {
+        index++;
+      } else if (char === '"') {
+        return JSON.parse(text2.slice(start, index));
+      }
+    }
+    return invalid();
+  }
+  function value() {
+    whitespace();
+    const char = text2[index];
+    if (char === '"') {
+      return string();
+    }
+    if (char === "[" || char === "{") {
+      const array = char === "[", result2 = array ? [] : {}, end = array ? "]" : "}";
+      index++;
+      whitespace();
+      if (text2[index] === end) {
+        index++;
+        return result2;
+      }
+      for (; ; ) {
+        whitespace();
+        let key;
+        if (!array) {
+          if (text2[index] !== '"') {
+            return invalid();
+          }
+          key = string();
+          whitespace();
+          if (text2[index++] !== ":") {
+            return invalid();
+          }
+        }
+        const item = value();
+        if (array) {
+          result2.push(item);
+        } else {
+          Object.defineProperty(result2, key, { configurable: true, enumerable: true, value: item, writable: true });
+        }
+        whitespace();
+        if (text2[index] === end) {
+          index++;
+          return result2;
+        }
+        if (text2[index++] !== ",") {
+          return invalid();
+        }
+      }
+    }
+    for (const [token2, literal] of [["true", true], ["false", false], ["null", null]]) {
+      if (text2.startsWith(token2, index)) {
+        index += token2.length;
+        return literal;
+      }
+    }
+    const token = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(text2.slice(index))?.[0];
+    if (!token) {
+      return invalid();
+    }
+    index += token.length;
+    const number = Number(token);
+    return /^-?\d+$/.test(token) && !Number.isSafeInteger(number) ? BigInt(token) : number;
+  }
+  const result = value();
+  whitespace();
+  if (index !== text2.length) {
+    invalid();
+  }
+  return result;
+}
+function stringifyJsonExact(value) {
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stringifyJsonExact(item) ?? "null").join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value).filter(([, item]) => item !== void 0).map(([key, item]) => `${JSON.stringify(key)}:${stringifyJsonExact(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 // media/gridArrayEdit.js
 var NUMERIC_FIELD = /(?:AutoField|IntegerField|FloatField)$/;
 var TEMPORAL_INPUT = { DateField: "date", DateTimeField: "datetime-local", TimeField: "time" };
 var editorSequence = 0;
+var ARRAY_PAGE_SIZE = 50;
+var ARRAY_MAX_COLUMNS = 12;
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -156,7 +259,7 @@ function parseEditableArray(column, text2) {
     return { items: [], nullValue: true };
   }
   try {
-    const value = JSON.parse(source);
+    const value = parseJsonExact(source);
     return Array.isArray(value) ? { items: value, nullValue: false } : void 0;
   } catch {
     return void 0;
@@ -173,6 +276,9 @@ function arrayShape(items) {
       if (!seen.has(key)) {
         seen.add(key);
         keys.push(key);
+        if (keys.length > ARRAY_MAX_COLUMNS) {
+          return { keys: [], kind: "scalar", wide: true };
+        }
       }
     }
   }
@@ -183,7 +289,7 @@ function inputText(value) {
     return "null";
   }
   if (typeof value === "object") {
-    return JSON.stringify(value);
+    return stringifyJsonExact(value);
   }
   return String(value ?? "");
 }
@@ -191,13 +297,17 @@ function coerceInput(text2, sample, fieldType = "") {
   if (fieldType === "BooleanField" || typeof sample === "boolean") {
     return text2 === "" ? null : text2 === "true";
   }
-  if (NUMERIC_FIELD.test(fieldType) || typeof sample === "number") {
-    const numeric = Number(text2);
-    return text2.trim() !== "" && Number.isFinite(numeric) ? numeric : text2;
+  if (NUMERIC_FIELD.test(fieldType) || typeof sample === "number" || typeof sample === "bigint") {
+    try {
+      const numeric = parseJsonExact(text2);
+      return typeof numeric === "bigint" || typeof numeric === "number" && Number.isFinite(numeric) ? numeric : text2;
+    } catch {
+      return text2;
+    }
   }
   if (sample === null || typeof sample === "object") {
     try {
-      return JSON.parse(text2);
+      return parseJsonExact(text2);
     } catch {
       return text2;
     }
@@ -216,7 +326,7 @@ function defaultItem(column, shape, items) {
     return false;
   }
   const sample = items.find((value) => value !== null);
-  if (typeof sample === "number") {
+  if (typeof sample === "number" || typeof sample === "bigint") {
     return 0;
   }
   if (typeof sample === "boolean") {
@@ -269,7 +379,7 @@ function scalarSuggestions(items) {
   return values;
 }
 function choiceIndex(choices, value) {
-  const exact = choices.findIndex((choice) => JSON.stringify(choice[0]) === JSON.stringify(value));
+  const exact = choices.findIndex((choice) => stringifyJsonExact(choice[0]) === stringifyJsonExact(value));
   return exact >= 0 ? exact : choices.findIndex((choice) => String(choice[0]) === String(value));
 }
 function choiceControl(spec, value, onValue) {
@@ -286,7 +396,10 @@ function choiceControl(spec, value, onValue) {
     select.appendChild(option);
   });
   select.value = String(selected);
-  select.addEventListener("change", () => onValue(choices[Number(select.value)][0]));
+  select.addEventListener("change", () => {
+    const chosen = choices[Number(select.value)][0];
+    onValue(typeof chosen === "string" ? coerceInput(chosen, value, spec.type) : chosen);
+  });
   return select;
 }
 function booleanControl(spec, value, onValue) {
@@ -317,7 +430,10 @@ function valueControl(value, spec, suggestionsId, onValue, label) {
   const fieldType = String(spec.type || "");
   const control = element(nested ? "textarea" : "input", nested ? "arrayedit-control arrayedit-json" : "arrayedit-control");
   if (!nested) {
-    control.type = TEMPORAL_INPUT[fieldType] || (NUMERIC_FIELD.test(fieldType) || typeof value === "number" ? "number" : "text");
+    control.type = typeof value === "bigint" ? "text" : TEMPORAL_INPUT[fieldType] || (NUMERIC_FIELD.test(fieldType) || typeof value === "number" ? "number" : "text");
+    if (typeof value === "bigint") {
+      control.inputMode = "numeric";
+    }
     if (control.type === "number") {
       control.step = fieldType.includes("Integer") || fieldType.includes("AutoField") ? "1" : "any";
     }
@@ -335,8 +451,8 @@ function openArrayEditor(td, column, start, host) {
   if (!parsed) {
     return void 0;
   }
-  const baseline = parsed.nullValue ? "" : JSON.stringify(parsed.items);
-  const items = JSON.parse(JSON.stringify(parsed.items));
+  const baseline = parsed.nullValue ? "" : stringifyJsonExact(parsed.items);
+  const items = parsed.items;
   const shape = arrayShape(items);
   const suggestions = scalarSuggestions(items);
   const editorId = editorSequence += 1;
@@ -362,6 +478,14 @@ function openArrayEditor(td, column, start, host) {
   const table = element("table", "arrayedit-table");
   table.setAttribute("aria-label", `${column.name || column.attname || "List"} items`);
   const footer = element("footer", "arrayedit-foot");
+  const pager = element("nav", "arrayedit-pager");
+  pager.setAttribute("aria-label", "List pages");
+  const previous = button("Previous", "secondary", "Previous list page");
+  const next = button("Next", "secondary", "Next list page");
+  const pageStatus = element("span", "arrayedit-page-status");
+  pageStatus.setAttribute("role", "status");
+  pageStatus.setAttribute("aria-live", "polite");
+  pager.append(previous, pageStatus, next);
   const addButton = button("+ Add item", "secondary", "Append a list item");
   const nullButton = column.null ? button("Set null", "secondary", "Replace this list with null") : null;
   const spacer = element("span", "arrayedit-spacer");
@@ -373,7 +497,7 @@ function openArrayEditor(td, column, start, host) {
   }
   footer.append(spacer, cancelButton, applyButton);
   scroll.appendChild(table);
-  panel.append(header, note, scroll, footer);
+  panel.append(header, note, scroll, pager, footer);
   backdrop.appendChild(panel);
   document.body.appendChild(backdrop);
   if (suggestions.length) {
@@ -387,7 +511,8 @@ function openArrayEditor(td, column, start, host) {
     panel.appendChild(list);
   }
   let settled = false;
-  function finish(next) {
+  let page = 0;
+  function finish(next2) {
     if (settled) {
       return;
     }
@@ -395,20 +520,31 @@ function openArrayEditor(td, column, start, host) {
     window.removeEventListener("keydown", onKey, true);
     backdrop.remove();
     host.closed?.();
-    if (next === void 0 || next === baseline) {
+    if (next2 === void 0 || next2 === baseline) {
       host.done();
     } else {
-      host.stage(next);
+      host.stage(next2);
     }
     previousFocus?.focus?.();
   }
   function removeRow(index) {
     items.splice(index, 1);
     render();
+    (table.querySelector(".arrayedit-control") || addButton).focus();
   }
   function addRow() {
     items.push(defaultItem(column, shape, items));
+    page = Math.floor((items.length - 1) / ARRAY_PAGE_SIZE);
     render(true);
+  }
+  function movePage(delta) {
+    const nextPage = page + delta;
+    if (nextPage < 0 || nextPage * ARRAY_PAGE_SIZE >= items.length) {
+      return;
+    }
+    page = nextPage;
+    render();
+    (table.querySelector(".arrayedit-control") || addButton).focus();
   }
   function appendValueCell(tr, value, spec, label, onValue) {
     const tdValue = element("td");
@@ -416,6 +552,15 @@ function openArrayEditor(td, column, start, host) {
     tr.appendChild(tdValue);
   }
   function render(focusLast = false) {
+    page = Math.min(page, Math.max(0, Math.ceil(items.length / ARRAY_PAGE_SIZE) - 1));
+    const start2 = page * ARRAY_PAGE_SIZE;
+    const end = Math.min(start2 + ARRAY_PAGE_SIZE, items.length);
+    pager.hidden = items.length <= ARRAY_PAGE_SIZE;
+    previous.disabled = page === 0;
+    next.disabled = end >= items.length;
+    pageStatus.textContent = items.length ? `${start2 + 1}\u2013${end} of ${items.length}` : "No items";
+    table.setAttribute("aria-rowcount", String(items.length + 1));
+    scroll.scrollTop = 0;
     table.textContent = "";
     const thead = element("thead");
     const headRow = element("tr");
@@ -441,8 +586,10 @@ function openArrayEditor(td, column, start, host) {
     thead.appendChild(headRow);
     table.appendChild(thead);
     const tbody = element("tbody");
-    items.forEach((item, index) => {
+    items.slice(start2, end).forEach((item, localIndex) => {
+      const index = start2 + localIndex;
       const tr = element("tr");
+      tr.setAttribute("aria-rowindex", String(index + 2));
       tr.appendChild(element("td", "arrayedit-index", String(index)));
       if (shape.kind === "object") {
         shape.keys.forEach((key) => {
@@ -472,7 +619,7 @@ function openArrayEditor(td, column, start, host) {
     }
     table.appendChild(tbody);
     count.textContent = `${items.length} item${items.length === 1 ? "" : "s"}`;
-    note.textContent = parsed.nullValue ? "Current value is null. Applying converts it to a list." : shape.kind === "object" ? "Object items are expanded into columns." : "Edit each item, add rows, or remove rows.";
+    note.textContent = parsed.nullValue ? "Current value is null. Applying converts it to a list." : shape.wide ? "Items have many fields. Edit each item as JSON." : shape.kind === "object" ? "Object items are expanded into columns." : "Edit each item, add rows, or remove rows.";
     if (focusLast) {
       tbody.querySelector("tr:last-child .arrayedit-control")?.focus();
     }
@@ -500,11 +647,13 @@ function openArrayEditor(td, column, start, host) {
       finish(void 0);
     } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
-      finish(JSON.stringify(items));
+      finish(stringifyJsonExact(items));
     }
   }
   addButton.addEventListener("click", addRow);
-  applyButton.addEventListener("click", () => finish(JSON.stringify(items)));
+  previous.addEventListener("click", () => movePage(-1));
+  next.addEventListener("click", () => movePage(1));
+  applyButton.addEventListener("click", () => finish(stringifyJsonExact(items)));
   cancelButton.addEventListener("click", () => finish(void 0));
   closeButton.addEventListener("click", () => finish(void 0));
   nullButton?.addEventListener("click", () => finish(""));
@@ -518,6 +667,53 @@ function openArrayEditor(td, column, start, host) {
   const firstControl = panel.querySelector(".arrayedit-control");
   (firstControl || addButton).focus();
   return { cancel: () => finish(void 0), td };
+}
+
+// media/gridArrayValue.js
+var cells = /* @__PURE__ */ new WeakMap();
+var texts = /* @__PURE__ */ new Map();
+var TEXT_CACHE_BYTES = 1024 * 1024;
+var retainedBytes = 0;
+function editableArrayLength(column, cell) {
+  if (!column || !["ArrayField", "JSONField"].includes(column.type)) {
+    return void 0;
+  }
+  if (cell && typeof cell === "object") {
+    if (cell.kind) {
+      return cell.kind === "array" && Number.isSafeInteger(cell.len) && cell.len >= 0 ? cell.len : void 0;
+    }
+    if (cells.has(cell)) {
+      return cells.get(cell);
+    }
+    const count2 = legacyLength(column, String(cell.edit ?? cell.v ?? ""));
+    cells.set(cell, count2);
+    return count2;
+  }
+  const text2 = String(cell ?? "");
+  if (!text2.trim() && column.type === "ArrayField") {
+    return 0;
+  }
+  if (texts.has(text2)) {
+    return texts.get(text2);
+  }
+  const count = legacyLength(column, text2);
+  const bytes = text2.length * 2;
+  if (bytes <= TEXT_CACHE_BYTES) {
+    while (texts.size && (texts.size >= 32 || retainedBytes + bytes > TEXT_CACHE_BYTES)) {
+      const oldest = texts.keys().next().value;
+      retainedBytes -= oldest.length * 2;
+      texts.delete(oldest);
+    }
+    texts.set(text2, count);
+    retainedBytes += bytes;
+  }
+  return count;
+}
+function legacyLength(column, text2) {
+  if (!text2.trim() && column.type === "ArrayField") {
+    return 0;
+  }
+  return text2.trimStart().startsWith("[") ? parseEditableArray(column, text2)?.items.length : void 0;
 }
 
 // media/gridPin.js
@@ -580,6 +776,7 @@ function setPin(cell, left) {
 
 // media/gridFkPicker.js
 var DEBOUNCE_MS = 200;
+var pickerSequence = 0;
 function openFkPicker(td, column, start, host) {
   const wrap = document.createElement("div");
   wrap.className = "fkpick";
@@ -590,6 +787,12 @@ function openFkPicker(td, column, start, host) {
   input.autocomplete = "off";
   const results = document.createElement("div");
   results.className = "fkresults";
+  results.id = `fk-results-${++pickerSequence}`;
+  results.setAttribute("role", "listbox");
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-label", `Search ${column.relation.target}`);
+  input.setAttribute("aria-autocomplete", "list");
+  input.setAttribute("aria-controls", results.id);
   results.hidden = true;
   wrap.appendChild(input);
   wrap.appendChild(results);
@@ -597,7 +800,10 @@ function openFkPicker(td, column, start, host) {
   td.appendChild(wrap);
   input.focus();
   input.select();
-  const state2 = { current: 0, highlight: -1, options: [], settled: false, timer: null };
+  const state2 = { current: 0, highlight: -1, options: [], settled: false, status: "", timer: null };
+  function storedValue(option) {
+    return String(option.value ?? option.pk);
+  }
   function finish(value) {
     if (state2.settled) {
       return;
@@ -616,9 +822,15 @@ function openFkPicker(td, column, start, host) {
     if (state2.timer) {
       clearTimeout(state2.timer);
     }
+    state2.current = host.allocId();
+    state2.options = [];
+    state2.highlight = -1;
+    state2.status = "Searching\u2026";
+    render();
     const run = () => {
-      state2.current = host.allocId();
-      host.post({ q: input.value.trim(), requestId: state2.current, target: column.relation.target, type: "lookupRelated" });
+      if (!state2.settled) {
+        host.post({ field: column.attname, q: input.value.trim(), requestId: state2.current, target: column.relation.target, type: "lookupRelated" });
+      }
     };
     if (immediate) {
       run();
@@ -628,14 +840,26 @@ function openFkPicker(td, column, start, host) {
   }
   function render() {
     results.textContent = "";
-    results.hidden = !state2.options.length;
+    results.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+    input.setAttribute("aria-activedescendant", state2.highlight >= 0 ? `${results.id}-${state2.highlight}` : "");
+    if (state2.status) {
+      const status = document.createElement("div");
+      status.className = "fkstatus";
+      status.setAttribute("role", "status");
+      status.textContent = state2.status;
+      results.appendChild(status);
+    }
     state2.options.forEach((option, index) => {
       const row = document.createElement("div");
       row.className = index === state2.highlight ? "fkopt active" : "fkopt";
+      row.id = `${results.id}-${index}`;
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", String(index === state2.highlight));
       row.textContent = option.label;
       row.addEventListener("mousedown", (event) => {
         event.preventDefault();
-        finish(String(option.pk));
+        finish(storedValue(option));
       });
       results.appendChild(row);
     });
@@ -657,7 +881,7 @@ function openFkPicker(td, column, start, host) {
       move2(-1);
     } else if (event.key === "Enter") {
       event.preventDefault();
-      finish(state2.highlight >= 0 ? String(state2.options[state2.highlight].pk) : input.value.trim());
+      finish(state2.highlight >= 0 ? storedValue(state2.options[state2.highlight]) : input.value.trim());
     } else if (event.key === "Escape") {
       event.preventDefault();
       finish(null);
@@ -666,6 +890,14 @@ function openFkPicker(td, column, start, host) {
   input.addEventListener("blur", () => setTimeout(() => finish(input.value.trim()), 0));
   query(true);
   return {
+    /** Cancels an obsolete picker before another result or editor replaces its cell. */
+    cancel() {
+      finish(null);
+    },
+    /** Stages direct key input before a Commit action takes its save snapshot. */
+    commit() {
+      finish(input.value.trim());
+    },
     /** Renders backend candidates when they answer the latest query. */
     fill(message) {
       if (state2.settled || message.requestId !== state2.current) {
@@ -674,6 +906,7 @@ function openFkPicker(td, column, start, host) {
       const result = message.result || {};
       state2.options = result.ok && Array.isArray(result.rows) ? result.rows : [];
       state2.highlight = state2.options.length ? 0 : -1;
+      state2.status = !result.ok ? "Search failed. Type again to retry." : state2.options.length ? "" : "No matching rows. Enter a key directly.";
       render();
     }
   };
@@ -822,8 +1055,9 @@ function createEditor(ctx) {
     }
   }
   function editForeignKey(td, column, start) {
+    activePicker?.cancel();
     activePicker = openFkPicker(td, column, start, {
-      allocId: () => lookupSeq += 1,
+      allocId: () => `${editorId}:lookup:${++lookupSeq}`,
       done: () => ctx.paintCell(td),
       post: (message) => ctx.post(message),
       stage: (value) => stage2(td, value)
@@ -854,7 +1088,7 @@ function createEditor(ctx) {
     }
     const column = td._column || {};
     const start = td.dataset.staged !== void 0 ? td.dataset.staged : td._editval ?? "";
-    if (parseEditableArray(column, start)) {
+    if (editableArrayLength(column, td.dataset.staged !== void 0 ? start : td._cell ?? start) !== void 0) {
       editArray(td, column, start);
       return;
     }
@@ -864,6 +1098,10 @@ function createEditor(ctx) {
     }
     const control = buildControl(column, start);
     const input = control.input;
+    if (column.type === "JSONField") {
+      input.title = "Enter a JSON value. Put strings in double quotes.";
+      input.setAttribute("aria-label", `${column.name || column.attname || "Value"} (JSON)`);
+    }
     td.textContent = "";
     td.appendChild(input);
     input.focus();
@@ -905,6 +1143,7 @@ function createEditor(ctx) {
       return;
     }
     finishActiveControl?.(true);
+    activePicker?.commit();
     if (!pendingCount()) {
       return;
     }
@@ -965,6 +1204,8 @@ function createEditor(ctx) {
     return failed.map((row) => `pk=${row.pk} ${row.error || Object.entries(row.fieldErrors || {}).map(([field, messages]) => `${field}: ${messages[0]}`).join("; ")}`).join(" \xB7 ") || "validation error";
   }
   function reset() {
+    activePicker?.cancel();
+    activePicker = void 0;
     activeArrayEditor?.cancel();
     finishActiveControl?.(false);
     activeCommit = void 0;
@@ -1168,7 +1409,7 @@ function paintRelatedCell(td, el2, renderValue2) {
   td.appendChild(renderValue2(td._cell));
   if (column.relation && rawOf(td._cell) !== null && rawOf(td._cell) !== void 0) {
     td.appendChild(document.createTextNode(" "));
-    td.appendChild(el2("button", { ariaLabel: `Open ${column.relation.target} filtered to this row`, className: "linkbtn", dataset: { act: "open", target: column.relation.target, val: String(rawOf(td._cell)) }, title: `Open ${column.relation.target} filtered to this row` }, el2("span", { ariaHidden: "true", className: "codicon codicon-open-preview" })));
+    td.appendChild(el2("button", { ariaLabel: `Open ${column.relation.target} filtered to this row`, className: "linkbtn", dataset: { act: "open", field: column.relation.filterField || "pk", target: column.relation.target, val: String(rawOf(td._cell)) }, title: `Open ${column.relation.target} filtered to this row` }, el2("span", { ariaHidden: "true", className: "codicon codicon-open-preview" })));
   }
 }
 function buildEditableRelatedTable(result, deps) {
@@ -1884,6 +2125,124 @@ async function runModelStabilityE2eProbe({ document: document2, postMessage, req
     postMessage({ requestId: requestId2, snapshot: { datetimeLabel, newerEditPreserved: true, parentDraftPreserved: true, saveFailureRecovered: true, relatedFailureRecovered: true }, type: "e2eQueryBuilderProbeResult" });
   } catch (error) {
     postMessage({ requestId: requestId2, snapshot: { error: error.message }, type: "e2eQueryBuilderProbeResult" });
+  }
+}
+
+// media/modelIntegrityE2eProbe.js
+async function waitFor2(predicate, label) {
+  const deadline = Date.now() + 7e3;
+  while (Date.now() < deadline) {
+    const result = predicate();
+    if (result) {
+      return result;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out at ${label}.`);
+}
+async function stableForeignKeyCell(document2) {
+  let previous, signature = "", since = 0;
+  return waitFor2(() => {
+    const cell = document2.querySelector('#tbody td[data-attname="company_id"]');
+    if (cell && !document2.hasFocus()) {
+      window.focus();
+      cell.focus();
+    }
+    const rect = cell?.getBoundingClientRect();
+    const current = rect ? [rect.x, rect.y, rect.width, rect.height].join(":") : "";
+    if (cell !== previous || current !== signature || !document2.hasFocus()) {
+      previous = cell;
+      signature = current;
+      since = performance.now();
+    }
+    return cell && rect.width > 0 && rect.height > 0 && document2.hasFocus() && performance.now() - since >= 200 ? cell : void 0;
+  }, "focused and stable foreign-key cell");
+}
+async function runModelIntegrityE2eProbe({ document: document2, postMessage, requestId: requestId2 }) {
+  const progress = (stage2) => postMessage({ requestId: requestId2, stage: stage2, type: "e2eQueryBuilderProbeProgress" });
+  let debugCell, debugInput;
+  try {
+    const cell = (field) => document2.querySelector(`#tbody td[data-attname="${field}"]`);
+    const fk = await stableForeignKeyCell(document2);
+    debugCell = fk;
+    progress("fk-search-states");
+    fk.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    const input = await waitFor2(() => fk.querySelector("input"), "foreign-key input");
+    debugInput = input;
+    if (!fk.textContent.includes("Searching")) {
+      throw new Error("FK search has no pending state.");
+    }
+    async function search(text2, expected) {
+      input.value = text2;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await waitFor2(() => fk.textContent.includes(expected), `FK search ${text2}`);
+    }
+    await search("empty", "No matching rows");
+    await search("fail", "Search failed");
+    await search("Beta", "#2 \xB7 Beta");
+    if (input.getAttribute("aria-expanded") !== "true" || !input.getAttribute("aria-activedescendant")) {
+      throw new Error("FK keyboard selection is not exposed.");
+    }
+    input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+    if (cell("company_id").dataset.staged !== "001") {
+      throw new Error("FK selection lost its alternate key or leading zeros.");
+    }
+    document2.getElementById("commit").click();
+    await waitFor2(() => document2.getElementById("commit").disabled && cell("company_id")?.dataset.staged === void 0 && cell("company_id")?.textContent.startsWith("001"), "foreign-key save");
+    progress("exact-json-list-edit");
+    const scroller = document2.getElementById("gridwrap");
+    scroller.scrollLeft = scroller.scrollWidth;
+    scroller.dispatchEvent(new Event("scroll"));
+    const data = await waitFor2(() => cell("data"), "JSON column");
+    data.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    const modal = await waitFor2(() => document2.querySelector('.arrayedit-panel[role="dialog"]'), "list editor");
+    const arrayPageSize = modal.querySelectorAll("tbody tr").length;
+    if (arrayPageSize !== 50) {
+      throw new Error(`Large list rendered ${arrayPageSize} rows instead of one page.`);
+    }
+    const integer = modal.querySelector('[aria-label="ref, row 1"]'), name = modal.querySelector('[aria-label="name, row 1"]');
+    if (integer?.value !== "9007199254740993" || integer.type !== "text") {
+      throw new Error("List editor rounded its untouched integer.");
+    }
+    name.value = "edited";
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+    [...modal.querySelectorAll("button")].find((button3) => button3.textContent === "Apply").click();
+    if (!cell("data").dataset.staged.includes('"ref":9007199254740993')) {
+      throw new Error("Applying the list changed an untouched integer.");
+    }
+    document2.getElementById("commit").click();
+    await waitFor2(() => document2.getElementById("commit").disabled && cell("data")?.dataset.staged === void 0, "JSON save");
+    progress("large-json-pagination");
+    cell("data").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    const pages = await waitFor2(() => document2.querySelector('.arrayedit-panel[role="dialog"]'), "paged list editor");
+    const pageButton = (label) => [...pages.querySelectorAll("button")].find((button3) => button3.textContent === label);
+    pageButton("Next").click();
+    const other = pages.querySelector('[aria-label="name, row 51"]');
+    other.value = "page edited";
+    other.dispatchEvent(new Event("input", { bubbles: true }));
+    pageButton("Previous").click();
+    if (pages.querySelector('[aria-label="name, row 1"]').value !== "edited") {
+      throw new Error("Previous-page values changed.");
+    }
+    pageButton("Next").click();
+    if (pages.querySelector('[aria-label="name, row 51"]').value !== "page edited") {
+      throw new Error("Page navigation discarded an edit.");
+    }
+    pageButton("+ Add item").click();
+    const added = pages.querySelector('[aria-label="name, row 10001"]');
+    if (!added || pages.querySelectorAll("tbody tr").length !== 1) {
+      throw new Error("Adding an item did not open its final page.");
+    }
+    pages.querySelector('[aria-label="Delete row 10001"]').click();
+    if (pages.querySelectorAll("tbody tr").length !== 50 || !pages.contains(document2.activeElement)) {
+      throw new Error("Deleting the final item lost the page or keyboard focus.");
+    }
+    pageButton("Apply").click();
+    document2.getElementById("commit").click();
+    await waitFor2(() => document2.getElementById("commit").disabled && cell("data")?.dataset.staged === void 0, "paged JSON save");
+    postMessage({ requestId: requestId2, snapshot: { fkStates: ["pending", "empty", "error", "selected", "saved"], exactJson: true, arrayPageSize, arrayPaging: true, viewport: { width: window.innerWidth, height: window.innerHeight } }, type: "e2eQueryBuilderProbeResult" });
+  } catch (error) {
+    postMessage({ requestId: requestId2, snapshot: { error: error.message, focus: document2.hasFocus(), activeControl: document2.activeElement?.className, cellConnected: debugCell?.isConnected, inputConnected: debugInput?.isConnected }, type: "e2eQueryBuilderProbeResult" });
   }
 }
 
@@ -7984,7 +8343,7 @@ function renderQuerySummaryTable(result, helpers) {
 }
 
 // media/modelQueryBuilderE2eProbe.js
-async function waitFor2(predicate, label, timeoutMs = 5e3) {
+async function waitFor3(predicate, label, timeoutMs = 5e3) {
   const started = Date.now();
   let value;
   while (Date.now() - started < timeoutMs) {
@@ -8011,7 +8370,7 @@ function conditionAdd(document2) {
   return [...document2.querySelectorAll("button")].find((candidate) => candidate.getAttribute("aria-label") === "Add condition to this group");
 }
 async function waitForE2eField(document2, predicate, timeoutMs = 5e3) {
-  return waitFor2(() => {
+  return waitFor3(() => {
     const select = document2.querySelector('select[aria-label="Condition field"]');
     return select && predicate(select) ? select : void 0;
   }, "Query Builder Field control", timeoutMs);
@@ -8041,7 +8400,7 @@ function assistantSettingsReady(document2, expected) {
 }
 async function propertyResult(document2, expected) {
   try {
-    await waitFor2(() => {
+    await waitFor3(() => {
       const cell = document2.querySelector('td[data-key="display_name"]');
       const load = document2.querySelector('button[data-field="display_name"]');
       return cell?.textContent === expected && load && !load.disabled;
@@ -8110,8 +8469,8 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
     }
     progress("example-aggregate-apply");
     examples[0].click();
-    await waitFor2(() => document2.getElementById("queryComputedList")?.textContent?.includes("row_count") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("row_count"), "aggregate example controls");
-    await waitFor2(() => previewIsReady(document2), "aggregate preview");
+    await waitFor3(() => document2.getElementById("queryComputedList")?.textContent?.includes("row_count") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("row_count"), "aggregate example controls");
+    await waitFor3(() => previewIsReady(document2), "aggregate preview");
     if (typeof document2.querySelector === "function") {
       progress("property-load-retry");
       propertyLoads.push(...await propertyLoadCycle(document2));
@@ -8122,7 +8481,7 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
       for (const expected of ["ascending", "descending", "none"]) {
         progress(`grid-sort-${expected}`);
         usernameSort.click();
-        await waitFor2(() => {
+        await waitFor3(() => {
           const header = document2.querySelector('th[data-key="username"]');
           usernameSort = header?.querySelector(".sortbtn");
           return header?.getAttribute("aria-sort") === expected && usernameSort && !usernameSort.disabled;
@@ -8139,47 +8498,47 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
     }
     progress("example-aggregate-undo-click");
     click(document2, "Undo");
-    await waitFor2(() => examplesRestored(document2), "aggregate undo");
+    await waitFor3(() => examplesRestored(document2), "aggregate undo");
     progress("example-aggregate-undo-restored");
     progress("example-exists-apply");
     click(document2, "2 \xB7 Related memberships via Exists");
-    await waitFor2(() => document2.getElementById("queryComputedList")?.textContent?.includes("has_memberships") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("has_memberships"), "Exists example controls");
-    await waitFor2(() => previewIsReady(document2), "Exists preview");
+    await waitFor3(() => document2.getElementById("queryComputedList")?.textContent?.includes("has_memberships") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("has_memberships"), "Exists example controls");
+    await waitFor3(() => previewIsReady(document2), "Exists preview");
     if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
       throw new Error("Exists example changed applied filters.");
     }
     progress("example-exists-undo-click");
     click(document2, "Undo");
-    await waitFor2(() => examplesRestored(document2), "Exists undo");
+    await waitFor3(() => examplesRestored(document2), "Exists undo");
     progress("example-exists-undo-restored");
     progress("example-formula-apply");
     click(document2, "3 \xB7 Normalize Username; Length \u2265 8");
-    await waitFor2(() => document2.getElementById("queryComputedList")?.textContent?.includes("normalized_username") && document2.getElementById("queryComputedList")?.textContent?.includes("username_length") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("username_length") && document2.getElementById("queryOrderBy")?.textContent?.includes("username_length") && document2.getElementById("queryOrderBy")?.textContent?.includes("normalized_username"), "Formula example controls");
-    await waitFor2(() => previewIsReady(document2), "Formula preview");
+    await waitFor3(() => document2.getElementById("queryComputedList")?.textContent?.includes("normalized_username") && document2.getElementById("queryComputedList")?.textContent?.includes("username_length") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("username_length") && document2.getElementById("queryOrderBy")?.textContent?.includes("username_length") && document2.getElementById("queryOrderBy")?.textContent?.includes("normalized_username"), "Formula example controls");
+    await waitFor3(() => previewIsReady(document2), "Formula preview");
     if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
       throw new Error("Formula example changed applied filters.");
     }
     progress("example-formula-undo-click");
     click(document2, "Undo");
-    await waitFor2(() => examplesRestored(document2), "Formula undo");
+    await waitFor3(() => examplesRestored(document2), "Formula undo");
     progress("example-formula-undo-restored");
     progress("example-window-apply");
     click(document2, "4 \xB7 Top 3 ID per Status");
-    await waitFor2(() => document2.getElementById("queryComputedList")?.textContent?.includes("rank_within_status") && document2.getElementById("queryComputedList")?.textContent?.includes("Window: row_number") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("rank_within_status") && document2.getElementById("queryOrderBy")?.textContent?.includes("status") && document2.getElementById("queryOrderBy")?.textContent?.includes("rank_within_status"), "Window example controls");
-    await waitFor2(() => previewIsReady(document2), "Window preview");
+    await waitFor3(() => document2.getElementById("queryComputedList")?.textContent?.includes("rank_within_status") && document2.getElementById("queryComputedList")?.textContent?.includes("Window: row_number") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("rank_within_status") && document2.getElementById("queryOrderBy")?.textContent?.includes("status") && document2.getElementById("queryOrderBy")?.textContent?.includes("rank_within_status"), "Window example controls");
+    await waitFor3(() => previewIsReady(document2), "Window preview");
     if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
       throw new Error("Window example changed applied filters.");
     }
     progress("example-window-undo-click");
     click(document2, "Undo");
-    await waitFor2(() => examplesRestored(document2), "Window undo");
+    await waitFor3(() => examplesRestored(document2), "Window undo");
     progress("example-window-undo-restored");
-    await waitFor2(() => document2.getElementById("queryDrawerStatus")?.textContent === "Applied query is current.", "restored draft preview");
+    await waitFor3(() => document2.getElementById("queryDrawerStatus")?.textContent === "Applied query is current.", "restored draft preview");
     progress("assistant-settings");
     click(document2, "AI Assist");
     progress("assistant-open-clicked");
-    const assistant = await waitFor2(() => document2.getElementById("queryAssistantPanel")?.hidden === false ? document2.getElementById("queryAssistantPanel") : void 0, "AI Assist panel");
-    const provider = await waitFor2(() => document2.getElementById("queryAssistantProvider"), "assistant provider selector");
+    const assistant = await waitFor3(() => document2.getElementById("queryAssistantPanel")?.hidden === false ? document2.getElementById("queryAssistantPanel") : void 0, "AI Assist panel");
+    const provider = await waitFor3(() => document2.getElementById("queryAssistantProvider"), "assistant provider selector");
     const instructions = document2.getElementById("queryAssistantInstructions");
     const model = document2.getElementById("queryAssistantModel");
     const reasoning = document2.getElementById("queryAssistantReasoning");
@@ -8190,81 +8549,81 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
     let modelControl = document2.getElementById("queryAssistantModel");
     modelControl.value = "sonnet";
     modelControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor2(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "" }), "Claude direct model save");
+    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "" }), "Claude direct model save");
     progress("assistant-reasoning-save");
     let reasoningControl = document2.getElementById("queryAssistantReasoning");
     reasoningControl.value = "high";
     reasoningControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor2(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "Claude reasoning save");
+    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "Claude reasoning save");
     progress("assistant-provider-switch");
     let providerControl = document2.getElementById("queryAssistantProvider");
     providerControl.value = "codex";
     providerControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor2(() => assistantSettingsReady(document2, { automatic: true, model: "", provider: "codex", reasoning: "" }), "Codex provider acknowledgement");
+    await waitFor3(() => assistantSettingsReady(document2, { automatic: true, model: "", provider: "codex", reasoning: "" }), "Codex provider acknowledgement");
     modelControl = document2.getElementById("queryAssistantModel");
     modelControl.value = "gpt-5";
     modelControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor2(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "" }), "Codex model save");
+    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "" }), "Codex model save");
     reasoningControl = document2.getElementById("queryAssistantReasoning");
     reasoningControl.value = "xhigh";
     reasoningControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor2(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "xhigh" }), "Codex supported reasoning save");
+    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "xhigh" }), "Codex supported reasoning save");
     modelControl = document2.getElementById("queryAssistantModel");
     modelControl.value = "gpt-5-mini";
     modelControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor2(() => assistant.textContent?.includes("does not support the selected reasoning level") && document2.getElementById("queryAssistantProvider")?.value === "codex" && !document2.getElementById("queryAssistantProvider")?.disabled, "known incompatible reasoning");
+    await waitFor3(() => assistant.textContent?.includes("does not support the selected reasoning level") && document2.getElementById("queryAssistantProvider")?.value === "codex" && !document2.getElementById("queryAssistantProvider")?.disabled, "known incompatible reasoning");
     reasoningControl = document2.getElementById("queryAssistantReasoning");
     reasoningControl.value = "medium";
     reasoningControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor2(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5-mini", provider: "codex", reasoning: "medium" }) && !assistant.textContent?.includes("does not support the selected reasoning level"), "compatible reasoning recovery");
+    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5-mini", provider: "codex", reasoning: "medium" }) && !assistant.textContent?.includes("does not support the selected reasoning level"), "compatible reasoning recovery");
     providerControl = document2.getElementById("queryAssistantProvider");
     providerControl.value = "claude";
     providerControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor2(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "retained Claude settings");
+    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "retained Claude settings");
     modelControl = document2.getElementById("queryAssistantModel");
     modelControl.value = "";
     modelControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor2(() => assistantSettingsReady(document2, { automatic: true, model: "", provider: "claude", reasoning: "high" }), "automatic mode restoration");
+    await waitFor3(() => assistantSettingsReady(document2, { automatic: true, model: "", provider: "claude", reasoning: "high" }), "automatic mode restoration");
     modelControl = document2.getElementById("queryAssistantModel");
     modelControl.value = "sonnet";
     modelControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor2(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "retained manual pin after automatic mode");
-    const currentInstructions = await waitFor2(() => document2.getElementById("queryAssistantInstructions"), "assistant instruction control after provider selection");
+    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "retained manual pin after automatic mode");
+    const currentInstructions = await waitFor3(() => document2.getElementById("queryAssistantInstructions"), "assistant instruction control after provider selection");
     currentInstructions.value = "Create a valid query draft";
     currentInstructions.dispatchEvent(new Event("input", { bubbles: true }));
     const refresh = document2.getElementById("queryAssistantRefresh");
     refresh.focus();
     click(document2, "Refresh models");
-    await waitFor2(() => document2.getElementById("queryAssistantInstructions")?.value === "Create a valid query draft" && assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }) && document2.activeElement?.id === "queryAssistantRefresh", "metadata refresh preservation and focus");
-    await waitFor2(() => button2(document2, "Generate suggestion") && !button2(document2, "Generate suggestion")?.disabled, "enabled assistant generation");
+    await waitFor3(() => document2.getElementById("queryAssistantInstructions")?.value === "Create a valid query draft" && assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }) && document2.activeElement?.id === "queryAssistantRefresh", "metadata refresh preservation and focus");
+    await waitFor3(() => button2(document2, "Generate suggestion") && !button2(document2, "Generate suggestion")?.disabled, "enabled assistant generation");
     progress("generation-running");
     click(document2, "Generate suggestion");
-    await waitFor2(() => assistant.textContent?.includes("Generating suggestion with Claude Code") && button2(document2, "Generate suggestion")?.disabled && button2(document2, "Cancel"), "assistant running state");
+    await waitFor3(() => assistant.textContent?.includes("Generating suggestion with Claude Code") && button2(document2, "Generate suggestion")?.disabled && button2(document2, "Cancel"), "assistant running state");
     progress("cancel-clicked");
     click(document2, "Cancel");
-    await waitFor2(() => button2(document2, "Cancel")?.disabled && assistant.textContent?.includes("Cancelling generation\u2026"), "assistant cancellation pending");
+    await waitFor3(() => button2(document2, "Cancel")?.disabled && assistant.textContent?.includes("Cancelling generation\u2026"), "assistant cancellation pending");
     progress("cancel-ack");
-    await waitFor2(() => assistant.textContent?.includes("Generation was cancelled.") && !assistant.textContent?.includes("AI-generated suggestion"), "assistant cancellation");
-    await waitFor2(() => button2(document2, "Generate suggestion") && !button2(document2, "Generate suggestion")?.disabled, "generation after cancellation");
+    await waitFor3(() => assistant.textContent?.includes("Generation was cancelled.") && !assistant.textContent?.includes("AI-generated suggestion"), "assistant cancellation");
+    await waitFor3(() => button2(document2, "Generate suggestion") && !button2(document2, "Generate suggestion")?.disabled, "generation after cancellation");
     progress("second-generation");
     click(document2, "Generate suggestion");
     progress("suggestion");
-    await waitFor2(() => assistant.textContent?.includes("AI-generated suggestion \xB7 Claude Code") || document2.getElementById("queryDraftAiAssembly")?.hidden === false, "assistant result or assembled draft");
+    await waitFor3(() => assistant.textContent?.includes("AI-generated suggestion \xB7 Claude Code") || document2.getElementById("queryDraftAiAssembly")?.hidden === false, "assistant result or assembled draft");
     if (button2(document2, "Use as draft")) {
       throw new Error("AI Assist exposed a manual draft action.");
     }
     if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
       throw new Error("Suggestion changed applied filters.");
     }
-    await waitFor2(() => document2.getElementById("queryDraftStatus")?.textContent === "Draft changes are not applied" && document2.getElementById("queryDraftAiAssembly")?.hidden === false && document2.getElementById("queryWhereRoot")?.textContent?.includes("Status") && document2.getElementById("queryWhereRoot")?.textContent?.includes("equals \u201Cactive\u201D.") && !document2.getElementById("queryDrawerApply")?.disabled, "rendered automatic draft-only assistant acceptance");
+    await waitFor3(() => document2.getElementById("queryDraftStatus")?.textContent === "Draft changes are not applied" && document2.getElementById("queryDraftAiAssembly")?.hidden === false && document2.getElementById("queryWhereRoot")?.textContent?.includes("Status") && document2.getElementById("queryWhereRoot")?.textContent?.includes("equals \u201Cactive\u201D.") && !document2.getElementById("queryDrawerApply")?.disabled, "rendered automatic draft-only assistant acceptance");
     if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None" || document2.getElementById("queryDrawerStatus")?.textContent?.includes("Applying")) {
       throw new Error("Assistant acceptance applied the query.");
     }
     click(document2, "Undo");
-    await waitFor2(() => document2.getElementById("queryDraftStatus")?.textContent === "Draft matches applied query", "assistant acceptance undo");
+    await waitFor3(() => document2.getElementById("queryDraftStatus")?.textContent === "Draft matches applied query", "assistant acceptance undo");
     progress("legacy-picker");
     click(document2, "1. Filter Rows");
-    const pickerAdd = await waitFor2(() => conditionAdd(document2), "legacy picker condition control");
+    const pickerAdd = await waitFor3(() => conditionAdd(document2), "legacy picker condition control");
     pickerAdd.click();
     const select = await waitForE2eField(document2, (candidate) => !candidate.disabled);
     const optionGroups = [...select.querySelectorAll("optgroup")].map((group) => group.label);
@@ -8437,7 +8796,7 @@ function handleMessage(message) {
     return;
   }
   if (message.type === "e2eQueryBuilderProbe") {
-    const probe = message.suite === "stability" ? runModelStabilityE2eProbe : runModelQueryBuilderE2eProbe;
+    const probe = message.suite === "integrity" ? runModelIntegrityE2eProbe : message.suite === "stability" ? runModelStabilityE2eProbe : runModelQueryBuilderE2eProbe;
     void probe({ document, postMessage: (value) => vscode.postMessage(value), requestId: message.requestId }).catch(() => vscode.postMessage({ requestId: message.requestId, snapshot: { error: "Model Browser E2E probe bootstrap failed." }, type: "e2eQueryBuilderProbeResult" }));
     return;
   }
@@ -8768,7 +9127,7 @@ function buildCell(row, column, pk) {
   if (column.editable) {
     td.classList.add("editable");
     td.dataset.attname = column.attname;
-    td.title = parseEditableArray(column, cellRawText(td._cell)) ? "Double-click to edit list items" : "Double-click to edit";
+    td.title = editableArrayLength(column, td._cell) !== void 0 ? "Double-click to edit list items" : "Double-click to edit";
     td._editval = cellRawText(td._cell);
   }
   paintCell(td);
@@ -8807,11 +9166,11 @@ function paintCell(td) {
   td.removeAttribute("aria-description");
   const cell = td._cell;
   td.appendChild(renderValue(cell));
-  appendArrayEditButton(td, column, cellRawText(cell));
+  appendArrayEditButton(td, column, cell);
   if (column.relation && rawValue(cell) !== null && rawValue(cell) !== void 0) {
     const wrap = el("span", { className: "fk" });
     wrap.appendChild(el("button", { ariaLabel: "Expand related row", className: "linkbtn", title: "Expand related row", dataset: { act: "fk", rel: column.relation.field, pk: String(td._pk), val: String(rawValue(cell)) } }, codicon("copy")));
-    wrap.appendChild(el("button", { ariaLabel: `Open ${column.relation.target} filtered to this row`, className: "linkbtn", title: `Open ${column.relation.target} filtered to this row`, dataset: { act: "open", target: column.relation.target, val: String(rawValue(cell)) } }, codicon("open-preview")));
+    wrap.appendChild(el("button", { ariaLabel: `Open ${column.relation.target} filtered to this row`, className: "linkbtn", title: `Open ${column.relation.target} filtered to this row`, dataset: { act: "open", field: column.relation.filterField || "pk", target: column.relation.target, val: String(rawValue(cell)) } }, codicon("open-preview")));
     td.appendChild(document.createTextNode(" "));
     td.appendChild(wrap);
   }
@@ -8826,11 +9185,11 @@ function appendArrayEditButton(td, column, text2) {
   if (!column.editable) {
     return;
   }
-  const parsed = parseEditableArray(column, text2);
-  if (!parsed) {
+  const length = editableArrayLength(column, text2);
+  if (length === void 0) {
     return;
   }
-  const button3 = el("button", { className: "arrayedit-open", dataset: { act: "editArray" }, title: `Edit ${parsed.items.length} list item${parsed.items.length === 1 ? "" : "s"}` }, `\u25A6 ${parsed.items.length}`);
+  const button3 = el("button", { className: "arrayedit-open", dataset: { act: "editArray" }, title: `Edit ${length} list item${length === 1 ? "" : "s"}` }, `\u25A6 ${length}`);
   td.insertBefore(button3, td.firstChild);
 }
 function renderValue(cell) {
@@ -8873,7 +9232,7 @@ function onTableClick(event) {
     toggleSort(data.col);
   } else if (data.act === "open") {
     const split = data.target.lastIndexOf(".");
-    vscode.postMessage({ type: "openModel", app: data.target.slice(0, split), model: data.target.slice(split + 1), filterPk: data.val });
+    vscode.postMessage({ type: "openModel", app: data.target.slice(0, split), model: data.target.slice(split + 1), filterField: data.field || "pk", filterPk: data.val });
   } else if (data.act === "fk") {
     expandInto(node, { relation: data.rel, pk: coerce(data.pk), value: coerce(data.val), single: true });
   } else if (data.act === "rel") {
@@ -9038,6 +9397,7 @@ function nestedPanel(title, trigger, body) {
   return wrap;
 }
 function closeDetail(button3) {
+  pendingRelated.clear();
   els.detailDrawer.hidden = true;
   els.detailContent.innerHTML = "";
   button3.dataset.open = "";

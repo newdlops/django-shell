@@ -8,6 +8,7 @@ import type { BackendModelColumn, BackendModelQuery, BackendModelQueryResult, Mo
 import type { ModelDataSource } from "./modelBrowser";
 import { modelBrowserHtml } from "./modelBrowserHtml";
 import { modelCommitResponse } from "./modelCommitResponse";
+import { modelLookupResponse } from "./modelLookup";
 import { DiagnosticLogger } from "./diagnostics";
 import { ModelQueryRunController, type ModelQueryRunOutcome, type ModelQueryRunSnapshot } from "./modelQueryRunController";
 import type { WorkbenchOverlay, WorkbenchOverlayGeometry } from "./workbenchOverlay";
@@ -20,14 +21,19 @@ interface IncomingMessage {
   commitId?: string;
   database?: string;
   editorId?: string;
+  field?: string;
+  filterField?: string;
+  filterPk?: unknown;
   mode?: BackendTransportMode;
   model?: string;
   pageSize?: number;
   pk?: unknown;
+  q?: string;
   relation?: string;
   rect?: unknown;
-  requestId?: number;
+  requestId?: number | string;
   single?: boolean;
+  target?: string;
   type: string;
   useOverlay?: boolean;
   value?: unknown;
@@ -57,6 +63,7 @@ export class ModelQueryConsole implements vscode.Disposable {
   private lastQueryResult: { result?: BackendModelQueryResult; source: string } | undefined;
   private lastRows: BackendModelQuery | undefined;
   private resultId: string | undefined;
+  private resultGeneration = 0;
   private runtimeId: string | undefined;
   private readonly executionPrefix = randomUUID();
   private readonly queryRun: ModelQueryRunController;
@@ -89,6 +96,7 @@ export class ModelQueryConsole implements vscode.Disposable {
   dispose(): void {
     const panel = this.panel;
     this.closePanel();
+    this.invalidateResult();
     this.queryRun.dispose();
     panel?.dispose();
     for (const disposable of this.disposables) {
@@ -177,8 +185,11 @@ export class ModelQueryConsole implements vscode.Disposable {
       await this.commitRelated(message);
     } else if (message.type === "expandRelated") {
       await this.expandRelated(message);
+    } else if (message.type === "lookupRelated") {
+      await this.lookupRelated(message);
     } else if (message.type === "openModel" && message.app && message.model) {
-      void vscode.commands.executeCommand("djangoShell.openModelData", { app: message.app, model: message.model });
+      if (!this.current) { this.post({ type: "error", message: "Open a result from one database before following a model relation." }); return; }
+      void vscode.commands.executeCommand("djangoShell.openModelData", { database: this.current?.database, app: message.app, initialField: message.filterField, initialPk: message.filterPk, model: message.model });
     } else if (message.type === "setTransport" && message.mode) {
       this.source.setModelTransport(message.mode);
       this.postTransport();
@@ -198,7 +209,11 @@ export class ModelQueryConsole implements vscode.Disposable {
     } else if (!this.resultId) { return false; }
     const offset = reset ? 0 : this.nextOffset ?? 0;
     const request = recordExecution ? { code } : { resultId: this.resultId };
-    const pending = this.queryRun.run((requestId) => this.source.modelQuery({ ...request, executionId: `${this.executionPrefix}:${requestId}`, limit: this.pageSize, offset }));
+    const owner = this.captureResultOwner();
+    const pending = this.queryRun.run((requestId) => this.source.modelQuery({ ...request, executionId: `${this.executionPrefix}:${requestId}`, limit: this.pageSize, offset }).then((result) => {
+      if (result.resultId && (!owner() || !this.queryRun.active || this.queryRun.snapshot.requestId !== requestId || this.queryRun.snapshot.state === "cancelling")) { this.releaseResult(result.resultId); }
+      return result;
+    }));
     if (!this.queryRun.active) {
       return false;
     }
@@ -242,10 +257,15 @@ export class ModelQueryConsole implements vscode.Disposable {
 
   /** Removes editor targets and result handles when explicit execution or runtime replacement invalidates them. */
   private invalidateResult(): void {
+    if (this.resultId) { this.releaseResult(this.resultId); }
+    this.resultGeneration += 1;
     this.current = undefined; this.columns = []; this.resultId = undefined;
     this.nextOffset = null; this.lastRows = undefined; this.lastQueryResult = undefined;
     this.post({ type: "queryInvalidated" });
   }
+
+  /** Releases only the backend handle owned by this result, with idle expiry covering unavailable runtimes. */
+  private releaseResult(resultId: string): void { void this.source.releaseModelQuery?.(resultId).catch(() => undefined); }
 
   /** Runs the complete query overlay document, preserving query-console whole-buffer semantics. */
   private async runCurrentQuery(): Promise<boolean> {
@@ -467,9 +487,25 @@ export class ModelQueryConsole implements vscode.Disposable {
     if (!this.current || !message.relation || message.pk === undefined) {
       return;
     }
+    const owner = this.captureResultOwner();
     const query: ModelRelatedQuery = { app: this.current.app, database: this.current.database, limit: this.pageSize, model: this.current.model, pk: message.pk, relation: message.relation, single: message.single, value: message.value };
-    const result = await this.source.modelRelated(query);
-    this.post({ requestId: message.requestId, result, type: "related" });
+    let result;
+    try { result = await this.source.modelRelated(query); }
+    catch (error) { result = { columns: [], error: error instanceof Error ? error.message : String(error), ok: false, rows: [] }; }
+    if (owner()) { this.post({ requestId: message.requestId, result, type: "related" }); }
+  }
+
+  /** Returns FK candidates only to the panel and result that requested them. */
+  private async lookupRelated(message: IncomingMessage): Promise<void> {
+    const owner = this.captureResultOwner();
+    const response = await modelLookupResponse(message, this.columns, (query) => this.source.modelLookup(query), this.current?.database);
+    if (owner()) { this.post(response); }
+  }
+
+  /** Captures independent panel, result, and runtime identities without invalidating ordinary paging. */
+  private captureResultOwner(): () => boolean {
+    const panel = this.panel, generation = this.resultGeneration, runtime = this.source.modelRuntimeId?.();
+    return () => Boolean(panel) && panel === this.panel && generation === this.resultGeneration && runtime === this.source.modelRuntimeId?.();
   }
 
   /** Invalidates a replaced backend without replaying arbitrary query code on namespace notifications. */

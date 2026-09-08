@@ -6,6 +6,7 @@ import type { BackendInterruptResult, BackendTransport, BackendTransportMode } f
 import type { BackendCommitResult, BackendFilterFieldTree, BackendModelAggregate, BackendModelColumn, BackendModelComputed, BackendModelCount, BackendModelFilter, BackendModelList, BackendModelLookup, BackendModelOrder, BackendModelQuery, BackendModelRelatedRows, BackendModelRelation, BackendModelRows, BackendModelSchema, ModelAggregateQuery, ModelAggregateTerm, ModelAnnotationSpec, ModelCommitChange, ModelCommitQuery, ModelComputedQuery, ModelCountQuery, ModelLookupQuery, ModelQueryRequest, ModelRelatedQuery, ModelRowsQuery } from "./modelBackend";
 import { modelBrowserHtml } from "./modelBrowserHtml";
 import { modelCommitResponse } from "./modelCommitResponse";
+import { modelLookupResponse } from "./modelLookup";
 import { DiagnosticLogger } from "./diagnostics";
 import { buildRecipeCountOrm, buildRecipeRowsOrm, buildRecipeSummaryOrm } from "./modelQueryRecipeOrm";
 import { cloneModelQueryRecipe, createEmptyModelQueryRecipe, isModelQueryRecipeV2, type ModelQueryRecipeV2, type QueryModelRef } from "./modelQueryRecipe";
@@ -26,6 +27,7 @@ export interface ModelDataSource {
   modelFilterFields(app: string, model: string): Promise<BackendFilterFieldTree>;
   modelLookup(query: ModelLookupQuery): Promise<BackendModelLookup>;
   modelQuery(query: ModelQueryRequest): Promise<BackendModelQuery>;
+  releaseModelQuery?(resultId: string): Promise<void>;
   /** Interrupts an active custom ORM query without queueing another shell request. */
   interruptModelQuery(reason: string, executionId?: string): Promise<BackendInterruptResult>;
   modelRuntimeId?(): string | undefined;
@@ -41,8 +43,10 @@ export interface ModelDataSource {
 }
 
 interface ModelTarget {
+  database?: string;
   app: string;
-  /** When set, the panel opens pre-filtered to this primary key (FK-link drill-in). */
+  initialField?: string;
+  /** When set, the panel opens filtered to this relation key, using initialField or the primary key. */
   initialPk?: unknown;
   label?: string;
   model: string;
@@ -58,6 +62,7 @@ interface IncomingMessage {
   changes?: ModelCommitChange[];
   columns?: BackendModelColumn[];
   field?: string;
+  filterField?: string;
   filterPk?: unknown;
   filters?: BackendModelFilter[];
   groupBy?: string[];
@@ -139,7 +144,7 @@ export class ModelBrowser implements vscode.Disposable {
   }
 
   /** Opens an isolated model panel, probes its rendered Query Builder, and closes only that panel. */
-  async e2eProbeQueryBuilder(target: ModelTarget, suite: "queryBuilder" | "stability" = "queryBuilder"): Promise<Record<string, unknown>> {
+  async e2eProbeQueryBuilder(target: ModelTarget, suite: "queryBuilder" | "stability" | "integrity" = "queryBuilder"): Promise<Record<string, unknown>> {
     const panel = this.createPanel(target);
     try {
       return await panel.e2eProbeQueryBuilder(suite);
@@ -242,7 +247,7 @@ class ModelBrowserPanel {
   ) {
     this.assistant = this.createAssistant(assistantService);
     this.initialLoad = new Promise((resolve) => { this.resolveInitialLoad = resolve; });
-    this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, `${target.model} — data`, vscode.ViewColumn.Active, {
+    this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, `${target.model}${target.database ? ` [${target.database}]` : ""} — data`, vscode.ViewColumn.Active, {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.file(path.join(extensionPath, "media"))],
       retainContextWhenHidden: true
@@ -250,9 +255,9 @@ class ModelBrowserPanel {
     const recipeSource = { app: target.app, model: target.model };
     this.appliedRecipe = createEmptyModelQueryRecipe(recipeSource);
     if (target.initialPk !== undefined && target.initialPk !== null && isRecipeInitialPk(target.initialPk)) {
-      // Opened by following a foreign-key link: pre-filter to that row's primary key. `pk` is allowlisted backend-side and resolves to the model's real primary key in every transport.
-      this.filters = [{ field: "pk", lookup: "exact", value: target.initialPk }];
-      this.appliedRecipe = createInitialPkModelQueryRecipe(recipeSource, target.initialPk);
+      const field = target.initialField && /^[A-Za-z_][A-Za-z0-9_]*$/.test(target.initialField) ? target.initialField : "pk";
+      this.filters = [{ field, lookup: "exact", value: target.initialPk }];
+      this.appliedRecipe = createInitialPkModelQueryRecipe(recipeSource, target.initialPk, field);
       this.appliedRecipeSummary = compactRecipeSummary(this.appliedRecipe);
     }
     this.latestDraftRecipe = cloneModelQueryRecipe(this.appliedRecipe);
@@ -272,7 +277,7 @@ class ModelBrowserPanel {
   }
 
   /** Requests one non-selecting Query Builder DOM probe from the loaded webview. */
-  async e2eProbeQueryBuilder(suite: "queryBuilder" | "stability" = "queryBuilder"): Promise<Record<string, unknown>> {
+  async e2eProbeQueryBuilder(suite: "queryBuilder" | "stability" | "integrity" = "queryBuilder"): Promise<Record<string, unknown>> {
     await this.waitForE2eInitialLoad();
     if (this.disposed) { throw new Error("Model Browser E2E panel closed before its probe."); }
     const requestId = `query-builder-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -369,7 +374,7 @@ class ModelBrowserPanel {
   /** Loads one page of rows, resetting the grid or appending to it. */
   private async loadPage(reset: boolean, generation = this.nextLoadGeneration()): Promise<void> {
     this.post({ phase: reset ? "rows" : "more", type: "loading" });
-    const query: ModelRowsQuery = { annotations: this.annotations, app: this.target.app, columns: this.columns, filters: this.filters, limit: this.pageSize, model: this.target.model, order: this.order, relations: this.relations };
+    const query: ModelRowsQuery = { annotations: this.annotations, app: this.target.app, database: this.target.database, columns: this.columns, filters: this.filters, limit: this.pageSize, model: this.target.model, order: this.order, relations: this.relations };
     const revision = this.appliedRecipeRevision;
     if (this.recipeMetadata) {
       query.recipe = this.appliedRecipe;
@@ -399,7 +404,7 @@ class ModelBrowserPanel {
     }
     if (reset && rows.ok && this.reconstructsViaOrmCell()) {
       // ORM and Terminal modes have no schema RPC: build the grid head from the page's own columns/relations.
-      this.post({ schema: { app: this.target.app, columns: rows.columns, label: this.target.label ?? "", model: this.target.model, ok: true, pk: rows.pk ?? "id", relations: rows.relations ?? [], table: "" }, type: "schema" });
+      this.post({ schema: { app: this.target.app, database: this.target.database, columns: rows.columns, label: this.target.label ?? "", model: this.target.model, ok: true, pk: rows.pk ?? "id", relations: rows.relations ?? [], table: "" }, type: "schema" });
     }
     this.logger?.log("model.browser.rows", { append: !reset, model: `${this.target.app}.${this.target.model}`, ok: rows.ok, rows: rows.rows.length });
     this.post({ append: !reset, filters: this.filters, order: this.order, queryLog: this.recipeLogMeta("rows"), recipeVersion: rows.recipeVersion, revision, rows, type: "rows" });
@@ -491,7 +496,7 @@ class ModelBrowserPanel {
   /** Builds a validation-only Recipe compiler result without evaluating any Django QuerySet. */
   private compileRecipe(recipe: ModelQueryRecipeV2, metadata: ModelQueryMetadataIndex): ModelQueryValidation {
     const transport: BackendTransport | "orm" = this.reconstructsViaOrmCell() ? "orm" : this.source.modelTransportInfo().active;
-    const context = { columns: this.columns, limit: this.pageSize, metadata, relations: this.relations, source: { app: this.target.app, model: this.target.model }, transport };
+    const context = { database: this.target.database, columns: this.columns, limit: this.pageSize, metadata, relations: this.relations, source: { app: this.target.app, model: this.target.model }, transport };
     return (recipe.mode === "summary" ? buildRecipeSummaryOrm(recipe, context) : buildRecipeRowsOrm(recipe, context)).validation;
   }
 
@@ -564,7 +569,7 @@ class ModelBrowserPanel {
   private async loadRecipeSummary(revision: number, generation = this.nextLoadGeneration()): Promise<void> {
     if (!this.recipeMetadata) { return; }
     this.post({ phase: "aggregate", type: "loading" });
-    const result = await this.source.modelAggregate({ aggregates: [], app: this.target.app, columns: this.columns, model: this.target.model, recipe: this.appliedRecipe, recipeMetadata: this.recipeMetadata.toBundle(), relations: this.relations });
+    const result = await this.source.modelAggregate({ aggregates: [], app: this.target.app, database: this.target.database, columns: this.columns, model: this.target.model, recipe: this.appliedRecipe, recipeMetadata: this.recipeMetadata.toBundle(), relations: this.relations });
     if (!this.isCurrentRecipeLoad(generation, revision)) { return; }
     this.logger?.log("model.browser.recipe.summary", { model: `${this.target.app}.${this.target.model}`, ok: result.ok, revision });
     if (!result.ok && result.issues?.length) {
@@ -659,7 +664,7 @@ class ModelBrowserPanel {
     } else if (message.type === "openConsole") {
       await vscode.commands.executeCommand("djangoShell.openConsole");
     } else if (message.type === "openModel" && message.app && message.model) {
-      this.openAnother({ app: message.app, initialPk: message.filterPk, model: message.model });
+      this.openAnother({ database: this.target.database, app: message.app, initialField: message.filterField, initialPk: message.filterPk, model: message.model });
     }
   }
 
@@ -705,7 +710,7 @@ class ModelBrowserPanel {
   private async loadComputed(field: string, requestId?: number | string): Promise<void> {
     const revision = this.appliedRecipeRevision;
     const generation = this.loadGeneration;
-    const query: ModelComputedQuery = { annotations: this.annotations, app: this.target.app, columns: this.columns, field, filters: this.filters, limit: Math.max(this.loadedRowCount, 1), model: this.target.model, order: this.order, relations: this.relations };
+    const query: ModelComputedQuery = { annotations: this.annotations, app: this.target.app, database: this.target.database, columns: this.columns, field, filters: this.filters, limit: Math.max(this.loadedRowCount, 1), model: this.target.model, order: this.order, relations: this.relations };
     if (this.recipeMetadata) { query.recipe = this.appliedRecipe; query.recipeMetadata = this.recipeMetadata.toBundle(); }
     let result: BackendModelComputed;
     try { result = await this.source.modelComputed(query); }
@@ -720,7 +725,7 @@ class ModelBrowserPanel {
   /** Computes and returns the total row count for the current filter set. */
   private async requestCount(): Promise<void> {
     const revision = this.appliedRecipeRevision;
-    const query: ModelCountQuery = { app: this.target.app, columns: this.columns, filters: this.filters, model: this.target.model, relations: this.relations };
+    const query: ModelCountQuery = { app: this.target.app, database: this.target.database, columns: this.columns, filters: this.filters, model: this.target.model, relations: this.relations };
     if (this.recipeMetadata) { query.recipe = this.appliedRecipe; query.recipeMetadata = this.recipeMetadata.toBundle(); }
     const result = await this.source.modelCount(query);
     if (this.disposed || revision !== this.appliedRecipeRevision) { return; }
@@ -736,6 +741,7 @@ class ModelBrowserPanel {
     const result = await this.source.modelAggregate({
       aggregates: Array.isArray(message.aggregates) ? message.aggregates : [],
       app: this.target.app,
+      database: this.target.database,
       columns: this.columns,
       filters,
       groupBy: Array.isArray(message.groupBy) ? message.groupBy : [],
@@ -761,7 +767,7 @@ class ModelBrowserPanel {
 
   /** Always returns a correlated save outcome, retaining unconfirmed edits after transport exceptions. */
   private async performCommit(message: IncomingMessage, app: string | undefined, model: string | undefined, columns: BackendModelColumn[]): Promise<void> {
-    const response = await modelCommitResponse({ ...message, app, database: message.type === "commitRelated" ? message.database : undefined, model }, columns, (query) => this.source.modelCommit(query));
+    const response = await modelCommitResponse({ ...message, app, database: message.type === "commitRelated" ? message.database : this.target.database, model }, columns, (query) => this.source.modelCommit(query));
     this.logger?.log("model.browser.commit", { model: response.model, ok: response.result.ok, saved: response.result.saved });
     this.post(response);
   }
@@ -771,25 +777,16 @@ class ModelBrowserPanel {
     if (!message.relation || message.pk === undefined) {
       return;
     }
-    const query: ModelRelatedQuery = { app: this.target.app, limit: PAGE_SIZE, model: this.target.model, pk: message.pk, relation: message.relation, single: message.single, value: message.value };
+    const query: ModelRelatedQuery = { app: this.target.app, database: this.target.database, limit: PAGE_SIZE, model: this.target.model, pk: message.pk, relation: message.relation, single: message.single, value: message.value };
     const result = await this.source.modelRelated(query);
     this.post({ requestId: message.requestId, result, type: "related" });
   }
 
   /** Searches the target model for foreign-key picker candidates and returns them to the webview. */
   private async lookupRelated(message: IncomingMessage): Promise<void> {
-    const target = message.target;
-    if (!target) {
-      return;
-    }
-    const split = target.lastIndexOf(".");
-    if (split < 0) {
-      return;
-    }
-    const configured = vscode.workspace.getConfiguration("djangoShell").get<string[]>("modelBrowser.lookupExcludeFields", []);
-    const exclude = Array.isArray(configured) ? configured.filter((item) => typeof item === "string" && item.trim()) : [];
-    const result = await this.source.modelLookup({ app: target.slice(0, split), exclude, model: target.slice(split + 1), q: typeof message.q === "string" ? message.q : "" });
-    this.post({ requestId: message.requestId, result, type: "lookup" });
+    const generation = this.loadGeneration;
+    const response = await modelLookupResponse(message, this.columns, (query) => this.source.modelLookup(query), this.target.database);
+    if (this.isCurrentLoad(generation)) { this.post(response); }
   }
 
   /** Posts one message to the webview unless the panel has been closed. */
