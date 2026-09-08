@@ -55,12 +55,12 @@ export function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabe
   /** Returns one current selection token, preserving invalid paths visibly. */
   function selectionFor(selected, choices, terminal, traversing) { if (!selected) { return ""; } const terminalValue = `relationTerminal:${selected}`; if (terminal && !traversing && choices.some((choice) => choice.value === terminalValue)) { return terminalValue; } return choices.some((choice) => choice.value === `relation:${selected}`) ? `relation:${selected}` : choices.some((choice) => choice.value.endsWith(`:${selected}`)) ? choices.find((choice) => choice.value.endsWith(`:${selected}`)).value : `unavailable:${selected}`; }
   /** Writes human-readable terminal metadata without injecting markup. */
-  function setTerminal(field) { status.textContent = [field?.type, field?.null ? "Nullable" : "Required", field?.helpText].filter(Boolean).join(" · "); }
+  function setTerminal(field) { status.dataset.kind = "metadata"; status.textContent = [field?.type, field?.null ? "Nullable" : "Required", field?.helpText].filter(Boolean).join(" · "); }
 
   /** Renders one generation of the cascading metadata-backed field path. */
   async function render() {
     const renderGeneration = ++generation;
-    disposeControllers(); segments.replaceChildren(); status.textContent = "";
+    disposeControllers(); segments.replaceChildren(); status.textContent = ""; delete status.dataset.kind;
     if (!source?.app || !source?.model) { appendState("Fields unavailable", 0); status.textContent = "Field details are unavailable."; return; }
     const parts = path ? path.split("__") : [];
     let model = source;

@@ -73,8 +73,10 @@ function fieldsFor(scope, metadata) {
 /** Builds one atomic field, lookup, and RHS patch from an allowlisted field selection. */
 function fieldSelectionChanges(comparison, field, selectedPath, context) {
   const relation = field?.role === "relation"; const lhs = field?.role === "computed" ? { alias: selectedPath, kind: "computed" } : { kind: "field", path: selectedPath };
-  const previousLookup = comparison?.lookup; const lookup = relation ? "isnull" : lookupsForField(field).includes(previousLookup) && rhsIsCompatible(comparison?.rhs, context, field, previousLookup) ? previousLookup : defaultLookup(field);
-  const rhs = relation ? { kind: "literal", value: previousLookup === "isnull" && typeof comparison?.rhs?.value === "boolean" ? comparison.rhs.value : true } : lookup === previousLookup && rhsIsCompatible(comparison?.rhs, context, field, lookup) ? comparison.rhs : starterRhs(rhsKindsFor({ context, field, lookup })[0] || "literal");
+  const previousLookup = comparison?.lhs?.kind === "field" && !comparison.lhs.path ? undefined : comparison?.lookup; const lookup = relation ? "isnull" : lookupsForField(field).includes(previousLookup) && rhsIsCompatible(comparison?.rhs, context, field, previousLookup) ? previousLookup : defaultLookup(field);
+  let rhs = relation ? { kind: "literal", value: previousLookup === "isnull" && typeof comparison?.rhs?.value === "boolean" ? comparison.rhs.value : true } : lookup === previousLookup && rhsIsCompatible(comparison?.rhs, context, field, lookup) ? comparison.rhs : starterRhs(rhsKindsFor({ context, field, lookup })[0] || "literal");
+  if (rhs.kind === "literal" && rhs.value === null && field?.type === "BooleanField") { rhs = { kind: "literal", value: true }; }
+  if (rhs.kind === "literal" && rhs.value === null && field?.choices?.length) { rhs = { kind: "literal", value: field.choices[0][0] }; }
   return { lhs, lookup, rhs };
 }
 
@@ -130,7 +132,7 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
     if (previousNodeIds) { requestedFocus = addedComparisonFocus(getRecipe?.(), action.parentId, previousNodeIds) || focus; }
     const structural = action.type !== "UPDATE_NODE" || action.history?.mode !== "text";
     if (structural) {
-      if (requestRender) { requestRender(); }
+      if (requestRender) { requestRender(requestedFocus); }
       else { queueMicrotask(() => { if (!disposed) { render(); } }); }
     }
   }
@@ -177,10 +179,11 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
     join.addEventListener("change", () => act({ changes: { join: join.value }, nodeId: group.nodeId, type: "UPDATE_NODE" }));
     const negated = el("input", { ariaLabel: "Negate group", checked: Boolean(group.negated), type: "checkbox" });
     negated.addEventListener("change", () => act({ changes: { negated: negated.checked }, nodeId: group.nodeId, type: "UPDATE_NODE" }));
-    const notLabel = el("label", { className: "query-predicate-not" }, negated, "Exclude this group (NOT)");
+    const notLabel = el("label", { className: "query-predicate-not", dataset: { negated: String(Boolean(group.negated)) } }, negated, "Exclude this group (NOT)");
     const addComparison = structuralButton("Add condition", "Add condition to this group", () => act({ parentId: group.nodeId, type: "ADD_COMPARISON" }, { nodeId: group.nodeId, role: "lhs" }));
     const addGroup = structuralButton("Add group", "Add nested condition group", () => act({ parentId: group.nodeId, type: "ADD_GROUP" }, { nodeId: group.nodeId, role: "lhs" }));
     const addExists = structuralButton("Add existence check", "Add related-row existence check", () => act({ parentId: group.nodeId, type: "ADD_EXISTS_PREDICATE" }, { nodeId: group.nodeId, role: "lhs" }));
+    addGroup.dataset.advanced = "true"; addExists.dataset.advanced = "true";
     const blocked = depth >= MAX_DEPTH || (group.children || []).length >= MAX_CHILDREN;
     addComparison.disabled = blocked; addGroup.disabled = blocked; addExists.disabled = blocked || !allowsExists(context);
     addComparison.title = blocked ? `Maximum depth ${MAX_DEPTH} or ${MAX_CHILDREN} children reached` : "Add condition";
@@ -207,21 +210,29 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
     const path = comparison.lhs?.kind === "computed" ? comparison.lhs.alias : (comparison.lhs?.kind === "field" ? comparison.lhs.path : "");
     const field = persistedFieldForPath(comparison.lhs, scope, metadata, fields);
     const row = el("div", { className: "query-predicate-row", dataset: { queryNodeId: comparison.nodeId, role: "comparison" } });
-    const fieldPicker = trackPicker(createQueryFieldPicker({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], controlKey: "predicate-lhs-" + comparison.nodeId, current: path, el, metadata, onChange: (selectedPath, kind, descriptor) => { const role = kind === "relationTerminal" ? "relation" : kind === "computed" ? "computed" : "field"; const selected = descriptor && (role === "computed" ? fields.find((entry) => entry.role === role && entry.path === descriptor.alias) : { ...descriptor, path: selectedPath, role }); if (selected) { act({ changes: fieldSelectionChanges(comparison, selected, selectedPath, context), nodeId: comparison.nodeId, type: "UPDATE_NODE" }); } }, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: true }));
+    /** Commits one selected field and puts typing focus in its type-appropriate value control. */
+    function selectField(selectedPath, kind, descriptor) {
+      const role = kind === "relationTerminal" ? "relation" : kind === "computed" ? "computed" : "field";
+      const selected = descriptor && (role === "computed" ? fields.find((entry) => entry.role === role && entry.path === descriptor.alias) : { ...descriptor, path: selectedPath, role });
+      if (selected) { act({ changes: fieldSelectionChanges(comparison, selected, selectedPath, context), nodeId: comparison.nodeId, type: "UPDATE_NODE" }, { nodeId: comparison.nodeId, role: "value" }); }
+    }
+    const fieldPicker = trackPicker(createQueryFieldPicker({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], controlKey: "predicate-lhs-" + comparison.nodeId, current: path, el, metadata, onChange: selectField, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: true }));
     fieldPicker.node.dataset.focusRole = "lhs";
     const lookups = lookupsForField(field);
     const lookup = nativeSelect(lookups.map((value) => ({ label: LOOKUP_LABELS[value] || value, value })), comparison.lookup, "Comparison");
     lookup.setAttribute("aria-description", "(i) means case-insensitive.");
-    lookup.addEventListener("change", () => act({ changes: lookupChanges(comparison, lookup.value), nodeId: comparison.nodeId, type: "UPDATE_NODE" }));
+    lookup.addEventListener("change", () => act({ changes: lookupChanges(comparison, lookup.value), nodeId: comparison.nodeId, type: "UPDATE_NODE" }, { nodeId: comparison.nodeId, role: ["blank", "not_blank"].includes(lookup.value) ? "lhs" : "value" }));
     const rhsKinds = rhsKindsFor({ context, field, lookup: comparison.lookup });
     const rhsKind = nativeSelect(rhsKinds.map((value) => ({ label: rhsLabel(value), value })), comparison.rhs?.kind, "Compare with");
     rhsKind.addEventListener("change", () => act({ changes: { rhs: starterRhs(rhsKind.value) }, nodeId: comparison.nodeId, type: "UPDATE_NODE" }));
     const rhs = comparison.rhs?.kind === rhsKind.value ? comparison.rhs : starterRhs(rhsKind.value);
     const valueEditor = createPredicateValueEditor({ context, el, field, lookup: comparison.lookup, onChange: (next) => act({ changes: { rhs: next }, history: { group: `predicate:${comparison.nodeId}:rhs`, mode: "text" }, nodeId: comparison.nodeId, type: "UPDATE_NODE" }), outerFields: scope.outerFields || [], popoverLayer, rhs, scopeFields: fields });
     if (valueEditor.destroy) { trackPicker(valueEditor); }
+    const valueControl = valueEditor.node.querySelector?.("input,select");
+    if (valueControl) { valueControl.dataset.queryControlKey = `predicate-value-${comparison.nodeId}`; }
     const negate = el("input", { ariaLabel: "Negate condition", checked: Boolean(comparison.negated), type: "checkbox" });
     negate.addEventListener("change", () => act({ changes: { negated: negate.checked }, nodeId: comparison.nodeId, type: "UPDATE_NODE" }));
-    row.append(el("label", {}, "Field", fieldPicker.node), el("label", {}, "Comparison", lookup), el("label", {}, "Compare with", rhsKind), el("label", {}, "Value", valueEditor.node), el("label", {}, negate, "Not"), nodeActions(comparison));
+    row.append(el("label", { className: "query-condition-field" }, "Field", fieldPicker.node), el("label", { className: "query-condition-lookup" }, "Comparison", lookup), el("label", { className: "query-condition-kind" }, "Compare with", rhsKind), el("label", { className: "query-condition-value" }, "Value", valueEditor.node), el("label", { className: "query-condition-negate", dataset: { negated: String(Boolean(comparison.negated)) } }, negate, "Not"), nodeActions(comparison));
     if (!rhsIsCompatible(comparison.rhs, context, field, comparison.lookup)) { row.dataset.invalid = "true"; row.appendChild(el("span", { className: "query-predicate-help", role: "note" }, "Value is incompatible with the selected field or lookup. Choose a new value.")); }
     row.appendChild(inlineIssues(comparison.nodeId));
     row.appendChild(createMeaningLine({ el, explanation: explainComparison(comparison, { fields: Object.fromEntries(fields.map((item) => [item.path, item])), issues: issuesFor(validation, comparison.nodeId), metadataState: metadata?.getState?.(scope.target || scope.source)?.pending ? "pending" : "ready", postFilter: context === "postFilter" }), id: `query-meaning-${comparison.nodeId}` }));
@@ -328,6 +339,7 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
     if (!requestedFocus) { return; }
     const request = requestedFocus; requestedFocus = undefined;
     const container = node.querySelector(`[data-query-node-id="${escapeSelector(request.nodeId)}"]`);
+    if (request.role === "value") { container?.querySelector('[data-role="predicate-value"] input, [data-role="predicate-value"] select')?.focus(); return; }
     if (request.role === "lhs-open") {
       const select = container?.querySelector(".query-field-picker select:not(:disabled)");
       if (!focusAndOpenSelect(select)) {
@@ -387,7 +399,8 @@ function starterRhs(kind) {
 /** Returns the complete comparison patch required when a lookup changes its RHS value contract. */
 function lookupChanges(comparison, lookup) {
   if (lookup === "isnull") { return { lookup, rhs: { kind: "literal", value: true } }; }
-  return comparison?.lookup === "isnull" ? { lookup, rhs: { kind: "literal", value: null } } : { lookup };
+  if (lookup === "in" || lookup === "range") { const kind = lookup === "in" ? "list" : "range"; return { lookup, rhs: comparison?.rhs?.kind === kind ? comparison.rhs : starterRhs(kind) }; }
+  return comparison?.lookup === "isnull" || ["list", "range"].includes(comparison?.rhs?.kind) ? { lookup, rhs: { kind: "literal", value: null } } : { lookup };
 }
 
 /** Returns the visible label for one structured RHS variant. */

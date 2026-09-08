@@ -4,6 +4,7 @@ import { installQueryRovingTabs } from "./gridQueryStageNav.js";
 
 /** Creates the workspace presenter without owning Recipe or host lifecycle state. */
 export function createQueryWorkspace({ drawerResize, element, elements, root, uiState }) {
+  let builderHeight, filterHeight;
   const stageSections = {
     calculatedValues: [elements.queryCalculatedValuesPanel, elements.queryStageCalculatedValues],
     filterResults: [elements.queryFilterResultsPanel, elements.queryStageFilterResults],
@@ -14,6 +15,14 @@ export function createQueryWorkspace({ drawerResize, element, elements, root, ui
 
   /** Renders persistent shell state without rebuilding editor controls. */
   function render(ui) {
+    const quick = Boolean(ui.quickFilters);
+    elements.queryDrawer.classList.toggle("query-quick-filters", quick);
+    if (elements.queryBuilderTitle) { elements.queryBuilderTitle.textContent = quick ? "Filters" : "Query Builder"; }
+    elements.queryClose?.setAttribute("aria-label", quick ? "Close filters" : "Close Query Builder");
+    if (elements.queryAdvancedBuilder) { elements.queryAdvancedBuilder.hidden = !quick; }
+    if (elements.queryClearFilters) { elements.queryClearFilters.hidden = !quick; }
+    if (elements.queryDrawerApply) { elements.queryDrawerApply.textContent = quick ? "Apply filters" : "Apply query"; elements.queryDrawerApply.title = quick ? "Apply filters (Ctrl/Cmd+Enter)" : "Apply query"; }
+    if (elements.queryReviewPane) { elements.queryReviewPane.hidden = quick; elements.queryReviewPane.inert = quick; }
     elements.queryDrawer.style.height = `${ui.drawerHeight}px`;
     elements.queryDrawer.classList.toggle("query-focus-mode", ui.focusMode);
     elements.queryFocusMode.setAttribute("aria-pressed", String(ui.focusMode));
@@ -57,21 +66,33 @@ export function createQueryWorkspace({ drawerResize, element, elements, root, ui
   }
 
   /** Opens the drawer and activates the requested editor stage. */
-  function open(section, { focus = true } = {}) {
+  function open(section, { focus = true, quickFilters = false } = {}) {
+    const previous = uiState.getSnapshot();
+    if (Boolean(previous.quickFilters) !== quickFilters) {
+      if (previous.quickFilters) { filterHeight = previous.drawerHeight; } else { builderHeight = previous.drawerHeight; }
+    }
+    const initialFilterHeight = (root?.defaultView?.innerWidth || 960) < 640 ? 440 : 320;
+    const height = Boolean(previous.quickFilters) === quickFilters ? previous.drawerHeight : quickFilters ? filterHeight || initialFilterHeight : builderHeight || previous.drawerHeight;
+    uiState.dispatch({ enabled: quickFilters, type: "SET_QUICK_FILTERS" });
     elements.queryDrawer.hidden = false;
     elements.queryDrawerToggle.setAttribute("aria-expanded", "true");
+    elements.queryFilterButton?.setAttribute("aria-expanded", String(quickFilters));
     uiState.dispatch({ open: true, type: "SET_DRAWER_OPEN" });
-    drawerResize.setHeight(uiState.getSnapshot().drawerHeight);
+    drawerResize.setHeight(height);
     if (sectionStages[section]) { uiState.dispatch({ stage: sectionStages[section], type: "SET_ACTIVE_STAGE" }); }
-    if (focus) { window.setTimeout(() => elements[section]?.querySelector("button,input,select,textarea")?.focus(), 0); }
+    if (focus) { window.setTimeout(() => {
+      const target = quickFilters ? elements[section]?.querySelector('[data-role="comparison"] .query-field-picker select:not(:disabled)') || elements[section]?.querySelector('button[aria-label="Add condition to this group"]') : elements[section]?.querySelector("button,input,select,textarea");
+      target?.focus();
+    }, 0); }
   }
 
   /** Closes the drawer and restores focus to its visible toggle. */
   function close() {
     elements.queryDrawer.hidden = true;
     elements.queryDrawerToggle.setAttribute("aria-expanded", "false");
+    elements.queryFilterButton?.setAttribute("aria-expanded", "false");
     uiState.dispatch({ open: false, type: "SET_DRAWER_OPEN" });
-    elements.queryDrawerToggle.focus();
+    (uiState.getSnapshot().quickFilters ? elements.queryFilterButton : elements.queryDrawerToggle).focus();
   }
 
   return { close, installRovingTabs: installQueryRovingTabs, open, render };

@@ -23,6 +23,7 @@ import { createQueryAssistant } from "./gridQueryAssistant.js";
 import { renderRecipePreview, renderQuerySummary } from "./gridQuerySummary.js";
 import { applyQueryValidationAnnotations, focusQueryIssue, renderQueryValidation } from "./gridQueryValidationView.js";
 import { recipeWithGridOrder } from "./gridSort.js";
+import { clearRowFiltersAction, supportsQuickFilters } from "./gridQuickFilters.js";
 
 const QUERY_IDS = ["querySummaryBand", "queryFilterButton", "queryColumnsButton", "queryModeButton", "queryHumanSummary", "queryDirtyState", "queryValidationState", "queryAppliedFiltersLabel", "queryAppliedFiltersEmpty", "queryAppliedFilters", "queryAppliedWhere", "queryAppliedPostFilter", "queryDrawerToggle", "queryDrawer", "queryDrawerResizeHandle", "gridwrap", "queryDrawerHeader", "queryBuilderTitle", "queryExamples", "queryWhereSection", "queryWhereGuide", "queryWhereRoot", "queryComputedSection", "queryComputedGuide", "queryComputedList", "queryPostFilterSection", "queryPostFilterGuide", "queryPostFilterRoot", "queryResultSection", "queryResultGuide", "queryGroupBy", "queryOrderBy", "queryPreviewSection", "queryPreviewGuide", "queryPlainMeaning", "queryImplicitBehavior", "queryOrmPreview", "queryCopyOrm", "queryIssueSummary", "queryResetDraft", "queryClearDraft", "queryDrawerApply", "queryDrawerApplyHelp", "queryDrawerStatus", "queryDraftStatus", "queryUndo", "queryRedo", "queryFocusMode", "queryMoreActions", "queryMoreMenu", "queryClose", "queryStageNav", "queryStageSelect", "queryStageFilterRows", "queryStageCalculatedValues", "queryStageFilterResults", "queryStageResult", "queryFilterRowsPanel", "queryCalculatedValuesPanel", "queryFilterResultsPanel", "queryResultPanel", "queryInspectorTabs", "queryInspectorMeaning", "queryInspectorProblems", "queryInspectorOrm", "queryInspectorAssistant", "queryMeaningPanel", "queryProblemsPanel", "queryEditorPane", "queryReviewPane", "queryOrmPanel", "queryAssistantPanel", "queryPopoverLayer", "queryWorkspace", "queryMobilePaneSwitch", "queryDrawerFooter"];
 const QUERY_STAGE_ORDINALS = { calculatedValues: 2, filterResults: 3, filterRows: 1, result: 4 };
@@ -32,7 +33,11 @@ export function createQueryController(options) {
   const root = options.root || document;
   const elements = Object.fromEntries(QUERY_IDS.map((id) => [id, root.getElementById(id)]));
   elements.queryDraftAiAssembly = root.getElementById("queryDraftAiAssembly");
+  elements.queryAdvancedBuilder = root.getElementById("queryAdvancedBuilder");
+  elements.queryClearFilters = root.getElementById("queryClearFilters");
   if (!elements.querySummaryBand) { return noQueryController(); }
+  elements.queryFilterButton.setAttribute("aria-controls", "queryDrawer");
+  elements.queryFilterButton.setAttribute("aria-expanded", "false");
   if (elements.queryInspectorAssistant && elements.queryInspectorTabs && elements.queryInspectorAssistant.parentElement !== elements.queryInspectorTabs) { elements.queryInspectorTabs.appendChild(elements.queryInspectorAssistant); }
   if (elements.queryAssistantPanel && elements.queryPreviewSection && elements.queryAssistantPanel.parentElement !== elements.queryPreviewSection) { elements.queryPreviewSection.appendChild(elements.queryAssistantPanel); }
   elements.queryBuilderTitle?.setAttribute("role", "heading");
@@ -161,6 +166,8 @@ export function createQueryController(options) {
 
   /** Renders static Query Builder regions from one coordinator-owned immutable snapshot. */
   function renderMain(snapshot) {
+    if (uiState.getSnapshot().quickFilters && !supportsQuickFilters(snapshot)) { uiState.dispatch({ enabled: false, type: "SET_QUICK_FILTERS" }); }
+    if (elements.queryClearFilters) { elements.queryClearFilters.disabled = !snapshot.draft.where.children.length; }
     const examples = buildQueryExamples({ columns: scope.columns, relations: scope.relations, source });
     examplesView.render({ draft: snapshot.draft, examples, source });
     const checking = validationLifecycle.phase === "pending" || validationLifecycle.phase === "previewing";
@@ -261,7 +268,10 @@ export function createQueryController(options) {
       getScope: () => scope,
       metadata,
       popoverLayer: elements.queryPopoverLayer,
-      requestRender: () => requestBuilderRender("predicate", { computed: false }),
+      requestRender: (focus) => {
+        if (focus?.role === "value") { focusIntent.set({ controlKey: `predicate-value-${focus.nodeId}`, fallbackId: context === "where" ? "queryWhereLegend" : "queryPostFilterLegend" }); }
+        requestBuilderRender("predicate", { computed: false });
+      },
       rootNodeId,
       validation: () => store.getSnapshot().validation
     });
@@ -506,8 +516,13 @@ export function createQueryController(options) {
     return false;
   }
 
-  elements.queryDrawerToggle.addEventListener("click", () => elements.queryDrawer.hidden ? openDrawer("queryWhereSection") : closeDrawer());
-  elements.queryFilterButton.addEventListener("click", () => openDrawer("queryWhereSection"));
+  elements.queryDrawerToggle.addEventListener("click", () => elements.queryDrawer.hidden || uiState.getSnapshot().quickFilters ? openDrawer("queryWhereSection") : closeDrawer());
+  elements.queryFilterButton.addEventListener("click", () => {
+    if (uiState.getSnapshot().focusMode) { setQueryFocusMode(false); }
+    openDrawer("queryWhereSection", { quickFilters: supportsQuickFilters(store.getSnapshot()) });
+  });
+  elements.queryAdvancedBuilder?.addEventListener("click", () => openDrawer("queryWhereSection"));
+  elements.queryClearFilters?.addEventListener("click", () => restoreDraft("clear-row-filters", () => store.dispatch(clearRowFiltersAction(store.getSnapshot().draft))));
   elements.queryColumnsButton.addEventListener("click", () => openDrawer("queryComputedSection"));
   elements.queryModeButton.addEventListener("click", () => openDrawer("queryResultSection"));
   elements.queryDrawerApply.addEventListener("click", apply);
@@ -557,7 +572,7 @@ export function createQueryController(options) {
     }
     if (event.key === "Escape" && !elements.queryDrawer.hidden) { event.preventDefault(); closeDrawer(); return; }
     if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "z" && !isTextEntry(event.target)) { event.preventDefault(); if (event.shiftKey) { redoDraft(); } else { undoDraft(); } return; }
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.altKey && !event.shiftKey && !isTextEntry(event.target)) { event.preventDefault(); apply(); }
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.altKey && !event.shiftKey && (!isTextEntry(event.target) || uiState.getSnapshot().quickFilters && elements.queryDrawer.contains(event.target))) { event.preventDefault(); apply(); }
   });
   root.addEventListener("pointerdown", (event) => { if (!elements.queryMoreMenu.hidden && !elements.queryMoreMenu.contains(event.target) && !elements.queryMoreActions.contains(event.target)) { closeMoreActions(); } }, { signal: menuAbort.signal });
   elements.queryMoreMenu.addEventListener("keydown", (event) => handleMoreMenuKey(event), { signal: menuAbort.signal });

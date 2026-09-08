@@ -37,7 +37,7 @@ function snapshotOf(state) { return { ...state, inspectorScrollTops: { ...state.
 /** Creates UI-only state without persisting Recipe values, validation, or ORM text. */
 export function createQueryUiState({ bounds, getPersisted = () => ({}), persist = () => {} } = {}) {
   let heightBounds = normalizeBounds(bounds);
-  let state = initialState(getPersisted() || {}, heightBounds);
+  let state = { ...initialState(getPersisted() || {}, heightBounds), quickFilters: false };
   const listeners = new Set();
   let persistTimer = 0;
   /** Notifies observers with a detached immutable UI snapshot. */
@@ -53,6 +53,7 @@ export function createQueryUiState({ bounds, getPersisted = () => ({}), persist 
     const type = action.type;
     if (type === "SET_ACTIVE_STAGE") { state.activeStage = stage(action.stage); state.mobilePane = "editor"; schedulePersistence(); }
     else if (type === "SET_DRAWER_OPEN") { state.drawerOpen = Boolean(action.open); schedulePersistence(); }
+    else if (type === "SET_QUICK_FILTERS") { state.quickFilters = Boolean(action.enabled); state.mobilePane = "editor"; }
     else if (type === "SET_DRAWER_HEIGHT") { state.drawerHeight = clamp(action.height, heightBounds.minimumHeight, heightBounds.maximumHeight); schedulePersistence(action.dragging ? 150 : 0); }
     else if (type === "SET_FOCUS_MODE") { state.focusMode = Boolean(action.enabled); }
     else if (type === "SET_INSPECTOR_TAB") { state.inspectorTab = inspectorTab(action.tab); state.mobilePane = "review"; schedulePersistence(); }
@@ -68,7 +69,7 @@ export function createQueryUiState({ bounds, getPersisted = () => ({}), persist 
     else if (type === "CLEAR_PENDING_COMPUTED_KIND") { state.pendingComputedKinds.delete(action.nodeId); }
     else if (type === "SET_PENDING_RESULT_MODE") { state.pendingResultMode = action.mode === "summary" || action.mode === "rows" ? action.mode : ""; }
     else if (type === "CLEAR_PENDING_RESULT_MODE") { state.pendingResultMode = ""; }
-    else if (type === "RESET_TRANSIENT_FOR_SOURCE") { const next = initialState(getPersisted() || {}, heightBounds); next.drawerOpen = state.drawerOpen; next.drawerHeight = state.drawerHeight; state = next; }
+    else if (type === "RESET_TRANSIENT_FOR_SOURCE") { const next = initialState(getPersisted() || {}, heightBounds); next.drawerOpen = state.drawerOpen; next.drawerHeight = state.drawerHeight; next.quickFilters = Boolean(state.quickFilters); state = next; }
     else { return; }
     publish();
   }

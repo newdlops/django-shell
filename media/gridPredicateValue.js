@@ -37,6 +37,8 @@ export function defaultLookup(field, allowed) {
 
 /** Returns valid RHS kinds for an editor context and lookup without permitting unsafe OuterRef use. */
 export function rhsKindsFor({ context = "where", field, lookup } = {}) {
+  if (lookup === "in") { return ["list"]; }
+  if (lookup === "range") { return ["range"]; }
   if (!lookup || VALUE_ONLY_LOOKUPS.has(lookup)) { return ["literal"]; }
   const kinds = ["literal", "field"];
   if (context === "subquery") { kinds.push("outerField"); }
@@ -109,27 +111,27 @@ export function createPredicateValueEditor({ context, el, field, lookup, onChang
     return { node };
   }
   if (Array.isArray(field?.choices) && field.choices.length && kind === "literal") {
-    node.appendChild(selectControl(el, "Field value", field.choices.map((choice) => ({ label: String(choice[1]), value: String(choice[0]) })), rhs.value, (value) => emit({ kind: "literal", value })));
+    node.appendChild(selectControl(el, "Field value", field.choices.map((choice) => ({ label: String(choice[1]), value: String(choice[0]) })), rhs.value, (value) => emit({ kind: "literal", value: field.choices.find((choice) => String(choice[0]) === value)?.[0] })));
     return { node };
   }
   if (kind === "list") {
     const values = Array.isArray(rhs.values) ? [...rhs.values] : [];
     const chips = el("span", { ariaLabel: "List values", className: "query-value-chips" });
-    const input = el("input", { ariaLabel: "Add list value", placeholder: "Add value", type: inputTypeFor(field, "exact") });
+    const input = el("input", { ariaLabel: "Add list value", autocomplete: "off", placeholder: "Add value", spellcheck: false, type: inputTypeFor(field, "exact") });
     const add = el("button", { ariaLabel: "Add list value", type: "button" }, "Add");
     const redraw = () => { chips.replaceChildren(...values.map((value, index) => { const remove = el("button", { ariaLabel: `Remove ${String(value)}`, type: "button" }, "Remove"); remove.addEventListener("click", () => { values.splice(index, 1); emit({ kind: "list", values: [...values] }); redraw(); }); return el("span", { className: "query-value-chip" }, String(value), remove); })); };
     add.addEventListener("click", () => { if (input.value !== "") { values.push(scalarFromInput(field, input.value)); input.value = ""; emit({ kind: "list", values: [...values] }); redraw(); input.focus(); } });
-    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); add.click(); } });
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) { event.preventDefault(); add.click(); } });
     redraw(); node.append(chips, input, add); return { node };
   }
   if (kind === "range") {
-    const lower = el("input", { ariaLabel: "Range lower bound", placeholder: "From", type: inputTypeFor(field, "exact"), value: rhs.lower == null ? "" : String(rhs.lower) });
-    const upper = el("input", { ariaLabel: "Range upper bound", placeholder: "To", type: inputTypeFor(field, "exact"), value: rhs.upper == null ? "" : String(rhs.upper) });
+    const lower = el("input", { ariaLabel: "Range lower bound", autocomplete: "off", placeholder: "From", spellcheck: false, type: inputTypeFor(field, "exact"), value: rhs.lower == null ? "" : String(rhs.lower) });
+    const upper = el("input", { ariaLabel: "Range upper bound", autocomplete: "off", placeholder: "To", spellcheck: false, type: inputTypeFor(field, "exact"), value: rhs.upper == null ? "" : String(rhs.upper) });
     const update = () => emit({ kind: "range", lower: scalarFromInput(field, lower.value), upper: scalarFromInput(field, upper.value) });
     lower.addEventListener("input", update); upper.addEventListener("input", update); node.append(lower, upper); return { node };
   }
   if (kind === "literal" && (field?.type === "BooleanField" || lookupIsValueFree(field, rhs))) { return { node }; }
-  const input = el("input", { ariaLabel: "Comparison value", type: inputTypeFor(field, "exact"), value: rhs.value == null ? "" : String(rhs.value) });
+  const input = el("input", { ariaLabel: "Comparison value", autocomplete: "off", spellcheck: false, type: inputTypeFor(field, "exact"), value: rhs.value == null ? "" : String(rhs.value) });
   input.addEventListener("input", () => emit({ kind: "literal", value: scalarFromInput(field, input.value) }));
   node.appendChild(input);
   return { node };

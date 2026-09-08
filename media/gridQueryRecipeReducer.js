@@ -101,7 +101,7 @@ export function reduceQueryRecipe(recipe, action = {}) {
   else if (action.type === "ADD_GROUP") { group()?.children.push(cloneQueryRecipe(action.group || { ...emptyGroup(nextNodeId("group")), nodeId: nextNodeId("group") })); }
   else if (action.type === "ADD_EXISTS_PREDICATE") {
     group()?.children.push(cloneQueryRecipe(action.node || { correlations: [], kind: "existsPredicate", negated: false, nodeId: nextNodeId("exists"), source: { kind: "relation", relation: "" }, where: { ...emptyGroup(nextNodeId("exists-where")), nodeId: nextNodeId("exists-where") } }));
-  } else if (action.type === "UPDATE_NODE") { const found = node(); if (found) { Object.assign(found.node, cloneQueryRecipe(action.changes || {})); } }
+  } else if (action.type === "UPDATE_NODE") { const target = node()?.node || findGroup(root, action.nodeId); if (target) { Object.assign(target, cloneQueryRecipe(action.changes || {})); } }
   else if (action.type === "REMOVE_NODE") { const found = node(); if (found && found.node.nodeId !== root.nodeId) { found.parent.children.splice(found.parent.children.indexOf(found.node), 1); } }
   else if (action.type === "DUPLICATE_NODE") { const found = node(); if (found) { const index = found.parent.children.indexOf(found.node); found.parent.children.splice(index + 1, 0, cloneWithNewNodeIds(found.node)); } }
   else if (action.type === "MOVE_NODE_UP" || action.type === "MOVE_NODE_DOWN") { const found = node(); if (found) { move(found.parent.children, found.parent.children.indexOf(found.node), action.type === "MOVE_NODE_UP" ? -1 : 1); } }

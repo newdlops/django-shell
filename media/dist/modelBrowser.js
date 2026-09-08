@@ -3083,9 +3083,9 @@ function reduceQueryRecipe(recipe, action = {}) {
   } else if (action.type === "ADD_EXISTS_PREDICATE") {
     group()?.children.push(cloneQueryRecipe(action.node || { correlations: [], kind: "existsPredicate", negated: false, nodeId: nextNodeId("exists"), source: { kind: "relation", relation: "" }, where: { ...emptyGroup(nextNodeId("exists-where")), nodeId: nextNodeId("exists-where") } }));
   } else if (action.type === "UPDATE_NODE") {
-    const found = node();
-    if (found) {
-      Object.assign(found.node, cloneQueryRecipe(action.changes || {}));
+    const target = node()?.node || findGroup(root, action.nodeId);
+    if (target) {
+      Object.assign(target, cloneQueryRecipe(action.changes || {}));
     }
   } else if (action.type === "REMOVE_NODE") {
     const found = node();
@@ -3516,6 +3516,12 @@ function defaultLookup(field, allowed) {
   return TEXT_TYPES.test(String(field?.type || "")) && lookups.includes("icontains") ? "icontains" : lookups.includes("exact") ? "exact" : lookups[0] || "";
 }
 function rhsKindsFor({ context = "where", field, lookup } = {}) {
+  if (lookup === "in") {
+    return ["list"];
+  }
+  if (lookup === "range") {
+    return ["range"];
+  }
   if (!lookup || VALUE_ONLY_LOOKUPS.has(lookup)) {
     return ["literal"];
   }
@@ -3594,13 +3600,13 @@ function createPredicateValueEditor({ context, el: el2, field, lookup, onChange,
     return { node };
   }
   if (Array.isArray(field?.choices) && field.choices.length && kind === "literal") {
-    node.appendChild(selectControl(el2, "Field value", field.choices.map((choice) => ({ label: String(choice[1]), value: String(choice[0]) })), rhs.value, (value) => emit({ kind: "literal", value })));
+    node.appendChild(selectControl(el2, "Field value", field.choices.map((choice) => ({ label: String(choice[1]), value: String(choice[0]) })), rhs.value, (value) => emit({ kind: "literal", value: field.choices.find((choice) => String(choice[0]) === value)?.[0] })));
     return { node };
   }
   if (kind === "list") {
     const values = Array.isArray(rhs.values) ? [...rhs.values] : [];
     const chips = el2("span", { ariaLabel: "List values", className: "query-value-chips" });
-    const input2 = el2("input", { ariaLabel: "Add list value", placeholder: "Add value", type: inputTypeFor(field, "exact") });
+    const input2 = el2("input", { ariaLabel: "Add list value", autocomplete: "off", placeholder: "Add value", spellcheck: false, type: inputTypeFor(field, "exact") });
     const add = el2("button", { ariaLabel: "Add list value", type: "button" }, "Add");
     const redraw = () => {
       chips.replaceChildren(...values.map((value, index) => {
@@ -3623,7 +3629,7 @@ function createPredicateValueEditor({ context, el: el2, field, lookup, onChange,
       }
     });
     input2.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
+      if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
         event.preventDefault();
         add.click();
       }
@@ -3633,8 +3639,8 @@ function createPredicateValueEditor({ context, el: el2, field, lookup, onChange,
     return { node };
   }
   if (kind === "range") {
-    const lower = el2("input", { ariaLabel: "Range lower bound", placeholder: "From", type: inputTypeFor(field, "exact"), value: rhs.lower == null ? "" : String(rhs.lower) });
-    const upper = el2("input", { ariaLabel: "Range upper bound", placeholder: "To", type: inputTypeFor(field, "exact"), value: rhs.upper == null ? "" : String(rhs.upper) });
+    const lower = el2("input", { ariaLabel: "Range lower bound", autocomplete: "off", placeholder: "From", spellcheck: false, type: inputTypeFor(field, "exact"), value: rhs.lower == null ? "" : String(rhs.lower) });
+    const upper = el2("input", { ariaLabel: "Range upper bound", autocomplete: "off", placeholder: "To", spellcheck: false, type: inputTypeFor(field, "exact"), value: rhs.upper == null ? "" : String(rhs.upper) });
     const update = () => emit({ kind: "range", lower: scalarFromInput(field, lower.value), upper: scalarFromInput(field, upper.value) });
     lower.addEventListener("input", update);
     upper.addEventListener("input", update);
@@ -3644,7 +3650,7 @@ function createPredicateValueEditor({ context, el: el2, field, lookup, onChange,
   if (kind === "literal" && (field?.type === "BooleanField" || lookupIsValueFree(field, rhs))) {
     return { node };
   }
-  const input = el2("input", { ariaLabel: "Comparison value", type: inputTypeFor(field, "exact"), value: rhs.value == null ? "" : String(rhs.value) });
+  const input = el2("input", { ariaLabel: "Comparison value", autocomplete: "off", spellcheck: false, type: inputTypeFor(field, "exact"), value: rhs.value == null ? "" : String(rhs.value) });
   input.addEventListener("input", () => emit({ kind: "literal", value: scalarFromInput(field, input.value) }));
   node.appendChild(input);
   return { node };
@@ -3826,6 +3832,7 @@ function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Ch
     return choices.some((choice) => choice.value === `relation:${selected}`) ? `relation:${selected}` : choices.some((choice) => choice.value.endsWith(`:${selected}`)) ? choices.find((choice) => choice.value.endsWith(`:${selected}`)).value : `unavailable:${selected}`;
   }
   function setTerminal(field) {
+    status.dataset.kind = "metadata";
     status.textContent = [field?.type, field?.null ? "Nullable" : "Required", field?.helpText].filter(Boolean).join(" \xB7 ");
   }
   async function render() {
@@ -3833,6 +3840,7 @@ function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Ch
     disposeControllers();
     segments.replaceChildren();
     status.textContent = "";
+    delete status.dataset.kind;
     if (!source?.app || !source?.model) {
       appendState("Fields unavailable", 0);
       status.textContent = "Field details are unavailable.";
@@ -4473,9 +4481,15 @@ function fieldsFor(scope, metadata) {
 function fieldSelectionChanges(comparison, field, selectedPath, context) {
   const relation = field?.role === "relation";
   const lhs = field?.role === "computed" ? { alias: selectedPath, kind: "computed" } : { kind: "field", path: selectedPath };
-  const previousLookup = comparison?.lookup;
+  const previousLookup = comparison?.lhs?.kind === "field" && !comparison.lhs.path ? void 0 : comparison?.lookup;
   const lookup = relation ? "isnull" : lookupsForField(field).includes(previousLookup) && rhsIsCompatible(comparison?.rhs, context, field, previousLookup) ? previousLookup : defaultLookup(field);
-  const rhs = relation ? { kind: "literal", value: previousLookup === "isnull" && typeof comparison?.rhs?.value === "boolean" ? comparison.rhs.value : true } : lookup === previousLookup && rhsIsCompatible(comparison?.rhs, context, field, lookup) ? comparison.rhs : starterRhs(rhsKindsFor({ context, field, lookup })[0] || "literal");
+  let rhs = relation ? { kind: "literal", value: previousLookup === "isnull" && typeof comparison?.rhs?.value === "boolean" ? comparison.rhs.value : true } : lookup === previousLookup && rhsIsCompatible(comparison?.rhs, context, field, lookup) ? comparison.rhs : starterRhs(rhsKindsFor({ context, field, lookup })[0] || "literal");
+  if (rhs.kind === "literal" && rhs.value === null && field?.type === "BooleanField") {
+    rhs = { kind: "literal", value: true };
+  }
+  if (rhs.kind === "literal" && rhs.value === null && field?.choices?.length) {
+    rhs = { kind: "literal", value: field.choices[0][0] };
+  }
   return { lhs, lookup, rhs };
 }
 function fieldForPath(path, fields3) {
@@ -4545,7 +4559,7 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     const structural = action.type !== "UPDATE_NODE" || action.history?.mode !== "text";
     if (structural) {
       if (requestRender) {
-        requestRender();
+        requestRender(requestedFocus);
       } else {
         queueMicrotask(() => {
           if (!disposed) {
@@ -4607,10 +4621,12 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     join.addEventListener("change", () => act({ changes: { join: join.value }, nodeId: group.nodeId, type: "UPDATE_NODE" }));
     const negated = el2("input", { ariaLabel: "Negate group", checked: Boolean(group.negated), type: "checkbox" });
     negated.addEventListener("change", () => act({ changes: { negated: negated.checked }, nodeId: group.nodeId, type: "UPDATE_NODE" }));
-    const notLabel = el2("label", { className: "query-predicate-not" }, negated, "Exclude this group (NOT)");
+    const notLabel = el2("label", { className: "query-predicate-not", dataset: { negated: String(Boolean(group.negated)) } }, negated, "Exclude this group (NOT)");
     const addComparison = structuralButton("Add condition", "Add condition to this group", () => act({ parentId: group.nodeId, type: "ADD_COMPARISON" }, { nodeId: group.nodeId, role: "lhs" }));
     const addGroup = structuralButton("Add group", "Add nested condition group", () => act({ parentId: group.nodeId, type: "ADD_GROUP" }, { nodeId: group.nodeId, role: "lhs" }));
     const addExists = structuralButton("Add existence check", "Add related-row existence check", () => act({ parentId: group.nodeId, type: "ADD_EXISTS_PREDICATE" }, { nodeId: group.nodeId, role: "lhs" }));
+    addGroup.dataset.advanced = "true";
+    addExists.dataset.advanced = "true";
     const blocked = depth >= MAX_DEPTH || (group.children || []).length >= MAX_CHILDREN;
     addComparison.disabled = blocked;
     addGroup.disabled = blocked;
@@ -4649,18 +4665,19 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     const path = comparison.lhs?.kind === "computed" ? comparison.lhs.alias : comparison.lhs?.kind === "field" ? comparison.lhs.path : "";
     const field = persistedFieldForPath(comparison.lhs, scope, metadata, fields3);
     const row = el2("div", { className: "query-predicate-row", dataset: { queryNodeId: comparison.nodeId, role: "comparison" } });
-    const fieldPicker = trackPicker2(createQueryFieldPicker({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], controlKey: "predicate-lhs-" + comparison.nodeId, current: path, el: el2, metadata, onChange: (selectedPath, kind, descriptor) => {
+    function selectField(selectedPath, kind, descriptor) {
       const role = kind === "relationTerminal" ? "relation" : kind === "computed" ? "computed" : "field";
       const selected = descriptor && (role === "computed" ? fields3.find((entry2) => entry2.role === role && entry2.path === descriptor.alias) : { ...descriptor, path: selectedPath, role });
       if (selected) {
-        act({ changes: fieldSelectionChanges(comparison, selected, selectedPath, context), nodeId: comparison.nodeId, type: "UPDATE_NODE" });
+        act({ changes: fieldSelectionChanges(comparison, selected, selectedPath, context), nodeId: comparison.nodeId, type: "UPDATE_NODE" }, { nodeId: comparison.nodeId, role: "value" });
       }
-    }, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: true }));
+    }
+    const fieldPicker = trackPicker2(createQueryFieldPicker({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], controlKey: "predicate-lhs-" + comparison.nodeId, current: path, el: el2, metadata, onChange: selectField, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: true }));
     fieldPicker.node.dataset.focusRole = "lhs";
     const lookups = lookupsForField(field);
     const lookup = nativeSelect(lookups.map((value) => ({ label: LOOKUP_LABELS[value] || value, value })), comparison.lookup, "Comparison");
     lookup.setAttribute("aria-description", "(i) means case-insensitive.");
-    lookup.addEventListener("change", () => act({ changes: lookupChanges(comparison, lookup.value), nodeId: comparison.nodeId, type: "UPDATE_NODE" }));
+    lookup.addEventListener("change", () => act({ changes: lookupChanges(comparison, lookup.value), nodeId: comparison.nodeId, type: "UPDATE_NODE" }, { nodeId: comparison.nodeId, role: ["blank", "not_blank"].includes(lookup.value) ? "lhs" : "value" }));
     const rhsKinds = rhsKindsFor({ context, field, lookup: comparison.lookup });
     const rhsKind = nativeSelect(rhsKinds.map((value) => ({ label: rhsLabel(value), value })), comparison.rhs?.kind, "Compare with");
     rhsKind.addEventListener("change", () => act({ changes: { rhs: starterRhs(rhsKind.value) }, nodeId: comparison.nodeId, type: "UPDATE_NODE" }));
@@ -4669,9 +4686,13 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     if (valueEditor.destroy) {
       trackPicker2(valueEditor);
     }
+    const valueControl2 = valueEditor.node.querySelector?.("input,select");
+    if (valueControl2) {
+      valueControl2.dataset.queryControlKey = `predicate-value-${comparison.nodeId}`;
+    }
     const negate = el2("input", { ariaLabel: "Negate condition", checked: Boolean(comparison.negated), type: "checkbox" });
     negate.addEventListener("change", () => act({ changes: { negated: negate.checked }, nodeId: comparison.nodeId, type: "UPDATE_NODE" }));
-    row.append(el2("label", {}, "Field", fieldPicker.node), el2("label", {}, "Comparison", lookup), el2("label", {}, "Compare with", rhsKind), el2("label", {}, "Value", valueEditor.node), el2("label", {}, negate, "Not"), nodeActions(comparison));
+    row.append(el2("label", { className: "query-condition-field" }, "Field", fieldPicker.node), el2("label", { className: "query-condition-lookup" }, "Comparison", lookup), el2("label", { className: "query-condition-kind" }, "Compare with", rhsKind), el2("label", { className: "query-condition-value" }, "Value", valueEditor.node), el2("label", { className: "query-condition-negate", dataset: { negated: String(Boolean(comparison.negated)) } }, negate, "Not"), nodeActions(comparison));
     if (!rhsIsCompatible(comparison.rhs, context, field, comparison.lookup)) {
       row.dataset.invalid = "true";
       row.appendChild(el2("span", { className: "query-predicate-help", role: "note" }, "Value is incompatible with the selected field or lookup. Choose a new value."));
@@ -4799,6 +4820,10 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     const request = requestedFocus;
     requestedFocus = void 0;
     const container = node.querySelector(`[data-query-node-id="${escapeSelector(request.nodeId)}"]`);
+    if (request.role === "value") {
+      container?.querySelector('[data-role="predicate-value"] input, [data-role="predicate-value"] select')?.focus();
+      return;
+    }
     if (request.role === "lhs-open") {
       const select = container?.querySelector(".query-field-picker select:not(:disabled)");
       if (!focusAndOpenSelect(select)) {
@@ -4879,7 +4904,11 @@ function lookupChanges(comparison, lookup) {
   if (lookup === "isnull") {
     return { lookup, rhs: { kind: "literal", value: true } };
   }
-  return comparison?.lookup === "isnull" ? { lookup, rhs: { kind: "literal", value: null } } : { lookup };
+  if (lookup === "in" || lookup === "range") {
+    const kind = lookup === "in" ? "list" : "range";
+    return { lookup, rhs: comparison?.rhs?.kind === kind ? comparison.rhs : starterRhs(kind) };
+  }
+  return comparison?.lookup === "isnull" || ["list", "range"].includes(comparison?.rhs?.kind) ? { lookup, rhs: { kind: "literal", value: null } } : { lookup };
 }
 function rhsLabel(kind) {
   return { field: "field", literal: "value", outerField: "outer field", relativeTime: "relative time" }[kind] || kind;
@@ -6013,7 +6042,7 @@ function snapshotOf(state2) {
 function createQueryUiState({ bounds, getPersisted = () => ({}), persist = () => {
 } } = {}) {
   let heightBounds = normalizeBounds(bounds);
-  let state2 = initialState(getPersisted() || {}, heightBounds);
+  let state2 = { ...initialState(getPersisted() || {}, heightBounds), quickFilters: false };
   const listeners = /* @__PURE__ */ new Set();
   let persistTimer = 0;
   function publish() {
@@ -6056,6 +6085,9 @@ function createQueryUiState({ bounds, getPersisted = () => ({}), persist = () =>
     } else if (type === "SET_DRAWER_OPEN") {
       state2.drawerOpen = Boolean(action.open);
       schedulePersistence();
+    } else if (type === "SET_QUICK_FILTERS") {
+      state2.quickFilters = Boolean(action.enabled);
+      state2.mobilePane = "editor";
     } else if (type === "SET_DRAWER_HEIGHT") {
       state2.drawerHeight = clamp(action.height, heightBounds.minimumHeight, heightBounds.maximumHeight);
       schedulePersistence(action.dragging ? 150 : 0);
@@ -6095,6 +6127,7 @@ function createQueryUiState({ bounds, getPersisted = () => ({}), persist = () =>
       const next = initialState(getPersisted() || {}, heightBounds);
       next.drawerOpen = state2.drawerOpen;
       next.drawerHeight = state2.drawerHeight;
+      next.quickFilters = Boolean(state2.quickFilters);
       state2 = next;
     } else {
       return;
@@ -6148,6 +6181,7 @@ function installQueryRovingTabs(items, select) {
 
 // media/gridQueryWorkspace.js
 function createQueryWorkspace({ drawerResize, element: element3, elements, root, uiState }) {
+  let builderHeight, filterHeight;
   const stageSections = {
     calculatedValues: [elements.queryCalculatedValuesPanel, elements.queryStageCalculatedValues],
     filterResults: [elements.queryFilterResultsPanel, elements.queryStageFilterResults],
@@ -6156,6 +6190,26 @@ function createQueryWorkspace({ drawerResize, element: element3, elements, root,
   };
   const sectionStages = { queryComputedSection: "calculatedValues", queryPostFilterSection: "filterResults", queryResultSection: "result", queryWhereSection: "filterRows" };
   function render(ui) {
+    const quick = Boolean(ui.quickFilters);
+    elements.queryDrawer.classList.toggle("query-quick-filters", quick);
+    if (elements.queryBuilderTitle) {
+      elements.queryBuilderTitle.textContent = quick ? "Filters" : "Query Builder";
+    }
+    elements.queryClose?.setAttribute("aria-label", quick ? "Close filters" : "Close Query Builder");
+    if (elements.queryAdvancedBuilder) {
+      elements.queryAdvancedBuilder.hidden = !quick;
+    }
+    if (elements.queryClearFilters) {
+      elements.queryClearFilters.hidden = !quick;
+    }
+    if (elements.queryDrawerApply) {
+      elements.queryDrawerApply.textContent = quick ? "Apply filters" : "Apply query";
+      elements.queryDrawerApply.title = quick ? "Apply filters (Ctrl/Cmd+Enter)" : "Apply query";
+    }
+    if (elements.queryReviewPane) {
+      elements.queryReviewPane.hidden = quick;
+      elements.queryReviewPane.inert = quick;
+    }
     elements.queryDrawer.style.height = `${ui.drawerHeight}px`;
     elements.queryDrawer.classList.toggle("query-focus-mode", ui.focusMode);
     elements.queryFocusMode.setAttribute("aria-pressed", String(ui.focusMode));
@@ -6215,23 +6269,39 @@ function createQueryWorkspace({ drawerResize, element: element3, elements, root,
     }));
     elements.queryWorkspace.dataset.mobilePane = ui.mobilePane;
   }
-  function open(section, { focus = true } = {}) {
+  function open(section, { focus = true, quickFilters = false } = {}) {
+    const previous = uiState.getSnapshot();
+    if (Boolean(previous.quickFilters) !== quickFilters) {
+      if (previous.quickFilters) {
+        filterHeight = previous.drawerHeight;
+      } else {
+        builderHeight = previous.drawerHeight;
+      }
+    }
+    const initialFilterHeight = (root?.defaultView?.innerWidth || 960) < 640 ? 440 : 320;
+    const height = Boolean(previous.quickFilters) === quickFilters ? previous.drawerHeight : quickFilters ? filterHeight || initialFilterHeight : builderHeight || previous.drawerHeight;
+    uiState.dispatch({ enabled: quickFilters, type: "SET_QUICK_FILTERS" });
     elements.queryDrawer.hidden = false;
     elements.queryDrawerToggle.setAttribute("aria-expanded", "true");
+    elements.queryFilterButton?.setAttribute("aria-expanded", String(quickFilters));
     uiState.dispatch({ open: true, type: "SET_DRAWER_OPEN" });
-    drawerResize.setHeight(uiState.getSnapshot().drawerHeight);
+    drawerResize.setHeight(height);
     if (sectionStages[section]) {
       uiState.dispatch({ stage: sectionStages[section], type: "SET_ACTIVE_STAGE" });
     }
     if (focus) {
-      window.setTimeout(() => elements[section]?.querySelector("button,input,select,textarea")?.focus(), 0);
+      window.setTimeout(() => {
+        const target = quickFilters ? elements[section]?.querySelector('[data-role="comparison"] .query-field-picker select:not(:disabled)') || elements[section]?.querySelector('button[aria-label="Add condition to this group"]') : elements[section]?.querySelector("button,input,select,textarea");
+        target?.focus();
+      }, 0);
     }
   }
   function close() {
     elements.queryDrawer.hidden = true;
     elements.queryDrawerToggle.setAttribute("aria-expanded", "false");
+    elements.queryFilterButton?.setAttribute("aria-expanded", "false");
     uiState.dispatch({ open: false, type: "SET_DRAWER_OPEN" });
-    elements.queryDrawerToggle.focus();
+    (uiState.getSnapshot().quickFilters ? elements.queryFilterButton : elements.queryDrawerToggle).focus();
   }
   return { close, installRovingTabs: installQueryRovingTabs, open, render };
 }
@@ -7542,6 +7612,22 @@ function recipeWithGridOrder(recipe, field, descending) {
   return { ...recipe, orderBy };
 }
 
+// media/gridQuickFilters.js
+function supportsQuickFilters(snapshot) {
+  const draft = snapshot?.draft, applied = snapshot?.applied;
+  if (!draft?.where || !applied) {
+    return false;
+  }
+  const withoutWhere = ({ where, ...rest }) => rest;
+  if (JSON.stringify(withoutWhere(draft)) !== JSON.stringify(withoutWhere(applied))) {
+    return false;
+  }
+  return (draft.where.children || []).every((node) => node.kind === "comparison" && node.lhs?.kind === "field" && ["literal", "list", "range"].includes(node.rhs?.kind));
+}
+function clearRowFiltersAction(recipe) {
+  return { changes: { children: [], join: "and", negated: false }, nodeId: recipe.where.nodeId, scope: "where", type: "UPDATE_NODE" };
+}
+
 // media/gridQueryController.js
 var QUERY_IDS = ["querySummaryBand", "queryFilterButton", "queryColumnsButton", "queryModeButton", "queryHumanSummary", "queryDirtyState", "queryValidationState", "queryAppliedFiltersLabel", "queryAppliedFiltersEmpty", "queryAppliedFilters", "queryAppliedWhere", "queryAppliedPostFilter", "queryDrawerToggle", "queryDrawer", "queryDrawerResizeHandle", "gridwrap", "queryDrawerHeader", "queryBuilderTitle", "queryExamples", "queryWhereSection", "queryWhereGuide", "queryWhereRoot", "queryComputedSection", "queryComputedGuide", "queryComputedList", "queryPostFilterSection", "queryPostFilterGuide", "queryPostFilterRoot", "queryResultSection", "queryResultGuide", "queryGroupBy", "queryOrderBy", "queryPreviewSection", "queryPreviewGuide", "queryPlainMeaning", "queryImplicitBehavior", "queryOrmPreview", "queryCopyOrm", "queryIssueSummary", "queryResetDraft", "queryClearDraft", "queryDrawerApply", "queryDrawerApplyHelp", "queryDrawerStatus", "queryDraftStatus", "queryUndo", "queryRedo", "queryFocusMode", "queryMoreActions", "queryMoreMenu", "queryClose", "queryStageNav", "queryStageSelect", "queryStageFilterRows", "queryStageCalculatedValues", "queryStageFilterResults", "queryStageResult", "queryFilterRowsPanel", "queryCalculatedValuesPanel", "queryFilterResultsPanel", "queryResultPanel", "queryInspectorTabs", "queryInspectorMeaning", "queryInspectorProblems", "queryInspectorOrm", "queryInspectorAssistant", "queryMeaningPanel", "queryProblemsPanel", "queryEditorPane", "queryReviewPane", "queryOrmPanel", "queryAssistantPanel", "queryPopoverLayer", "queryWorkspace", "queryMobilePaneSwitch", "queryDrawerFooter"];
 var QUERY_STAGE_ORDINALS = { calculatedValues: 2, filterResults: 3, filterRows: 1, result: 4 };
@@ -7549,9 +7635,13 @@ function createQueryController(options) {
   const root = options.root || document;
   const elements = Object.fromEntries(QUERY_IDS.map((id) => [id, root.getElementById(id)]));
   elements.queryDraftAiAssembly = root.getElementById("queryDraftAiAssembly");
+  elements.queryAdvancedBuilder = root.getElementById("queryAdvancedBuilder");
+  elements.queryClearFilters = root.getElementById("queryClearFilters");
   if (!elements.querySummaryBand) {
     return noQueryController();
   }
+  elements.queryFilterButton.setAttribute("aria-controls", "queryDrawer");
+  elements.queryFilterButton.setAttribute("aria-expanded", "false");
   if (elements.queryInspectorAssistant && elements.queryInspectorTabs && elements.queryInspectorAssistant.parentElement !== elements.queryInspectorTabs) {
     elements.queryInspectorTabs.appendChild(elements.queryInspectorAssistant);
   }
@@ -7688,6 +7778,12 @@ function createQueryController(options) {
     restoreDraft("redo", () => store.redo());
   }
   function renderMain(snapshot) {
+    if (uiState.getSnapshot().quickFilters && !supportsQuickFilters(snapshot)) {
+      uiState.dispatch({ enabled: false, type: "SET_QUICK_FILTERS" });
+    }
+    if (elements.queryClearFilters) {
+      elements.queryClearFilters.disabled = !snapshot.draft.where.children.length;
+    }
     const examples = buildQueryExamples({ columns: scope.columns, relations: scope.relations, source });
     examplesView.render({ draft: snapshot.draft, examples, source });
     const checking = validationLifecycle.phase === "pending" || validationLifecycle.phase === "previewing";
@@ -7805,7 +7901,12 @@ function createQueryController(options) {
       getScope: () => scope,
       metadata,
       popoverLayer: elements.queryPopoverLayer,
-      requestRender: () => requestBuilderRender("predicate", { computed: false }),
+      requestRender: (focus) => {
+        if (focus?.role === "value") {
+          focusIntent.set({ controlKey: `predicate-value-${focus.nodeId}`, fallbackId: context === "where" ? "queryWhereLegend" : "queryPostFilterLegend" });
+        }
+        requestBuilderRender("predicate", { computed: false });
+      },
       rootNodeId,
       validation: () => store.getSnapshot().validation
     });
@@ -8084,8 +8185,15 @@ function createQueryController(options) {
     }
     return false;
   }
-  elements.queryDrawerToggle.addEventListener("click", () => elements.queryDrawer.hidden ? openDrawer("queryWhereSection") : closeDrawer());
-  elements.queryFilterButton.addEventListener("click", () => openDrawer("queryWhereSection"));
+  elements.queryDrawerToggle.addEventListener("click", () => elements.queryDrawer.hidden || uiState.getSnapshot().quickFilters ? openDrawer("queryWhereSection") : closeDrawer());
+  elements.queryFilterButton.addEventListener("click", () => {
+    if (uiState.getSnapshot().focusMode) {
+      setQueryFocusMode(false);
+    }
+    openDrawer("queryWhereSection", { quickFilters: supportsQuickFilters(store.getSnapshot()) });
+  });
+  elements.queryAdvancedBuilder?.addEventListener("click", () => openDrawer("queryWhereSection"));
+  elements.queryClearFilters?.addEventListener("click", () => restoreDraft("clear-row-filters", () => store.dispatch(clearRowFiltersAction(store.getSnapshot().draft))));
   elements.queryColumnsButton.addEventListener("click", () => openDrawer("queryComputedSection"));
   elements.queryModeButton.addEventListener("click", () => openDrawer("queryResultSection"));
   elements.queryDrawerApply.addEventListener("click", apply);
@@ -8192,7 +8300,7 @@ function createQueryController(options) {
       }
       return;
     }
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.altKey && !event.shiftKey && !isTextEntry(event.target)) {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.altKey && !event.shiftKey && (!isTextEntry(event.target) || uiState.getSnapshot().quickFilters && elements.queryDrawer.contains(event.target))) {
       event.preventDefault();
       apply();
     }

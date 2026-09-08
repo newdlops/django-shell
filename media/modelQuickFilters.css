@@ -1,0 +1,35 @@
+/* A compact row-filter editor using the existing Query Builder, draft lifecycle, and VS Code theme. */
+.query-quick-actions{display:none}
+.query-quick-filters{grid-template-columns:minmax(0,1fr)}
+.query-quick-filters .query-quick-actions{grid-row:2;display:flex;align-items:center;gap:8px;min-width:0;padding:4px 12px;border-bottom:1px solid var(--vscode-panel-border)}
+.query-quick-filters .query-title-row>strong{flex:0 1 auto}
+.query-quick-filters .query-skip-links a[data-query-skip-target="queryStageNav"],.query-quick-filters .query-skip-links a[data-query-skip-target="queryReviewPane"],.query-quick-filters #queryDrawerIntro,.query-quick-filters #queryFocusMode,.query-quick-filters #queryMoreActions,.query-quick-filters #queryExamples,.query-quick-filters #queryStageNav,.query-quick-filters #queryStageSelect,.query-quick-filters #queryMobilePaneSwitch,.query-quick-filters #queryReviewPane{display:none}
+.query-quick-filters .query-workspace{display:flex;flex:1 1 auto;min-height:0}
+.query-quick-filters .query-editor-pane{display:block!important;flex:1 1 auto;min-width:0;padding:8px 12px}
+.query-quick-filters #queryWhereSection>.query-stage-description,.query-quick-filters #queryWhereGuide{display:none}
+.query-quick-filters #queryWhereLegend,.query-quick-filters .query-predicate-builder>legend,.query-quick-filters .query-predicate-group>legend{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.query-quick-filters .query-predicate-group{display:flex;flex-direction:column;margin:0;padding:0;border:0}
+.query-quick-filters .query-predicate-children{order:1}
+.query-quick-filters .query-predicate-toolbar{order:2;margin:6px 0 0;gap:8px}
+.query-quick-filters .query-predicate-toolbar>select{min-width:0;max-width:100%;min-height:26px;border:1px solid var(--vscode-input-border,var(--vscode-panel-border));background:var(--vscode-input-background);color:var(--vscode-input-foreground);font:inherit}
+.query-quick-filters .query-predicate-toolbar>[data-advanced],.query-quick-filters .query-predicate-not[data-negated="false"],.query-quick-filters .query-condition-kind,.query-quick-filters .query-condition-negate[data-negated="false"],.query-quick-filters .query-predicate-actions>button:not(:last-child){display:none}
+.query-quick-filters .query-predicate-toolbar>button,.query-quick-filters .query-predicate-actions>button,.query-quick-filters .query-predicate-value button{min-height:26px;background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground,var(--vscode-foreground))}
+.query-quick-filters .query-predicate-toolbar>button:hover,.query-quick-filters .query-predicate-actions>button:hover,.query-quick-filters .query-predicate-value button:hover{background:var(--vscode-button-secondaryHoverBackground,var(--vscode-list-hoverBackground))}
+.query-quick-filters .query-predicate-row{align-items:flex-end;gap:8px;padding:6px 0;border-top:0;border-bottom:1px solid var(--vscode-panel-border)}
+.query-quick-filters .query-condition-field{flex:1.2 1 170px}
+.query-quick-filters .query-condition-lookup{flex:.8 1 115px}
+.query-quick-filters .query-condition-value{flex:1.4 1 180px}
+.query-quick-filters .query-predicate-row input:not([type="checkbox"]),.query-quick-filters .query-predicate-row select{box-sizing:border-box;width:100%;max-width:none;min-height:26px;padding:3px 6px;border:1px solid var(--vscode-input-border,var(--vscode-panel-border));border-radius:2px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);font:inherit}
+.query-quick-filters .query-predicate-value{display:flex;flex-wrap:wrap;width:100%;min-width:0;flex:auto}
+.query-quick-filters .query-predicate-value>input{flex:1 1 80px;min-width:0}
+.query-quick-filters .query-predicate-value>.query-value-chips{flex:1 0 100%}
+.query-quick-filters .query-predicate-value>.query-value-chips:empty{display:none}
+.query-quick-filters .query-control-help[data-kind="metadata"],.query-quick-filters .query-predicate-row>.query-meaning,.query-quick-filters .query-predicate-issues:empty{display:none}
+.query-quick-filters .query-predicate-help,.query-quick-filters .query-predicate-issues,.query-quick-filters .query-predicate-row>.query-meaning{flex:1 0 100%;margin:0}
+.query-quick-filters .query-drawer-footer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 8px;min-width:0}
+.query-quick-filters .query-drawer-status{grid-column:1;min-width:0;margin-right:auto;overflow-wrap:anywhere}
+.query-quick-filters #queryDrawerApply{grid-column:2;grid-row:1;min-height:26px;white-space:nowrap}
+.query-quick-filters .query-drawer-footer>.query-apply-help{grid-column:1/-1;grid-row:2;margin:0;white-space:normal}
+.query-quick-filters .query-drawer-footer>.query-apply-help:not([data-state="invalid"]){font-size:11px}
+@media(max-width:639px){.query-quick-filters .query-quick-actions,.query-quick-filters .query-editor-pane{padding-right:8px;padding-left:8px}.query-quick-filters .query-condition-field{flex:1 0 100%}.query-quick-filters .query-condition-lookup{flex:1 1 90px}.query-quick-filters .query-condition-value{flex:1.5 1 120px}.query-quick-filters .query-quick-actions{flex-wrap:wrap}.query-quick-filters .query-draft-status{flex:1 0 100%;order:2}}
+@media(forced-colors:active){.query-quick-filters .query-predicate-row{border-bottom-color:CanvasText}.query-quick-filters button:focus-visible,.query-quick-filters input:focus-visible,.query-quick-filters select:focus-visible{outline:2px solid Highlight}}
