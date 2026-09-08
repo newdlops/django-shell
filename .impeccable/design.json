@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-26T04:40:58Z",
+  "generatedAt": "2026-09-08T11:51:36.013Z",
   "title": "Design System: Django Shell",
   "extensions": {
     "colorMeta": {
@@ -193,6 +193,13 @@
       "description": "A stable text-and-icon status for running, cancelling, failed, or completed work.",
       "html": "<div class=\"ds-operation-status\" role=\"status\" aria-live=\"polite\"><svg viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M8 2a6 6 0 1 0 6 6h-1a5 5 0 1 1-5-5V2Z\" /></svg><span>Running query · 12s</span><button type=\"button\">Interrupt</button></div>",
       "css": ".ds-operation-status { display: inline-flex; align-items: center; gap: 6px; min-height: 24px; color: var(--vscode-descriptionForeground); font: 11px/1.35 var(--vscode-font-family); font-variant-numeric: tabular-nums; } .ds-operation-status svg { width: 14px; height: 14px; } .ds-operation-status button { min-height: 22px; padding: 2px 7px; border: 0; border-radius: 4px; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground); font: inherit; cursor: pointer; } .ds-operation-status button:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); } .ds-operation-status button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }"
+    },
+    {
+      "name": "Quick Filter Condition",
+      "kind": "custom",
+      "description": "A compact source-row condition with a native field selector, comparison, typed value, and Remove. Changes remain a draft until Apply filters; advanced conditions use Query Builder.",
+      "html": "<div class=\"ds-filter-condition\"><label>Field<select aria-label=\"Condition field\"><option>Username — username</option></select></label><label>Comparison<select aria-label=\"Comparison\"><option>contains (i)</option></select></label><label>Value<input aria-label=\"Comparison value\" autocomplete=\"off\" spellcheck=\"false\" value=\"alex\" /></label><button type=\"button\" aria-label=\"Remove Username condition\">Remove</button></div>",
+      "css": ".ds-filter-condition { display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px; padding:6px 0; border-bottom:1px solid var(--vscode-panel-border); font:inherit; } .ds-filter-condition label { display:grid; min-width:0; gap:3px; flex:1 1 115px; color:var(--vscode-descriptionForeground); font-size:11px; } .ds-filter-condition label:first-child { flex:1.2 1 170px; } .ds-filter-condition label:nth-child(3) { flex:1.4 1 180px; } .ds-filter-condition input,.ds-filter-condition select { width:100%; min-width:0; min-height:26px; padding:3px 6px; border:1px solid var(--vscode-input-border,var(--vscode-panel-border)); border-radius:2px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); font:inherit; } .ds-filter-condition button { min-height:26px; padding:3px 9px; border:0; border-radius:4px; background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground,var(--vscode-foreground)); font:inherit; cursor:pointer; } .ds-filter-condition button:hover { background:var(--vscode-button-secondaryHoverBackground,var(--vscode-list-hoverBackground)); } .ds-filter-condition :focus-visible { outline:1px solid var(--vscode-focusBorder); outline-offset:2px; } .ds-filter-condition :disabled { opacity:.5; cursor:default; } @media(max-width:639px) { .ds-filter-condition label:first-child { flex:1 0 100%; } } @media(forced-colors:active) { .ds-filter-condition { border-color:CanvasText; } .ds-filter-condition :focus-visible { outline:2px solid Highlight; } }"
     }
   ],
   "narrative": {

@@ -10,6 +10,15 @@ The existing `UNLICENSED` manifest and proprietary `LICENSE` describe the curren
 
 The activity bar icon remains `media/django-shell.svg`. Do not use the colored deployment icon there because VS Code activity icons are expected to be theme-colored SVGs.
 
+### 1.1.1000053 validation record — 2026-09-08
+
+- `npm run check`: 1,016 tests passed with no failures or skips.
+- The Model Browser E2E suite passed in VS Code 1.136.1 on macOS arm64. Coverage includes two OR filters, keyboard Apply, Clear/Undo, host-side query validation, and foreign-key focus departure, return, selection, and save in both Model Data and ORM Query.
+- The browser fixture passed filter interactions at 390, 768, and 1440 pixels wide, including light and forced-colors checks. It uses a simulated backend; the native suite above separately exercises the VS Code host boundary.
+- Full VS Code E2E remains incomplete: the detached overlay hover closed after pointer handoff. The recorded events show successful entry and retention followed by a pointer event outside the test's requested path. Isolating that input and completing the hover/resize checks remain open; this is not a full-suite pass.
+- Actual SSH/WAN bootstrap behavior and the managed endpoint's SentinelOne detection status remain unverified.
+- The design sidecar was synchronized with `DESIGN.md` and checked for drift.
+
 ### 1.1.1000052 validation record — 2026-09-08
 
 - `npm run check`: 1,010 tests passed with no failures or skips.
@@ -29,7 +38,7 @@ npm run test:e2e
 
 `npm run check` enforces code guidelines, compiles TypeScript, bundles the renderer assets, and runs unit tests. `npm run test:e2e` launches VS Code and validates Model Browser, ORM Query, the custom console, overlay documents, restart reset behavior, and renderer guards. The test runner uses its own extensions directory, disables extension updates and background timer throttling, and focuses its own window for input probes; it must not load or update unrelated user extensions. Set `VSCODE_E2E_EXECUTABLE` to an existing VS Code executable when using a cached installation.
 
-Both E2E entrypoints reserve an inspector port and verify the owning test process before activating its single workbench window. Webview typing waits for focus and stable geometry; completion timing records the first visible frame inside the renderer so inspector round trips do not inflate the 500ms budget.
+Both E2E entrypoints reserve an inspector port and verify the owning test process before activating its single workbench window. On macOS, activation targets that verified process ID. Webview focus uses Chromium pointer input, and typing waits for focus and stable geometry; completion timing records the first visible frame inside the renderer so inspector round trips do not inflate the 500ms budget.
 
 The overlay checks require a Node inspector belonging to the test's VS Code process. If an injected local port-routing hook causes `address already in use` or `main inspector did not open`, run the test process without that hook and its runtime shims. Keep other applications and their listeners running.
 
@@ -52,13 +61,13 @@ npm run package
 This produces a file like:
 
 ```text
-django-shell-1.1.1000052.vsix
+django-shell-1.1.1000053.vsix
 ```
 
 Install it into VS Code:
 
 ```sh
-code --install-extension django-shell-1.1.1000052.vsix --force
+code --install-extension django-shell-1.1.1000053.vsix --force
 ```
 
 After installation, reload VS Code and run `Django Shell: Open Console` from the command palette.
@@ -89,7 +98,7 @@ After the checks pass, commit and push the release, package the VSIX, and instal
 
 ```sh
 npx @vscode/vsce login <publisher-id>
-npx @vscode/vsce publish --packagePath django-shell-1.1.1000052.vsix
+npx @vscode/vsce publish --packagePath django-shell-1.1.1000053.vsix
 ```
 
 Use `npx @vscode/vsce publish patch`, `minor`, or `major` only when you want VSCE to bump the version automatically.

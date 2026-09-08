@@ -46,6 +46,7 @@ media/gridEdit.js
 media/gridFilter.js
 media/gridFkPicker.js
 media/modelIntegrityE2eProbe.js
+media/modelQuickFiltersE2eProbe.js
 media/gridQuery.js
 media/gridResize.js
 media/icon.svg

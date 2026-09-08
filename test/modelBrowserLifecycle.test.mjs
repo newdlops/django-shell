@@ -115,28 +115,28 @@ test("Query Builder probe reports bootstrap and wait failures as one correlated 
 
   const timeoutMessages = [];
   let clock = 0;
-  const examples = ["Aggregate summary", "Correlated Exists", "Chained Formula", "Window RowNumber"].map((label) => ({ click() {}, getAttribute: () => label }));
-  const document = { getElementById: () => undefined, querySelectorAll: () => examples };
+  const document = { getElementById: () => undefined, querySelectorAll: () => [] };
   await withProbeGlobals({ HTMLSelectElement: { prototype: {} }, Date: { now: () => { clock += 1000; return clock; } }, setTimeout: (resolve) => { queueMicrotask(resolve); return 1; } }, async () => {
     await runModelQueryBuilderE2eProbe({ document, postMessage: (message) => timeoutMessages.push(message), requestId: "wait-request" });
   });
   const terminal = timeoutMessages.filter((message) => message.type === "e2eQueryBuilderProbeResult");
   assert.equal(terminal.length, 1);
   assert.equal(terminal[0].requestId, "wait-request");
-  assert.match(terminal[0].snapshot.error, /Timed out waiting for aggregate example controls/);
+  assert.match(terminal[0].snapshot.error, /Quick filters timed out at filter action/);
 });
 
 test("Query Builder probe survives restoration errors without duplicate terminal output", async () => {
   const { runModelQueryBuilderE2eProbe } = await loadProbe();
   const messages = [];
   const selectPrototype = new Proxy({}, { deleteProperty: () => false });
-  await withProbeGlobals({ HTMLSelectElement: { prototype: selectPrototype } }, async () => {
+  let clock = 0;
+  await withProbeGlobals({ HTMLSelectElement: { prototype: selectPrototype }, Date: { now: () => { clock += 1000; return clock; } }, setTimeout: (resolve) => { queueMicrotask(resolve); return 1; } }, async () => {
     await runModelQueryBuilderE2eProbe({ document: { getElementById: () => undefined, querySelectorAll: () => [] }, postMessage: (message) => messages.push(message), requestId: "cleanup-request" });
   });
   const terminal = messages.filter((message) => message.type === "e2eQueryBuilderProbeResult");
   assert.equal(terminal.length, 1);
   assert.equal(terminal[0].requestId, "cleanup-request");
-  assert.match(terminal[0].snapshot.error, /Progressive examples are missing or unordered/);
+  assert.match(terminal[0].snapshot.error, /Quick filters timed out at filter action/);
 });
 
 test("Model Browser probe ignores stale and late results while preserving bounded correlated progress", async () => {

@@ -1,7 +1,9 @@
 // Activates only the isolated E2E process's own workbench before input and timing probes.
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const vscode = require("vscode");
 const WebSocket = require("ws");
 
 let target;
@@ -11,6 +13,9 @@ async function focusTestWorkbench(extension) {
   const result = await evaluateTestWorkbench(extension, `electron.app.focus({steal:true});win.show();win.focus();win.webContents.focus();return {ok:true,pid:process.pid,windowId:win.id};`);
   assert.equal(result?.ok, true, JSON.stringify(result));
   assert.equal(result.pid, target.pid);
+  if (process.platform === "darwin") {
+    execFileSync("/usr/bin/osascript", ["-e", `tell application "System Events" to set frontmost of first process whose unix id is ${target.pid} to true`], { timeout: 3000 });
+  }
 }
 
 /** Saves only the isolated test workbench's rendered pixels for visual regression diagnosis. */
@@ -33,6 +38,8 @@ async function withTestWorkbenchSize(extension, width, height, run) {
 /** Focuses a real webview cell through Chromium input instead of relying on cross-frame window.focus. */
 async function focusTestWebview(extension, point) {
   assert.ok(Number.isFinite(point?.x) && Number.isFinite(point?.y), "Webview focus requires a measured cell point.");
+  await focusTestWorkbench(extension);
+  await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
   const result = await evaluateTestWorkbench(extension, `
     if(!win.isFocused()){electron.app.focus({steal:true});win.show();win.focus();win.webContents.focus();await new Promise(resolve=>setTimeout(resolve,120));}
     const frames=await win.webContents.executeJavaScript('(function(){return Array.from(document.querySelectorAll("iframe.webview")).map(frame=>{const rect=frame.getBoundingClientRect();return {x:rect.x,y:rect.y,width:rect.width,height:rect.height,visible:getComputedStyle(frame).visibility!=="hidden"&&rect.width>0&&rect.height>0};}).filter(frame=>frame.visible);})()');
@@ -40,12 +47,19 @@ async function focusTestWebview(extension, point) {
     const frame=frames[0],point=${JSON.stringify(point)};
     if(point.x<0||point.y<0||point.x>=frame.width||point.y>=frame.height){return {ok:false,reason:"cell-outside-webview",frame,point};}
     const x=Math.round(frame.x+point.x),y=Math.round(frame.y+point.y);
-    win.webContents.sendInputEvent({type:"mouseMove",x,y});
-    try{win.webContents.sendInputEvent({type:"mouseDown",button:"left",modifiers:["leftbuttondown"],clickCount:1,x,y});}
-    finally{win.webContents.sendInputEvent({type:"mouseUp",button:"left",clickCount:1,x,y});}
-    return {ok:true,x,y};
+    const debuggerSession=win.webContents.debugger,ownedSession=!debuggerSession.isAttached();
+    if(ownedSession){debuggerSession.attach("1.3");}
+    try{
+      await debuggerSession.sendCommand("Input.dispatchMouseEvent",{type:"mouseMoved",x,y});
+      try{await debuggerSession.sendCommand("Input.dispatchMouseEvent",{type:"mousePressed",button:"left",buttons:1,clickCount:1,x,y});}
+      finally{await debuggerSession.sendCommand("Input.dispatchMouseEvent",{type:"mouseReleased",button:"left",buttons:0,clickCount:1,x,y});}
+    }finally{if(ownedSession){debuggerSession.detach();}}
+    await new Promise(resolve=>setTimeout(resolve,150));
+    const focusedFrame=await win.webContents.executeJavaScript('({focus:document.hasFocus(),active:document.activeElement&&document.activeElement.tagName,viewport:{width:innerWidth,height:innerHeight}})');
+    return {ok:true,x,y,frame,point,zoom:win.webContents.getZoomFactor(),windowFocused:win.isFocused(),contentsFocused:win.webContents.isFocused(),focusedFrame};
   `);
   assert.equal(result?.ok, true, JSON.stringify(result));
+  console.log("E2E webview focus:", JSON.stringify(result));
 }
 
 /** Executes one test action only after verifying both the parent process and unique workbench. */

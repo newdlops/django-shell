@@ -6,7 +6,7 @@ This extension uses a running build number; the current release line is `1.1.x`.
 Earlier `0.0.x` entries are retained below. The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.1.1000053] — 2026-09-08
 
 ### Improved
 - Model Data's Filters action opens a compact field, comparison, and value editor with Undo, Clear row filters, and keyboard Apply. Complex queries or unrelated draft changes open the full Query Builder, and switching editors preserves the draft.
@@ -14,6 +14,7 @@ Earlier `0.0.x` entries are retained below. The format is loosely based on
 ### Fixed
 - Top-level AND/OR and NOT controls now update the actual predicate group, including groups inside related-row existence checks.
 - List and range comparisons keep structured values when changing operators; new text, boolean, and choice conditions start with values matching their visible controls, and numeric choices retain their type.
+- VS Code E2E activates its own macOS process and delivers webview pointer input through Chromium, covering foreign-key focus departure and return in both Model Data and ORM Query.
 
 ## [1.1.1000052] — 2026-09-08
 

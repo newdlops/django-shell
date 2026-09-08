@@ -8466,8 +8466,86 @@ function renderQuerySummaryTable(result, helpers) {
   return table;
 }
 
+// media/modelQuickFiltersE2eProbe.js
+async function waitFor3(predicate, label) {
+  const deadline = Date.now() + 5e3;
+  while (Date.now() < deadline) {
+    const value = predicate();
+    if (value) {
+      return value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Quick filters timed out at ${label}.`);
+}
+async function readyToApply(document2) {
+  try {
+    await waitFor3(() => !document2.getElementById("queryDrawerApply").disabled, "validated draft");
+  } catch (error) {
+    throw new Error(`${error.message} ${JSON.stringify({ status: document2.getElementById("queryDrawerStatus")?.textContent, issues: document2.getElementById("queryIssueSummary")?.textContent, fields: [...document2.querySelectorAll("#queryWhereRoot input,#queryWhereRoot select")].map((node) => [node.getAttribute("aria-label"), node.value]) })}`);
+  }
+}
+async function addTextCondition(document2, field, value) {
+  const existing = new Set([...document2.querySelectorAll('#queryWhereRoot [data-role="comparison"]')].map((node) => node.dataset.queryNodeId));
+  document2.querySelector('#queryWhereRoot button[aria-label="Add condition to this group"]').click();
+  const row = await waitFor3(() => [...document2.querySelectorAll('#queryWhereRoot [data-role="comparison"]')].find((node) => !existing.has(node.dataset.queryNodeId)), "new condition");
+  const select = await waitFor3(() => {
+    const control = row.querySelector('select[aria-label="Condition field"]');
+    return control && [...control.options].some((option) => option.value === `field:${field}`) ? control : void 0;
+  }, "field metadata");
+  const nodeId = row.dataset.queryNodeId;
+  select.value = `field:${field}`;
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  const input = await waitFor3(() => {
+    const control = document2.querySelector(`[data-query-node-id="${nodeId}"] input[aria-label="Comparison value"]`);
+    return control && document2.activeElement === control ? control : void 0;
+  }, "value focus");
+  input.value = value;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  return input;
+}
+async function runModelQuickFiltersE2eProbe(document2, progress) {
+  const get = (id) => document2.getElementById(id);
+  const filterButton = await waitFor3(() => get("queryFilterButton"), "filter action");
+  filterButton.click();
+  await waitFor3(() => get("queryBuilderTitle").textContent === "Filters", "compact editor");
+  if (get("queryDirtyState").hidden !== true || !get("queryReviewPane").hidden) {
+    throw new Error("Opening compact filters changed the draft or exposed the review pane.");
+  }
+  await addTextCondition(document2, "username", "demo");
+  await addTextCondition(document2, "status", "active");
+  const join = document2.querySelector('#queryWhereRoot select[aria-label="Join conditions"]');
+  join.value = "or";
+  join.dispatchEvent(new Event("change", { bubbles: true }));
+  await readyToApply(document2);
+  if (get("queryFilterButton").textContent !== "Filters 0") {
+    throw new Error("Editing filters applied the draft prematurely.");
+  }
+  progress("quick-filters-draft");
+  const currentInput = document2.querySelector('#queryWhereRoot input[aria-label="Comparison value"]');
+  currentInput.focus();
+  currentInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ctrlKey: true, key: "Enter" }));
+  await waitFor3(() => get("queryFilterButton").textContent === "Filters 2" && get("queryDrawerStatus").textContent === "Applied query is current.", "keyboard Apply");
+  get("queryClearFilters").click();
+  if (get("queryFilterButton").textContent !== "Filters 2") {
+    throw new Error("Clear filters executed without Apply.");
+  }
+  get("queryUndo").click();
+  await waitFor3(() => document2.querySelectorAll('#queryWhereRoot [data-role="comparison"]').length === 2, "Undo clear");
+  get("queryClearFilters").click();
+  await readyToApply(document2);
+  get("queryDrawerApply").click();
+  await waitFor3(() => get("queryFilterButton").textContent === "Filters 0" && get("queryDrawerStatus").textContent === "Applied query is current.", "Apply clear");
+  get("queryClose").click();
+  if (document2.activeElement !== get("queryFilterButton")) {
+    throw new Error("Closing compact filters lost keyboard focus.");
+  }
+  progress("quick-filters-passed");
+  return { cleared: true, keyboardApply: true, undo: true };
+}
+
 // media/modelQueryBuilderE2eProbe.js
-async function waitFor3(predicate, label, timeoutMs = 5e3) {
+async function waitFor4(predicate, label, timeoutMs = 5e3) {
   const started = Date.now();
   let value;
   while (Date.now() - started < timeoutMs) {
@@ -8494,7 +8572,7 @@ function conditionAdd(document2) {
   return [...document2.querySelectorAll("button")].find((candidate) => candidate.getAttribute("aria-label") === "Add condition to this group");
 }
 async function waitForE2eField(document2, predicate, timeoutMs = 5e3) {
-  return waitFor3(() => {
+  return waitFor4(() => {
     const select = document2.querySelector('select[aria-label="Condition field"]');
     return select && predicate(select) ? select : void 0;
   }, "Query Builder Field control", timeoutMs);
@@ -8524,7 +8602,7 @@ function assistantSettingsReady(document2, expected) {
 }
 async function propertyResult(document2, expected) {
   try {
-    await waitFor3(() => {
+    await waitFor4(() => {
       const cell = document2.querySelector('td[data-key="display_name"]');
       const load = document2.querySelector('button[data-field="display_name"]');
       return cell?.textContent === expected && load && !load.disabled;
@@ -8577,6 +8655,8 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
   try {
     selectPrototype = HTMLSelectElement.prototype;
     originalShowPicker = Object.getOwnPropertyDescriptor(selectPrototype, "showPicker");
+    progress("quick-filters");
+    await runModelQuickFiltersE2eProbe(document2, progress);
     progress("examples");
     Object.defineProperty(selectPrototype, "showPicker", { configurable: true, value() {
       showPickerCalls += 1;
@@ -8593,8 +8673,8 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
     }
     progress("example-aggregate-apply");
     examples[0].click();
-    await waitFor3(() => document2.getElementById("queryComputedList")?.textContent?.includes("row_count") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("row_count"), "aggregate example controls");
-    await waitFor3(() => previewIsReady(document2), "aggregate preview");
+    await waitFor4(() => document2.getElementById("queryComputedList")?.textContent?.includes("row_count") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("row_count"), "aggregate example controls");
+    await waitFor4(() => previewIsReady(document2), "aggregate preview");
     if (typeof document2.querySelector === "function") {
       progress("property-load-retry");
       propertyLoads.push(...await propertyLoadCycle(document2));
@@ -8605,7 +8685,7 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
       for (const expected of ["ascending", "descending", "none"]) {
         progress(`grid-sort-${expected}`);
         usernameSort.click();
-        await waitFor3(() => {
+        await waitFor4(() => {
           const header = document2.querySelector('th[data-key="username"]');
           usernameSort = header?.querySelector(".sortbtn");
           return header?.getAttribute("aria-sort") === expected && usernameSort && !usernameSort.disabled;
@@ -8622,47 +8702,47 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
     }
     progress("example-aggregate-undo-click");
     click(document2, "Undo");
-    await waitFor3(() => examplesRestored(document2), "aggregate undo");
+    await waitFor4(() => examplesRestored(document2), "aggregate undo");
     progress("example-aggregate-undo-restored");
     progress("example-exists-apply");
     click(document2, "2 \xB7 Related memberships via Exists");
-    await waitFor3(() => document2.getElementById("queryComputedList")?.textContent?.includes("has_memberships") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("has_memberships"), "Exists example controls");
-    await waitFor3(() => previewIsReady(document2), "Exists preview");
+    await waitFor4(() => document2.getElementById("queryComputedList")?.textContent?.includes("has_memberships") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("has_memberships"), "Exists example controls");
+    await waitFor4(() => previewIsReady(document2), "Exists preview");
     if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
       throw new Error("Exists example changed applied filters.");
     }
     progress("example-exists-undo-click");
     click(document2, "Undo");
-    await waitFor3(() => examplesRestored(document2), "Exists undo");
+    await waitFor4(() => examplesRestored(document2), "Exists undo");
     progress("example-exists-undo-restored");
     progress("example-formula-apply");
     click(document2, "3 \xB7 Normalize Username; Length \u2265 8");
-    await waitFor3(() => document2.getElementById("queryComputedList")?.textContent?.includes("normalized_username") && document2.getElementById("queryComputedList")?.textContent?.includes("username_length") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("username_length") && document2.getElementById("queryOrderBy")?.textContent?.includes("username_length") && document2.getElementById("queryOrderBy")?.textContent?.includes("normalized_username"), "Formula example controls");
-    await waitFor3(() => previewIsReady(document2), "Formula preview");
+    await waitFor4(() => document2.getElementById("queryComputedList")?.textContent?.includes("normalized_username") && document2.getElementById("queryComputedList")?.textContent?.includes("username_length") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("username_length") && document2.getElementById("queryOrderBy")?.textContent?.includes("username_length") && document2.getElementById("queryOrderBy")?.textContent?.includes("normalized_username"), "Formula example controls");
+    await waitFor4(() => previewIsReady(document2), "Formula preview");
     if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
       throw new Error("Formula example changed applied filters.");
     }
     progress("example-formula-undo-click");
     click(document2, "Undo");
-    await waitFor3(() => examplesRestored(document2), "Formula undo");
+    await waitFor4(() => examplesRestored(document2), "Formula undo");
     progress("example-formula-undo-restored");
     progress("example-window-apply");
     click(document2, "4 \xB7 Top 3 ID per Status");
-    await waitFor3(() => document2.getElementById("queryComputedList")?.textContent?.includes("rank_within_status") && document2.getElementById("queryComputedList")?.textContent?.includes("Window: row_number") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("rank_within_status") && document2.getElementById("queryOrderBy")?.textContent?.includes("status") && document2.getElementById("queryOrderBy")?.textContent?.includes("rank_within_status"), "Window example controls");
-    await waitFor3(() => previewIsReady(document2), "Window preview");
+    await waitFor4(() => document2.getElementById("queryComputedList")?.textContent?.includes("rank_within_status") && document2.getElementById("queryComputedList")?.textContent?.includes("Window: row_number") && document2.getElementById("queryPostFilterRoot")?.textContent?.includes("rank_within_status") && document2.getElementById("queryOrderBy")?.textContent?.includes("status") && document2.getElementById("queryOrderBy")?.textContent?.includes("rank_within_status"), "Window example controls");
+    await waitFor4(() => previewIsReady(document2), "Window preview");
     if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
       throw new Error("Window example changed applied filters.");
     }
     progress("example-window-undo-click");
     click(document2, "Undo");
-    await waitFor3(() => examplesRestored(document2), "Window undo");
+    await waitFor4(() => examplesRestored(document2), "Window undo");
     progress("example-window-undo-restored");
-    await waitFor3(() => document2.getElementById("queryDrawerStatus")?.textContent === "Applied query is current.", "restored draft preview");
+    await waitFor4(() => document2.getElementById("queryDrawerStatus")?.textContent === "Applied query is current.", "restored draft preview");
     progress("assistant-settings");
     click(document2, "AI Assist");
     progress("assistant-open-clicked");
-    const assistant = await waitFor3(() => document2.getElementById("queryAssistantPanel")?.hidden === false ? document2.getElementById("queryAssistantPanel") : void 0, "AI Assist panel");
-    const provider = await waitFor3(() => document2.getElementById("queryAssistantProvider"), "assistant provider selector");
+    const assistant = await waitFor4(() => document2.getElementById("queryAssistantPanel")?.hidden === false ? document2.getElementById("queryAssistantPanel") : void 0, "AI Assist panel");
+    const provider = await waitFor4(() => document2.getElementById("queryAssistantProvider"), "assistant provider selector");
     const instructions = document2.getElementById("queryAssistantInstructions");
     const model = document2.getElementById("queryAssistantModel");
     const reasoning = document2.getElementById("queryAssistantReasoning");
@@ -8673,81 +8753,81 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
     let modelControl = document2.getElementById("queryAssistantModel");
     modelControl.value = "sonnet";
     modelControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "" }), "Claude direct model save");
+    await waitFor4(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "" }), "Claude direct model save");
     progress("assistant-reasoning-save");
     let reasoningControl = document2.getElementById("queryAssistantReasoning");
     reasoningControl.value = "high";
     reasoningControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "Claude reasoning save");
+    await waitFor4(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "Claude reasoning save");
     progress("assistant-provider-switch");
     let providerControl = document2.getElementById("queryAssistantProvider");
     providerControl.value = "codex";
     providerControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor3(() => assistantSettingsReady(document2, { automatic: true, model: "", provider: "codex", reasoning: "" }), "Codex provider acknowledgement");
+    await waitFor4(() => assistantSettingsReady(document2, { automatic: true, model: "", provider: "codex", reasoning: "" }), "Codex provider acknowledgement");
     modelControl = document2.getElementById("queryAssistantModel");
     modelControl.value = "gpt-5";
     modelControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "" }), "Codex model save");
+    await waitFor4(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "" }), "Codex model save");
     reasoningControl = document2.getElementById("queryAssistantReasoning");
     reasoningControl.value = "xhigh";
     reasoningControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "xhigh" }), "Codex supported reasoning save");
+    await waitFor4(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5", provider: "codex", reasoning: "xhigh" }), "Codex supported reasoning save");
     modelControl = document2.getElementById("queryAssistantModel");
     modelControl.value = "gpt-5-mini";
     modelControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor3(() => assistant.textContent?.includes("does not support the selected reasoning level") && document2.getElementById("queryAssistantProvider")?.value === "codex" && !document2.getElementById("queryAssistantProvider")?.disabled, "known incompatible reasoning");
+    await waitFor4(() => assistant.textContent?.includes("does not support the selected reasoning level") && document2.getElementById("queryAssistantProvider")?.value === "codex" && !document2.getElementById("queryAssistantProvider")?.disabled, "known incompatible reasoning");
     reasoningControl = document2.getElementById("queryAssistantReasoning");
     reasoningControl.value = "medium";
     reasoningControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5-mini", provider: "codex", reasoning: "medium" }) && !assistant.textContent?.includes("does not support the selected reasoning level"), "compatible reasoning recovery");
+    await waitFor4(() => assistantSettingsReady(document2, { automatic: false, model: "gpt-5-mini", provider: "codex", reasoning: "medium" }) && !assistant.textContent?.includes("does not support the selected reasoning level"), "compatible reasoning recovery");
     providerControl = document2.getElementById("queryAssistantProvider");
     providerControl.value = "claude";
     providerControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "retained Claude settings");
+    await waitFor4(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "retained Claude settings");
     modelControl = document2.getElementById("queryAssistantModel");
     modelControl.value = "";
     modelControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor3(() => assistantSettingsReady(document2, { automatic: true, model: "", provider: "claude", reasoning: "high" }), "automatic mode restoration");
+    await waitFor4(() => assistantSettingsReady(document2, { automatic: true, model: "", provider: "claude", reasoning: "high" }), "automatic mode restoration");
     modelControl = document2.getElementById("queryAssistantModel");
     modelControl.value = "sonnet";
     modelControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor3(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "retained manual pin after automatic mode");
-    const currentInstructions = await waitFor3(() => document2.getElementById("queryAssistantInstructions"), "assistant instruction control after provider selection");
+    await waitFor4(() => assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }), "retained manual pin after automatic mode");
+    const currentInstructions = await waitFor4(() => document2.getElementById("queryAssistantInstructions"), "assistant instruction control after provider selection");
     currentInstructions.value = "Create a valid query draft";
     currentInstructions.dispatchEvent(new Event("input", { bubbles: true }));
     const refresh = document2.getElementById("queryAssistantRefresh");
     refresh.focus();
     click(document2, "Refresh models");
-    await waitFor3(() => document2.getElementById("queryAssistantInstructions")?.value === "Create a valid query draft" && assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }) && document2.activeElement?.id === "queryAssistantRefresh", "metadata refresh preservation and focus");
-    await waitFor3(() => button2(document2, "Generate suggestion") && !button2(document2, "Generate suggestion")?.disabled, "enabled assistant generation");
+    await waitFor4(() => document2.getElementById("queryAssistantInstructions")?.value === "Create a valid query draft" && assistantSettingsReady(document2, { automatic: false, model: "sonnet", provider: "claude", reasoning: "high" }) && document2.activeElement?.id === "queryAssistantRefresh", "metadata refresh preservation and focus");
+    await waitFor4(() => button2(document2, "Generate suggestion") && !button2(document2, "Generate suggestion")?.disabled, "enabled assistant generation");
     progress("generation-running");
     click(document2, "Generate suggestion");
-    await waitFor3(() => assistant.textContent?.includes("Generating suggestion with Claude Code") && button2(document2, "Generate suggestion")?.disabled && button2(document2, "Cancel"), "assistant running state");
+    await waitFor4(() => assistant.textContent?.includes("Generating suggestion with Claude Code") && button2(document2, "Generate suggestion")?.disabled && button2(document2, "Cancel"), "assistant running state");
     progress("cancel-clicked");
     click(document2, "Cancel");
-    await waitFor3(() => button2(document2, "Cancel")?.disabled && assistant.textContent?.includes("Cancelling generation\u2026"), "assistant cancellation pending");
+    await waitFor4(() => button2(document2, "Cancel")?.disabled && assistant.textContent?.includes("Cancelling generation\u2026"), "assistant cancellation pending");
     progress("cancel-ack");
-    await waitFor3(() => assistant.textContent?.includes("Generation was cancelled.") && !assistant.textContent?.includes("AI-generated suggestion"), "assistant cancellation");
-    await waitFor3(() => button2(document2, "Generate suggestion") && !button2(document2, "Generate suggestion")?.disabled, "generation after cancellation");
+    await waitFor4(() => assistant.textContent?.includes("Generation was cancelled.") && !assistant.textContent?.includes("AI-generated suggestion"), "assistant cancellation");
+    await waitFor4(() => button2(document2, "Generate suggestion") && !button2(document2, "Generate suggestion")?.disabled, "generation after cancellation");
     progress("second-generation");
     click(document2, "Generate suggestion");
     progress("suggestion");
-    await waitFor3(() => assistant.textContent?.includes("AI-generated suggestion \xB7 Claude Code") || document2.getElementById("queryDraftAiAssembly")?.hidden === false, "assistant result or assembled draft");
+    await waitFor4(() => assistant.textContent?.includes("AI-generated suggestion \xB7 Claude Code") || document2.getElementById("queryDraftAiAssembly")?.hidden === false, "assistant result or assembled draft");
     if (button2(document2, "Use as draft")) {
       throw new Error("AI Assist exposed a manual draft action.");
     }
     if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None") {
       throw new Error("Suggestion changed applied filters.");
     }
-    await waitFor3(() => document2.getElementById("queryDraftStatus")?.textContent === "Draft changes are not applied" && document2.getElementById("queryDraftAiAssembly")?.hidden === false && document2.getElementById("queryWhereRoot")?.textContent?.includes("Status") && document2.getElementById("queryWhereRoot")?.textContent?.includes("equals \u201Cactive\u201D.") && !document2.getElementById("queryDrawerApply")?.disabled, "rendered automatic draft-only assistant acceptance");
+    await waitFor4(() => document2.getElementById("queryDraftStatus")?.textContent === "Draft changes are not applied" && document2.getElementById("queryDraftAiAssembly")?.hidden === false && document2.getElementById("queryWhereRoot")?.textContent?.includes("Status") && document2.getElementById("queryWhereRoot")?.textContent?.includes("equals \u201Cactive\u201D.") && !document2.getElementById("queryDrawerApply")?.disabled, "rendered automatic draft-only assistant acceptance");
     if (document2.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None" || document2.getElementById("queryDrawerStatus")?.textContent?.includes("Applying")) {
       throw new Error("Assistant acceptance applied the query.");
     }
     click(document2, "Undo");
-    await waitFor3(() => document2.getElementById("queryDraftStatus")?.textContent === "Draft matches applied query", "assistant acceptance undo");
+    await waitFor4(() => document2.getElementById("queryDraftStatus")?.textContent === "Draft matches applied query", "assistant acceptance undo");
     progress("legacy-picker");
     click(document2, "1. Filter Rows");
-    const pickerAdd = await waitFor3(() => conditionAdd(document2), "legacy picker condition control");
+    const pickerAdd = await waitFor4(() => conditionAdd(document2), "legacy picker condition control");
     pickerAdd.click();
     const select = await waitForE2eField(document2, (candidate) => !candidate.disabled);
     const optionGroups = [...select.querySelectorAll("optgroup")].map((group) => group.label);

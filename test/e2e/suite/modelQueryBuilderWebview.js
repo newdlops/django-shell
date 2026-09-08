@@ -50,8 +50,11 @@ async function assertModelQueryBuilderWebview(extension) {
     }
     assert.equal(fixture.calls.modelAggregate, 0, "assistant and examples do not run aggregate queries");
     assert.equal(fixture.calls.modelCommit, 0, "assistant acceptance never commits edits");
-    assert.equal(fixture.calls.modelRows, 4, "only the initial load and three header-sort states reload fixture rows");
-    assert.deepEqual(fixture.calls.orders, ["default", "username:asc", "username:desc", "default"]);
+    assert.equal(fixture.calls.modelRows, 6, "the initial load, two filter applications, and three header sorts reload fixture rows");
+    assert.deepEqual(fixture.calls.orders, ["default", "default", "default", "username:asc", "username:desc", "default"]);
+    assert.deepEqual(fixture.calls.filters[1].children.map((node) => [node.lhs.path, node.lookup, node.rhs.value]), [["username", "icontains", "demo"], ["status", "icontains", "active"]]);
+    assert.equal(fixture.calls.filters[1].join, "or");
+    assert.deepEqual(fixture.calls.filters[2].children, []);
   } finally {
     progressSubscription?.dispose();
     browser.dispose();
@@ -126,7 +129,7 @@ function modelFixtureSource(onDidChangeRuntime) {
     relations
   };
   const membershipTree = { fields: [{ attname: "company_id", label: "Company ID", name: "company_id", null: false, pk: false, type: "IntegerField" }, { attname: "id", label: "ID", name: "id", null: false, pk: true, type: "AutoField" }], ok: true, pk: "id", relations: [] };
-  const calls = { modelAggregate: 0, modelCommit: 0, modelComputed: 0, modelRows: 0, orders: [] };
+  const calls = { modelAggregate: 0, modelCommit: 0, modelComputed: 0, modelRows: 0, orders: [], filters: [] };
   const source = {
     interruptModelQuery: async () => ({ interrupted: false, ok: true }),
     listModels: async () => ({ models: [{ app: "db", label: "Application user", model: "AppUser", table: "db_appuser" }, { app: "db", label: "Membership", model: "Membership", table: "db_membership" }], ok: true }),
@@ -138,7 +141,7 @@ function modelFixtureSource(onDidChangeRuntime) {
     modelLookup: async () => ({ columns: [], ok: true, rows: [], sql: [] }),
     modelQuery: async () => ({ columns, ok: true, orm: "", rows: [], sql: [] }),
     modelRelated: async () => ({ columns: [], hasMore: false, ok: true, orm: "", rows: [], single: false, sql: [] }),
-    modelRows: async (query) => { calls.modelRows += 1; const term = query.recipe?.orderBy?.[0]; calls.orders.push(term ? `${term.ref.path || term.ref.alias}:${term.direction}` : "default"); return { columns, hasMore: false, nextOffset: null, ok: true, orm: "db.AppUser.objects.all()", pk: "id", relations, rows: [{ id: 1, status: "active", username: "demo" }], sql: [] }; },
+    modelRows: async (query) => { calls.modelRows += 1; calls.filters.push(structuredClone(query.recipe?.where)); const term = query.recipe?.orderBy?.[0]; calls.orders.push(term ? `${term.ref.path || term.ref.alias}:${term.direction}` : "default"); return { columns, hasMore: false, nextOffset: null, ok: true, orm: "db.AppUser.objects.all()", pk: "id", relations, rows: [{ id: 1, status: "active", username: "demo" }], sql: [] }; },
     modelSchema: async () => ({ app: "db", columns, label: "Application user", model: "AppUser", ok: true, pk: "id", relations, table: "db_appuser" }),
     modelTransportInfo: () => ({ active: "tcp", mode: "auto" }),
     onDidChangeRuntime,

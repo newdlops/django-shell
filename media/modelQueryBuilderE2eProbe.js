@@ -1,4 +1,5 @@
 // Isolated DOM-only Query Builder E2E probe used by the Extension Host fixture.
+import { runModelQuickFiltersE2eProbe } from "./modelQuickFiltersE2eProbe.js";
 
 /** Waits until a DOM predicate becomes true and returns its value. */
 async function waitFor(predicate, label, timeoutMs = 5000) {
@@ -93,6 +94,8 @@ export async function runModelQueryBuilderE2eProbe({ document, postMessage, requ
   view?.addEventListener?.("error", terminalError); view?.addEventListener?.("unhandledrejection", terminalError);
   try {
     selectPrototype = HTMLSelectElement.prototype; originalShowPicker = Object.getOwnPropertyDescriptor(selectPrototype, "showPicker");
+    progress("quick-filters");
+    await runModelQuickFiltersE2eProbe(document, progress);
     progress("examples");
     Object.defineProperty(selectPrototype, "showPicker", { configurable: true, value() { showPickerCalls += 1; } });
     const sortCycle = []; const propertyLoads = [];
