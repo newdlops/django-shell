@@ -22,6 +22,8 @@ npm run test:e2e
 
 `npm run check` enforces code guidelines, compiles TypeScript, bundles the renderer assets, and runs unit tests. `npm run test:e2e` launches VS Code and validates Model Browser, ORM Query, the custom console, overlay documents, restart reset behavior, and renderer guards. The test runner uses its own extensions directory, disables extension updates and background timer throttling, and focuses its own window for input probes; it must not load or update unrelated user extensions. Set `VSCODE_E2E_EXECUTABLE` to an existing VS Code executable when using a cached installation.
 
+Both E2E entrypoints reserve an inspector port and verify the owning test process before activating its single workbench window. Webview typing waits for focus and stable geometry; completion timing records the first visible frame inside the renderer so inspector round trips do not inflate the 500ms budget.
+
 The overlay checks require a Node inspector belonging to the test's VS Code process. If an injected local port-routing hook causes `address already in use` or `main inspector did not open`, run the test process without that hook and its runtime shims. Keep other applications and their listeners running.
 
 Confirm the deployment icon is present:
@@ -43,13 +45,13 @@ npm run package
 This produces a file like:
 
 ```text
-django-shell-1.1.1000050.vsix
+django-shell-1.1.1000051.vsix
 ```
 
 Install it into VS Code:
 
 ```sh
-code --install-extension django-shell-1.1.1000050.vsix --force
+code --install-extension django-shell-1.1.1000051.vsix --force
 ```
 
 After installation, reload VS Code and run `Django Shell: Open Console` from the command palette.
@@ -80,7 +82,7 @@ After the checks pass, commit and push the release, package the VSIX, and instal
 
 ```sh
 npx @vscode/vsce login <publisher-id>
-npx @vscode/vsce publish --packagePath django-shell-1.1.1000050.vsix
+npx @vscode/vsce publish --packagePath django-shell-1.1.1000051.vsix
 ```
 
 Use `npx @vscode/vsce publish patch`, `minor`, or `major` only when you want VSCE to bump the version automatically.

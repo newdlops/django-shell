@@ -8,6 +8,19 @@ Earlier `0.0.x` entries are retained below. The format is loosely based on
 
 ## Unreleased
 
+## [1.1.1000051] — 2026-09-08
+
+### Fixed
+- Foreign-key pickers and relation links preserve alternate target keys, leading zeros, and explicit database choices through further navigation, reads, and saves. ORM Query now supports foreign-key search, and stale relation responses cannot change a newer result's editor.
+- JSON edits preserve scalar types, quoted strings, and large integers across Socket and generated ORM saves. Decimal inputs retain exact decimal values, and date-based uniqueness validation checks every edited row before an atomic save.
+- Query results keep the requested `values_list()` column order, named and flat result shapes, and read-only annotation columns.
+- Backend connections have bounded admission, input deadlines, request/response sizes, and output capture. Reserved control capacity remains available during busy work, and an oversized response never silently replays a submitted request.
+- AI assistant output preserves UTF-8 characters across stream chunks. Cancellation, timeout, and output-limit failures terminate owned processes and their descendants.
+
+### Improved
+- Query result handles expire while idle, enforce estimated retention budgets, and are explicitly released on the original backend when replaced or discarded. Reopening a panel still reuses its retained result without executing the query again.
+- Array cells use shape metadata instead of repeatedly parsing the full JSON. The list editor displays 50 items per page, preserves edits between pages, and bounds controls for objects with many fields.
+
 ## [1.1.1000050] — 2026-09-08
 
 ### Fixed
