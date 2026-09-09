@@ -3,6 +3,7 @@
 import { LOOKUP_LABELS, createPredicateValueEditor, defaultLookup, lookupsForField, rhsIsCompatible, rhsKindsFor } from "./gridPredicateValue.js";
 import { createGridCombobox } from "./gridCombobox.js";
 import { createQueryFieldPicker } from "./gridQueryFieldPicker.js";
+import { createFieldExplorer } from "./gridFieldExplorer.js";
 import { createQuerySourceScope, relationSourceState } from "./gridQueryRelations.js";
 import { explainComparison, explainPredicateGroup } from "./gridQueryExplanation.js";
 import { createMeaningLine } from "./gridQueryGuidanceView.js";
@@ -62,7 +63,7 @@ function focusAndOpenSelect(select) {
 function fieldsFor(scope, metadata) {
   const target = scope?.target || scope?.source || scope?.modelRef;
   const tree = target ? metadata?.getState?.(target)?.tree : undefined;
-  const fromTree = (tree?.fields || []).map((field) => ({ ...field, path: field.name, role: "field" }));
+  const fromTree = (tree?.fields || []).map((field) => ({ ...field, path: field.attname || field.name, role: "field" }));
   const fromRelations = (tree?.relations || []).map((relation) => ({ ...relation, path: relation.name, role: "relation", type: relation.kind || "relation" }));
   const fromColumns = (scope?.columns || []).map((field) => ({ ...field, path: field.attname || field.name, role: "field" }));
   const fromComputed = (scope?.computedFields || scope?.computed || []).filter((field) => field?.enabled !== false && (field?.alias || field?.path)).map((field) => ({ alias: field.alias || field.path, path: field.alias || field.path, role: "computed", type: field.outputType || "" }));
@@ -89,7 +90,17 @@ function fieldForPath(path, fields) {
 function persistedFieldForPath(lhs, scope, metadata, fields) {
   if (lhs?.kind === "computed") { return fields.find((field) => field.role === "computed" && field.path === lhs.alias) || { path: lhs.alias, role: "computed", type: "" }; }
   const path = lhs?.kind === "field" ? lhs.path : ""; const parts = String(path || "").split("__").filter(Boolean); let target = scope?.target || scope?.source || scope?.modelRef; let tree = metadata?.getState?.(target)?.tree;
-  for (let index = 0; tree && index < parts.length; index += 1) { const segment = parts[index]; const field = (tree.fields || []).find((item) => item.name === segment); if (field && index === parts.length - 1) { return { ...field, path, role: "field" }; } const relation = (tree.relations || []).find((item) => item.name === segment); if (relation && index === parts.length - 1) { return { ...relation, path, role: "relation", type: relation.kind || "relation" }; } if (!relation) { break; } const boundary = String(relation.target || "").lastIndexOf("."); target = boundary > 0 ? { app: relation.target.slice(0, boundary), model: relation.target.slice(boundary + 1) } : undefined; tree = metadata?.getState?.(target)?.tree; }
+  for (let index = 0; tree && index < parts.length; index += 1) {
+    const segment = parts[index];
+    const field = (tree.fields || []).find((item) => item.attname === segment || item.name === segment);
+    if (field && index === parts.length - 1) { return { ...field, path, role: "field" }; }
+    const relation = (tree.relations || []).find((item) => item.name === segment);
+    if (relation && index === parts.length - 1) { return { ...relation, path, role: "relation", type: relation.kind || "relation" }; }
+    if (!relation) { break; }
+    const boundary = String(relation.target || "").lastIndexOf(".");
+    target = boundary > 0 ? { app: relation.target.slice(0, boundary), model: relation.target.slice(boundary + 1) } : undefined;
+    tree = metadata?.getState?.(target)?.tree;
+  }
   return fieldForPath(path, fields);
 }
 
@@ -114,6 +125,7 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
   let disposed = false;
   let pickerDisposables = [];
   let requestedFocus;
+  const fieldNavigation = new Map();
 
   /** Retains one nested picker until this predicate subtree is rebuilt or destroyed. */
   function trackPicker(picker) { pickerDisposables.push(picker); return picker; }
@@ -151,6 +163,7 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
     requestMetadata();
     const group = root();
     releasePickers();
+    for (const nodeId of fieldNavigation.keys()) { if (!findNode(getRecipe?.(), nodeId)) { fieldNavigation.delete(nodeId); } }
     body.replaceChildren();
     if (!group) {
       body.appendChild(el("p", { className: "query-builder-empty" }, "Loading predicate group…"));
@@ -174,33 +187,35 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
   function renderGroup(group, container, depth, scope) {
     const section = el("fieldset", { className: "query-predicate-group", dataset: { depth: String(depth), queryNodeId: group.nodeId, role: "predicate-group" } });
     const heading = el("legend", {}, depth === 1 ? "Conditions" : "Nested conditions");
+    const header = el("div", { className: "query-predicate-header" });
     const toolbar = el("div", { className: "query-predicate-toolbar" });
-    const join = nativeSelect([{ label: "Match all (AND)", value: "and" }, { label: "Match any (OR)", value: "or" }], group.join, "Join conditions");
+    const join = nativeSelect([{ label: "All conditions (AND)", value: "and" }, { label: "Any condition (OR)", value: "or" }], group.join, "Join conditions");
     join.addEventListener("change", () => act({ changes: { join: join.value }, nodeId: group.nodeId, type: "UPDATE_NODE" }));
     const negated = el("input", { ariaLabel: "Negate group", checked: Boolean(group.negated), type: "checkbox" });
     negated.addEventListener("change", () => act({ changes: { negated: negated.checked }, nodeId: group.nodeId, type: "UPDATE_NODE" }));
-    const notLabel = el("label", { className: "query-predicate-not", dataset: { negated: String(Boolean(group.negated)) } }, negated, "Exclude this group (NOT)");
-    const addComparison = structuralButton("Add condition", "Add condition to this group", () => act({ parentId: group.nodeId, type: "ADD_COMPARISON" }, { nodeId: group.nodeId, role: "lhs" }));
-    const addGroup = structuralButton("Add group", "Add nested condition group", () => act({ parentId: group.nodeId, type: "ADD_GROUP" }, { nodeId: group.nodeId, role: "lhs" }));
+    const notLabel = el("label", { className: "query-predicate-not", dataset: { negated: String(Boolean(group.negated)) } }, negated, "Exclude group");
+    const addComparison = structuralButton("+ Condition", "Add condition to this group", () => act({ parentId: group.nodeId, type: "ADD_COMPARISON" }, { nodeId: group.nodeId, role: "lhs" }));
+    const addGroup = structuralButton("+ Group", "Add nested condition group", () => act({ parentId: group.nodeId, type: "ADD_GROUP" }, { nodeId: group.nodeId, role: "lhs" }));
     const addExists = structuralButton("Add existence check", "Add related-row existence check", () => act({ parentId: group.nodeId, type: "ADD_EXISTS_PREDICATE" }, { nodeId: group.nodeId, role: "lhs" }));
-    addGroup.dataset.advanced = "true"; addExists.dataset.advanced = "true";
-    const blocked = depth >= MAX_DEPTH || (group.children || []).length >= MAX_CHILDREN;
-    addComparison.disabled = blocked; addGroup.disabled = blocked; addExists.disabled = blocked || !allowsExists(context);
+    addExists.dataset.advanced = "true";
+    const blocked = (group.children || []).length >= MAX_CHILDREN;
+    addComparison.disabled = blocked; addGroup.disabled = blocked || depth >= MAX_DEPTH; addExists.disabled = blocked || depth >= MAX_DEPTH || !allowsExists(context);
     addComparison.title = blocked ? `Maximum depth ${MAX_DEPTH} or ${MAX_CHILDREN} children reached` : "Add condition";
     addGroup.title = blocked ? `Maximum depth ${MAX_DEPTH} or ${MAX_CHILDREN} children reached` : "Add nested group";
-    if ((group.children || []).length > 1) { toolbar.appendChild(join); }
-    toolbar.append(notLabel, addComparison, addGroup);
+    header.append(el("span", { className: "query-group-match" }, "Match"), join, notLabel);
+    if (depth > 1) { header.appendChild(nodeActions(group)); }
+    toolbar.append(addComparison, addGroup);
     if (allowsExists(context)) { toolbar.appendChild(addExists); }
-    section.append(heading, toolbar, inlineIssues(group.nodeId));
+    section.append(heading, header, inlineIssues(group.nodeId));
     const children = el("div", { className: "query-predicate-children" });
-    for (const child of group.children || []) {
+    for (const [index, child] of (group.children || []).entries()) {
+      if (index) { children.appendChild(el("div", { className: "query-condition-connector", ariaHidden: "true" }, el("span", {}, group.join.toUpperCase()))); }
       if (child.kind === "group") { renderGroup(child, children, depth + 1, scope); }
       else if (child.kind === "comparison") { renderComparison(child, children, scope); }
       else if (child.kind === "existsPredicate") { renderExists(child, children, depth, scope); }
     }
-    if (!(group.children || []).length) { children.appendChild(createMeaningLine({ el, explanation: explainPredicateGroup(group, { postFilter: context === "postFilter", root: depth === 1 }), id: `query-meaning-${group.nodeId}` })); }
-    section.appendChild(children);
-    if (depth > 1) { section.appendChild(nodeActions(group, group)); }
+    if (!(group.children || []).length) { children.appendChild(el("p", { className: "query-filter-empty" }, depth === 1 ? "Start with a field. Add groups to combine AND and OR." : "Add conditions to this group.")); }
+    section.append(children, toolbar);
     container.appendChild(section);
   }
 
@@ -211,16 +226,21 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
     const field = persistedFieldForPath(comparison.lhs, scope, metadata, fields);
     const row = el("div", { className: "query-predicate-row", dataset: { queryNodeId: comparison.nodeId, role: "comparison" } });
     /** Commits one selected field and puts typing focus in its type-appropriate value control. */
-    function selectField(selectedPath, kind, descriptor) {
+    function selectField(selectedPath, kind, descriptor, pastedLookup) {
       const role = kind === "relationTerminal" ? "relation" : kind === "computed" ? "computed" : "field";
       const selected = descriptor && (role === "computed" ? fields.find((entry) => entry.role === role && entry.path === descriptor.alias) : { ...descriptor, path: selectedPath, role });
-      if (selected) { act({ changes: fieldSelectionChanges(comparison, selected, selectedPath, context), nodeId: comparison.nodeId, type: "UPDATE_NODE" }, { nodeId: comparison.nodeId, role: "value" }); }
+      if (selected) {
+        const changes = fieldSelectionChanges(comparison, selected, selectedPath, context);
+        if (pastedLookup) { Object.assign(changes, lookupChanges({ ...comparison, ...changes }, pastedLookup)); }
+        act({ changes, nodeId: comparison.nodeId, type: "UPDATE_NODE" }, { nodeId: comparison.nodeId, role: "value" });
+      }
     }
-    const fieldPicker = trackPicker(createQueryFieldPicker({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], controlKey: "predicate-lhs-" + comparison.nodeId, current: path, el, metadata, onChange: selectField, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: true }));
+    if (!fieldNavigation.has(comparison.nodeId)) { fieldNavigation.set(comparison.nodeId, {}); }
+    const fieldPicker = trackPicker((popoverLayer ? createFieldExplorer : createQueryFieldPicker)({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], controlKey: "predicate-lhs-" + comparison.nodeId, current: path, el, metadata, navigation: fieldNavigation.get(comparison.nodeId), onChange: selectField, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: true }));
     fieldPicker.node.dataset.focusRole = "lhs";
     const lookups = lookupsForField(field);
     const lookup = nativeSelect(lookups.map((value) => ({ label: LOOKUP_LABELS[value] || value, value })), comparison.lookup, "Comparison");
-    lookup.setAttribute("aria-description", "(i) means case-insensitive.");
+    lookup.setAttribute("aria-description", "Choose how to compare this field. Ignore case treats uppercase and lowercase as equal.");
     lookup.addEventListener("change", () => act({ changes: lookupChanges(comparison, lookup.value), nodeId: comparison.nodeId, type: "UPDATE_NODE" }, { nodeId: comparison.nodeId, role: ["blank", "not_blank"].includes(lookup.value) ? "lhs" : "value" }));
     const rhsKinds = rhsKindsFor({ context, field, lookup: comparison.lookup });
     const rhsKind = nativeSelect(rhsKinds.map((value) => ({ label: rhsLabel(value), value })), comparison.rhs?.kind, "Compare with");
@@ -232,7 +252,8 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
     if (valueControl) { valueControl.dataset.queryControlKey = `predicate-value-${comparison.nodeId}`; }
     const negate = el("input", { ariaLabel: "Negate condition", checked: Boolean(comparison.negated), type: "checkbox" });
     negate.addEventListener("change", () => act({ changes: { negated: negate.checked }, nodeId: comparison.nodeId, type: "UPDATE_NODE" }));
-    row.append(el("label", { className: "query-condition-field" }, "Field", fieldPicker.node), el("label", { className: "query-condition-lookup" }, "Comparison", lookup), el("label", { className: "query-condition-kind" }, "Compare with", rhsKind), el("label", { className: "query-condition-value" }, "Value", valueEditor.node), el("label", { className: "query-condition-negate", dataset: { negated: String(Boolean(comparison.negated)) } }, negate, "Not"), nodeActions(comparison));
+    const valueHeader = el("span", { className: "query-value-heading" }, el("span", {}, "Value"), el("label", { className: "query-condition-kind" }, el("span", { className: "query-kind-label" }, "Compare with"), rhsKind));
+    row.append(el("label", { className: "query-condition-field" }, "Field", fieldPicker.node), el("label", { className: "query-condition-lookup" }, "Comparison", lookup), el("div", { className: "query-condition-value" }, valueHeader, valueEditor.node), el("label", { className: "query-condition-negate", dataset: { negated: String(Boolean(comparison.negated)) } }, negate, "Exclude"), nodeActions(comparison));
     if (!rhsIsCompatible(comparison.rhs, context, field, comparison.lookup)) { row.dataset.invalid = "true"; row.appendChild(el("span", { className: "query-predicate-help", role: "note" }, "Value is incompatible with the selected field or lookup. Choose a new value.")); }
     row.appendChild(inlineIssues(comparison.nodeId));
     row.appendChild(createMeaningLine({ el, explanation: explainComparison(comparison, { fields: Object.fromEntries(fields.map((item) => [item.path, item])), issues: issuesFor(validation, comparison.nodeId), metadataState: metadata?.getState?.(scope.target || scope.source)?.pending ? "pending" : "ready", postFilter: context === "postFilter" }), id: `query-meaning-${comparison.nodeId}` }));
@@ -303,6 +324,14 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
       structuralButton("Duplicate", "Duplicate", () => act({ nodeId: predicate.nodeId, type: "DUPLICATE_NODE" }, { nodeId: predicate.nodeId, role: "lhs" })),
       structuralButton("Remove", "Remove", () => removeNode(predicate.nodeId))
     );
+    for (const button of actions.children) {
+      const label = button.getAttribute?.("aria-label");
+      if (label === "Duplicate" || label === "Remove") {
+        button.title = label;
+        button.className = "query-node-icon";
+        button.replaceChildren(el("span", { ariaHidden: "true", className: `codicon codicon-${label === "Duplicate" ? "copy" : "close"}` }));
+      } else { button.dataset.advanced = "true"; }
+    }
     return actions;
   }
 
@@ -341,6 +370,8 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
     const container = node.querySelector(`[data-query-node-id="${escapeSelector(request.nodeId)}"]`);
     if (request.role === "value") { container?.querySelector('[data-role="predicate-value"] input, [data-role="predicate-value"] select')?.focus(); return; }
     if (request.role === "lhs-open") {
+      const trigger = container?.querySelector(".query-field-trigger");
+      if (trigger) { trigger.focus(); trigger.click(); return; }
       const select = container?.querySelector(".query-field-picker select:not(:disabled)");
       if (!focusAndOpenSelect(select)) {
         const scope = getScope?.() || {};
@@ -364,7 +395,7 @@ export function createPredicateBuilder({ context = "where", dispatch, el, getRec
   }
 
   /** Releases event wiring; callers own the containing drawer and its DOM lifecycle. */
-  function destroy() { disposed = true; releasePickers(); node.removeEventListener("keydown", onKeydown); }
+  function destroy() { disposed = true; releasePickers(); fieldNavigation.clear(); node.removeEventListener("keydown", onKeydown); }
 
   node.addEventListener("keydown", onKeydown);
   render();

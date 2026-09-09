@@ -9,7 +9,7 @@ const DATE_TYPES = new Set(["DateField", "DateTimeField", "TimeField"]);
 const VALUE_ONLY_LOOKUPS = new Set(["in", "isnull", "range", "blank", "not_blank"]);
 
 export const LOOKUP_LABELS = Object.freeze({
-  blank: "is blank", contains: "contains", date: "date =", endswith: "ends with", exact: "=", gt: ">", gte: "≥", icontains: "contains (i)", iexact: "= (i)", iendswith: "ends with (i)", in: "in list", isnull: "is null", istartswith: "starts with (i)", length: "length =", length__gt: "length >", length__gte: "length ≥", length__lt: "length <", length__lte: "length ≤", lt: "<", lte: "≤", not_blank: "is not blank", quarter: "quarter", range: "between", second: "second", startswith: "starts with", trim: "trimmed =", week_day: "weekday", year: "year", month: "month", day: "day", hour: "hour", minute: "minute"
+  blank: "is blank", contains: "contains (case-sensitive)", date: "date is", endswith: "ends with (case-sensitive)", exact: "equals", gt: "greater than", gte: "at least", icontains: "contains (ignore case)", iexact: "equals (ignore case)", iendswith: "ends with (ignore case)", in: "is one of", isnull: "value presence", istartswith: "starts with (ignore case)", length: "length equals", length__gt: "length greater than", length__gte: "length at least", length__lt: "length less than", length__lte: "length at most", lt: "less than", lte: "at most", not_blank: "is not blank", quarter: "quarter", range: "is between", second: "second", startswith: "starts with (case-sensitive)", trim: "trimmed equals", week_day: "weekday", year: "year", month: "month", day: "day", hour: "hour", minute: "minute"
 });
 
 /** Returns type-appropriate, backend-allowlisted lookups for one resolved scalar field. */

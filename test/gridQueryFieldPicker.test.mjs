@@ -3,6 +3,60 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createQueryFieldPicker } from "../media/gridQueryFieldPicker.js";
 
+/** Returns realistic foreign-key metadata whose field names overlap the relation query names. */
+function companyMetadata() {
+  const trees = {
+    "app.Record": { fields: [{ name: "company", attname: "company_id", type: "IntegerField" }, { name: "title", attname: "title", type: "CharField" }], relations: [{ name: "company", target: "app.Company" }] },
+    "app.Company": { fields: [{ name: "user", attname: "user_id", type: "IntegerField" }, { name: "name", attname: "name", type: "CharField" }], relations: [{ name: "user", target: "app.User" }] },
+    "app.User": { fields: [{ name: "email", attname: "email", type: "EmailField" }], relations: [] }
+  };
+  return { getState(target) { return { tree: trees[`${target.app}.${target.model}`] }; } };
+}
+
+/** Selects one visible cascade level through its normal native change handler. */
+function choose(picker, level, value) {
+  const control = picker.node.children[0].children[level];
+  assert.ok(control && !control.disabled, `Expected enabled path level ${level}`);
+  control.value = value;
+  control.dispatch("change");
+}
+
+test("two-hop foreign-key paths survive overlapping field names and earlier segment edits", () => {
+  const changes = [];
+  const picker = createQueryFieldPicker({ allowRelationTerminal: true, el: element, metadata: companyMetadata(), onChange: (path) => changes.push(path), source: { app: "app", model: "Record" } });
+  choose(picker, 0, "relation:company");
+  choose(picker, 1, "relation:user");
+  choose(picker, 2, "field:email");
+  assert.deepEqual(changes, ["company__user__email"]);
+  picker.setCurrent(changes[0]);
+  choose(picker, 1, "field:name");
+  assert.equal(changes.at(-1), "company__name");
+  picker.setCurrent(changes.at(-1));
+  choose(picker, 0, "field:title");
+  assert.equal(changes.at(-1), "title");
+  picker.dispose();
+});
+
+test("metadata-driven remounts retain uncommitted relation navigation without emitting a partial filter", () => {
+  const navigation = {}, changes = [];
+  const options = { allowRelationTerminal: true, current: "title", el: element, metadata: companyMetadata(), navigation, onChange: (path) => changes.push(path), source: { app: "app", model: "Record" } };
+  let picker = createQueryFieldPicker(options);
+  choose(picker, 0, "relation:company");
+  picker.dispose();
+  picker = createQueryFieldPicker(options);
+  choose(picker, 1, "relation:user");
+  picker.dispose();
+  picker = createQueryFieldPicker(options);
+  assert.deepEqual(changes, []);
+  choose(picker, 2, "field:email");
+  assert.deepEqual(changes, ["company__user__email"]);
+  picker.dispose();
+  picker = createQueryFieldPicker({ ...options, current: "company_id" });
+  assert.equal(picker.node.children[0].children.length, 1);
+  assert.equal(picker.node.children[0].children[0].value, "field:company_id");
+  picker.dispose();
+});
+
 /** Creates a lightweight DOM factory with event dispatch for native-picker tests. */
 function element(tag, properties = {}, ...children) { const listeners = new Map(); const node = { ...properties, children: [], dataset: properties.dataset || {}, addEventListener(type, listener) { listeners.set(type, listener); }, append(...items) { items.forEach((item) => this.appendChild(item)); }, appendChild(item) { if (item && typeof item === "object") { item.parentNode = this; } this.children.push(item); }, dispatch(type) { listeners.get(type)?.(); }, focus() { this.focused = true; }, remove() { if (this.parentNode) { this.parentNode.children.splice(this.parentNode.children.indexOf(this), 1); } }, removeEventListener(type) { listeners.delete(type); }, replaceChildren(...items) { this.children = []; items.forEach((item) => this.appendChild(item)); }, replaceWith(item) { const parent = this.parentNode; if (!parent) { return; } const index = parent.children.indexOf(this); item.parentNode = parent; parent.children.splice(index, 1, item); }, tag }; node.append(...children); return node; }
 /** Returns immediate metadata with one scalar and one relation target. */

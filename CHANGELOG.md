@@ -6,6 +6,17 @@ This extension uses a running build number; the current release line is `1.1.x`.
 Earlier `0.0.x` entries are retained below. The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.1000055] — 2026-09-09
+
+### Improved
+- Filters now support searchable relationship paths, model breadcrumbs, and pasting complete Django lookups such as `company__user__email__icontains`.
+- Nested AND/OR groups, condition duplication and exclusion, field comparisons, and relative dates stay editable in the same filter panel, with keyboard navigation and responsive layouts.
+
+### Fixed
+- Multi-hop relationship filters load and validate the metadata for each referenced model. Foreign-key storage fields such as `company_id` remain distinct from traversable relationships.
+- Field navigation survives metadata refreshes and retry, while stale responses and keyboard input during loading cannot overwrite a newer selection.
+- Filter counts include actual conditions without counting structural AND/OR groups.
+
 ## [1.1.1000054] — 2026-09-09
 
 ### Fixed

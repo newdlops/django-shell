@@ -10,6 +10,14 @@ The existing `UNLICENSED` manifest and proprietary `LICENSE` describe the curren
 
 The activity bar icon remains `media/django-shell.svg`. Do not use the colored deployment icon there because VS Code activity icons are expected to be theme-colored SVGs.
 
+### 1.1.1000055 validation record — 2026-09-09
+
+- `npm run check`: 1,035 tests passed with no failures or skips, including multi-hop relationship metadata resolution, real Django lookup execution, and searchable field-path validation.
+- Browser fixture checks passed at 390, 768, and 1440 pixels wide: relationship traversal and pasted lookups, nested AND/OR, duplicate/exclude, typed comparisons, keyboard navigation, metadata retry, stale responses, and light/high-contrast layouts.
+- Native VS Code 1.136.1 on macOS arm64 passed the filter and Query Builder flow, Model Browser/ORM Query stability checks, and foreign-key editing integrity checks. The updated E2E probe exercises the searchable field explorer and its focus behavior.
+- Full VS Code E2E did not pass: the later Python console golden-visual check reported `Renderer transport timed out after 8000ms` in `assertGoldenHiddenPreludeVisualStability`. Keep this limitation visible for this local installation.
+- The native run used the real Node executable with injected Node/Electron/DYLD hooks removed from the test process; Port Manager's runtime shims otherwise conflicted with the test inspector.
+
 ### 1.1.1000054 validation record — 2026-09-09
 
 - `npm run check`: 1,022 tests passed with no failures or skips, including direct input quarantine, independent E2E extension directories, cross-process inspector reservations, and reservation release after process termination.
@@ -73,13 +81,13 @@ npm run package
 This produces a file like:
 
 ```text
-django-shell-1.1.1000054.vsix
+django-shell-1.1.1000055.vsix
 ```
 
 Install it into VS Code:
 
 ```sh
-code --install-extension django-shell-1.1.1000054.vsix --force
+code --install-extension django-shell-1.1.1000055.vsix --force
 ```
 
 After installation, reload VS Code and run `Django Shell: Open Console` from the command palette.
@@ -110,7 +118,7 @@ After the checks pass, commit and push the release, package the VSIX, and instal
 
 ```sh
 npx @vscode/vsce login <publisher-id>
-npx @vscode/vsce publish --packagePath django-shell-1.1.1000054.vsix
+npx @vscode/vsce publish --packagePath django-shell-1.1.1000055.vsix
 ```
 
 Use `npx @vscode/vsce publish patch`, `minor`, or `major` only when you want VSCE to bump the version automatically.

@@ -1905,7 +1905,7 @@ function propertyLoadAction(state2, field) {
   return state2.computedActive.has(field) ? "Reload" : "Load";
 }
 function createPropertyValues({ onChange, onError, onSuccess, post, state: state2 }) {
-  let sequence = 0;
+  let sequence2 = 0;
   let revision;
   const requests = /* @__PURE__ */ new Map();
   state2.computedPending = /* @__PURE__ */ new Set();
@@ -1926,7 +1926,7 @@ function createPropertyValues({ onChange, onError, onSuccess, post, state: state
     delete state2.computedErrors[field];
     delete state2.computed[field];
     if (state2.rowCount > 0) {
-      const requestId2 = `property-${++sequence}`;
+      const requestId2 = `property-${++sequence2}`;
       requests.set(field, requestId2);
       state2.computedPending.add(field);
       post({ field, requestId: requestId2, revision, type: "loadComputed" });
@@ -3454,31 +3454,31 @@ var DATE_TYPES = /* @__PURE__ */ new Set(["DateField", "DateTimeField", "TimeFie
 var VALUE_ONLY_LOOKUPS = /* @__PURE__ */ new Set(["in", "isnull", "range", "blank", "not_blank"]);
 var LOOKUP_LABELS = Object.freeze({
   blank: "is blank",
-  contains: "contains",
-  date: "date =",
-  endswith: "ends with",
-  exact: "=",
-  gt: ">",
-  gte: "\u2265",
-  icontains: "contains (i)",
-  iexact: "= (i)",
-  iendswith: "ends with (i)",
-  in: "in list",
-  isnull: "is null",
-  istartswith: "starts with (i)",
-  length: "length =",
-  length__gt: "length >",
-  length__gte: "length \u2265",
-  length__lt: "length <",
-  length__lte: "length \u2264",
-  lt: "<",
-  lte: "\u2264",
+  contains: "contains (case-sensitive)",
+  date: "date is",
+  endswith: "ends with (case-sensitive)",
+  exact: "equals",
+  gt: "greater than",
+  gte: "at least",
+  icontains: "contains (ignore case)",
+  iexact: "equals (ignore case)",
+  iendswith: "ends with (ignore case)",
+  in: "is one of",
+  isnull: "value presence",
+  istartswith: "starts with (ignore case)",
+  length: "length equals",
+  length__gt: "length greater than",
+  length__gte: "length at least",
+  length__lt: "length less than",
+  length__lte: "length at most",
+  lt: "less than",
+  lte: "at most",
   not_blank: "is not blank",
   quarter: "quarter",
-  range: "between",
+  range: "is between",
   second: "second",
-  startswith: "starts with",
-  trim: "trimmed =",
+  startswith: "starts with (case-sensitive)",
+  trim: "trimmed equals",
   week_day: "weekday",
   year: "year",
   month: "month",
@@ -3672,14 +3672,14 @@ function rootMetadataOptions(tree) {
     return { fields: [], relations: [] };
   }
   return {
-    fields: (tree.fields || []).filter((field) => field && typeof field.name === "string").map((field) => ({ ...field, path: field.name, role: "field" })),
+    fields: (tree.fields || []).filter((field) => field && typeof field.name === "string").map((field) => ({ ...field, name: field.attname || field.name, path: field.attname || field.name, role: "field" })),
     relations: (tree.relations || []).filter((relation) => relation && typeof relation.name === "string").map((relation) => ({ ...relation, path: relation.name, role: "relation" }))
   };
 }
 function createQueryMetadataService({ post, onChange } = {}) {
   const cache = /* @__PURE__ */ new Map();
   const pending = /* @__PURE__ */ new Map();
-  let sequence = 0;
+  let sequence2 = 0;
   function publish(target) {
     onChange?.(getState(target));
   }
@@ -3703,7 +3703,7 @@ function createQueryMetadataService({ post, onChange } = {}) {
       publish(normalized);
       return Promise.reject(new Error(error));
     }
-    const requestId2 = `query-meta-${sequence += 1}`;
+    const requestId2 = `query-meta-${sequence2 += 1}`;
     let rejectRequest;
     let resolveRequest;
     const promise = new Promise((resolve, reject) => {
@@ -3781,16 +3781,24 @@ function targetFromLabel(label, source) {
   const boundary = value.lastIndexOf(".");
   return boundary > 0 ? { app: value.slice(0, boundary), model: value.slice(boundary + 1) } : { app: source?.app || "", model: value };
 }
-function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Choose field", computed = [], context = "where", controlKey = "", current = "", el: el2, metadata, onChange, source } = {}) {
+function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Choose field", computed = [], context = "where", controlKey = "", current = "", el: el2, metadata, navigation, onChange, source } = {}) {
   const node = el2("div", { className: "query-field-picker", dataset: { context } });
   const segments = el2("div", { className: "query-field-picker-segments" });
   const status = el2("p", { className: "query-control-help", role: "status" });
   node.append(segments, status);
   let disposed = false;
   let generation = 0;
-  let drillPath = "";
-  let path = String(current || "");
+  let committed = String(current || "");
+  const sourceKey = `${source?.app || ""}.${source?.model || ""}`;
+  const retained = navigation?.source === sourceKey && navigation?.current === committed;
+  let drillPath = retained ? navigation.drillPath : "";
+  let path = retained ? navigation.path : committed;
   let controllers = [];
+  function rememberNavigation() {
+    if (navigation) {
+      Object.assign(navigation, { current: committed, drillPath, path, source: sourceKey });
+    }
+  }
   function disposeControllers() {
     for (const controller of controllers) {
       controller.destroy?.();
@@ -3819,6 +3827,8 @@ function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Ch
   function emit(next, kind, descriptor) {
     drillPath = "";
     path = String(next || "");
+    committed = path;
+    rememberNavigation();
     onChange?.(path, kind, descriptor);
   }
   function selectionFor(selected, choices, terminal, traversing) {
@@ -3907,7 +3917,8 @@ function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Ch
       if (selected && !choices.some((choice) => choice.value.endsWith(`:${selected}`))) {
         choices.push({ disabled: true, group: "Unavailable", label: `Unavailable field: ${selected}`, value: `unavailable:${selected}` });
       }
-      const picker = createQuerySelect({ ariaLabel: index === 0 ? ariaLabel : `Related field after ${prefix.join("__")}`, dataset: controlKey ? { queryControlKey: `${controlKey}-${index}` } : {}, el: el2, onChange: (value) => select(value, index, model, prefix, options), options: [{ disabled: true, label: index === 0 ? "Choose field or calculated value" : "Choose related field", value: "" }, ...choices], value: selectionFor(selected, choices, allowRelationTerminal && parts2.length === index + 1, drillPath === [...prefix, selected].join("__")) });
+      const levelPrefix = [...prefix];
+      const picker = createQuerySelect({ ariaLabel: index === 0 ? ariaLabel : `Related field after ${prefix.join("__")}`, dataset: controlKey ? { queryControlKey: `${controlKey}-${index}` } : {}, el: el2, onChange: (value) => select(value, index, levelPrefix, options), options: [{ disabled: true, label: index === 0 ? "Choose field or calculated value" : "Choose related field", value: "" }, ...choices], value: selectionFor(selected, choices, allowRelationTerminal && parts2.length === index + 1, drillPath === [...prefix, selected].join("__")) });
       if (loading) {
         loading.node?.replaceWith?.(picker.node);
         controllers = controllers.filter((controller) => controller !== loading);
@@ -3920,7 +3931,8 @@ function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Ch
         return;
       }
       const relation = options.relations.find((item) => item.name === selected);
-      const field = drillPath === [...prefix, selected].join("__") ? void 0 : options.fields.find((item) => item.name === selected);
+      const traversing = relation && (parts2.length > index + 1 || drillPath === [...prefix, selected].join("__"));
+      const field = traversing ? void 0 : options.fields.find((item) => item.name === selected);
       if (field) {
         if (parts2.length > index + 1) {
           appendState(`Unavailable field: ${parts2.slice(index + 1).join("__")}`, index + 1);
@@ -3942,7 +3954,7 @@ function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Ch
       model = targetFromLabel(relation.target, source);
     }
   }
-  function select(value, index, model, prefix, options) {
+  function select(value, index, prefix, options) {
     const [kind, selected] = String(value || "").split(":", 2);
     if (!selected || kind === "unavailable") {
       return;
@@ -3966,6 +3978,7 @@ function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Ch
       if (relation) {
         path = [...prefix, selected].join("__");
         drillPath = path;
+        rememberNavigation();
         render();
       }
       return;
@@ -3975,6 +3988,7 @@ function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Ch
       emit([...prefix, selected].join("__"), kind, field);
     }
   }
+  rememberNavigation();
   render();
   return {
     /** Invalidates pending loads and releases native listeners. */
@@ -4000,7 +4014,291 @@ function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Ch
     setCurrent(next) {
       drillPath = "";
       path = String(next || "");
+      committed = path;
+      rememberNavigation();
       render();
+    }
+  };
+}
+
+// media/gridFieldExplorerOptions.js
+function targetFor(relation) {
+  const boundary = String(relation.target || "").lastIndexOf(".");
+  if (boundary < 1) {
+    throw new Error("The related model is unavailable.");
+  }
+  return { app: relation.target.slice(0, boundary), model: relation.target.slice(boundary + 1) };
+}
+function optionsFor(tree, prefix, computed) {
+  const options = rootMetadataOptions(tree);
+  const pathFor = (name) => [...prefix, name].join("__");
+  return [
+    ...options.relations.map((item) => ({ descriptor: item, group: "Relationships", kind: "relation", label: item.name, path: pathFor(item.name), detail: item.target })),
+    ...options.fields.map((item) => ({ descriptor: item, group: "Fields", kind: "field", label: item.name, path: pathFor(item.name), detail: item.type })),
+    ...!prefix.length ? computed.filter((item) => item.enabled !== false && item.alias).map((item) => ({ descriptor: item, group: "Calculated values", kind: "computed", label: item.alias, path: item.alias, detail: item.outputType || "Calculated" })) : [],
+    ...options.relations.map((item) => ({ descriptor: item, group: "Relationship checks", kind: "relationTerminal", label: `Check ${item.name}`, path: pathFor(item.name), detail: "Has value / is null" }))
+  ];
+}
+async function resolveFieldExplorer({ source, prefix = [], query = "", computed = [], loadTree }) {
+  const text2 = String(query).trim();
+  if (text2.length > 240 || prefix.length > 11) {
+    return { prefix, items: [], message: "This path is too long. Choose a closer field." };
+  }
+  const pasted = text2.includes("__"), parts2 = pasted ? text2.split("__") : [...prefix, text2];
+  if (parts2.length > 14) {
+    return { prefix, items: [], message: "This path has too many relationships." };
+  }
+  let model = source, tree = await loadTree(model);
+  const resolved = [];
+  for (let index = 0; index < parts2.length - 1; index += 1) {
+    const segment = parts2[index], options = rootMetadataOptions(tree);
+    const relation = options.relations.find((item) => item.name === segment);
+    const lookup = parts2.slice(index + 1).join("__");
+    if (pasted && relation && lookup === "isnull") {
+      const path = [...resolved, segment].join("__");
+      return { prefix: resolved, model, items: [{ descriptor: relation, group: "Django lookup", kind: "relationTerminal", label: path, path, lookup, detail: "Has value / is null" }], total: 1 };
+    }
+    if (relation && resolved.length < 11) {
+      resolved.push(segment);
+      model = targetFor(relation);
+      tree = await loadTree(model);
+      continue;
+    }
+    const field = options.fields.find((item) => item.name === segment);
+    if (pasted && field && lookupsForField(field).includes(lookup)) {
+      const path = [...resolved, segment].join("__");
+      return { prefix: resolved, model, items: [{ descriptor: field, group: "Django lookup", kind: "field", label: path, path, lookup, detail: `${LOOKUP_LABELS[lookup]} \xB7 ${field.type}` }], total: 1 };
+    }
+    return { prefix: resolved, model, items: [], message: field ? `\u201C${lookup}\u201D is not an available comparison for ${segment}. Choose the field first to see its comparisons.` : `No field or relationship named \u201C${segment}\u201D here. Check the path or browse from the model above.` };
+  }
+  const term = parts2.at(-1).toLowerCase();
+  const all = optionsFor(tree, resolved, computed).filter((item) => `${item.label} ${item.descriptor.label || ""}`.toLowerCase().includes(term));
+  return { prefix: resolved, model, items: all.slice(0, 60), total: all.length, partial: Boolean(tree.partial) };
+}
+
+// media/gridFieldExplorer.js
+var sequence = 0;
+function createFieldExplorer({ ariaLabel = "Condition field", computed = [], controlKey, current = "", el: el2, metadata, navigation = {}, onChange, popoverLayer, source }) {
+  const sourceKey = `${source?.app}.${source?.model}`;
+  if (navigation.source !== sourceKey || navigation.current !== current) {
+    Object.assign(navigation, { source: sourceKey, current, open: false, prefix: current.split("__").slice(0, -1), query: "" });
+  }
+  const id = `query-field-explorer-${++sequence}`;
+  const trigger = el2("button", { ariaLabel, className: "query-field-trigger", dataset: { queryControlKey: `${controlKey}-0` }, title: current || "Search fields or paste a Django lookup", type: "button" });
+  trigger.setAttribute("aria-haspopup", "dialog");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.setAttribute("aria-describedby", `${id}-current`);
+  trigger.append(el2("span", { id: `${id}-current`, className: current ? "query-field-path" : "query-field-placeholder" }, current ? current.split("__").join(" \u203A ") : "Choose a field\u2026"), el2("span", { ariaHidden: "true", className: "codicon codicon-search" }));
+  const node = el2("div", { className: "query-field-picker query-field-explorer" }, trigger);
+  let disposed = false, generation = 0, active = -1, view, failedTarget;
+  const search = el2("input", { ariaLabel: "Search fields or paste a lookup", autocomplete: "off", className: "query-field-search", dataset: { queryControlKey: `${controlKey}-search` }, name: "filter-field-search", placeholder: "Search or paste company__user__email\u2026", role: "combobox", spellcheck: false, type: "text", value: navigation.query || "" });
+  search.setAttribute("aria-autocomplete", "list");
+  search.setAttribute("aria-expanded", "true");
+  search.setAttribute("aria-controls", `${id}-list`);
+  const crumbs = el2("nav", { ariaLabel: "Field path", className: "query-field-breadcrumbs" });
+  const list = el2("div", { className: "query-field-results", id: `${id}-list`, role: "listbox", ariaLabel: "Available fields" });
+  const status = el2("div", { className: "query-field-status", role: "status" });
+  const closeButton = el2("button", { ariaLabel: "Close field picker", className: "query-field-close", type: "button" }, el2("span", { ariaHidden: "true", className: "codicon codicon-close" }));
+  const content = el2("section", { ariaLabel: "Choose filter field", className: "query-field-dialog", role: "dialog" }, el2("div", { className: "query-field-searchbar" }, search, closeButton), crumbs, list, status);
+  const portal = createQueryPopover({ anchor: trigger, layer: popoverLayer, onClose: closed });
+  portal.node.classList.add("query-field-portal");
+  function closed(reason) {
+    trigger.setAttribute("aria-expanded", "false");
+    if (reason === "destroy") {
+      return;
+    }
+    navigation.open = false;
+    generation += 1;
+    if (["escape", "close"].includes(reason)) {
+      trigger.focus();
+    }
+  }
+  async function loadTree(model) {
+    const state2 = metadata?.getState?.(model);
+    if (state2?.tree) {
+      return state2.tree;
+    }
+    try {
+      if (state2?.error) {
+        throw new Error(state2.error);
+      }
+      return await metadata.loadTree(model);
+    } catch (error) {
+      failedTarget = model;
+      throw error;
+    }
+  }
+  function open() {
+    if (disposed) {
+      return;
+    }
+    navigation.open = true;
+    trigger.setAttribute("aria-expanded", "true");
+    portal.open(content);
+    search.focus();
+    render();
+  }
+  function browse(prefix) {
+    navigation.prefix = prefix;
+    navigation.query = "";
+    search.value = "";
+    render();
+    search.focus();
+  }
+  function renderCrumbs(prefix) {
+    crumbs.replaceChildren();
+    for (const [index, label] of [source.model, ...prefix].entries()) {
+      const crumb = el2("button", { ariaLabel: index ? `Browse ${prefix.slice(0, index).join("__")}` : "Browse root fields", type: "button" }, label);
+      if (index) {
+        crumbs.appendChild(el2("span", { ariaHidden: "true" }, "\u203A"));
+      }
+      crumb.addEventListener("click", () => browse(prefix.slice(0, index)));
+      crumbs.appendChild(crumb);
+    }
+  }
+  async function render() {
+    const token = ++generation;
+    list.replaceChildren();
+    active = -1;
+    view = void 0;
+    search.removeAttribute("aria-activedescendant");
+    renderCrumbs(navigation.prefix || []);
+    status.textContent = "Loading fields\u2026";
+    list.setAttribute("aria-busy", "true");
+    try {
+      const next = await resolveFieldExplorer({ source, prefix: navigation.prefix || [], query: navigation.query || "", computed, loadTree });
+      if (disposed || token !== generation || !navigation.open) {
+        return;
+      }
+      view = next;
+      renderCrumbs(next.prefix || []);
+      list.replaceChildren();
+      let group;
+      for (const [index, item] of next.items.entries()) {
+        if (group !== item.group) {
+          group = item.group;
+          list.appendChild(el2("div", { ariaHidden: "true", className: "query-field-section" }, group));
+        }
+        const option = el2("div", { ariaLabel: `${item.kind === "relation" ? "Browse" : "Choose"} ${item.path}${item.lookup ? `__${item.lookup}` : ""}`, className: "query-field-option", dataset: { index: String(index) }, id: `${id}-option-${index}`, role: "option", title: item.path });
+        option.setAttribute("aria-selected", "false");
+        option.append(el2("span", { className: "query-field-option-name" }, item.label), el2("span", { className: "query-field-option-detail" }, item.detail));
+        if (item.kind === "relation") {
+          option.appendChild(el2("span", { ariaHidden: "true", className: "codicon codicon-chevron-right" }));
+        }
+        option.addEventListener("click", () => choose(item));
+        option.addEventListener("pointermove", () => highlight(index));
+        list.appendChild(option);
+      }
+      status.textContent = next.message || (!next.items.length ? "No matching fields. Try a shorter name or return to the model above." : next.total > 60 ? `${next.total} matches. Showing 60; type more to narrow the list.` : next.partial ? "Related fields are unavailable on this connection. Choose a local field or retry after reconnecting." : "\u2191 \u2193 to navigate \xB7 Enter to select \xB7 Esc to close");
+      list.setAttribute("aria-busy", "false");
+      if (next.items.length) {
+        highlight(0);
+      }
+    } catch {
+      if (disposed || token !== generation || !navigation.open) {
+        return;
+      }
+      view = void 0;
+      list.setAttribute("aria-busy", "false");
+      status.replaceChildren("Field details could not be loaded. ");
+      const retry = el2("button", { type: "button" }, "Retry");
+      retry.addEventListener("click", () => {
+        retry.disabled = true;
+        metadata.retry(failedTarget).then(() => {
+          if (!disposed) {
+            render();
+          }
+        }).catch(() => {
+          if (!disposed) {
+            render();
+          }
+        });
+      });
+      status.appendChild(retry);
+    }
+    portal.reposition();
+  }
+  function highlight(index) {
+    if (!view?.items.length) {
+      return;
+    }
+    active = (index + view.items.length) % view.items.length;
+    for (const option of list.querySelectorAll('[role="option"]')) {
+      option.setAttribute("aria-selected", String(Number(option.dataset.index) === active));
+    }
+    const selected = list.querySelector(`[data-index="${active}"]`);
+    if (!selected) {
+      search.removeAttribute("aria-activedescendant");
+      return;
+    }
+    search.setAttribute("aria-activedescendant", selected.id);
+    selected.scrollIntoView({ block: "nearest" });
+  }
+  function choose(item) {
+    if (!item || disposed) {
+      return;
+    }
+    if (item.kind === "relation") {
+      browse(item.path.split("__"));
+      return;
+    }
+    navigation.current = item.path;
+    navigation.query = "";
+    navigation.prefix = item.path.split("__").slice(0, -1);
+    portal.close("selected");
+    onChange?.(item.path, item.kind, item.descriptor, item.lookup);
+  }
+  function onKey(event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      portal.close("escape");
+    } else if (event.target !== search) {
+      return;
+    } else if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+      event.preventDefault();
+      highlight(active + (event.key === "ArrowDown" ? 1 : -1));
+    } else if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.isComposing) {
+      event.preventDefault();
+      choose(view?.items[active]);
+    } else if (event.key === "ArrowLeft" && !search.value && navigation.prefix?.length) {
+      event.preventDefault();
+      browse(navigation.prefix.slice(0, -1));
+    }
+  }
+  function outside(event) {
+    if (navigation.open && !node.contains(event.target) && !portal.node.contains(event.target)) {
+      portal.close("outside");
+    }
+  }
+  function focusOutside(event) {
+    if (navigation.open && !node.contains(event.target) && !portal.node.contains(event.target)) {
+      portal.close("blur");
+    }
+  }
+  trigger.addEventListener("click", () => navigation.open ? portal.close("close") : open());
+  closeButton.addEventListener("click", () => portal.close("close"));
+  search.addEventListener("input", () => {
+    navigation.query = search.value;
+    render();
+  });
+  content.addEventListener("keydown", onKey);
+  document.addEventListener("pointerdown", outside);
+  document.addEventListener("focusin", focusOutside);
+  if (navigation.open) {
+    queueMicrotask(open);
+  }
+  return {
+    node,
+    focus: () => trigger.focus(),
+    open,
+    /** Releases this generation while retaining unfinished navigation for a metadata render. */
+    dispose() {
+      disposed = true;
+      generation += 1;
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("focusin", focusOutside);
+      portal.destroy();
     }
   };
 }
@@ -4471,7 +4769,7 @@ function focusAndOpenSelect(select) {
 function fieldsFor(scope, metadata) {
   const target = scope?.target || scope?.source || scope?.modelRef;
   const tree = target ? metadata?.getState?.(target)?.tree : void 0;
-  const fromTree = (tree?.fields || []).map((field) => ({ ...field, path: field.name, role: "field" }));
+  const fromTree = (tree?.fields || []).map((field) => ({ ...field, path: field.attname || field.name, role: "field" }));
   const fromRelations = (tree?.relations || []).map((relation) => ({ ...relation, path: relation.name, role: "relation", type: relation.kind || "relation" }));
   const fromColumns = (scope?.columns || []).map((field) => ({ ...field, path: field.attname || field.name, role: "field" }));
   const fromComputed = (scope?.computedFields || scope?.computed || []).filter((field) => field?.enabled !== false && (field?.alias || field?.path)).map((field) => ({ alias: field.alias || field.path, path: field.alias || field.path, role: "computed", type: field.outputType || "" }));
@@ -4505,7 +4803,7 @@ function persistedFieldForPath(lhs, scope, metadata, fields3) {
   let tree = metadata?.getState?.(target)?.tree;
   for (let index = 0; tree && index < parts2.length; index += 1) {
     const segment = parts2[index];
-    const field = (tree.fields || []).find((item) => item.name === segment);
+    const field = (tree.fields || []).find((item) => item.attname === segment || item.name === segment);
     if (field && index === parts2.length - 1) {
       return { ...field, path, role: "field" };
     }
@@ -4535,6 +4833,7 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
   let disposed = false;
   let pickerDisposables = [];
   let requestedFocus;
+  const fieldNavigation = /* @__PURE__ */ new Map();
   function trackPicker2(picker) {
     pickerDisposables.push(picker);
     return picker;
@@ -4585,6 +4884,11 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     requestMetadata();
     const group = root();
     releasePickers2();
+    for (const nodeId of fieldNavigation.keys()) {
+      if (!findNode2(getRecipe?.(), nodeId)) {
+        fieldNavigation.delete(nodeId);
+      }
+    }
     body.replaceChildren();
     if (!group) {
       body.appendChild(el2("p", { className: "query-builder-empty" }, "Loading predicate group\u2026"));
@@ -4616,33 +4920,37 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
   function renderGroup(group, container, depth, scope) {
     const section = el2("fieldset", { className: "query-predicate-group", dataset: { depth: String(depth), queryNodeId: group.nodeId, role: "predicate-group" } });
     const heading = el2("legend", {}, depth === 1 ? "Conditions" : "Nested conditions");
+    const header = el2("div", { className: "query-predicate-header" });
     const toolbar = el2("div", { className: "query-predicate-toolbar" });
-    const join = nativeSelect([{ label: "Match all (AND)", value: "and" }, { label: "Match any (OR)", value: "or" }], group.join, "Join conditions");
+    const join = nativeSelect([{ label: "All conditions (AND)", value: "and" }, { label: "Any condition (OR)", value: "or" }], group.join, "Join conditions");
     join.addEventListener("change", () => act({ changes: { join: join.value }, nodeId: group.nodeId, type: "UPDATE_NODE" }));
     const negated = el2("input", { ariaLabel: "Negate group", checked: Boolean(group.negated), type: "checkbox" });
     negated.addEventListener("change", () => act({ changes: { negated: negated.checked }, nodeId: group.nodeId, type: "UPDATE_NODE" }));
-    const notLabel = el2("label", { className: "query-predicate-not", dataset: { negated: String(Boolean(group.negated)) } }, negated, "Exclude this group (NOT)");
-    const addComparison = structuralButton("Add condition", "Add condition to this group", () => act({ parentId: group.nodeId, type: "ADD_COMPARISON" }, { nodeId: group.nodeId, role: "lhs" }));
-    const addGroup = structuralButton("Add group", "Add nested condition group", () => act({ parentId: group.nodeId, type: "ADD_GROUP" }, { nodeId: group.nodeId, role: "lhs" }));
+    const notLabel = el2("label", { className: "query-predicate-not", dataset: { negated: String(Boolean(group.negated)) } }, negated, "Exclude group");
+    const addComparison = structuralButton("+ Condition", "Add condition to this group", () => act({ parentId: group.nodeId, type: "ADD_COMPARISON" }, { nodeId: group.nodeId, role: "lhs" }));
+    const addGroup = structuralButton("+ Group", "Add nested condition group", () => act({ parentId: group.nodeId, type: "ADD_GROUP" }, { nodeId: group.nodeId, role: "lhs" }));
     const addExists = structuralButton("Add existence check", "Add related-row existence check", () => act({ parentId: group.nodeId, type: "ADD_EXISTS_PREDICATE" }, { nodeId: group.nodeId, role: "lhs" }));
-    addGroup.dataset.advanced = "true";
     addExists.dataset.advanced = "true";
-    const blocked = depth >= MAX_DEPTH || (group.children || []).length >= MAX_CHILDREN;
+    const blocked = (group.children || []).length >= MAX_CHILDREN;
     addComparison.disabled = blocked;
-    addGroup.disabled = blocked;
-    addExists.disabled = blocked || !allowsExists(context);
+    addGroup.disabled = blocked || depth >= MAX_DEPTH;
+    addExists.disabled = blocked || depth >= MAX_DEPTH || !allowsExists(context);
     addComparison.title = blocked ? `Maximum depth ${MAX_DEPTH} or ${MAX_CHILDREN} children reached` : "Add condition";
     addGroup.title = blocked ? `Maximum depth ${MAX_DEPTH} or ${MAX_CHILDREN} children reached` : "Add nested group";
-    if ((group.children || []).length > 1) {
-      toolbar.appendChild(join);
+    header.append(el2("span", { className: "query-group-match" }, "Match"), join, notLabel);
+    if (depth > 1) {
+      header.appendChild(nodeActions(group));
     }
-    toolbar.append(notLabel, addComparison, addGroup);
+    toolbar.append(addComparison, addGroup);
     if (allowsExists(context)) {
       toolbar.appendChild(addExists);
     }
-    section.append(heading, toolbar, inlineIssues(group.nodeId));
+    section.append(heading, header, inlineIssues(group.nodeId));
     const children = el2("div", { className: "query-predicate-children" });
-    for (const child of group.children || []) {
+    for (const [index, child] of (group.children || []).entries()) {
+      if (index) {
+        children.appendChild(el2("div", { className: "query-condition-connector", ariaHidden: "true" }, el2("span", {}, group.join.toUpperCase())));
+      }
       if (child.kind === "group") {
         renderGroup(child, children, depth + 1, scope);
       } else if (child.kind === "comparison") {
@@ -4652,12 +4960,9 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
       }
     }
     if (!(group.children || []).length) {
-      children.appendChild(createMeaningLine({ el: el2, explanation: explainPredicateGroup(group, { postFilter: context === "postFilter", root: depth === 1 }), id: `query-meaning-${group.nodeId}` }));
+      children.appendChild(el2("p", { className: "query-filter-empty" }, depth === 1 ? "Start with a field. Add groups to combine AND and OR." : "Add conditions to this group."));
     }
-    section.appendChild(children);
-    if (depth > 1) {
-      section.appendChild(nodeActions(group, group));
-    }
+    section.append(children, toolbar);
     container.appendChild(section);
   }
   function renderComparison(comparison, container, scope) {
@@ -4665,18 +4970,25 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     const path = comparison.lhs?.kind === "computed" ? comparison.lhs.alias : comparison.lhs?.kind === "field" ? comparison.lhs.path : "";
     const field = persistedFieldForPath(comparison.lhs, scope, metadata, fields3);
     const row = el2("div", { className: "query-predicate-row", dataset: { queryNodeId: comparison.nodeId, role: "comparison" } });
-    function selectField(selectedPath, kind, descriptor) {
+    function selectField(selectedPath, kind, descriptor, pastedLookup) {
       const role = kind === "relationTerminal" ? "relation" : kind === "computed" ? "computed" : "field";
       const selected = descriptor && (role === "computed" ? fields3.find((entry2) => entry2.role === role && entry2.path === descriptor.alias) : { ...descriptor, path: selectedPath, role });
       if (selected) {
-        act({ changes: fieldSelectionChanges(comparison, selected, selectedPath, context), nodeId: comparison.nodeId, type: "UPDATE_NODE" }, { nodeId: comparison.nodeId, role: "value" });
+        const changes = fieldSelectionChanges(comparison, selected, selectedPath, context);
+        if (pastedLookup) {
+          Object.assign(changes, lookupChanges({ ...comparison, ...changes }, pastedLookup));
+        }
+        act({ changes, nodeId: comparison.nodeId, type: "UPDATE_NODE" }, { nodeId: comparison.nodeId, role: "value" });
       }
     }
-    const fieldPicker = trackPicker2(createQueryFieldPicker({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], controlKey: "predicate-lhs-" + comparison.nodeId, current: path, el: el2, metadata, onChange: selectField, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: true }));
+    if (!fieldNavigation.has(comparison.nodeId)) {
+      fieldNavigation.set(comparison.nodeId, {});
+    }
+    const fieldPicker = trackPicker2((popoverLayer ? createFieldExplorer : createQueryFieldPicker)({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], controlKey: "predicate-lhs-" + comparison.nodeId, current: path, el: el2, metadata, navigation: fieldNavigation.get(comparison.nodeId), onChange: selectField, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: true }));
     fieldPicker.node.dataset.focusRole = "lhs";
     const lookups = lookupsForField(field);
     const lookup = nativeSelect(lookups.map((value) => ({ label: LOOKUP_LABELS[value] || value, value })), comparison.lookup, "Comparison");
-    lookup.setAttribute("aria-description", "(i) means case-insensitive.");
+    lookup.setAttribute("aria-description", "Choose how to compare this field. Ignore case treats uppercase and lowercase as equal.");
     lookup.addEventListener("change", () => act({ changes: lookupChanges(comparison, lookup.value), nodeId: comparison.nodeId, type: "UPDATE_NODE" }, { nodeId: comparison.nodeId, role: ["blank", "not_blank"].includes(lookup.value) ? "lhs" : "value" }));
     const rhsKinds = rhsKindsFor({ context, field, lookup: comparison.lookup });
     const rhsKind = nativeSelect(rhsKinds.map((value) => ({ label: rhsLabel(value), value })), comparison.rhs?.kind, "Compare with");
@@ -4692,7 +5004,8 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     }
     const negate = el2("input", { ariaLabel: "Negate condition", checked: Boolean(comparison.negated), type: "checkbox" });
     negate.addEventListener("change", () => act({ changes: { negated: negate.checked }, nodeId: comparison.nodeId, type: "UPDATE_NODE" }));
-    row.append(el2("label", { className: "query-condition-field" }, "Field", fieldPicker.node), el2("label", { className: "query-condition-lookup" }, "Comparison", lookup), el2("label", { className: "query-condition-kind" }, "Compare with", rhsKind), el2("label", { className: "query-condition-value" }, "Value", valueEditor.node), el2("label", { className: "query-condition-negate", dataset: { negated: String(Boolean(comparison.negated)) } }, negate, "Not"), nodeActions(comparison));
+    const valueHeader = el2("span", { className: "query-value-heading" }, el2("span", {}, "Value"), el2("label", { className: "query-condition-kind" }, el2("span", { className: "query-kind-label" }, "Compare with"), rhsKind));
+    row.append(el2("label", { className: "query-condition-field" }, "Field", fieldPicker.node), el2("label", { className: "query-condition-lookup" }, "Comparison", lookup), el2("div", { className: "query-condition-value" }, valueHeader, valueEditor.node), el2("label", { className: "query-condition-negate", dataset: { negated: String(Boolean(comparison.negated)) } }, negate, "Exclude"), nodeActions(comparison));
     if (!rhsIsCompatible(comparison.rhs, context, field, comparison.lookup)) {
       row.dataset.invalid = "true";
       row.appendChild(el2("span", { className: "query-predicate-help", role: "note" }, "Value is incompatible with the selected field or lookup. Choose a new value."));
@@ -4787,6 +5100,16 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
       structuralButton("Duplicate", "Duplicate", () => act({ nodeId: predicate.nodeId, type: "DUPLICATE_NODE" }, { nodeId: predicate.nodeId, role: "lhs" })),
       structuralButton("Remove", "Remove", () => removeNode(predicate.nodeId))
     );
+    for (const button3 of actions.children) {
+      const label = button3.getAttribute?.("aria-label");
+      if (label === "Duplicate" || label === "Remove") {
+        button3.title = label;
+        button3.className = "query-node-icon";
+        button3.replaceChildren(el2("span", { ariaHidden: "true", className: `codicon codicon-${label === "Duplicate" ? "copy" : "close"}` }));
+      } else {
+        button3.dataset.advanced = "true";
+      }
+    }
     return actions;
   }
   function removeNode(nodeId) {
@@ -4825,6 +5148,12 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
       return;
     }
     if (request.role === "lhs-open") {
+      const trigger = container?.querySelector(".query-field-trigger");
+      if (trigger) {
+        trigger.focus();
+        trigger.click();
+        return;
+      }
       const select = container?.querySelector(".query-field-picker select:not(:disabled)");
       if (!focusAndOpenSelect(select)) {
         const scope = getScope?.() || {};
@@ -4859,6 +5188,7 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
   function destroy() {
     disposed = true;
     releasePickers2();
+    fieldNavigation.clear();
     node.removeEventListener("keydown", onKeydown);
   }
   node.addEventListener("keydown", onKeydown);
@@ -4999,15 +5329,15 @@ function findPredicate(root, nodeId) {
   return found;
 }
 function clonePredicateNode(node) {
-  let sequence = 0;
+  let sequence2 = 0;
   const copy2 = cloneComputedValue(node);
   const rewrite = (value) => {
     if (!value || typeof value !== "object") {
       return;
     }
     if (typeof value.nodeId === "string") {
-      sequence += 1;
-      value.nodeId = `${value.kind || "node"}-copy-${sequence}`;
+      sequence2 += 1;
+      value.nodeId = `${value.kind || "node"}-copy-${sequence2}`;
     }
     (value.children || []).forEach(rewrite);
     if (value.where) {
@@ -6278,7 +6608,7 @@ function createQueryWorkspace({ drawerResize, element: element3, elements, root,
         builderHeight = previous.drawerHeight;
       }
     }
-    const initialFilterHeight = (root?.defaultView?.innerWidth || 960) < 640 ? 440 : 320;
+    const initialFilterHeight = (root?.defaultView?.innerWidth || 960) < 960 ? 620 : 540;
     const height = Boolean(previous.quickFilters) === quickFilters ? previous.drawerHeight : quickFilters ? filterHeight || initialFilterHeight : builderHeight || previous.drawerHeight;
     uiState.dispatch({ enabled: quickFilters, type: "SET_QUICK_FILTERS" });
     elements.queryDrawer.hidden = false;
@@ -6291,7 +6621,7 @@ function createQueryWorkspace({ drawerResize, element: element3, elements, root,
     }
     if (focus) {
       window.setTimeout(() => {
-        const target = quickFilters ? elements[section]?.querySelector('[data-role="comparison"] .query-field-picker select:not(:disabled)') || elements[section]?.querySelector('button[aria-label="Add condition to this group"]') : elements[section]?.querySelector("button,input,select,textarea");
+        const target = quickFilters ? elements[section]?.querySelector('[data-role="comparison"] .query-field-trigger, [data-role="comparison"] .query-field-picker select:not(:disabled)') || elements[section]?.querySelector('button[aria-label="Add condition to this group"]') : elements[section]?.querySelector("button,input,select,textarea");
         target?.focus();
       }, 0);
     }
@@ -6465,7 +6795,7 @@ function stableListEntrySignature(entry2 = {}) {
   return `field:${String(entry2.path || "")}`;
 }
 function createStableListKeyReconciler(prefix = "entry") {
-  let sequence = 0;
+  let sequence2 = 0;
   let previous = [];
   function lcsPairs(left, right) {
     const table = Array.from({ length: left.length + 1 }, () => Array(right.length + 1).fill(0));
@@ -6513,8 +6843,8 @@ function createStableListKeyReconciler(prefix = "entry") {
         usedPrevious.add(nextIndex);
         continue;
       }
-      sequence += 1;
-      keys[nextIndex] = `${prefix}-${sequence}`;
+      sequence2 += 1;
+      keys[nextIndex] = `${prefix}-${sequence2}`;
     }
     previous = next.map((item, index) => ({ key: keys[index], signature: item.signature }));
     return keys;
@@ -6842,8 +7172,8 @@ function createQueryExamplesView({ el: el2, mount, onChoose } = {}) {
 }
 
 // media/gridQueryAssistant.js
-function requestId(sequence) {
-  return `query-assistant-${Date.now()}-${sequence}`;
+function requestId(sequence2) {
+  return `query-assistant-${Date.now()}-${sequence2}`;
 }
 function hasCodeExpression(recipe) {
   return Array.isArray(recipe?.computed) && recipe.computed.some((item) => item?.kind === "codeExpression");
@@ -6862,7 +7192,7 @@ function createQueryAssistant({ element: element3, getDraft, getRevision, mount,
   let generation;
   let invalidated = false;
   let pendingId = "";
-  let sequence = 0;
+  let sequence2 = 0;
   let suggestion;
   let message = "Detecting local providers and model metadata\u2026";
   let error = "";
@@ -6875,7 +7205,7 @@ function createQueryAssistant({ element: element3, getDraft, getRevision, mount,
     }
   }
   function detect() {
-    const id = requestId(++sequence);
+    const id = requestId(++sequence2);
     pendingId = id;
     send2({ requestId: id, type: "queryAssistantProviders" });
   }
@@ -6899,7 +7229,7 @@ function createQueryAssistant({ element: element3, getDraft, getRevision, mount,
     if (!current || activeId || pendingId) {
       return;
     }
-    const id = requestId(++sequence);
+    const id = requestId(++sequence2);
     pendingId = id;
     error = "";
     focusId = controlId;
@@ -6929,7 +7259,7 @@ function createQueryAssistant({ element: element3, getDraft, getRevision, mount,
     snapshot.providers.forEach((entry2) => providerSelect.appendChild(text2("option", { disabled: !entry2.available, value: entry2.provider }, `${entry2.label}${entry2.available ? "" : " (unavailable)"}`)));
     providerSelect.value = selected;
     providerSelect.addEventListener("change", () => {
-      const id = requestId(++sequence);
+      const id = requestId(++sequence2);
       pendingId = id;
       error = "";
       focusId = "queryAssistantProvider";
@@ -7000,7 +7330,7 @@ function createQueryAssistant({ element: element3, getDraft, getRevision, mount,
     generateButton.addEventListener("click", generate);
     const refresh = text2("button", { className: "secondary", disabled, type: "button" }, "Refresh models");
     refresh.addEventListener("click", () => {
-      const id = requestId(++sequence);
+      const id = requestId(++sequence2);
       pendingId = id;
       error = "";
       focusId = "queryAssistantRefresh";
@@ -7056,7 +7386,7 @@ function createQueryAssistant({ element: element3, getDraft, getRevision, mount,
     const draft = getDraft();
     suggestion = void 0;
     invalidated = false;
-    activeId = requestId(++sequence);
+    activeId = requestId(++sequence2);
     generation = { requestId: activeId, revision: getRevision(), source: { ...draft.source } };
     error = "";
     message = "";
@@ -7082,7 +7412,7 @@ function createQueryAssistant({ element: element3, getDraft, getRevision, mount,
     if (!suggestion || stale() || acceptingId) {
       return;
     }
-    acceptingId = requestId(++sequence);
+    acceptingId = requestId(++sequence2);
     error = "";
     message = "Validating and adding AI suggestion to the draft\u2026";
     send2({ requestId: acceptingId, revision: getRevision(), suggestionId: suggestion.suggestionId, type: "acceptQueryAssistantSuggestion" });
@@ -7228,7 +7558,7 @@ function createQueryAssistant({ element: element3, getDraft, getRevision, mount,
 
 // media/gridQuerySummary.js
 function countPredicateNodes(group) {
-  return (group?.children || []).reduce((count, node) => count + 1 + (node.kind === "group" ? countPredicateNodes(node) : node.kind === "existsPredicate" ? countPredicateNodes(node.where) : 0), 0);
+  return (group?.children || []).reduce((count, node) => count + (node.kind === "group" ? countPredicateNodes(node) : 1 + (node.kind === "existsPredicate" ? countPredicateNodes(node.where) : 0)), 0);
 }
 function summarizeRecipeFilters(recipe = {}) {
   const sourceCount = countPredicateNodes(recipe.where);
@@ -7622,7 +7952,13 @@ function supportsQuickFilters(snapshot) {
   if (JSON.stringify(withoutWhere(draft)) !== JSON.stringify(withoutWhere(applied))) {
     return false;
   }
-  return (draft.where.children || []).every((node) => node.kind === "comparison" && node.lhs?.kind === "field" && ["literal", "list", "range"].includes(node.rhs?.kind));
+  return supportsGroup(draft.where);
+}
+function supportsGroup(group, depth = 1) {
+  if (depth > 5 || group.kind !== "group" || !Array.isArray(group.children)) {
+    return false;
+  }
+  return group.children.every((node) => node.kind === "group" ? supportsGroup(node, depth + 1) : node.kind === "comparison" && node.lhs?.kind === "field" && ["literal", "list", "range", "field", "relativeTime"].includes(node.rhs?.kind));
 }
 function clearRowFiltersAction(recipe) {
   return { changes: { children: [], join: "and", negated: false }, nodeId: recipe.where.nodeId, scope: "where", type: "UPDATE_NODE" };
@@ -8487,15 +8823,16 @@ async function readyToApply(document2) {
 }
 async function addTextCondition(document2, field, value) {
   const existing = new Set([...document2.querySelectorAll('#queryWhereRoot [data-role="comparison"]')].map((node) => node.dataset.queryNodeId));
-  document2.querySelector('#queryWhereRoot button[aria-label="Add condition to this group"]').click();
+  const add = document2.querySelector('#queryWhereRoot button[aria-label="Add condition to this group"]');
+  add.focus();
+  add.click();
   const row = await waitFor3(() => [...document2.querySelectorAll('#queryWhereRoot [data-role="comparison"]')].find((node) => !existing.has(node.dataset.queryNodeId)), "new condition");
-  const select = await waitFor3(() => {
-    const control = row.querySelector('select[aria-label="Condition field"]');
-    return control && [...control.options].some((option) => option.value === `field:${field}`) ? control : void 0;
-  }, "field metadata");
   const nodeId = row.dataset.queryNodeId;
-  select.value = `field:${field}`;
-  select.dispatchEvent(new Event("change", { bubbles: true }));
+  const search = await waitFor3(() => document2.querySelector('input[role="combobox"][aria-label="Search fields or paste a lookup"]'), "field explorer");
+  search.value = field;
+  search.dispatchEvent(new Event("input", { bubbles: true }));
+  const option = await waitFor3(() => [...document2.querySelectorAll('.query-field-results [role="option"]')].find((item) => item.getAttribute("aria-label") === `Choose ${field}`), "field metadata");
+  option.click();
   const input = await waitFor3(() => {
     const control = document2.querySelector(`[data-query-node-id="${nodeId}"] input[aria-label="Comparison value"]`);
     return control && document2.activeElement === control ? control : void 0;
@@ -8509,6 +8846,7 @@ async function runModelQuickFiltersE2eProbe(document2, progress) {
   const filterButton = await waitFor3(() => get("queryFilterButton"), "filter action");
   filterButton.click();
   await waitFor3(() => get("queryBuilderTitle").textContent === "Filters", "compact editor");
+  await new Promise((resolve) => setTimeout(resolve, 0));
   if (get("queryDirtyState").hidden !== true || !get("queryReviewPane").hidden) {
     throw new Error("Opening compact filters changed the draft or exposed the review pane.");
   }
@@ -8573,8 +8911,8 @@ function conditionAdd(document2) {
 }
 async function waitForE2eField(document2, predicate, timeoutMs = 5e3) {
   return waitFor4(() => {
-    const select = document2.querySelector('select[aria-label="Condition field"]');
-    return select && predicate(select) ? select : void 0;
+    const trigger = document2.querySelector('button[aria-label="Condition field"]');
+    return trigger && predicate(trigger) ? trigger : void 0;
   }, "Query Builder Field control", timeoutMs);
 }
 function previewIsReady(document2) {
@@ -8825,15 +9163,18 @@ async function runModelQueryBuilderE2eProbe({ document: document2, postMessage, 
     }
     click(document2, "Undo");
     await waitFor4(() => document2.getElementById("queryDraftStatus")?.textContent === "Draft matches applied query", "assistant acceptance undo");
-    progress("legacy-picker");
+    progress("field-explorer");
     click(document2, "1. Filter Rows");
-    const pickerAdd = await waitFor4(() => conditionAdd(document2), "legacy picker condition control");
+    const pickerAdd = await waitFor4(() => conditionAdd(document2), "field explorer condition control");
+    pickerAdd.focus();
     pickerAdd.click();
-    const select = await waitForE2eField(document2, (candidate) => !candidate.disabled);
-    const optionGroups = [...select.querySelectorAll("optgroup")].map((group) => group.label);
-    const options = [...select.querySelectorAll("option")];
+    const trigger = await waitForE2eField(document2, (candidate) => !candidate.disabled);
+    await waitFor4(() => document2.querySelector('.query-field-results [role="option"]'), "field explorer metadata");
+    const optionGroups = [...document2.querySelectorAll(".query-field-section")].map((group) => group.textContent);
+    const options = [...document2.querySelectorAll('.query-field-results [role="option"]')];
     const overflow = assistantOverflow(document2);
-    finish({ appliedFilters: document2.getElementById("queryAppliedFiltersEmpty")?.textContent || "", applyDisabled: document2.getElementById("queryDrawerApply")?.disabled === true, assistantOverflow: overflow, conditionCount: document2.querySelectorAll('select[aria-label="Condition field"]').length, disabled: select.disabled, drawerOpen: drawer?.hidden === false, enabledOptionCount: options.filter((option) => !option.disabled && option.value).length, exampleCount: examples.length, focused: document2.activeElement === select, optionGroups, placeholderDisabled: options[0]?.disabled === true, propertyLoads, selectedValue: select.value, showPickerCalls, sortCycle });
+    const search = document2.querySelector('input[role="combobox"][aria-label="Search fields or paste a lookup"]');
+    finish({ appliedFilters: document2.getElementById("queryAppliedFiltersEmpty")?.textContent || "", applyDisabled: document2.getElementById("queryDrawerApply")?.disabled === true, assistantOverflow: overflow, conditionCount: document2.querySelectorAll('button[aria-label="Condition field"]').length, disabled: trigger.disabled, drawerOpen: drawer?.hidden === false, enabledOptionCount: options.length, exampleCount: examples.length, explorerOpen: trigger.getAttribute("aria-expanded") === "true", focused: document2.activeElement === search, optionGroups, placeholderVisible: Boolean(trigger.querySelector(".query-field-placeholder")), propertyLoads, selectedValue: search?.value, showPickerCalls, sortCycle });
   } catch (error) {
     finish({ error: String(error?.message || error), showPickerCalls });
   } finally {

@@ -52,11 +52,12 @@ test("predicate Exists sources use bounded pickers and release replaced picker l
   assert.match(builderSource, /releasePickers\(\);/);
 });
 
-test("condition field paths use native selects while relation and model catalogs remain searchable", () => {
+test("condition fields provide a searchable explorer and retain native picks for embedded callers", () => {
   assert.match(fieldPickerSource, /createQuerySelect/);
   assert.doesNotMatch(fieldPickerSource, /createCombobox/);
   assert.match(builderSource, /controlKey: "predicate-lhs-" \+ comparison\.nodeId/);
   assert.match(builderSource, /createGridCombobox/);
+  assert.match(builderSource, /popoverLayer \? createFieldExplorer : createQueryFieldPicker/);
 });
 
 test("Add condition targets and opens the newly appended native field select", () => {
@@ -99,8 +100,9 @@ test("comparison rows expose visible Field, Comparison, Compare with, and Value 
   for (const label of ["Field", "Comparison", "Compare with", "Value"]) { assert.ok(builderSource.includes(`"${label}"`), label); }
 });
 
-test("group join control appears only when a group has more than one child", () => {
-  assert.match(builderSource, /group\.children \|\| \[\]\)\.length > 1/);
+test("group join and exclusion stay in the header before conditions are added", () => {
+  assert.match(builderSource, /header\.append\([^\n]+join, notLabel/);
+  assert.match(builderSource, /query-condition-connector/);
 });
 
 test("rendered relationship actions expose distinct accessible group text", async () => {

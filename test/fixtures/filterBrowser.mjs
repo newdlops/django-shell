@@ -33,10 +33,17 @@ function installBridge() {
     { name: "status", label: "Status", type: "IntegerField", choices: [[1, "Pending"], [2, "Active"]] },
     { name: "long_customer_reference", label: "Customer reference from the imported regional account record — 표시 이름이 긴 필드", type: "CharField" }
   ].map((column) => ({ ...column, attname: column.name, editable: false, null: false }));
+  const companyRelation = { name: "company", target: "accounts.Company", kind: "forward_fk", single: true };
+  const filterTrees = {
+    "accounts.User": { fields: [...columns, { name: "company", attname: "company_id", type: "IntegerField" }], relations: [companyRelation] },
+    "accounts.Company": { fields: [{ name: "id", attname: "id", type: "AutoField", pk: true }, { name: "user", attname: "user_id", type: "IntegerField" }, { name: "name", attname: "name", type: "CharField" }], relations: [{ name: "user", target: "accounts.Contact", kind: "forward_fk", single: true }] },
+    "accounts.Contact": { fields: [{ name: "email", attname: "email", type: "EmailField" }, { name: "is_active", attname: "is_active", type: "BooleanField" }], relations: [] }
+  };
   const rows = [{ id: 1, username: "alex", email: "alex@example.test", is_active: true, login_count: 12, created_at: "2026-09-08T09:00:00" }, { id: 2, username: "mina", email: "mina@example.test", is_active: false, login_count: 4, created_at: "2026-09-07T09:00:00" }];
   let persisted = {};
   const parameters = new URLSearchParams(location.search);
-  window.filterFixture = { messages: [], delay: 30, metadataError: parameters.has("metadata-error"), rejectApply: false };
+  let relatedFailures = parameters.has("related-metadata-error") ? 1 : 0;
+  window.filterFixture = { messages: [], delay: parameters.has("slow-metadata") ? 180 : 30, metadataError: parameters.has("metadata-error"), rejectApply: false };
   /** Delivers one backend reply through the production webview message listener. */
   function reply(message) { setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: message })), window.filterFixture.delay); }
   window.acquireVsCodeApi = () => ({
@@ -44,11 +51,14 @@ function installBridge() {
     postMessage(message) {
       window.filterFixture.messages.push(message);
       if (message.type === "ready") {
-        reply({ type: "schema", schema: { app: "accounts", model: "User", label: "Users", table: "accounts_user", columns, pk: "id", relations: [] } });
+        reply({ type: "schema", schema: { app: "accounts", model: "User", label: "Users", table: "accounts_user", columns, pk: "id", relations: [companyRelation] } });
         reply({ type: "rows", revision: 0, rows: { ok: true, rows, hasMore: false } });
         reply({ type: "transport", mode: "tcp", active: "tcp" });
       } else if (message.type === "filterFields") {
-        reply({ type: "filterFields", requestId: message.requestId, result: window.filterFixture.metadataError ? { ok: false, error: "Fixture metadata unavailable" } : { ok: true, fields: columns, relations: [], pk: "id" } });
+        const tree = filterTrees[`${message.app}.${message.model}`];
+        const failRelated = message.model === "Company" && relatedFailures > 0;
+        if (failRelated) { relatedFailures -= 1; }
+        reply({ type: "filterFields", requestId: message.requestId, result: window.filterFixture.metadataError || failRelated || !tree ? { ok: false, error: "Fixture metadata unavailable" } : { ok: true, ...tree, pk: "id" } });
       } else if (message.type === "modelList") {
         reply({ type: "modelList", requestId: message.requestId, result: { ok: true, models: [{ app: "accounts", model: "User" }] } });
       } else if (message.type === "previewQueryRecipe") {

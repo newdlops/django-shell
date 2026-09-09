@@ -12,7 +12,7 @@ export function modelBrowserHtml(webview: vscode.Webview, extensionPath: string,
   const nonce = String(Date.now());
   const codiconUri = webviewAssetUri(webview, extensionPath, "media", "codicon.css");
   const scriptUri = webviewAssetUri(webview, extensionPath, "media", "dist", "modelBrowser.js");
-  const styles = webviewStylesheetLinks(webview, extensionPath, ["uiFoundation.css", "modelBrowser.css", "modelQueryBuilder.css", "modelQueryGuidance.css", "modelQueryWorkspace.css", "modelQueryControls.css", "modelQueryAssistant.css", "modelQueryPopover.css", "modelQuickFilters.css"]);
+  const styles = webviewStylesheetLinks(webview, extensionPath, ["uiFoundation.css", "modelBrowser.css", "modelQueryBuilder.css", "modelQueryGuidance.css", "modelQueryWorkspace.css", "modelQueryControls.css", "modelQueryAssistant.css", "modelQueryPopover.css", "modelQuickFilters.css", "modelFieldExplorer.css"]);
   const title = options.mode === "query" ? "ORM Query" : "Model Data";
   const placeholder = options.mode === "query" ? "Run a query to inspect its rows." : "Select a model from the Django Shell catalog.";
   return `<!doctype html>

@@ -21,14 +21,14 @@ async function readyToApply(document) {
 /** Selects an allowlisted field and types into the resulting scalar control. */
 async function addTextCondition(document, field, value) {
   const existing = new Set([...document.querySelectorAll('#queryWhereRoot [data-role="comparison"]')].map((node) => node.dataset.queryNodeId));
-  document.querySelector('#queryWhereRoot button[aria-label="Add condition to this group"]').click();
+  const add = document.querySelector('#queryWhereRoot button[aria-label="Add condition to this group"]');
+  add.focus(); add.click();
   const row = await waitFor(() => [...document.querySelectorAll('#queryWhereRoot [data-role="comparison"]')].find((node) => !existing.has(node.dataset.queryNodeId)), "new condition");
-  const select = await waitFor(() => {
-    const control = row.querySelector('select[aria-label="Condition field"]');
-    return control && [...control.options].some((option) => option.value === `field:${field}`) ? control : undefined;
-  }, "field metadata");
   const nodeId = row.dataset.queryNodeId;
-  select.value = `field:${field}`; select.dispatchEvent(new Event("change", { bubbles: true }));
+  const search = await waitFor(() => document.querySelector('input[role="combobox"][aria-label="Search fields or paste a lookup"]'), "field explorer");
+  search.value = field; search.dispatchEvent(new Event("input", { bubbles: true }));
+  const option = await waitFor(() => [...document.querySelectorAll('.query-field-results [role="option"]')].find((item) => item.getAttribute("aria-label") === `Choose ${field}`), "field metadata");
+  option.click();
   const input = await waitFor(() => {
     const control = document.querySelector(`[data-query-node-id="${nodeId}"] input[aria-label="Comparison value"]`);
     return control && document.activeElement === control ? control : undefined;
@@ -43,6 +43,7 @@ export async function runModelQuickFiltersE2eProbe(document, progress) {
   const filterButton = await waitFor(() => get("queryFilterButton"), "filter action");
   filterButton.click();
   await waitFor(() => get("queryBuilderTitle").textContent === "Filters", "compact editor");
+  await new Promise((resolve) => setTimeout(resolve, 0));
   if (get("queryDirtyState").hidden !== true || !get("queryReviewPane").hidden) { throw new Error("Opening compact filters changed the draft or exposed the review pane."); }
   await addTextCondition(document, "username", "demo");
   await addTextCondition(document, "status", "active");

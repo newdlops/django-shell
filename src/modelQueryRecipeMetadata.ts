@@ -3,6 +3,7 @@
 import type { BackendFilterField, BackendFilterFieldTree, BackendFilterRelation, BackendModelColumn } from "./modelBackend";
 import { MODEL_QUERY_RECIPE_LIMITS } from "./modelQueryRecipeLimits";
 import type { ModelQueryRecipeV2, QueryModelRef } from "./modelQueryRecipe";
+import { loadQueryReferenceTrees } from "./modelQueryMetadataLoader";
 
 /** Resolved metadata for a recipe path. */
 export interface QueryResolvedPath { choices?: Array<[unknown, string]>; leafKind: "field" | "property" | "relation"; nullable: boolean; path: string; relationTerminal: boolean; toMany: boolean; type: string; }
@@ -63,14 +64,13 @@ export class ModelQueryMetadataIndex {
       const segment = segments[index];
       const final = index === segments.length - 1;
       const field = tree.fields.find((candidate) => candidate.attname === segment || candidate.name === segment || (segment === "pk" && candidate.pk));
-      if (field) {
+      const relation = this.resolveRelation(current, segment);
+      if (field && (final || !relation || (field.attname === segment && field.name !== segment))) {
         if (!final) { return undefined; }
         return resolvedField(path, field, toMany, this.models.get(modelKey(current))?.columns);
       }
       const property = final && current.app === model.app && current.model === model.model ? this.models.get(modelKey(current))?.columns?.find((candidate) => candidate.computed && (candidate.attname === segment || candidate.name === segment)) : undefined;
       if (property) { return { choices: property.choices, leafKind: "property", nullable: property.null, path, relationTerminal: false, toMany, type: property.type }; }
-      const currentTree = tree;
-      const relation = currentTree.relations.find((candidate) => candidate.name === segment || candidate.queryName === segment || candidate.filterField === segment || (segment === "pk" && currentTree.pk === segment));
       if (!relation) { return undefined; }
       toMany ||= !relation.single;
       if (final) { return { leafKind: "relation", nullable: true, path, relationTerminal: true, toMany, type: relation.kind }; }
@@ -101,21 +101,7 @@ export async function loadModelQueryMetadata(recipe: ModelQueryRecipeV2, loadTre
   const index = new ModelQueryMetadataIndex();
   index.setCatalog(modelCatalog);
   index.addColumns(recipe.source, rootColumns);
-  const pending = new Map<string, QueryModelRef>([[modelKey(recipe.source), recipe.source]]);
-  for (const model of collectExplicitModels(recipe)) { pending.set(modelKey(model), model); }
-  const visited = new Set<string>();
-  while (pending.size) {
-    const [key, model] = pending.entries().next().value as [string, QueryModelRef];
-    pending.delete(key);
-    if (visited.has(key)) { continue; }
-    visited.add(key);
-    index.addTree(model, await loadTree(model));
-    for (const relation of collectRelationSources(recipe, model)) {
-      const resolved = index.resolveRelation(model, relation);
-      const target = resolved && parseModelKey(resolved.target);
-      if (target && !visited.has(modelKey(target))) { pending.set(modelKey(target), target); }
-    }
-  }
+  await loadQueryReferenceTrees(recipe, index, loadTree);
   return index;
 }
 

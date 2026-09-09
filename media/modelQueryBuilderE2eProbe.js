@@ -20,9 +20,9 @@ function click(document, label) { const target = button(document, label); if (!t
 /** Returns the stable Add-condition action from the active predicate group. */
 function conditionAdd(document) { return [...document.querySelectorAll("button")].find((candidate) => candidate.getAttribute("aria-label") === "Add condition to this group"); }
 
-/** Waits for one rendered Query Builder condition Field control matching a predicate. */
+/** Waits for one rendered Query Builder field explorer trigger matching a predicate. */
 async function waitForE2eField(document, predicate, timeoutMs = 5000) {
-  return waitFor(() => { const select = document.querySelector('select[aria-label="Condition field"]'); return select && predicate(select) ? select : undefined; }, "Query Builder Field control", timeoutMs);
+  return waitFor(() => { const trigger = document.querySelector('button[aria-label="Condition field"]'); return trigger && predicate(trigger) ? trigger : undefined; }, "Query Builder Field control", timeoutMs);
 }
 
 /** Returns whether the active draft has a locally valid, settled preview. */
@@ -150,9 +150,11 @@ export async function runModelQueryBuilderE2eProbe({ document, postMessage, requ
     await waitFor(() => document.getElementById("queryDraftStatus")?.textContent === "Draft changes are not applied" && document.getElementById("queryDraftAiAssembly")?.hidden === false && document.getElementById("queryWhereRoot")?.textContent?.includes("Status") && document.getElementById("queryWhereRoot")?.textContent?.includes("equals “active”.") && !document.getElementById("queryDrawerApply")?.disabled, "rendered automatic draft-only assistant acceptance");
     if (document.getElementById("queryAppliedFiltersEmpty")?.textContent !== "None" || document.getElementById("queryDrawerStatus")?.textContent?.includes("Applying")) { throw new Error("Assistant acceptance applied the query."); }
     click(document, "Undo"); await waitFor(() => document.getElementById("queryDraftStatus")?.textContent === "Draft matches applied query", "assistant acceptance undo");
-    progress("legacy-picker"); click(document, "1. Filter Rows"); const pickerAdd = await waitFor(() => conditionAdd(document), "legacy picker condition control"); pickerAdd.click(); const select = await waitForE2eField(document, (candidate) => !candidate.disabled);
-    const optionGroups = [...select.querySelectorAll("optgroup")].map((group) => group.label); const options = [...select.querySelectorAll("option")]; const overflow = assistantOverflow(document);
-    finish({ appliedFilters: document.getElementById("queryAppliedFiltersEmpty")?.textContent || "", applyDisabled: document.getElementById("queryDrawerApply")?.disabled === true, assistantOverflow: overflow, conditionCount: document.querySelectorAll('select[aria-label="Condition field"]').length, disabled: select.disabled, drawerOpen: drawer?.hidden === false, enabledOptionCount: options.filter((option) => !option.disabled && option.value).length, exampleCount: examples.length, focused: document.activeElement === select, optionGroups, placeholderDisabled: options[0]?.disabled === true, propertyLoads, selectedValue: select.value, showPickerCalls, sortCycle });
+    progress("field-explorer"); click(document, "1. Filter Rows"); const pickerAdd = await waitFor(() => conditionAdd(document), "field explorer condition control"); pickerAdd.focus(); pickerAdd.click(); const trigger = await waitForE2eField(document, (candidate) => !candidate.disabled);
+    await waitFor(() => document.querySelector('.query-field-results [role="option"]'), "field explorer metadata");
+    const optionGroups = [...document.querySelectorAll(".query-field-section")].map((group) => group.textContent); const options = [...document.querySelectorAll('.query-field-results [role="option"]')]; const overflow = assistantOverflow(document);
+    const search = document.querySelector('input[role="combobox"][aria-label="Search fields or paste a lookup"]');
+    finish({ appliedFilters: document.getElementById("queryAppliedFiltersEmpty")?.textContent || "", applyDisabled: document.getElementById("queryDrawerApply")?.disabled === true, assistantOverflow: overflow, conditionCount: document.querySelectorAll('button[aria-label="Condition field"]').length, disabled: trigger.disabled, drawerOpen: drawer?.hidden === false, enabledOptionCount: options.length, exampleCount: examples.length, explorerOpen: trigger.getAttribute("aria-expanded") === "true", focused: document.activeElement === search, optionGroups, placeholderVisible: Boolean(trigger.querySelector(".query-field-placeholder")), propertyLoads, selectedValue: search?.value, showPickerCalls, sortCycle });
   } catch (error) { finish({ error: String(error?.message || error), showPickerCalls }); }
   finally { view?.removeEventListener?.("error", terminalError); view?.removeEventListener?.("unhandledrejection", terminalError); try { if (selectPrototype && originalShowPicker) { Object.defineProperty(selectPrototype, "showPicker", originalShowPicker); } else if (selectPrototype) { delete selectPrototype.showPicker; } } catch { /* Terminal output was already emitted. */ } }
 }

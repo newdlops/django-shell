@@ -22,7 +22,7 @@ function treeFromMessage(message) {
 export function rootMetadataOptions(tree) {
   if (!tree) { return { fields: [], relations: [] }; }
   return {
-    fields: (tree.fields || []).filter((field) => field && typeof field.name === "string").map((field) => ({ ...field, path: field.name, role: "field" })),
+    fields: (tree.fields || []).filter((field) => field && typeof field.name === "string").map((field) => ({ ...field, name: field.attname || field.name, path: field.attname || field.name, role: "field" })),
     relations: (tree.relations || []).filter((relation) => relation && typeof relation.name === "string").map((relation) => ({ ...relation, path: relation.name, role: "relation" }))
   };
 }

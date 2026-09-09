@@ -71,7 +71,7 @@ export function createQueryWorkspace({ drawerResize, element, elements, root, ui
     if (Boolean(previous.quickFilters) !== quickFilters) {
       if (previous.quickFilters) { filterHeight = previous.drawerHeight; } else { builderHeight = previous.drawerHeight; }
     }
-    const initialFilterHeight = (root?.defaultView?.innerWidth || 960) < 640 ? 440 : 320;
+    const initialFilterHeight = (root?.defaultView?.innerWidth || 960) < 960 ? 620 : 540;
     const height = Boolean(previous.quickFilters) === quickFilters ? previous.drawerHeight : quickFilters ? filterHeight || initialFilterHeight : builderHeight || previous.drawerHeight;
     uiState.dispatch({ enabled: quickFilters, type: "SET_QUICK_FILTERS" });
     elements.queryDrawer.hidden = false;
@@ -81,7 +81,7 @@ export function createQueryWorkspace({ drawerResize, element, elements, root, ui
     drawerResize.setHeight(height);
     if (sectionStages[section]) { uiState.dispatch({ stage: sectionStages[section], type: "SET_ACTIVE_STAGE" }); }
     if (focus) { window.setTimeout(() => {
-      const target = quickFilters ? elements[section]?.querySelector('[data-role="comparison"] .query-field-picker select:not(:disabled)') || elements[section]?.querySelector('button[aria-label="Add condition to this group"]') : elements[section]?.querySelector("button,input,select,textarea");
+      const target = quickFilters ? elements[section]?.querySelector('[data-role="comparison"] .query-field-trigger, [data-role="comparison"] .query-field-picker select:not(:disabled)') || elements[section]?.querySelector('button[aria-label="Add condition to this group"]') : elements[section]?.querySelector("button,input,select,textarea");
       target?.focus();
     }, 0); }
   }

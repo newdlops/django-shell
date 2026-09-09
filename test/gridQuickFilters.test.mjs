@@ -15,14 +15,14 @@ function fixture() {
   return createQueryRecipeStore(recipe);
 }
 
-test("quick filtering admits ordinary predicates and reveals complex or unrelated draft changes", () => {
+test("quick filtering admits nested groups and field comparisons while revealing unrelated draft changes", () => {
   const store = fixture();
   assert.equal(supportsQuickFilters(store.getSnapshot()), true);
   store.dispatch({ type: "ADD_GROUP", parentId: store.getSnapshot().draft.where.nodeId, scope: "where" });
-  assert.equal(supportsQuickFilters(store.getSnapshot()), false);
+  assert.equal(supportsQuickFilters(store.getSnapshot()), true);
   store.undo();
   store.dispatch({ type: "UPDATE_NODE", scope: "where", nodeId: "name", changes: { rhs: { kind: "field", path: "email" } } });
-  assert.equal(supportsQuickFilters(store.getSnapshot()), false);
+  assert.equal(supportsQuickFilters(store.getSnapshot()), true);
   store.undo();
   const snapshot = store.getSnapshot();
   snapshot.draft.computed[0].alias = "changed";

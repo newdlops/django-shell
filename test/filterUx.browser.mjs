@@ -16,7 +16,8 @@ async function applications(page) { return page.evaluate(() => window.filterFixt
 async function addCondition(page, field) {
   await page.getByRole("button", { name: "Add condition to this group", exact: true }).first().click();
   const row = page.locator("#queryWhereRoot [data-role=comparison]").last();
-  await row.getByLabel("Condition field", { exact: true }).selectOption("field:" + field);
+  await page.getByRole("combobox", { name: "Search fields or paste a lookup" }).fill(field);
+  await page.getByRole("option", { name: "Choose " + field, exact: true }).click();
   return row;
 }
 
@@ -45,7 +46,7 @@ async function exerciseFilters(page, url, width) {
   await textRow.getByLabel("Comparison value", { exact: true }).fill("alex");
   const booleanRow = await addCondition(page, "is_active");
   assert.equal(await booleanRow.getByLabel("Boolean value").inputValue(), "true");
-  await page.getByLabel("Join conditions", { exact: true }).selectOption("or");
+  await page.locator("#queryWhereRoot").getByLabel("Join conditions", { exact: true }).selectOption("or");
   await readyToApply(page);
   assert.equal((await applications(page)).length, 0, "draft editing does not execute a query");
   const toolbar = await page.evaluate(() => ({ add: document.querySelector('#queryWhereRoot button[aria-label="Add condition to this group"]').getBoundingClientRect().toJSON(), pane: document.getElementById("queryEditorPane").getBoundingClientRect().toJSON() }));
@@ -83,7 +84,7 @@ async function exerciseFilters(page, url, width) {
   await page.getByRole("button", { name: "Add nested condition group", exact: true }).first().click();
   await page.locator("#queryClose").click();
   await page.locator("#queryFilterButton").click();
-  assert.equal(await page.locator("#queryBuilderTitle").textContent(), "Query Builder", "nested groups must remain fully visible");
+  assert.equal(await page.locator("#queryBuilderTitle").textContent(), "Filters", "nested groups remain editable in the filter composer");
   console.log(`Filter interactions passed at ${width} × 900.`);
 }
 

@@ -28,17 +28,22 @@ function targetFromLabel(label, source) {
 }
 
 /** Creates a picker which emits only complete scalar paths or allowed relation terminals. */
-export function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Choose field", computed = [], context = "where", controlKey = "", current = "", el, metadata, onChange, source } = {}) {
+export function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Choose field", computed = [], context = "where", controlKey = "", current = "", el, metadata, navigation, onChange, source } = {}) {
   const node = el("div", { className: "query-field-picker", dataset: { context } });
   const segments = el("div", { className: "query-field-picker-segments" });
   const status = el("p", { className: "query-control-help", role: "status" });
   node.append(segments, status);
   let disposed = false;
   let generation = 0;
-  let drillPath = "";
-  let path = String(current || "");
+  let committed = String(current || "");
+  const sourceKey = `${source?.app || ""}.${source?.model || ""}`;
+  const retained = navigation?.source === sourceKey && navigation?.current === committed;
+  let drillPath = retained ? navigation.drillPath : "";
+  let path = retained ? navigation.path : committed;
   let controllers = [];
 
+  /** Retains unfinished navigation across metadata renders without changing the query draft. */
+  function rememberNavigation() { if (navigation) { Object.assign(navigation, { current: committed, drillPath, path, source: sourceKey }); } }
   /** Releases native select listeners before rebuilding the visible cascade. */
   function disposeControllers() { for (const controller of controllers) { controller.destroy?.(); } controllers = []; }
   /** Tests whether an async continuation may still write this picker. */
@@ -51,7 +56,7 @@ export function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabe
     controllers.push(picker); segments.appendChild(picker.node); return picker;
   }
   /** Emits an independently copied complete path after an allowlisted leaf choice. */
-  function emit(next, kind, descriptor) { drillPath = ""; path = String(next || ""); onChange?.(path, kind, descriptor); }
+  function emit(next, kind, descriptor) { drillPath = ""; path = String(next || ""); committed = path; rememberNavigation(); onChange?.(path, kind, descriptor); }
   /** Returns one current selection token, preserving invalid paths visibly. */
   function selectionFor(selected, choices, terminal, traversing) { if (!selected) { return ""; } const terminalValue = `relationTerminal:${selected}`; if (terminal && !traversing && choices.some((choice) => choice.value === terminalValue)) { return terminalValue; } return choices.some((choice) => choice.value === `relation:${selected}`) ? `relation:${selected}` : choices.some((choice) => choice.value.endsWith(`:${selected}`)) ? choices.find((choice) => choice.value.endsWith(`:${selected}`)).value : `unavailable:${selected}`; }
   /** Writes human-readable terminal metadata without injecting markup. */
@@ -96,7 +101,8 @@ export function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabe
       if (!choices.length) { loading?.node?.remove?.(); if (loading) { controllers = controllers.filter((controller) => controller !== loading); loading.destroy?.(); } appendState("No selectable fields.", index); return; }
       const selected = parts[index] || "";
       if (selected && !choices.some((choice) => choice.value.endsWith(`:${selected}`))) { choices.push({ disabled: true, group: "Unavailable", label: `Unavailable field: ${selected}`, value: `unavailable:${selected}` }); }
-      const picker = createQuerySelect({ ariaLabel: index === 0 ? ariaLabel : `Related field after ${prefix.join("__")}`, dataset: controlKey ? { queryControlKey: `${controlKey}-${index}` } : {}, el, onChange: (value) => select(value, index, model, prefix, options), options: [{ disabled: true, label: index === 0 ? "Choose field or calculated value" : "Choose related field", value: "" }, ...choices], value: selectionFor(selected, choices, allowRelationTerminal && parts.length === index + 1, drillPath === [...prefix, selected].join("__")) });
+      const levelPrefix = [...prefix];
+      const picker = createQuerySelect({ ariaLabel: index === 0 ? ariaLabel : `Related field after ${prefix.join("__")}`, dataset: controlKey ? { queryControlKey: `${controlKey}-${index}` } : {}, el, onChange: (value) => select(value, index, levelPrefix, options), options: [{ disabled: true, label: index === 0 ? "Choose field or calculated value" : "Choose related field", value: "" }, ...choices], value: selectionFor(selected, choices, allowRelationTerminal && parts.length === index + 1, drillPath === [...prefix, selected].join("__")) });
       if (loading) {
         loading.node?.replaceWith?.(picker.node);
         controllers = controllers.filter((controller) => controller !== loading);
@@ -107,7 +113,8 @@ export function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabe
       controllers.push(picker);
       if (!selected) { return; }
       const relation = options.relations.find((item) => item.name === selected);
-      const field = drillPath === [...prefix, selected].join("__") ? undefined : options.fields.find((item) => item.name === selected);
+      const traversing = relation && (parts.length > index + 1 || drillPath === [...prefix, selected].join("__"));
+      const field = traversing ? undefined : options.fields.find((item) => item.name === selected);
       if (field) {
         if (parts.length > index + 1) { appendState(`Unavailable field: ${parts.slice(index + 1).join("__")}`, index + 1); return; }
         setTerminal(field); return;
@@ -119,21 +126,21 @@ export function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabe
   }
 
   /** Handles a native segment choice without emitting a partial relation path. */
-  function select(value, index, model, prefix, options) {
+  function select(value, index, prefix, options) {
     const [kind, selected] = String(value || "").split(":", 2);
     if (!selected || kind === "unavailable") { return; }
     if (kind === "computed") { const descriptor = index === 0 ? computed.find((item) => item?.enabled !== false && item.alias === selected) : undefined; if (descriptor) { emit(selected, kind, descriptor); } return; }
     if (kind === "relationTerminal") { const relation = options.relations.find((item) => item.name === selected); if (relation) { emit([...prefix, selected].join("__"), kind, relation); } return; }
     if (kind === "relation") {
       const relation = options.relations.find((item) => item.name === selected);
-      if (relation) { path = [...prefix, selected].join("__"); drillPath = path; render(); }
+      if (relation) { path = [...prefix, selected].join("__"); drillPath = path; rememberNavigation(); render(); }
       return;
     }
     const field = options.fields.find((item) => item.name === selected); if (kind === "field" && field) { emit([...prefix, selected].join("__"), kind, field); }
   }
 
-  render();
-  return { /** Invalidates pending loads and releases native listeners. */ dispose() { disposed = true; generation += 1; disposeControllers(); }, /** Focuses the first native select. */ focus() { controllers[0]?.focus?.(); }, /** Returns the current internal cascade path. */ getPath() { return path; }, /** Returns the last selected path segment. */ getTerminal() { return path.split("__").at(-1) || ""; }, node, /** Replaces the persisted path and begins a new guarded render. */ setCurrent(next) { drillPath = ""; path = String(next || ""); render(); } };
+  rememberNavigation(); render();
+  return { /** Invalidates pending loads and releases native listeners. */ dispose() { disposed = true; generation += 1; disposeControllers(); }, /** Focuses the first native select. */ focus() { controllers[0]?.focus?.(); }, /** Returns the current internal cascade path. */ getPath() { return path; }, /** Returns the last selected path segment. */ getTerminal() { return path.split("__").at(-1) || ""; }, node, /** Replaces the persisted path and begins a new guarded render. */ setCurrent(next) { drillPath = ""; path = String(next || ""); committed = path; rememberNavigation(); render(); } };
 }
 
 /** Exposes pure option formatting for focused tests. */

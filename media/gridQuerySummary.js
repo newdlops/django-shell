@@ -1,8 +1,8 @@
 // Safe human-readable summaries for ModelQueryRecipeV2 draft and applied states.
 
-/** Counts recursive predicate nodes without relying on DOM state. */
+/** Counts actual conditions and existence checks without counting structural Boolean groups as filters. */
 export function countPredicateNodes(group) {
-  return (group?.children || []).reduce((count, node) => count + 1 + (node.kind === "group" ? countPredicateNodes(node) : node.kind === "existsPredicate" ? countPredicateNodes(node.where) : 0), 0);
+  return (group?.children || []).reduce((count, node) => count + (node.kind === "group" ? countPredicateNodes(node) : 1 + (node.kind === "existsPredicate" ? countPredicateNodes(node.where) : 0)), 0);
 }
 
 /** Summarizes applied source-row and result-filter trees without changing their semantics. */
