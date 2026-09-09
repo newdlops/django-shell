@@ -10,6 +10,12 @@ The existing `UNLICENSED` manifest and proprietary `LICENSE` describe the curren
 
 The activity bar icon remains `media/django-shell.svg`. Do not use the colored deployment icon there because VS Code activity icons are expected to be theme-colored SVGs.
 
+### 1.1.1000056 validation record — 2026-09-10
+
+- `npm run check`: 1,035 tests passed with no failures or skips.
+- The VSIX contains 327 files. Comparing every extracted file with the locally installed `1.1.1000055` package found differences only in the package manifest, VSIX manifest, and changelog; all runtime files are byte-identical.
+- Browser and native VS Code E2E were not rerun for this version-only reissue. The `1.1.1000055` results below still apply, including the unresolved Python console golden-visual timeout in the full native suite.
+
 ### 1.1.1000055 validation record — 2026-09-09
 
 - `npm run check`: 1,035 tests passed with no failures or skips, including multi-hop relationship metadata resolution, real Django lookup execution, and searchable field-path validation.
@@ -81,13 +87,13 @@ npm run package
 This produces a file like:
 
 ```text
-django-shell-1.1.1000055.vsix
+django-shell-1.1.1000056.vsix
 ```
 
 Install it into VS Code:
 
 ```sh
-code --install-extension django-shell-1.1.1000055.vsix --force
+code --install-extension django-shell-1.1.1000056.vsix --force
 ```
 
 After installation, reload VS Code and run `Django Shell: Open Console` from the command palette.
@@ -118,10 +124,12 @@ After the checks pass, commit and push the release, package the VSIX, and instal
 
 ```sh
 npx @vscode/vsce login <publisher-id>
-npx @vscode/vsce publish --packagePath django-shell-1.1.1000055.vsix
+npx @vscode/vsce publish --packagePath django-shell-1.1.1000056.vsix
 ```
 
 Use `npx @vscode/vsce publish patch`, `minor`, or `major` only when you want VSCE to bump the version automatically.
+
+If publishing reports `The version ... has been previously deleted, and cannot be recreated`, choose a new version, update both manifests and the changelog, then package and publish again. [Marketplace does not allow deleted version numbers to be reused](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#removing-specific-extension-versions). Version `1.1.1000055` returned this error on 2026-09-10; release `1.1.1000056` uses the same extension code with a new version number.
 
 If Node cannot validate a certificate chain that is trusted by the operating system, use `NODE_OPTIONS=--use-system-ca` with VSCE on a Node version supporting that option. Keep TLS certificate verification enabled.
 

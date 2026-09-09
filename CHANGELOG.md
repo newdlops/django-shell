@@ -6,6 +6,11 @@ This extension uses a running build number; the current release line is `1.1.x`.
 Earlier `0.0.x` entries are retained below. The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.1000056] — 2026-09-10
+
+### Fixed
+- Reissue the relationship lookup and filter composer improvements from 1.1.1000055 with a new release number because Marketplace cannot reuse a deleted version. Extension behavior is unchanged from that build.
+
 ## [1.1.1000055] — 2026-09-09
 
 ### Improved
