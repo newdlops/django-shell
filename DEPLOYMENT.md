@@ -14,6 +14,7 @@ The activity bar icon remains `media/django-shell.svg`. Do not use the colored d
 
 - `npm run check`: 1,035 tests passed with no failures or skips.
 - The VSIX contains 327 files. Comparing every extracted file with the locally installed `1.1.1000055` package found differences only in the package manifest, VSIX manifest, and changelog; all runtime files are byte-identical.
+- VSCE accepted the `1.1.1000056` upload, and local VS Code installation succeeded. All installed runtime files match the uploaded VSIX. Upload acceptance is separate from the public-availability check described below.
 - Browser and native VS Code E2E were not rerun for this version-only reissue. The `1.1.1000055` results below still apply, including the unresolved Python console golden-visual timeout in the full native suite.
 
 ### 1.1.1000055 validation record — 2026-09-09
@@ -128,6 +129,8 @@ npx @vscode/vsce publish --packagePath django-shell-1.1.1000056.vsix
 ```
 
 Use `npx @vscode/vsce publish patch`, `minor`, or `major` only when you want VSCE to bump the version automatically.
+
+VSCE's `Published` message confirms that the upload was accepted. Check the extension's **Manage** tab in the publisher portal for validation status, then confirm the new version is returned by `npx @vscode/vsce show newdlops.django-shell --json`. A version marked `Verifying` is not yet available publicly; wait for its validation result before treating the release as complete.
 
 If publishing reports `The version ... has been previously deleted, and cannot be recreated`, choose a new version, update both manifests and the changelog, then package and publish again. [Marketplace does not allow deleted version numbers to be reused](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#removing-specific-extension-versions). Version `1.1.1000055` returned this error on 2026-09-10; release `1.1.1000056` uses the same extension code with a new version number.
 
