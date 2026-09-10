@@ -6,6 +6,13 @@ This extension uses a running build number; the current release line is `1.1.x`.
 Earlier `0.0.x` entries are retained below. The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.1000057] — 2026-09-11
+
+### Improved
+- Console executions can be collapsed individually or together, with code previews, execution status, duration, and output line counts remaining visible.
+- Long successful results fold automatically after completion. Errors stay open by default, while explicit expansion choices survive new logs and completion.
+- Streaming output preserves the scroll position when reading earlier logs. Keyboard controls and sticky execution headers keep long results easy to navigate.
+
 ## [1.1.1000056] — 2026-09-10
 
 ### Fixed

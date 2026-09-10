@@ -10,6 +10,13 @@ The existing `UNLICENSED` manifest and proprietary `LICENSE` describe the curren
 
 The activity bar icon remains `media/django-shell.svg`. Do not use the colored deployment icon there because VS Code activity icons are expected to be theme-colored SVGs.
 
+### 1.1.1000057 validation record — 2026-09-11
+
+- `npm ci` completed, followed by `npm run check`: 1,035 tests passed with no failures or skips.
+- The console browser fixture passed at 390, 768, and 1440 pixels wide, including independent/bulk disclosure, 1,000-line output retention, keyboard focus, streaming choices, scroll preservation, errors, Clear/Restart, light/high-contrast themes, forced colors, and 200% CSS zoom. Host replies are simulated in this fixture.
+- Full native VS Code E2E passed on VS Code 1.136.1, macOS arm64, including Python execution, overlay input/providers/themes, hover handoff, Model Browser, ORM Query, and restart behavior. The first run failed to deliver the test's native pointer at hover sash entry; a rerun passed without a code or test change. The earlier Python console golden-visual timeout did not recur in the successful run.
+- The VSIX contains 328 files. Its console HTML, stylesheet, and bundled renderer match the verified build; development tests, TypeScript sources, local configuration, and environment files are excluded. SHA-256: `9edf7c19b3b9b107c0529234171eb768e2b30bc68087bb22cd3c12beb2d8eacf`.
+
 ### 1.1.1000056 validation record — 2026-09-10
 
 - `npm run check`: 1,035 tests passed with no failures or skips.

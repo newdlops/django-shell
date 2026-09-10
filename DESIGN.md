@@ -282,6 +282,14 @@ Borders communicate structure, focus, and validation. Decorative outlines, overs
 - **Combobox / Field Finder:** Uses semantic combobox, listbox, and option roles with complete keyboard interaction and focus return.
 - **Resizable Sash:** Uses a focusable separator with orientation and keyboard increments, not pointer-only dragging.
 
+### Console Execution Outputs
+
+- Each execution is an independent disclosure with an always-visible execution number, one-line code preview, running/completion/error status, duration, and output line count. The full source and result remain intact when collapsed.
+- Start executions expanded; automatically collapse successful results exceeding 12 lines or 2,000 characters on completion. Keep errors and short results expanded by default. Preserve explicit user choices through streaming and completion, and avoid auto-collapsing text that is being selected or focused.
+- Provide Collapse all and Expand all in the output toolbar. Native buttons expose `aria-expanded` and `aria-controls`, support Enter/Space, and retain visible focus. New executions start independently of earlier bulk actions.
+- Use flat theme-colored rows, Codicon chevrons, existing UI/editor fonts, and the current output panel height limit. Sticky execution headers keep collapse controls reachable in long results; narrow panels place status on a second row. Wide result text scrolls within its result, not the entire console.
+- Preserve a reader's scroll position when live output arrives. Verify long/empty/error/running outputs, independent toggles, bulk controls, manual choices, Clear/Restart, keyboard focus, and dark/light/high-contrast layouts at 390, 768, and 1440 pixels.
+
 ### Native VS Code Trees
 
 - **Runtime Inspector:** Uses native `TreeItem`, `ThemeIcon`, description, tooltip, collapsible state, and view-title actions. Loading, unavailable transport, empty runtime, and error are distinct.

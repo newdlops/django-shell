@@ -9455,6 +9455,122 @@ function applyTerminalSnapshot(state, snapshot) {
   return { clear: false, write: text + suffix };
 }
 
+// media/consoleOutputAccordion.js
+var LONG_OUTPUT_LINES = 12;
+var LONG_OUTPUT_CHARACTERS = 2e3;
+function createOutputAccordionItem(count, code, onToggle) {
+  const item = document.createElement("section");
+  item.className = "outputItem";
+  item.dataset.execution = String(count || "");
+  const id = `execution-output-${count || 0}`;
+  const heading = document.createElement("h3");
+  heading.className = "outputHeading";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "outputHeader";
+  toggle.dataset.role = "toggle";
+  toggle.setAttribute("aria-controls", id);
+  toggle.setAttribute("aria-labelledby", `${id}-execution ${id}-code`);
+  toggle.setAttribute("aria-describedby", `${id}-status ${id}-summary`);
+  const chevron = document.createElement("span");
+  chevron.className = "outputChevron codicon codicon-chevron-down";
+  chevron.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.id = `${id}-execution`;
+  label.className = "outputExecution";
+  label.dataset.role = "header-label";
+  label.textContent = `In [${count || ""}]`;
+  const preview = document.createElement("span");
+  preview.id = `${id}-code`;
+  preview.className = "outputCodePreview";
+  preview.textContent = code.split(/\r?\n/).find((line) => line.trim())?.trim().slice(0, 240) || "Python execution";
+  preview.title = preview.textContent;
+  const metadata = document.createElement("span");
+  metadata.className = "outputMetadata";
+  const status2 = document.createElement("span");
+  status2.id = `${id}-status`;
+  status2.className = "outputStatus";
+  status2.dataset.role = "status";
+  const summary = document.createElement("span");
+  summary.id = `${id}-summary`;
+  summary.className = "outputSummary";
+  summary.dataset.role = "summary";
+  metadata.append(status2, summary);
+  toggle.append(chevron, label, preview, metadata);
+  heading.append(toggle);
+  const content = document.createElement("div");
+  content.id = id;
+  content.className = "outputDetails";
+  content.dataset.role = "details";
+  const source = document.createElement("pre");
+  source.className = "inputSource";
+  source.dataset.role = "source";
+  source.textContent = code;
+  const outputLabel = document.createElement("div");
+  outputLabel.className = "outputItemLabel";
+  outputLabel.dataset.role = "out-label";
+  outputLabel.textContent = `Out[${count || ""}]:`;
+  const result = document.createElement("pre");
+  result.className = "result pending";
+  result.dataset.role = "result";
+  content.append(source, outputLabel, result);
+  item.append(heading, content);
+  setOutputExpanded(item, true);
+  toggle.addEventListener("click", () => {
+    setOutputExpanded(item, toggle.getAttribute("aria-expanded") !== "true", true);
+    onToggle();
+  });
+  return item;
+}
+function setOutputExpanded(item, expanded, manual = false) {
+  const toggle = item.querySelector('[data-role="toggle"]');
+  item.querySelector('[data-role="details"]').hidden = !expanded;
+  toggle.setAttribute("aria-expanded", String(expanded));
+  toggle.title = `${expanded ? "Collapse" : "Expand"} execution`;
+  item.querySelector(".outputChevron").className = `outputChevron codicon codicon-chevron-${expanded ? "down" : "right"}`;
+  if (manual) {
+    item.dataset.expansionTouched = "true";
+  }
+}
+function updateOutputDisclosure(item, text, completed = false, ok = true) {
+  const lines = text ? (text.match(/\n/g) || []).length + (text.endsWith("\n") ? 0 : 1) : 0;
+  item.querySelector('[data-role="summary"]').textContent = lines ? `${lines.toLocaleString()} ${lines === 1 ? "line" : "lines"}` : completed ? "No output" : "";
+  if (!completed || item.dataset.expansionTouched === "true") {
+    return;
+  }
+  const selection = window.getSelection();
+  const reading = item.contains(document.activeElement) || selection && !selection.isCollapsed && selection.containsNode(item, true);
+  const long = lines > LONG_OUTPUT_LINES || text.length > LONG_OUTPUT_CHARACTERS;
+  if (!reading) {
+    setOutputExpanded(item, !ok || !long);
+  }
+}
+
+// media/uiAnnouncer.js
+function createAnnouncer(root = document) {
+  const polite = root.getElementById("politeAnnouncements");
+  const assertive = root.getElementById("assertiveAnnouncements");
+  function announce(target, message) {
+    if (!target || !message) {
+      return;
+    }
+    target.textContent = "";
+    requestAnimationFrame(() => {
+      target.textContent = String(message);
+    });
+  }
+  return {
+    /** Announces normal progress and completion without interrupting speech. */
+    announceStatus(message) {
+      announce(polite, message);
+    },
+    /** Announces an actionable failure immediately. */
+    announceError(message) {
+      announce(assertive, message);
+    }
+  };
+}
+
 // media/customConsoleSource.js
 var STYLE_ID = "django-shell-custom-console-style";
 var vscode = acquireVsCodeApi();
@@ -9470,6 +9586,9 @@ var debugControls = document.querySelector(".debugControls");
 var debugMode = document.getElementById("debugMode");
 var newOverlayTabButtons = Array.from(document.querySelectorAll("[data-action=new-overlay-tab]"));
 var outputList = document.getElementById("outputList");
+var collapseOutputsButton = document.getElementById("collapseOutputs");
+var expandOutputsButton = document.getElementById("expandOutputs");
+var announcer = createAnnouncer();
 var editorAnchor = document.getElementById("editorAnchor");
 var inputPrompt = document.getElementById("inputPrompt");
 var inputPromptText = inputPrompt && inputPrompt.querySelector(".promptMark");
@@ -9542,6 +9661,8 @@ function mountTerminal() {
 }
 function wirePythonCell() {
   document.getElementById("clear").addEventListener("click", clearOutput);
+  collapseOutputsButton.addEventListener("click", () => setAllOutputsExpanded(false));
+  expandOutputsButton.addEventListener("click", () => setAllOutputsExpanded(true));
   if (editorAnchor) {
     editorAnchor.addEventListener("click", showOverlayEditor);
     new ResizeObserver(() => scheduleEditorGeometry()).observe(editorAnchor);
@@ -9898,21 +10019,24 @@ function showRunningOutput(count, code) {
   }
   stopOutputTimer(count);
   runningOutputs.set(count, window.setInterval(() => updateRunningOutput(count), 1e3));
+  syncOutputActions();
   currentOutput.scrollTop = currentOutput.scrollHeight;
 }
 function showOutput(count, result, ok, code) {
+  const followOutput = outputAtBottom();
   currentOutput.classList.remove("outputHidden");
   currentOutputLabel.textContent = "Outputs";
   stopOutputTimer(count);
   const item = outputItemFor(count) || createOutputItem(count, code);
   item.classList.remove("running");
+  item.classList.toggle("failed", !ok);
   const header = item.querySelector("[data-role=header-label]");
   if (header) {
-    header.textContent = `In [${count || ""}] -> Out[${count || ""}]`;
+    header.textContent = `In [${count || ""}]`;
   }
   const status2 = item.querySelector("[data-role=status]");
   if (status2) {
-    status2.textContent = item.dataset.startedAt ? `${durationText(Number(item.dataset.startedAt))} total` : "complete";
+    status2.textContent = `${ok ? "Done" : "Error"}${item.dataset.startedAt ? ` \xB7 ${durationText(Number(item.dataset.startedAt))}` : ""}`;
   }
   const label = item.querySelector("[data-role=out-label]");
   if (label) {
@@ -9924,8 +10048,18 @@ function showOutput(count, result, ok, code) {
   }
   delete body.dataset.streamed;
   body.className = ok ? "result" : "result error";
-  body.textContent = result;
-  currentOutput.scrollTop = currentOutput.scrollHeight;
+  updateOutputDisclosure(item, result, true, ok);
+  body.textContent = result || "No output";
+  body.classList.toggle("empty", !result);
+  syncOutputActions();
+  if (followOutput) {
+    currentOutput.scrollTop = currentOutput.scrollHeight;
+  }
+  if (ok) {
+    announcer.announceStatus(`Execution ${count} completed.`);
+  } else {
+    announcer.announceError(`Execution ${count} failed. ${item.querySelector('[data-role="details"]').hidden ? "Expand its output to inspect the error." : "See its output for the error."}`);
+  }
   vscode.postMessage({ ...e2eCellState("output"), execution: count || 0, ok: Boolean(ok), text: result, type: "e2eOutputRendered" });
 }
 function showProgress(count, progress) {
@@ -9958,6 +10092,7 @@ function appendLiveOutput(body, text) {
   if (!text) {
     return;
   }
+  const followOutput = outputAtBottom();
   if (body.dataset.streamed !== "true") {
     body.textContent = "";
     body.dataset.streamed = "true";
@@ -9974,42 +10109,36 @@ function appendLiveOutput(body, text) {
     }
   }
   body.textContent = next.slice(-LIVE_OUTPUT_LIMIT) || "Running\u2026";
-  currentOutput.scrollTop = currentOutput.scrollHeight;
+  updateOutputDisclosure(body.closest(".outputItem"), body.textContent);
+  if (followOutput) {
+    currentOutput.scrollTop = currentOutput.scrollHeight;
+  }
 }
 function createOutputItem(count, code) {
-  const item = document.createElement("section");
-  item.className = "outputItem";
-  item.dataset.execution = String(count || "");
-  const header = document.createElement("div");
-  header.className = "outputHeader";
-  const headerLabel = document.createElement("span");
-  headerLabel.dataset.role = "header-label";
-  headerLabel.textContent = `In [${count || ""}] -> running`;
-  const status2 = document.createElement("span");
-  status2.className = "outputStatus";
-  status2.dataset.role = "status";
-  const spacer = document.createElement("span");
-  spacer.className = "grow";
-  header.appendChild(headerLabel);
-  header.appendChild(spacer);
-  header.appendChild(status2);
-  const source = document.createElement("pre");
-  source.className = "inputSource";
-  source.dataset.role = "source";
-  source.textContent = code;
-  const label = document.createElement("div");
-  label.className = "outputItemLabel";
-  label.dataset.role = "out-label";
-  label.textContent = `Out[${count || ""}]:`;
-  const body = document.createElement("pre");
-  body.className = "result pending";
-  body.dataset.role = "result";
-  item.appendChild(header);
-  item.appendChild(source);
-  item.appendChild(label);
-  item.appendChild(body);
+  const item = createOutputAccordionItem(count, code, syncOutputActions);
   outputList.appendChild(item);
   return item;
+}
+function outputAtBottom() {
+  return currentOutput.scrollHeight - currentOutput.scrollTop - currentOutput.clientHeight <= 24;
+}
+function setAllOutputsExpanded(expanded) {
+  const action = expanded ? expandOutputsButton : collapseOutputsButton;
+  if (action.getAttribute("aria-disabled") === "true") {
+    return;
+  }
+  for (const item of outputList.children) {
+    setOutputExpanded(item, expanded, true);
+  }
+  syncOutputActions();
+  announcer.announceStatus(`All execution outputs ${expanded ? "expanded" : "collapsed"}.`);
+}
+function syncOutputActions() {
+  const toggles = [...outputList.querySelectorAll('[data-role="toggle"]')];
+  collapseOutputsButton.disabled = expandOutputsButton.disabled = toggles.length === 0;
+  collapseOutputsButton.setAttribute("aria-disabled", String(!toggles.some((toggle) => toggle.getAttribute("aria-expanded") === "true")));
+  expandOutputsButton.setAttribute("aria-disabled", String(!toggles.some((toggle) => toggle.getAttribute("aria-expanded") === "false")));
+  scheduleEditorGeometry();
 }
 function outputItemFor(count) {
   return outputList.querySelector(`.outputItem[data-execution="${String(count || "")}"]`);
@@ -10074,6 +10203,7 @@ function clearOutput() {
   }
   currentOutput.classList.add("outputHidden");
   outputList.textContent = "";
+  syncOutputActions();
 }
 function resetPythonCell() {
   pendingExecution = 0;

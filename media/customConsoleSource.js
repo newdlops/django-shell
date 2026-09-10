@@ -4,6 +4,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import xtermCss from "@xterm/xterm/css/xterm.css";
 import { applyTerminalSnapshot, consumeTerminalData, createTerminalReplayState } from "../src/terminalSnapshotReplay";
+import { createOutputAccordionItem, setOutputExpanded, updateOutputDisclosure } from "./consoleOutputAccordion.js";
+import { createAnnouncer } from "./uiAnnouncer.js";
 
 const STYLE_ID = "django-shell-custom-console-style";
 const vscode = acquireVsCodeApi();
@@ -19,6 +21,9 @@ const debugControls = document.querySelector(".debugControls");
 const debugMode = document.getElementById("debugMode");
 const newOverlayTabButtons = Array.from(document.querySelectorAll("[data-action=new-overlay-tab]"));
 const outputList = document.getElementById("outputList");
+const collapseOutputsButton = document.getElementById("collapseOutputs");
+const expandOutputsButton = document.getElementById("expandOutputs");
+const announcer = createAnnouncer();
 const editorAnchor = document.getElementById("editorAnchor");
 const inputPrompt = document.getElementById("inputPrompt");
 const inputPromptText = inputPrompt && inputPrompt.querySelector(".promptMark");
@@ -98,6 +103,8 @@ function mountTerminal() {
 /** Registers editor-like Python input behavior and cell actions. */
 function wirePythonCell() {
   document.getElementById("clear").addEventListener("click", clearOutput);
+  collapseOutputsButton.addEventListener("click", () => setAllOutputsExpanded(false));
+  expandOutputsButton.addEventListener("click", () => setAllOutputsExpanded(true));
   if (editorAnchor) {
     editorAnchor.addEventListener("click", showOverlayEditor);
     new ResizeObserver(() => scheduleEditorGeometry()).observe(editorAnchor);
@@ -509,23 +516,26 @@ function showRunningOutput(count, code) {
   }
   stopOutputTimer(count);
   runningOutputs.set(count, window.setInterval(() => updateRunningOutput(count), 1000));
+  syncOutputActions();
   currentOutput.scrollTop = currentOutput.scrollHeight;
 }
 
 /** Appends or completes one execution output directly below the active Python cell. */
 function showOutput(count, result, ok, code) {
+  const followOutput = outputAtBottom();
   currentOutput.classList.remove("outputHidden");
   currentOutputLabel.textContent = "Outputs";
   stopOutputTimer(count);
   const item = outputItemFor(count) || createOutputItem(count, code);
   item.classList.remove("running");
+  item.classList.toggle("failed", !ok);
   const header = item.querySelector("[data-role=header-label]");
   if (header) {
-    header.textContent = `In [${count || ""}] -> Out[${count || ""}]`;
+    header.textContent = `In [${count || ""}]`;
   }
   const status = item.querySelector("[data-role=status]");
   if (status) {
-    status.textContent = item.dataset.startedAt ? `${durationText(Number(item.dataset.startedAt))} total` : "complete";
+    status.textContent = `${ok ? "Done" : "Error"}${item.dataset.startedAt ? ` · ${durationText(Number(item.dataset.startedAt))}` : ""}`;
   }
   const label = item.querySelector("[data-role=out-label]");
   if (label) {
@@ -537,8 +547,13 @@ function showOutput(count, result, ok, code) {
   }
   delete body.dataset.streamed;
   body.className = ok ? "result" : "result error";
-  body.textContent = result;
-  currentOutput.scrollTop = currentOutput.scrollHeight;
+  updateOutputDisclosure(item, result, true, ok);
+  body.textContent = result || "No output";
+  body.classList.toggle("empty", !result);
+  syncOutputActions();
+  if (followOutput) { currentOutput.scrollTop = currentOutput.scrollHeight; }
+  if (ok) { announcer.announceStatus(`Execution ${count} completed.`); }
+  else { announcer.announceError(`Execution ${count} failed. ${item.querySelector('[data-role="details"]').hidden ? "Expand its output to inspect the error." : "See its output for the error."}`); }
   vscode.postMessage({ ...e2eCellState("output"), execution: count || 0, ok: Boolean(ok), text: result, type: "e2eOutputRendered" });
 }
 
@@ -575,6 +590,7 @@ function appendLiveOutput(body, text) {
   if (!text) {
     return;
   }
+  const followOutput = outputAtBottom();
   if (body.dataset.streamed !== "true") {
     body.textContent = "";
     body.dataset.streamed = "true";
@@ -591,44 +607,38 @@ function appendLiveOutput(body, text) {
     }
   }
   body.textContent = next.slice(-LIVE_OUTPUT_LIMIT) || "Running…";
-  currentOutput.scrollTop = currentOutput.scrollHeight;
+  updateOutputDisclosure(body.closest(".outputItem"), body.textContent);
+  if (followOutput) { currentOutput.scrollTop = currentOutput.scrollHeight; }
 }
 
 /** Creates one output item with the executed input source preserved exactly. */
 function createOutputItem(count, code) {
-  const item = document.createElement("section");
-  item.className = "outputItem";
-  item.dataset.execution = String(count || "");
-  const header = document.createElement("div");
-  header.className = "outputHeader";
-  const headerLabel = document.createElement("span");
-  headerLabel.dataset.role = "header-label";
-  headerLabel.textContent = `In [${count || ""}] -> running`;
-  const status = document.createElement("span");
-  status.className = "outputStatus";
-  status.dataset.role = "status";
-  const spacer = document.createElement("span");
-  spacer.className = "grow";
-  header.appendChild(headerLabel);
-  header.appendChild(spacer);
-  header.appendChild(status);
-  const source = document.createElement("pre");
-  source.className = "inputSource";
-  source.dataset.role = "source";
-  source.textContent = code;
-  const label = document.createElement("div");
-  label.className = "outputItemLabel";
-  label.dataset.role = "out-label";
-  label.textContent = `Out[${count || ""}]:`;
-  const body = document.createElement("pre");
-  body.className = "result pending";
-  body.dataset.role = "result";
-  item.appendChild(header);
-  item.appendChild(source);
-  item.appendChild(label);
-  item.appendChild(body);
+  const item = createOutputAccordionItem(count, code, syncOutputActions);
   outputList.appendChild(item);
   return item;
+}
+
+/** Preserves a reader's position when progress arrives while older results are being inspected. */
+function outputAtBottom() {
+  return currentOutput.scrollHeight - currentOutput.scrollTop - currentOutput.clientHeight <= 24;
+}
+
+/** Applies an explicit expansion choice to the executions currently in the output list. */
+function setAllOutputsExpanded(expanded) {
+  const action = expanded ? expandOutputsButton : collapseOutputsButton;
+  if (action.getAttribute("aria-disabled") === "true") { return; }
+  for (const item of outputList.children) { setOutputExpanded(item, expanded, true); }
+  syncOutputActions();
+  announcer.announceStatus(`All execution outputs ${expanded ? "expanded" : "collapsed"}.`);
+}
+
+/** Keeps bulk output controls in sync with the current disclosure states. */
+function syncOutputActions() {
+  const toggles = [...outputList.querySelectorAll('[data-role="toggle"]')];
+  collapseOutputsButton.disabled = expandOutputsButton.disabled = toggles.length === 0;
+  collapseOutputsButton.setAttribute("aria-disabled", String(!toggles.some((toggle) => toggle.getAttribute("aria-expanded") === "true")));
+  expandOutputsButton.setAttribute("aria-disabled", String(!toggles.some((toggle) => toggle.getAttribute("aria-expanded") === "false")));
+  scheduleEditorGeometry();
 }
 
 /** Returns the output item already associated with an execution count. */
@@ -710,6 +720,7 @@ function clearOutput() {
   }
   currentOutput.classList.add("outputHidden");
   outputList.textContent = "";
+  syncOutputActions();
 }
 
 /** Clears Python prompt and output state after a backend restart. */
