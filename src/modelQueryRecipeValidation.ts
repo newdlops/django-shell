@@ -5,6 +5,7 @@ import type { BackendTransport } from "./backendClient";
 import { createEmptyModelQueryRecipe, isModelQueryRecipeV2, MODEL_QUERY_RECIPE_VERSION, type ModelQueryRecipeV2, type QueryComparisonNode, type QueryComputedColumn, type QueryFormulaNode, type QueryModelRef, type QueryOrderTerm, type QueryPredicateGroup, type QueryPredicateNode, type QuerySubquerySource, type QueryValueRef } from "./modelQueryRecipe";
 import { MODEL_QUERY_AGGREGATE_FUNCTIONS, MODEL_QUERY_FORMULA_FUNCTIONS, MODEL_QUERY_LOOKUPS, MODEL_QUERY_OUTPUT_TYPES, MODEL_QUERY_RECIPE_LIMITS, MODEL_QUERY_WINDOW_FUNCTIONS } from "./modelQueryRecipeLimits";
 import { ModelQueryMetadataIndex, type QueryResolvedPath } from "./modelQueryRecipeMetadata";
+import { MODEL_QUERY_PROPERTY_LOOKUPS } from "./modelQueryPropertyFilter";
 
 /** Every stable error or warning code emitted by recipe validation. */
 export const MODEL_QUERY_ISSUE_CODES = ["RECIPE_VERSION_UNSUPPORTED", "RECIPE_SOURCE_MISMATCH", "RECIPE_TOO_LARGE", "RECIPE_SHAPE_INVALID", "NODE_ID_INVALID", "NODE_ID_DUPLICATE", "PREDICATE_NODE_LIMIT", "PREDICATE_GROUP_DEPTH_LIMIT", "PREDICATE_GROUP_CHILD_LIMIT", "EMPTY_NESTED_GROUP", "FIELD_METADATA_UNAVAILABLE", "FIELD_PATH_INVALID", "FIELD_PATH_TOO_LONG", "FIELD_PATH_RELATION_TERMINAL", "FIELD_PATH_TO_MANY_UNSAFE", "LOOKUP_UNSUPPORTED", "LOOKUP_TYPE_MISMATCH", "RHS_KIND_UNSUPPORTED", "RHS_TYPE_MISMATCH", "VALUE_REQUIRED", "VALUE_INVALID", "IN_LIST_LIMIT", "RELATIVE_TIME_INVALID", "COMPUTED_COLUMN_LIMIT", "ALIAS_INVALID", "ALIAS_RESERVED", "ALIAS_COLLISION", "ALIAS_DUPLICATE", "COMPUTED_REFERENCE_UNKNOWN", "COMPUTED_REFERENCE_FORWARD", "COMPUTED_REFERENCE_DISABLED", "COMPUTED_KIND_UNSUPPORTED_IN_SUMMARY", "AGGREGATE_FIELD_REQUIRED", "AGGREGATE_FANOUT_UNSAFE", "AGGREGATE_DISTINCT_UNSUPPORTED", "WINDOW_ORDER_REQUIRED", "WINDOW_FILTER_UNSUPPORTED", "FORMULA_NODE_LIMIT", "FORMULA_DEPTH_LIMIT", "FORMULA_TYPE_MISMATCH", "FORMULA_DIVIDE_BY_ZERO", "OUTPUT_TYPE_REQUIRED", "RAW_EXPRESSION_INVALID", "RAW_EXPRESSION_TRANSPORT_UNSUPPORTED", "RAW_MODEL_NAME_AMBIGUOUS", "SUBQUERY_SOURCE_INVALID", "SUBQUERY_RELATION_INVALID", "SUBQUERY_CORRELATION_REQUIRED", "SUBQUERY_CORRELATION_LIMIT", "SUBQUERY_CORRELATION_INVALID", "SUBQUERY_SELECT_INVALID", "SUBQUERY_ORDER_LIMIT", "SUBQUERY_IMPLICIT_ORDER", "SUBQUERY_AGGREGATE_FANOUT_UNSAFE", "OUTER_REF_SCOPE_INVALID", "GLOBAL_SUMMARY_POST_FILTER_UNSUPPORTED", "PYTHON_PROPERTY_FULL_SCAN", "PYTHON_PROPERTY_BOOLEAN_UNSUPPORTED", "PYTHON_PROPERTY_SUMMARY_UNSUPPORTED", "AUTO_DISTINCT_APPLIED", "OFFSET_PAGINATION_REQUIRED", "TRANSPORT_CAPABILITY_UNSUPPORTED", "GENERATED_QUERY_TOO_LARGE"] as const;
@@ -28,7 +29,8 @@ export function validateModelQueryRecipe(input: unknown, context: ModelQueryVali
   if (utf8Bytes(normalized) > MODEL_QUERY_RECIPE_LIMITS.recipeBytes) { add(issues, "RECIPE_TOO_LARGE", "", "Remove conditions or shorten entered expressions."); }
   validateNodeIdsAndLimits(normalized, issues);
   if (!context.metadata.getTree(context.source)) { add(issues, "FIELD_METADATA_UNAVAILABLE", "/source", "Reload field metadata before applying the query."); }
-  validateGroup(normalized.where, "/where", context.source, context, issues, { nested: false, outerScope: false, propertyAllowed: true, postFilter: false, aliases: new Map() });
+  validateGroup(normalized.where, "/where", context.source, context, issues, { nested: false, outerScope: false, propertyAllowed: normalized.mode === "rows", postFilter: false, aliases: new Map() });
+  if (normalized.computed.some((item) => item.enabled && item.kind === "window") && issues.some((issue) => issue.code === "PYTHON_PROPERTY_FULL_SCAN")) { add(issues, "PYTHON_PROPERTY_BOOLEAN_UNSUPPORTED", "/computed", "Remove window columns before filtering Python properties; window ranks require database WHERE filters."); }
   const symbols = validateComputed(normalized, context, issues);
   validateMode(normalized, context, symbols, issues);
   validateGroup(normalized.postFilter, "/postFilter", context.source, context, issues, { nested: false, outerScope: false, propertyAllowed: false, postFilter: true, aliases: symbols });
@@ -65,7 +67,7 @@ function add(issues: ModelQueryIssue[], code: ModelQueryIssueCode, path: string,
 }
 
 /** Produces a stable concise message for every issue code. */
-function issueMessage(code: ModelQueryIssueCode): string { return code.split("_").map((word) => word.toLowerCase()).join(" "); }
+function issueMessage(code: ModelQueryIssueCode): string { return code === "PYTHON_PROPERTY_FULL_SCAN" ? "Property filter scans Python values before pagination" : code.split("_").map((word) => word.toLowerCase()).join(" "); }
 
 /** Finalizes warning projection and deterministic user-facing summary. */
 function finish(issues: ModelQueryIssue[], normalized: ModelQueryRecipeV2 | undefined): ModelQueryValidation {
@@ -109,7 +111,7 @@ function validateGroup(group: unknown, path: string, model: QueryModelRef, conte
     const childPath = `${path}/children/${index}`;
     if (!isRecord(child)) { add(issues, "RECIPE_SHAPE_INVALID", childPath, "Restore this predicate."); return; }
     if (child.kind === "group") { validateGroup(child, childPath, model, context, issues, { ...options, nested: true, propertyAllowed: false }); }
-    else if (child.kind === "comparison") { validateComparison(child as QueryComparisonNode, childPath, model, context, issues, options); }
+    else if (child.kind === "comparison") { validateComparison(child as QueryComparisonNode, childPath, model, context, issues, { ...options, propertyAllowed: options.propertyAllowed && group.join === "and" && !group.negated }); }
     else if (child.kind === "existsPredicate") { validateExistsPredicate(child, childPath, model, context, issues, options.aliases); }
     else { add(issues, "RECIPE_SHAPE_INVALID", childPath, "Choose a supported predicate kind."); }
   });
@@ -122,16 +124,16 @@ interface SymbolInfo { enabled: boolean; outputType: string; kind: QueryComputed
 
 /** Validates a lookup comparison and its value references. */
 function validateComparison(node: QueryComparisonNode, path: string, model: QueryModelRef, context: ModelQueryValidationContext, issues: ModelQueryIssue[], options: GroupOptions): void {
-  const lhs = resolveValueRef(node.lhs, `${path}/lhs`, model, context, options.aliases, issues);
+  const lhs = resolveValueRef(node.lhs, `${path}/lhs`, model, context, options.aliases, issues, true);
   if (!(MODEL_QUERY_LOOKUPS as readonly string[]).includes(node.lookup)) { add(issues, "LOOKUP_UNSUPPORTED", `${path}/lookup`, "Choose a supported lookup.", node.nodeId); }
   if (lhs && lhs.leafKind === "relation" && node.lookup !== "isnull") { add(issues, "FIELD_PATH_RELATION_TERMINAL", `${path}/lhs/path`, "Select a scalar field or use is null.", node.nodeId); }
-  if (lhs && !lookupAllowed(lhs.type, node.lookup)) { add(issues, "LOOKUP_TYPE_MISMATCH", `${path}/lookup`, "Choose a lookup supported by this field type.", node.nodeId); }
-  if (lhs?.leafKind === "property") { validateProperty(node, path, context, issues, options); }
+  if (lhs && !(lhs.leafKind === "property" ? (MODEL_QUERY_PROPERTY_LOOKUPS as readonly string[]).includes(node.lookup) : lookupAllowed(lhs.type, node.lookup))) { add(issues, "LOOKUP_TYPE_MISMATCH", `${path}/lookup`, "Choose a lookup supported by this field type.", node.nodeId); }
+  if (lhs?.leafKind === "property") { validateProperty(node, path, lhs, issues, options); }
   validateRhs(node, path, model, context, issues, options, lhs);
 }
 
 /** Resolves a field or enabled computed alias reference. */
-function resolveValueRef(ref: unknown, path: string, model: QueryModelRef, context: ModelQueryValidationContext, aliases: Map<string, SymbolInfo>, issues: ModelQueryIssue[]): QueryResolvedPath | undefined {
+function resolveValueRef(ref: unknown, path: string, model: QueryModelRef, context: ModelQueryValidationContext, aliases: Map<string, SymbolInfo>, issues: ModelQueryIssue[], allowProperty = false): QueryResolvedPath | undefined {
   if (!isRecord(ref)) { add(issues, "RECIPE_SHAPE_INVALID", path, "Choose a field or computed value."); return undefined; }
   if (ref.kind === "computed") {
     if (typeof ref.alias !== "string" || !aliases.has(ref.alias)) { add(issues, "COMPUTED_REFERENCE_UNKNOWN", `${path}/alias`, "Choose an enabled computed column."); return undefined; }
@@ -139,14 +141,15 @@ function resolveValueRef(ref: unknown, path: string, model: QueryModelRef, conte
     return { leafKind: "field", nullable: true, path: ref.alias, relationTerminal: false, toMany: false, type: symbol.outputType };
   }
   if (ref.kind !== "field" || typeof ref.path !== "string") { add(issues, "RECIPE_SHAPE_INVALID", path, "Choose a field path."); return undefined; }
-  return resolvePath(ref.path, path, model, context, issues);
+  return resolvePath(ref.path, path, model, context, issues, allowProperty);
 }
 
 /** Resolves one metadata-backed path and reports all deterministic path errors. */
-function resolvePath(pathValue: string, path: string, model: QueryModelRef, context: ModelQueryValidationContext, issues: ModelQueryIssue[]): QueryResolvedPath | undefined {
+function resolvePath(pathValue: string, path: string, model: QueryModelRef, context: ModelQueryValidationContext, issues: ModelQueryIssue[], allowProperty = false): QueryResolvedPath | undefined {
   if (pathValue.length > MODEL_QUERY_RECIPE_LIMITS.pathCharacters || pathValue.trim().split("__").length > MODEL_QUERY_RECIPE_LIMITS.pathSegments) { add(issues, "FIELD_PATH_TOO_LONG", path, "Use a shorter field path."); return undefined; }
   if (!context.metadata.getTree(model)) { add(issues, "FIELD_METADATA_UNAVAILABLE", path, "Reload field metadata."); return undefined; }
   const resolved = context.metadata.resolvePath(model, pathValue);
+  if (resolved?.leafKind === "property" && !allowProperty) { add(issues, "FIELD_PATH_INVALID", path, "Properties can only be used as direct root AND filter conditions in Rows mode."); return undefined; }
   if (!resolved) { add(issues, "FIELD_PATH_INVALID", path, "Choose a field from the model tree."); }
   return resolved;
 }
@@ -178,7 +181,10 @@ function validateScalar(value: unknown, path: string, issues: ModelQueryIssue[],
 function validateRelativeTime(rhs: Record<string, unknown>, path: string, lhs: QueryResolvedPath | undefined, issues: ModelQueryIssue[], nodeId?: string): void { if (!Number.isInteger(rhs.amount) || (rhs.amount as number) < 1 || (rhs.amount as number) > 10000 || !["now", "today"].includes(String(rhs.anchor)) || !["past", "future"].includes(String(rhs.direction)) || !["minutes", "hours", "days", "weeks"].includes(String(rhs.unit)) || (lhs && (isTime(lhs.type) || (isDate(lhs.type) && rhs.anchor === "now")))) { add(issues, "RELATIVE_TIME_INVALID", `${path}/rhs`, "Use 1–10000 units and a time-compatible anchor.", nodeId); } }
 
 /** Enforces the limited safe context for Python @property filtering. */
-function validateProperty(node: QueryComparisonNode, path: string, context: ModelQueryValidationContext, issues: ModelQueryIssue[], options: GroupOptions): void { if (context.source !== context.source || !options.propertyAllowed || options.nested || options.postFilter || options.outerScope || !["literal", "list", "range"].includes(node.rhs.kind)) { add(issues, options.postFilter ? "PYTHON_PROPERTY_SUMMARY_UNSUPPORTED" : "PYTHON_PROPERTY_BOOLEAN_UNSUPPORTED", path, "Use this property as a direct root AND condition only.", node.nodeId); } else { add(issues, "PYTHON_PROPERTY_FULL_SCAN", path, "This property filter scans loaded rows.", node.nodeId, "warning"); } }
+function validateProperty(node: QueryComparisonNode, path: string, field: QueryResolvedPath, issues: ModelQueryIssue[], options: GroupOptions): void {
+  if (!options.propertyAllowed || options.nested || options.postFilter || options.outerScope || !["literal", "list", "range"].includes(node.rhs?.kind)) { add(issues, options.postFilter ? "PYTHON_PROPERTY_SUMMARY_UNSUPPORTED" : "PYTHON_PROPERTY_BOOLEAN_UNSUPPORTED", path, "Use this property as a direct root AND condition with a literal value in Rows mode.", node.nodeId); }
+  else if (!field.annotated) { add(issues, "PYTHON_PROPERTY_FULL_SCAN", path, "Add database filters to reduce work. Count scans all candidates.", node.nodeId, "warning"); }
+}
 
 /** Validates EXISTS source, correlation, and inner predicate scope. */
 function validateExistsPredicate(node: Record<string, unknown>, path: string, outerModel: QueryModelRef, context: ModelQueryValidationContext, issues: ModelQueryIssue[], aliases: Map<string, SymbolInfo>): void {

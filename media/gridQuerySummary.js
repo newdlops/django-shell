@@ -104,6 +104,7 @@ function valueSummary(value) {
   if (value.kind === "field") { return value.path || "field"; }
   if (value.kind === "outerField") { return `outer.${value.path || "field"}`; }
   if (value.kind === "list") { return `[${(value.values || []).map(literalSummary).join(", ")}]`; }
+  if (value.kind === "range") { return `[${literalSummary(value.lower)}, ${literalSummary(value.upper)}]`; }
   if (value.kind === "relativeTime") { return `${value.amount || 0} ${value.unit || "time"} ${value.direction || "ago"}`; }
   return literalSummary(value.value);
 }

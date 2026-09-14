@@ -5,7 +5,7 @@ import { resolveFieldExplorer } from "./gridFieldExplorerOptions.js";
 let sequence = 0;
 
 /** Creates a retained field explorer whose incomplete navigation never changes the query draft. */
-export function createFieldExplorer({ ariaLabel = "Condition field", computed = [], controlKey, current = "", el, metadata, navigation = {}, onChange, popoverLayer, source }) {
+export function createFieldExplorer({ ariaLabel = "Condition field", computed = [], properties = [], controlKey, current = "", el, metadata, navigation = {}, onChange, popoverLayer, source }) {
   const sourceKey = `${source?.app}.${source?.model}`;
   if (navigation.source !== sourceKey || navigation.current !== current) {
     Object.assign(navigation, { source: sourceKey, current, open: false, prefix: current.split("__").slice(0, -1), query: "" });
@@ -77,7 +77,7 @@ export function createFieldExplorer({ ariaLabel = "Condition field", computed = 
     renderCrumbs(navigation.prefix || []);
     status.textContent = "Loading fields…"; list.setAttribute("aria-busy", "true");
     try {
-      const next = await resolveFieldExplorer({ source, prefix: navigation.prefix || [], query: navigation.query || "", computed, loadTree });
+      const next = await resolveFieldExplorer({ source, prefix: navigation.prefix || [], query: navigation.query || "", computed, properties, loadTree });
       if (disposed || token !== generation || !navigation.open) { return; }
       view = next; renderCrumbs(next.prefix || []); list.replaceChildren();
       let group;

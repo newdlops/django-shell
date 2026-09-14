@@ -6,7 +6,7 @@ import { rootMetadataOptions } from "./gridQueryMetadata.js";
 function fieldOption(field) {
   const name = String(field?.name || field?.path || "");
   const label = String(field?.label || "").trim();
-  return { description: [field?.type, field?.null ? "Nullable" : "Required", field?.helpText].filter(Boolean).join(" · "), group: "Fields", label: label && label !== name ? `${label} — ${name}` : name, value: `field:${name}` };
+  return { description: field?.computed ? (field.annotated ? "@property · SQL annotation" : "@property · Python filter") : [field?.type, field?.null ? "Nullable" : "Required", field?.helpText].filter(Boolean).join(" · "), group: field?.computed ? "Model properties" : "Fields", label: label && label !== name ? `${label} — ${name}` : name, value: `field:${name}` };
 }
 
 /** Converts a relation descriptor into a drill-in native-select option. */
@@ -28,7 +28,7 @@ function targetFromLabel(label, source) {
 }
 
 /** Creates a picker which emits only complete scalar paths or allowed relation terminals. */
-export function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Choose field", computed = [], context = "where", controlKey = "", current = "", el, metadata, navigation, onChange, source } = {}) {
+export function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Choose field", computed = [], properties = [], context = "where", controlKey = "", current = "", el, metadata, navigation, onChange, source } = {}) {
   const node = el("div", { className: "query-field-picker", dataset: { context } });
   const segments = el("div", { className: "query-field-picker-segments" });
   const status = el("p", { className: "query-control-help", role: "status" });
@@ -95,6 +95,7 @@ export function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabe
       }
       if (!currentGeneration(renderGeneration)) { return; }
       const options = rootMetadataOptions(tree);
+      if (index === 0) { options.fields.push(...properties.map((item) => ({ ...item, name: item.attname || item.name, path: item.attname || item.name, role: "field" }))); }
       const choices = [...options.fields.map(fieldOption)];
       if (index === 0) { choices.push(...computed.filter((item) => item?.enabled !== false && item?.alias).map((item) => ({ description: "Calculated value available in this query.", group: "Calculated values", label: `calculated value ${item.alias}`, value: `computed:${item.alias}` }))); }
       choices.push(...options.relations.flatMap((relation) => allowRelationTerminal ? [relationOption(relation), relationTerminalOption(relation)] : [relationOption(relation)]));

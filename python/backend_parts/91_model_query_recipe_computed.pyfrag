@@ -352,8 +352,11 @@ def _browse_recipe_base_queryset(state, specs, include_post=True):
     recipe, model = state["recipe"], state["model"]
     state["predicate_annotations"] = []
     state["predicate_number"] = 0
-    where = _browse_recipe_predicate(state, recipe["where"], model, {}, None, "where")
+    where_group, property_annotations = _browse_recipe_property_plan(state)
+    where = _browse_recipe_predicate(state, where_group, model, {}, None, "where")
     queryset = _browse_queryset(model, state)
+    if property_annotations:
+        queryset = queryset.annotate(**property_annotations)
     if state["predicate_annotations"]:
         queryset = queryset.annotate(**dict(state["predicate_annotations"]))
     queryset = queryset.filter(where)
@@ -404,8 +407,13 @@ def _browse_recipe_rows(namespace, request):
         cursor = request.get("cursor")
         if keyset_capable and cursor is not None:
             queryset = queryset.filter(**{f"{model._meta.pk.attname}__gt": cursor})
+        offset = 0 if keyset_capable else offset
         with _browse_capture(request.get("database")) as ctx:
-            raw = list(queryset[offset:offset + limit + 1].values(*[field.attname for field in model._meta.concrete_fields], *[item["alias"] for item in specs]))
+            names = [field.attname for field in model._meta.concrete_fields] + [item["alias"] for item in specs]
+            if state.get("property_terms"):
+                raw = [{name: getattr(obj, name) for name in names} for obj in _browse_recipe_property_page(state, queryset, offset, offset + limit + 1)]
+            else:
+                raw = list(queryset[offset:offset + limit + 1].values(*names))
         has_more, raw = len(raw) > limit, raw[:limit]
         columns = _browse_columns(model) + [{"annotation": True, "attname": item["alias"], "editable": False, "name": item["alias"], "null": True, "pk": False, "type": item["kind"]} for item in specs] + _browse_computed_columns(model)
         next_cursor = raw[-1][model._meta.pk.attname] if keyset_capable and has_more and raw else None
@@ -462,7 +470,7 @@ def _browse_recipe_count(request):
                     query = query.filter(_browse_recipe_predicate(state, recipe["postFilter"], state["model"], state.get("compiled_aliases", {}), None, "postFilter"))
                 count = query.count()
             else:
-                count = queryset.count()
+                count = sum(1 for _ in _browse_recipe_property_iter(queryset, state["property_terms"])) if state.get("property_terms") else queryset.count()
         return {"count": count, "issues": state["issues"], "ok": True, "orm": _browse_recipe_orm_log(state, "count"), "recipeVersion": 2, "sql": _browse_sql(ctx)}
     except Exception:
         return _browse_recipe_failure(state)
@@ -485,7 +493,11 @@ def _browse_recipe_computed(namespace, request):
         limit = _browse_limit(request.get("limit"), maximum=None)
         annotations = _browse_declared_annotations(model)
         with _browse_capture(request.get("database")) as ctx:
-            if field in annotations:
+            if state.get("property_terms"):
+                if field in annotations:
+                    queryset = queryset.annotate(__djs=annotations[field])
+                values = {_browse_jsonable(obj.pk): _browse_cell(getattr(obj, "__djs") if field in annotations else _pty_safe_getattr(obj, field)) for obj in _browse_recipe_property_page(state, queryset, 0, limit)}
+            elif field in annotations:
                 raw = queryset.annotate(__djs=annotations[field]).values_list("pk", "__djs")[:limit]
                 values = {_browse_jsonable(pk): _browse_cell(value) for pk, value in raw}
             else:

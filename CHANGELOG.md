@@ -6,6 +6,17 @@ This extension uses a running build number; the current release line is `1.1.x`.
 Earlier `0.0.x` entries are retained below. The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.1000058] — 2026-09-14
+
+### Improved
+- Model properties and cached properties are selectable in Filters, with explicit Text, Number, and Boolean values, pasted lookups, list and range conditions, and individual exclusion.
+- Property conditions are supported in the root AND group in Rows mode. Declared `djshell_annotations` filter in SQL; other properties are evaluated on database-filtered candidates before pagination, with visible scan guidance.
+
+### Fixed
+- Property filters now apply consistently to rows, pagination, Count, and lazy property values in Socket and ORM/Terminal modes. Decimal comparisons preserve numeric boundaries, and failing property getters cannot include unintended rows.
+- Empty property-filter results retain model columns, cached properties do not appear as duplicate annotation columns, and applied range summaries show their actual bounds.
+- Updated the bundled `ws` dependency to 8.21.3, including the memory-exhaustion fix for [GHSA-96hv-2xvq-fx4p](https://github.com/advisories/GHSA-96hv-2xvq-fx4p).
+
 ## [1.1.1000057] — 2026-09-11
 
 ### Improved

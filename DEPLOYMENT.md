@@ -10,6 +10,14 @@ The existing `UNLICENSED` manifest and proprietary `LICENSE` describe the curren
 
 The activity bar icon remains `media/django-shell.svg`. Do not use the colored deployment icon there because VS Code activity icons are expected to be theme-colored SVGs.
 
+### 1.1.1000058 validation record — 2026-09-14
+
+- `npm ci` completed with the final lockfile, followed by `npm run check`: 1,040 tests passed with no failures or skips. Real Django fixtures cover property-filter execution, pagination, Count, lazy values, Decimal comparisons, and fail-closed getters.
+- Property-filter and relationship-lookup browser fixtures passed at 390, 768, and 1440 pixels wide. Coverage includes typed values, pasted lookups, list/range conditions, exclusion, persistence, invalid group recovery, keyboard focus, nested relationship conditions, metadata retries, and light/high-contrast layouts. Host replies are simulated in these browser fixtures.
+- The bundled `ws` dependency is 8.21.3, including the fix for [GHSA-96hv-2xvq-fx4p](https://github.com/advisories/GHSA-96hv-2xvq-fx4p). `npm audit --omit=dev` reports zero vulnerabilities; the full dependency audit retains one low-severity development-only finding.
+- Full native E2E passed on VS Code 1.136.1, macOS arm64, covering Model Browser, ORM Query, Python execution, overlay input/providers/themes, hover handoff, and restart behavior. The first run exposed an outdated expected field-group list; the test now requires `Model properties`. After that correction, one run timed out waiting for the `Company` runtime class decoration; a fresh full run passed without further code or test changes. The runner removed injected Node/Electron/DYLD hooks only from its isolated test process.
+- The VSIX contains 331 files. All 322 packaged files under `media`, `out`, `python`, and `node_modules` match the verified build, including the new property-filter modules and the backend source digest. Development tests, TypeScript sources, local configuration, logs, and environment files are excluded. SHA-256: `e55755f83f551a6e04c1ad6901ddd4eecc07b725a124e3af230d0bf2f95d82aa`.
+
 ### 1.1.1000057 validation record — 2026-09-11
 
 - `npm ci` completed, followed by `npm run check`: 1,035 tests passed with no failures or skips.

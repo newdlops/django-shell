@@ -6,7 +6,7 @@ import type { ModelQueryRecipeV2, QueryModelRef } from "./modelQueryRecipe";
 import { loadQueryReferenceTrees } from "./modelQueryMetadataLoader";
 
 /** Resolved metadata for a recipe path. */
-export interface QueryResolvedPath { choices?: Array<[unknown, string]>; leafKind: "field" | "property" | "relation"; nullable: boolean; path: string; relationTerminal: boolean; toMany: boolean; type: string; }
+export interface QueryResolvedPath { annotated?: boolean; choices?: Array<[unknown, string]>; leafKind: "field" | "property" | "relation"; nullable: boolean; path: string; relationTerminal: boolean; toMany: boolean; type: string; }
 /** Serializable snapshot of all trees and root columns used by a recipe. */
 export interface ModelQueryMetadataBundle { catalog: QueryModelRef[]; models: Record<string, { columns?: BackendModelColumn[]; tree: BackendFilterFieldTree }>; }
 /** One loaded model descriptor that is safe to include in an assistant schema projection. */
@@ -69,8 +69,8 @@ export class ModelQueryMetadataIndex {
         if (!final) { return undefined; }
         return resolvedField(path, field, toMany, this.models.get(modelKey(current))?.columns);
       }
-      const property = final && current.app === model.app && current.model === model.model ? this.models.get(modelKey(current))?.columns?.find((candidate) => candidate.computed && (candidate.attname === segment || candidate.name === segment)) : undefined;
-      if (property) { return { choices: property.choices, leafKind: "property", nullable: property.null, path, relationTerminal: false, toMany, type: property.type }; }
+      const property = final && segments.length === 1 ? this.models.get(modelKey(current))?.columns?.find((candidate) => candidate.computed && (candidate.attname === segment || candidate.name === segment)) : undefined;
+      if (property) { return { annotated: property.annotated, choices: property.choices, leafKind: "property", nullable: property.null, path, relationTerminal: false, toMany, type: property.type }; }
       if (!relation) { return undefined; }
       toMany ||= !relation.single;
       if (final) { return { leafKind: "relation", nullable: true, path, relationTerminal: true, toMany, type: relation.kind }; }

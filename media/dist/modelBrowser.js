@@ -3446,12 +3446,69 @@ function parseQueryScalar(field, raw) {
   return raw;
 }
 
+// media/gridPropertyPredicateValue.js
+var TYPES = { text: "CharField", number: "FloatField", boolean: "BooleanField" };
+function propertyValueType(rhs, lookup, retained) {
+  const sample = rhs?.kind === "list" ? rhs.values?.[0] : rhs?.kind === "range" ? rhs.lower : rhs?.value;
+  if (typeof sample === "string") {
+    return "text";
+  }
+  if (typeof sample === "boolean") {
+    return "boolean";
+  }
+  if (typeof sample === "number") {
+    return "number";
+  }
+  return retained in TYPES ? retained : ["gt", "gte", "lt", "lte", "range"].includes(lookup) ? "number" : "text";
+}
+function createPropertyPredicateValueEditor({ context, createEditor: createEditor2, el: el2, field, lookup, onChange, popoverLayer, rhs, valueState }) {
+  const node = el2("span", { className: "query-predicate-value query-property-value", dataset: { role: "predicate-value" } });
+  const type = el2("select", { ariaLabel: "Property value type", autocomplete: "off", className: "query-predicate-select", name: "property-value-type" });
+  for (const [value2, label] of [["text", "Text"], ["number", "Number"], ["boolean", "Boolean"]]) {
+    type.appendChild(el2("option", { value: value2 }, label));
+  }
+  if (valueState.propertyPath !== field.path) {
+    valueState.propertyValueType = void 0;
+  }
+  valueState.propertyPath = field.path;
+  type.value = propertyValueType(rhs, lookup, valueState.propertyValueType);
+  const value = el2("span", { className: "query-property-input" });
+  let editor2;
+  node.append(type, value);
+  function render() {
+    editor2?.destroy?.();
+    valueState.propertyValueType = type.value;
+    editor2 = createEditor2({ context, el: el2, field: { type: TYPES[type.value] }, lookup, onChange: (next) => {
+      rhs = next;
+      onChange(next);
+    }, popoverLayer, rhs });
+    value.replaceChildren(editor2.node);
+  }
+  function changeType() {
+    const initial = type.value === "boolean" ? false : type.value === "number" ? 0 : "";
+    rhs = lookup === "in" ? { kind: "list", values: [] } : lookup === "range" ? { kind: "range", lower: initial, upper: initial } : { kind: "literal", value: initial };
+    onChange(rhs);
+    render();
+    value.querySelector("input,select")?.focus();
+  }
+  type.addEventListener("change", changeType);
+  render();
+  return {
+    node,
+    /** Releases any retained native field controls. */
+    destroy() {
+      editor2?.destroy?.();
+    }
+  };
+}
+
 // media/gridPredicateValue.js
 var NUMERIC_TYPES2 = /Integer|Float|Decimal|AutoField/;
 var TEXT_TYPES = /Char|Text|Email|Slug|URL|FilePath/;
 var GENERIC_TEXT_TYPES = /UUID|IP|Duration|File|Generic/;
 var DATE_TYPES = /* @__PURE__ */ new Set(["DateField", "DateTimeField", "TimeField"]);
 var VALUE_ONLY_LOOKUPS = /* @__PURE__ */ new Set(["in", "isnull", "range", "blank", "not_blank"]);
+var PROPERTY_LOOKUPS = ["exact", "iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "gt", "gte", "lt", "lte", "in", "range", "isnull", "blank", "not_blank"];
 var LOOKUP_LABELS = Object.freeze({
   blank: "is blank",
   contains: "contains (case-sensitive)",
@@ -3492,6 +3549,8 @@ function lookupsForField(field, allowed = Object.keys(LOOKUP_LABELS)) {
   let names;
   if (field?.role === "relation") {
     names = ["isnull"];
+  } else if (type === "property") {
+    names = PROPERTY_LOOKUPS;
   } else if (type === "BooleanField") {
     names = ["exact", "isnull"];
   } else if (type === "DateTimeField") {
@@ -3525,6 +3584,9 @@ function rhsKindsFor({ context = "where", field, lookup } = {}) {
   if (!lookup || VALUE_ONLY_LOOKUPS.has(lookup)) {
     return ["literal"];
   }
+  if (field?.type === "property") {
+    return ["literal"];
+  }
   const kinds = ["literal", "field"];
   if (context === "subquery") {
     kinds.push("outerField");
@@ -3555,7 +3617,10 @@ function selectControl(el2, ariaLabel, options, value, onChange) {
   select.addEventListener("change", () => onChange(select.value));
   return select;
 }
-function createPredicateValueEditor({ context, el: el2, field, lookup, onChange, popoverLayer, rhs = { kind: "literal", value: null }, scopeFields = [], outerFields = [] }) {
+function createPredicateValueEditor({ context, el: el2, field, lookup, onChange, popoverLayer, rhs = { kind: "literal", value: null }, scopeFields = [], outerFields = [], valueState = {} }) {
+  if (field?.type === "property" && !["isnull", "blank", "not_blank"].includes(lookup)) {
+    return createPropertyPredicateValueEditor({ context, createEditor: createPredicateValueEditor, el: el2, field, lookup, onChange, popoverLayer, rhs, valueState });
+  }
   const node = el2("span", { className: "query-predicate-value", dataset: { role: "predicate-value" } });
   const kind = lookup === "in" ? "list" : lookup === "range" ? "range" : rhsIsCompatible(rhs, context, field, lookup) ? rhs.kind : rhs?.kind || "literal";
   function emit(next) {
@@ -3606,7 +3671,8 @@ function createPredicateValueEditor({ context, el: el2, field, lookup, onChange,
   if (kind === "list") {
     const values = Array.isArray(rhs.values) ? [...rhs.values] : [];
     const chips = el2("span", { ariaLabel: "List values", className: "query-value-chips" });
-    const input2 = el2("input", { ariaLabel: "Add list value", autocomplete: "off", placeholder: "Add value", spellcheck: false, type: inputTypeFor(field, "exact") });
+    const input2 = field?.type === "BooleanField" ? selectControl(el2, "Add list value", [{ label: "true", value: "true" }, { label: "false", value: "false" }], "true", () => {
+    }) : el2("input", { ariaLabel: "Add list value", autocomplete: "off", placeholder: "Add value", spellcheck: false, type: inputTypeFor(field, "exact") });
     const add = el2("button", { ariaLabel: "Add list value", type: "button" }, "Add");
     const redraw = () => {
       chips.replaceChildren(...values.map((value, index) => {
@@ -3622,7 +3688,7 @@ function createPredicateValueEditor({ context, el: el2, field, lookup, onChange,
     add.addEventListener("click", () => {
       if (input2.value !== "") {
         values.push(scalarFromInput(field, input2.value));
-        input2.value = "";
+        input2.value = field?.type === "BooleanField" ? "true" : "";
         emit({ kind: "list", values: [...values] });
         redraw();
         input2.focus();
@@ -3764,7 +3830,7 @@ function createQueryMetadataService({ post, onChange } = {}) {
 function fieldOption(field) {
   const name = String(field?.name || field?.path || "");
   const label = String(field?.label || "").trim();
-  return { description: [field?.type, field?.null ? "Nullable" : "Required", field?.helpText].filter(Boolean).join(" \xB7 "), group: "Fields", label: label && label !== name ? `${label} \u2014 ${name}` : name, value: `field:${name}` };
+  return { description: field?.computed ? field.annotated ? "@property \xB7 SQL annotation" : "@property \xB7 Python filter" : [field?.type, field?.null ? "Nullable" : "Required", field?.helpText].filter(Boolean).join(" \xB7 "), group: field?.computed ? "Model properties" : "Fields", label: label && label !== name ? `${label} \u2014 ${name}` : name, value: `field:${name}` };
 }
 function relationOption(relation) {
   const name = String(relation?.name || "");
@@ -3781,7 +3847,7 @@ function targetFromLabel(label, source) {
   const boundary = value.lastIndexOf(".");
   return boundary > 0 ? { app: value.slice(0, boundary), model: value.slice(boundary + 1) } : { app: source?.app || "", model: value };
 }
-function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Choose field", computed = [], context = "where", controlKey = "", current = "", el: el2, metadata, navigation, onChange, source } = {}) {
+function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Choose field", computed = [], properties = [], context = "where", controlKey = "", current = "", el: el2, metadata, navigation, onChange, source } = {}) {
   const node = el2("div", { className: "query-field-picker", dataset: { context } });
   const segments = el2("div", { className: "query-field-picker-segments" });
   const status = el2("p", { className: "query-control-help", role: "status" });
@@ -3899,6 +3965,9 @@ function createQueryFieldPicker({ allowRelationTerminal = false, ariaLabel = "Ch
         return;
       }
       const options = rootMetadataOptions(tree);
+      if (index === 0) {
+        options.fields.push(...properties.map((item) => ({ ...item, name: item.attname || item.name, path: item.attname || item.name, role: "field" })));
+      }
       const choices = [...options.fields.map(fieldOption)];
       if (index === 0) {
         choices.push(...computed.filter((item) => item?.enabled !== false && item?.alias).map((item) => ({ description: "Calculated value available in this query.", group: "Calculated values", label: `calculated value ${item.alias}`, value: `computed:${item.alias}` })));
@@ -4029,17 +4098,18 @@ function targetFor(relation) {
   }
   return { app: relation.target.slice(0, boundary), model: relation.target.slice(boundary + 1) };
 }
-function optionsFor(tree, prefix, computed) {
+function optionsFor(tree, prefix, computed, properties) {
   const options = rootMetadataOptions(tree);
   const pathFor = (name) => [...prefix, name].join("__");
   return [
     ...options.relations.map((item) => ({ descriptor: item, group: "Relationships", kind: "relation", label: item.name, path: pathFor(item.name), detail: item.target })),
     ...options.fields.map((item) => ({ descriptor: item, group: "Fields", kind: "field", label: item.name, path: pathFor(item.name), detail: item.type })),
+    ...!prefix.length ? properties.map((item) => ({ descriptor: item, group: "Model properties", kind: "field", label: item.attname || item.name, path: item.attname || item.name, detail: item.annotated ? "@property \xB7 SQL annotation" : "@property \xB7 Python filter" })) : [],
     ...!prefix.length ? computed.filter((item) => item.enabled !== false && item.alias).map((item) => ({ descriptor: item, group: "Calculated values", kind: "computed", label: item.alias, path: item.alias, detail: item.outputType || "Calculated" })) : [],
     ...options.relations.map((item) => ({ descriptor: item, group: "Relationship checks", kind: "relationTerminal", label: `Check ${item.name}`, path: pathFor(item.name), detail: "Has value / is null" }))
   ];
 }
-async function resolveFieldExplorer({ source, prefix = [], query = "", computed = [], loadTree }) {
+async function resolveFieldExplorer({ source, prefix = [], query = "", computed = [], properties = [], loadTree }) {
   const text2 = String(query).trim();
   if (text2.length > 240 || prefix.length > 11) {
     return { prefix, items: [], message: "This path is too long. Choose a closer field." };
@@ -4064,7 +4134,7 @@ async function resolveFieldExplorer({ source, prefix = [], query = "", computed 
       tree = await loadTree(model);
       continue;
     }
-    const field = options.fields.find((item) => item.name === segment);
+    const field = options.fields.find((item) => item.name === segment) || (!resolved.length ? properties.find((item) => (item.attname || item.name) === segment) : void 0);
     if (pasted && field && lookupsForField(field).includes(lookup)) {
       const path = [...resolved, segment].join("__");
       return { prefix: resolved, model, items: [{ descriptor: field, group: "Django lookup", kind: "field", label: path, path, lookup, detail: `${LOOKUP_LABELS[lookup]} \xB7 ${field.type}` }], total: 1 };
@@ -4072,13 +4142,13 @@ async function resolveFieldExplorer({ source, prefix = [], query = "", computed 
     return { prefix: resolved, model, items: [], message: field ? `\u201C${lookup}\u201D is not an available comparison for ${segment}. Choose the field first to see its comparisons.` : `No field or relationship named \u201C${segment}\u201D here. Check the path or browse from the model above.` };
   }
   const term = parts2.at(-1).toLowerCase();
-  const all = optionsFor(tree, resolved, computed).filter((item) => `${item.label} ${item.descriptor.label || ""}`.toLowerCase().includes(term));
+  const all = optionsFor(tree, resolved, computed, properties).filter((item) => `${item.label} ${item.descriptor.label || ""}`.toLowerCase().includes(term));
   return { prefix: resolved, model, items: all.slice(0, 60), total: all.length, partial: Boolean(tree.partial) };
 }
 
 // media/gridFieldExplorer.js
 var sequence = 0;
-function createFieldExplorer({ ariaLabel = "Condition field", computed = [], controlKey, current = "", el: el2, metadata, navigation = {}, onChange, popoverLayer, source }) {
+function createFieldExplorer({ ariaLabel = "Condition field", computed = [], properties = [], controlKey, current = "", el: el2, metadata, navigation = {}, onChange, popoverLayer, source }) {
   const sourceKey = `${source?.app}.${source?.model}`;
   if (navigation.source !== sourceKey || navigation.current !== current) {
     Object.assign(navigation, { source: sourceKey, current, open: false, prefix: current.split("__").slice(0, -1), query: "" });
@@ -4166,7 +4236,7 @@ function createFieldExplorer({ ariaLabel = "Condition field", computed = [], con
     status.textContent = "Loading fields\u2026";
     list.setAttribute("aria-busy", "true");
     try {
-      const next = await resolveFieldExplorer({ source, prefix: navigation.prefix || [], query: navigation.query || "", computed, loadTree });
+      const next = await resolveFieldExplorer({ source, prefix: navigation.prefix || [], query: navigation.query || "", computed, properties, loadTree });
       if (disposed || token !== generation || !navigation.open) {
         return;
       }
@@ -4984,7 +5054,7 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     if (!fieldNavigation.has(comparison.nodeId)) {
       fieldNavigation.set(comparison.nodeId, {});
     }
-    const fieldPicker = trackPicker2((popoverLayer ? createFieldExplorer : createQueryFieldPicker)({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], controlKey: "predicate-lhs-" + comparison.nodeId, current: path, el: el2, metadata, navigation: fieldNavigation.get(comparison.nodeId), onChange: selectField, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: true }));
+    const fieldPicker = trackPicker2((popoverLayer ? createFieldExplorer : createQueryFieldPicker)({ ariaLabel: "Condition field", computed: scope.computedFields || scope.computed || [], properties: context === "where" ? (scope.columns || []).filter((item) => item.computed && !item.annotation) : [], controlKey: "predicate-lhs-" + comparison.nodeId, current: path, el: el2, metadata, navigation: fieldNavigation.get(comparison.nodeId), onChange: selectField, popoverLayer, source: scope.target || scope.source, allowRelationTerminal: true }));
     fieldPicker.node.dataset.focusRole = "lhs";
     const lookups = lookupsForField(field);
     const lookup = nativeSelect(lookups.map((value) => ({ label: LOOKUP_LABELS[value] || value, value })), comparison.lookup, "Comparison");
@@ -4994,18 +5064,21 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     const rhsKind = nativeSelect(rhsKinds.map((value) => ({ label: rhsLabel(value), value })), comparison.rhs?.kind, "Compare with");
     rhsKind.addEventListener("change", () => act({ changes: { rhs: starterRhs(rhsKind.value) }, nodeId: comparison.nodeId, type: "UPDATE_NODE" }));
     const rhs = comparison.rhs?.kind === rhsKind.value ? comparison.rhs : starterRhs(rhsKind.value);
-    const valueEditor = createPredicateValueEditor({ context, el: el2, field, lookup: comparison.lookup, onChange: (next) => act({ changes: { rhs: next }, history: { group: `predicate:${comparison.nodeId}:rhs`, mode: "text" }, nodeId: comparison.nodeId, type: "UPDATE_NODE" }), outerFields: scope.outerFields || [], popoverLayer, rhs, scopeFields: fields3 });
+    const valueEditor = createPredicateValueEditor({ context, el: el2, field, lookup: comparison.lookup, valueState: fieldNavigation.get(comparison.nodeId), onChange: (next) => act({ changes: { rhs: next }, history: { group: `predicate:${comparison.nodeId}:rhs`, mode: "text" }, nodeId: comparison.nodeId, type: "UPDATE_NODE" }), outerFields: scope.outerFields || [], popoverLayer, rhs, scopeFields: fields3.filter((item) => !item.computed) });
     if (valueEditor.destroy) {
       trackPicker2(valueEditor);
     }
-    const valueControl2 = valueEditor.node.querySelector?.("input,select");
+    const valueControl2 = valueEditor.node.querySelector?.(".query-property-input input,.query-property-input select") || valueEditor.node.querySelector?.("input,select");
     if (valueControl2) {
       valueControl2.dataset.queryControlKey = `predicate-value-${comparison.nodeId}`;
     }
     const negate = el2("input", { ariaLabel: "Negate condition", checked: Boolean(comparison.negated), type: "checkbox" });
     negate.addEventListener("change", () => act({ changes: { negated: negate.checked }, nodeId: comparison.nodeId, type: "UPDATE_NODE" }));
-    const valueHeader = el2("span", { className: "query-value-heading" }, el2("span", {}, "Value"), el2("label", { className: "query-condition-kind" }, el2("span", { className: "query-kind-label" }, "Compare with"), rhsKind));
-    row.append(el2("label", { className: "query-condition-field" }, "Field", fieldPicker.node), el2("label", { className: "query-condition-lookup" }, "Comparison", lookup), el2("div", { className: "query-condition-value" }, valueHeader, valueEditor.node), el2("label", { className: "query-condition-negate", dataset: { negated: String(Boolean(comparison.negated)) } }, negate, "Exclude"), nodeActions(comparison));
+    const valueHeader = el2("span", { className: "query-value-heading" }, el2("span", {}, "Value"));
+    if (field.type !== "property") {
+      valueHeader.appendChild(el2("label", { className: "query-condition-kind" }, el2("span", { className: "query-kind-label" }, "Compare with"), rhsKind));
+    }
+    row.append(el2("label", { className: "query-condition-field" }, field.type === "property" ? "Property" : "Field", fieldPicker.node), el2("label", { className: "query-condition-lookup" }, "Comparison", lookup), el2("div", { className: "query-condition-value" }, valueHeader, valueEditor.node), el2("label", { className: "query-condition-negate", dataset: { negated: String(Boolean(comparison.negated)) } }, negate, "Exclude"), nodeActions(comparison));
     if (!rhsIsCompatible(comparison.rhs, context, field, comparison.lookup)) {
       row.dataset.invalid = "true";
       row.appendChild(el2("span", { className: "query-predicate-help", role: "note" }, "Value is incompatible with the selected field or lookup. Choose a new value."));
@@ -5144,7 +5217,7 @@ function createPredicateBuilder({ context = "where", dispatch, el: el2, getRecip
     requestedFocus = void 0;
     const container = node.querySelector(`[data-query-node-id="${escapeSelector(request.nodeId)}"]`);
     if (request.role === "value") {
-      container?.querySelector('[data-role="predicate-value"] input, [data-role="predicate-value"] select')?.focus();
+      (container?.querySelector(".query-property-input input,.query-property-input select") || container?.querySelector('[data-role="predicate-value"] input, [data-role="predicate-value"] select'))?.focus();
       return;
     }
     if (request.role === "lhs-open") {
@@ -7659,6 +7732,9 @@ function valueSummary(value) {
   if (value.kind === "list") {
     return `[${(value.values || []).map(literalSummary).join(", ")}]`;
   }
+  if (value.kind === "range") {
+    return `[${literalSummary(value.lower)}, ${literalSummary(value.upper)}]`;
+  }
   if (value.kind === "relativeTime") {
     return `${value.amount || 0} ${value.unit || "time"} ${value.direction || "ago"}`;
   }
@@ -7759,8 +7835,8 @@ var QUERY_ISSUE_GUIDANCE = entries([
   ["SUBQUERY_AGGREGATE_FANOUT_UNSAFE", "This subquery aggregate can duplicate values", "The selected target path can multiply rows before aggregation."],
   ["OUTER_REF_SCOPE_INVALID", "Choose a field from the current outer row", "This OuterRef points outside the scope available to the subquery."],
   ["GLOBAL_SUMMARY_POST_FILTER_UNSUPPORTED", "This global summary filter is not supported", "The current result filter needs grouping or a supported summary alias context."],
-  ["PYTHON_PROPERTY_FULL_SCAN", "This filter scans Python values in memory", "The property is not a database field, so normal indexed filtering and pagination are unavailable."],
-  ["PYTHON_PROPERTY_BOOLEAN_UNSUPPORTED", "This Python property cannot use this boolean filter", "The property value cannot be translated to the requested database boolean operation."],
+  ["PYTHON_PROPERTY_FULL_SCAN", "This filter scans Python values in memory", "Property getters run on database-filtered candidates before pagination. Add database conditions to reduce work; Count scans every candidate."],
+  ["PYTHON_PROPERTY_BOOLEAN_UNSUPPORTED", "This property needs a root AND condition", "Use a literal property condition in the root AND group in Rows mode. Nested groups, group exclusion, and Python filters with window columns are unsupported."],
   ["PYTHON_PROPERTY_SUMMARY_UNSUPPORTED", "Python properties are not available in Summary", "Summary mode must run in the database and cannot group or aggregate arbitrary Python properties."],
   ["AUTO_DISTINCT_APPLIED", "Duplicate source rows will be removed", "The builder adds DISTINCT because a to-many relation could otherwise duplicate the current model rows."],
   ["OFFSET_PAGINATION_REQUIRED", "This query uses offset pagination", "Calculated values, windows, or custom ordering prevent primary-key keyset pagination."],

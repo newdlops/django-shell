@@ -47,7 +47,8 @@ test("manifest preserves the fixed backend fragment order and line budget", () =
     "backend_parts/82_commit_dates.pyfrag",
     "backend_parts/83_query_cache.pyfrag",
     "backend_parts/90_model_query_recipe_predicate.pyfrag",
-    "backend_parts/91_model_query_recipe_computed.pyfrag"
+    "backend_parts/91_model_query_recipe_computed.pyfrag",
+    "backend_parts/92_model_query_recipe_properties.pyfrag"
   ]);
   for (const fragment of manifest) {
     const source = fs.readFileSync(path.join(pythonDirectory, fragment), "utf8");

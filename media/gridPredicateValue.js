@@ -1,12 +1,14 @@
 // Typed Recipe predicate lookup matrix and value editors for the VS Code-native Query Builder.
 import { createQuerySelect } from "./gridQuerySelect.js";
 import { inputTypeForQueryScalar, parseQueryScalar } from "./gridQueryScalarEditor.js";
+import { createPropertyPredicateValueEditor } from "./gridPropertyPredicateValue.js";
 
 const NUMERIC_TYPES = /Integer|Float|Decimal|AutoField/;
 const TEXT_TYPES = /Char|Text|Email|Slug|URL|FilePath/;
 const GENERIC_TEXT_TYPES = /UUID|IP|Duration|File|Generic/;
 const DATE_TYPES = new Set(["DateField", "DateTimeField", "TimeField"]);
 const VALUE_ONLY_LOOKUPS = new Set(["in", "isnull", "range", "blank", "not_blank"]);
+export const PROPERTY_LOOKUPS = ["exact", "iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "gt", "gte", "lt", "lte", "in", "range", "isnull", "blank", "not_blank"];
 
 export const LOOKUP_LABELS = Object.freeze({
   blank: "is blank", contains: "contains (case-sensitive)", date: "date is", endswith: "ends with (case-sensitive)", exact: "equals", gt: "greater than", gte: "at least", icontains: "contains (ignore case)", iexact: "equals (ignore case)", iendswith: "ends with (ignore case)", in: "is one of", isnull: "value presence", istartswith: "starts with (ignore case)", length: "length equals", length__gt: "length greater than", length__gte: "length at least", length__lt: "length less than", length__lte: "length at most", lt: "less than", lte: "at most", not_blank: "is not blank", quarter: "quarter", range: "is between", second: "second", startswith: "starts with (case-sensitive)", trim: "trimmed equals", week_day: "weekday", year: "year", month: "month", day: "day", hour: "hour", minute: "minute"
@@ -18,6 +20,7 @@ export function lookupsForField(field, allowed = Object.keys(LOOKUP_LABELS)) {
   const type = String(field?.type || "");
   let names;
   if (field?.role === "relation") { names = ["isnull"]; }
+  else if (type === "property") { names = PROPERTY_LOOKUPS; }
   else if (type === "BooleanField") { names = ["exact", "isnull"]; }
   else if (type === "DateTimeField") { names = ["exact", "gt", "gte", "lt", "lte", "range", "date", "year", "quarter", "month", "week_day", "day", "hour", "minute", "second", "isnull"]; }
   else if (type === "DateField") { names = ["exact", "gt", "gte", "lt", "lte", "range", "year", "quarter", "month", "week_day", "day", "isnull"]; }
@@ -40,6 +43,7 @@ export function rhsKindsFor({ context = "where", field, lookup } = {}) {
   if (lookup === "in") { return ["list"]; }
   if (lookup === "range") { return ["range"]; }
   if (!lookup || VALUE_ONLY_LOOKUPS.has(lookup)) { return ["literal"]; }
+  if (field?.type === "property") { return ["literal"]; }
   const kinds = ["literal", "field"];
   if (context === "subquery") { kinds.push("outerField"); }
   if ((context === "where" || context === "subquery") && DATE_TYPES.has(String(field?.type || ""))) { kinds.push("relativeTime"); }
@@ -72,7 +76,8 @@ function selectControl(el, ariaLabel, options, value, onChange) {
 }
 
 /** Builds the typed literal, list, range, field, OuterRef, or relative-time RHS control for one comparison row. */
-export function createPredicateValueEditor({ context, el, field, lookup, onChange, popoverLayer, rhs = { kind: "literal", value: null }, scopeFields = [], outerFields = [] }) {
+export function createPredicateValueEditor({ context, el, field, lookup, onChange, popoverLayer, rhs = { kind: "literal", value: null }, scopeFields = [], outerFields = [], valueState = {} }) {
+  if (field?.type === "property" && !["isnull", "blank", "not_blank"].includes(lookup)) { return createPropertyPredicateValueEditor({ context, createEditor: createPredicateValueEditor, el, field, lookup, onChange, popoverLayer, rhs, valueState }); }
   const node = el("span", { className: "query-predicate-value", dataset: { role: "predicate-value" } });
   const kind = lookup === "in" ? "list" : (lookup === "range" ? "range" : (rhsIsCompatible(rhs, context, field, lookup) ? rhs.kind : (rhs?.kind || "literal")));
 
@@ -117,10 +122,10 @@ export function createPredicateValueEditor({ context, el, field, lookup, onChang
   if (kind === "list") {
     const values = Array.isArray(rhs.values) ? [...rhs.values] : [];
     const chips = el("span", { ariaLabel: "List values", className: "query-value-chips" });
-    const input = el("input", { ariaLabel: "Add list value", autocomplete: "off", placeholder: "Add value", spellcheck: false, type: inputTypeFor(field, "exact") });
+    const input = field?.type === "BooleanField" ? selectControl(el, "Add list value", [{ label: "true", value: "true" }, { label: "false", value: "false" }], "true", () => {}) : el("input", { ariaLabel: "Add list value", autocomplete: "off", placeholder: "Add value", spellcheck: false, type: inputTypeFor(field, "exact") });
     const add = el("button", { ariaLabel: "Add list value", type: "button" }, "Add");
     const redraw = () => { chips.replaceChildren(...values.map((value, index) => { const remove = el("button", { ariaLabel: `Remove ${String(value)}`, type: "button" }, "Remove"); remove.addEventListener("click", () => { values.splice(index, 1); emit({ kind: "list", values: [...values] }); redraw(); }); return el("span", { className: "query-value-chip" }, String(value), remove); })); };
-    add.addEventListener("click", () => { if (input.value !== "") { values.push(scalarFromInput(field, input.value)); input.value = ""; emit({ kind: "list", values: [...values] }); redraw(); input.focus(); } });
+    add.addEventListener("click", () => { if (input.value !== "") { values.push(scalarFromInput(field, input.value)); input.value = field?.type === "BooleanField" ? "true" : ""; emit({ kind: "list", values: [...values] }); redraw(); input.focus(); } });
     input.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) { event.preventDefault(); add.click(); } });
     redraw(); node.append(chips, input, add); return { node };
   }

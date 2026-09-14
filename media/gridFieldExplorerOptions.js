@@ -10,19 +10,20 @@ function targetFor(relation) {
 }
 
 /** Describes scalar fields, traversable relationships, and relationship checks without duplicate identities. */
-function optionsFor(tree, prefix, computed) {
+function optionsFor(tree, prefix, computed, properties) {
   const options = rootMetadataOptions(tree);
   const pathFor = (name) => [...prefix, name].join("__");
   return [
     ...options.relations.map((item) => ({ descriptor: item, group: "Relationships", kind: "relation", label: item.name, path: pathFor(item.name), detail: item.target })),
     ...options.fields.map((item) => ({ descriptor: item, group: "Fields", kind: "field", label: item.name, path: pathFor(item.name), detail: item.type })),
+    ...(!prefix.length ? properties.map((item) => ({ descriptor: item, group: "Model properties", kind: "field", label: item.attname || item.name, path: item.attname || item.name, detail: item.annotated ? "@property · SQL annotation" : "@property · Python filter" })) : []),
     ...(!prefix.length ? computed.filter((item) => item.enabled !== false && item.alias).map((item) => ({ descriptor: item, group: "Calculated values", kind: "computed", label: item.alias, path: item.alias, detail: item.outputType || "Calculated" })) : []),
     ...options.relations.map((item) => ({ descriptor: item, group: "Relationship checks", kind: "relationTerminal", label: `Check ${item.name}`, path: pathFor(item.name), detail: "Has value / is null" }))
   ];
 }
 
 /** Returns one bounded field list or one validated pasted path/lookup, without searching unrelated models. */
-export async function resolveFieldExplorer({ source, prefix = [], query = "", computed = [], loadTree }) {
+export async function resolveFieldExplorer({ source, prefix = [], query = "", computed = [], properties = [], loadTree }) {
   const text = String(query).trim();
   if (text.length > 240 || prefix.length > 11) { return { prefix, items: [], message: "This path is too long. Choose a closer field." }; }
   const pasted = text.includes("__"), parts = pasted ? text.split("__") : [...prefix, text];
@@ -40,7 +41,7 @@ export async function resolveFieldExplorer({ source, prefix = [], query = "", co
     if (relation && resolved.length < 11) {
       resolved.push(segment); model = targetFor(relation); tree = await loadTree(model); continue;
     }
-    const field = options.fields.find((item) => item.name === segment);
+    const field = options.fields.find((item) => item.name === segment) || (!resolved.length ? properties.find((item) => (item.attname || item.name) === segment) : undefined);
     if (pasted && field && lookupsForField(field).includes(lookup)) {
       const path = [...resolved, segment].join("__");
       return { prefix: resolved, model, items: [{ descriptor: field, group: "Django lookup", kind: "field", label: path, path, lookup, detail: `${LOOKUP_LABELS[lookup]} · ${field.type}` }], total: 1 };
@@ -48,6 +49,6 @@ export async function resolveFieldExplorer({ source, prefix = [], query = "", co
     return { prefix: resolved, model, items: [], message: field ? `“${lookup}” is not an available comparison for ${segment}. Choose the field first to see its comparisons.` : `No field or relationship named “${segment}” here. Check the path or browse from the model above.` };
   }
   const term = parts.at(-1).toLowerCase();
-  const all = optionsFor(tree, resolved, computed).filter((item) => `${item.label} ${item.descriptor.label || ""}`.toLowerCase().includes(term));
+  const all = optionsFor(tree, resolved, computed, properties).filter((item) => `${item.label} ${item.descriptor.label || ""}`.toLowerCase().includes(term));
   return { prefix: resolved, model, items: all.slice(0, 60), total: all.length, partial: Boolean(tree.partial) };
 }

@@ -343,12 +343,14 @@ def _browse_tabulate_items(items, limit):
         if not database:
             columns = [dict(column, editable=False) for column in columns]
         concrete = {column["attname"] for column in columns}
+        properties = _browse_computed_columns(model)
+        property_names = {column["attname"] for column in properties}
         # Surface per-row annotation values Django stored on the instance (e.g. an annotate() over a @property-filtered
         # stream) — they live in __dict__ as non-underscore keys outside the concrete columns.
-        ann_names = [name for name in vars(items[0]) if isinstance(name, str) and not name.startswith("_") and name not in concrete]
+        ann_names = [name for name in vars(items[0]) if isinstance(name, str) and not name.startswith("_") and name not in concrete and name not in property_names]
         rows = [_browse_serialize_row(dict({column["attname"]: getattr(item, column["attname"], None) for column in columns}, **{name: getattr(item, name, None) for name in ann_names}), columns) for item in items]
         ann_cols = [{"annotation": True, "attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": "annotation"} for name in ann_names]
-        return {"app": model._meta.app_label, "columns": columns + ann_cols + _browse_computed_columns(model), "database": database, "editable": bool(database), "hasMore": has_more, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
+        return {"app": model._meta.app_label, "columns": columns + ann_cols + properties, "database": database, "editable": bool(database), "hasMore": has_more, "model": model._meta.object_name, "pk": model._meta.pk.attname, "relations": _browse_relations(model), "rows": rows}
     if items and all(isinstance(item, dict) for item in items):
         names = list(dict.fromkeys(key for item in items for key in item))
         return {"columns": [{"attname": name, "editable": False, "name": name, "null": True, "pk": False, "type": ""} for name in names], "editable": False, "hasMore": has_more, "rows": [_browse_serialize_row(item) for item in items]}

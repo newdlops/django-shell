@@ -1,0 +1,115 @@
+# Validates and streams root model-property filters consistently across Recipe rows, count, and lazy values.
+
+_BROWSE_RECIPE_PROPERTY_LOOKUPS = frozenset({"exact", "iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "gt", "gte", "lt", "lte", "in", "range", "isnull", "blank", "not_blank"})
+
+
+def _browse_recipe_property_column(model, path):
+    """Finds a public root property without allowing relation traversal, methods, or Django's pk descriptor."""
+    if not isinstance(path, str) or not path.isidentifier() or "__" in path:
+        return None
+    return next((column for column in _browse_computed_columns(model) if column["attname"] == path), None)
+
+
+def _browse_recipe_validate_property(state, node, path, model, column):
+    """Allows literal property conditions only in the unnegated root AND of a Rows recipe."""
+    import re
+
+    recipe, rhs = state["recipe"], node.get("rhs")
+    root = recipe.get("where", {})
+    allowed = model is state["model"] and re.fullmatch(r"/where/children/\d+", path) and root.get("join") == "and" and not root.get("negated")
+    if recipe.get("mode") != "rows" or not allowed or not isinstance(rhs, dict) or rhs.get("kind") not in ("literal", "list", "range"):
+        code = "PYTHON_PROPERTY_SUMMARY_UNSUPPORTED" if path.startswith("/postFilter") else "PYTHON_PROPERTY_BOOLEAN_UNSUPPORTED"
+        _browse_recipe_issue(state, code, path, "Properties require a direct root AND condition in Rows mode.", "Use a literal value at the root of WHERE in Rows mode.", node.get("nodeId"))
+    elif not column.get("annotated"):
+        _browse_recipe_issue(state, "PYTHON_PROPERTY_FULL_SCAN", path, "Property getters run on database-filtered candidates before pagination.", "Add database conditions to reduce the scan; Count scans all candidates.", node.get("nodeId"), "warning")
+        if any(isinstance(item, dict) and item.get("enabled") and item.get("kind") == "window" for item in recipe.get("computed", ())):
+            _browse_recipe_issue(state, "PYTHON_PROPERTY_BOOLEAN_UNSUPPORTED", "/computed", "Window ranks require database WHERE filters.", "Remove window columns before filtering Python properties.")
+    if node.get("lookup") not in _BROWSE_RECIPE_PROPERTY_LOOKUPS:
+        _browse_recipe_issue(state, "LOOKUP_TYPE_MISMATCH", path + "/lookup", "This property comparison is unsupported.", "Choose a scalar property comparison.", node.get("nodeId"))
+
+
+def _browse_recipe_property_plan(state):
+    """Separates Python conditions and replaces declared properties with internal SQL annotation aliases."""
+    children, annotations, terms = [], {}, []
+    declared = _browse_declared_annotations(state["model"])
+    for node in state["recipe"]["where"]["children"]:
+        lhs = node.get("lhs", {})
+        column = _browse_recipe_property_column(state["model"], lhs.get("path")) if node.get("kind") == "comparison" and lhs.get("kind") == "field" else None
+        if column is None:
+            children.append(node)
+        elif column.get("annotated"):
+            alias = "__djs_property_" + column["attname"]
+            annotations[alias] = declared[column["attname"]]
+            children.append({**node, "lhs": {"kind": "field", "path": alias}})
+        else:
+            terms.append({"field": column["attname"], "lookup": node["lookup"], "negated": node["negated"], "rhs": node["rhs"]})
+    state["property_terms"] = terms
+    return {**state["recipe"]["where"], "children": children}, annotations
+
+
+def _browse_recipe_property_expected(value, expected):
+    """Preserves decimal numeric boundaries without coercing text or boolean literals."""
+    from decimal import Decimal
+
+    return Decimal(str(expected)) if isinstance(value, Decimal) and type(expected) in (int, float) else expected
+
+
+def _browse_recipe_property_match(obj, term):
+    """Evaluates a scalar property comparison, excluding a row when its getter or comparison raises."""
+    try:
+        value = getattr(obj, term["field"])
+        lookup, rhs = term["lookup"], term["rhs"]
+        expected = _browse_recipe_property_expected(value, rhs.get("value"))
+        if lookup == "isnull":
+            matched = (value is None) == expected
+        elif lookup in ("blank", "not_blank"):
+            matched = value is None or value == ""
+            if lookup == "not_blank":
+                matched = not matched
+        elif lookup == "exact":
+            matched = value == expected
+        elif value is None:
+            matched = False
+        elif lookup == "iexact":
+            matched = str(value).lower() == str(expected).lower()
+        elif lookup == "contains":
+            matched = str(expected) in str(value)
+        elif lookup == "icontains":
+            matched = str(expected).lower() in str(value).lower()
+        elif lookup == "startswith":
+            matched = str(value).startswith(str(expected))
+        elif lookup == "istartswith":
+            matched = str(value).lower().startswith(str(expected).lower())
+        elif lookup == "endswith":
+            matched = str(value).endswith(str(expected))
+        elif lookup == "iendswith":
+            matched = str(value).lower().endswith(str(expected).lower())
+        elif lookup == "gt":
+            matched = value > expected
+        elif lookup == "gte":
+            matched = value >= expected
+        elif lookup == "lt":
+            matched = value < expected
+        elif lookup == "lte":
+            matched = value <= expected
+        elif lookup == "in":
+            matched = any(value == _browse_recipe_property_expected(value, item) for item in rhs["values"])
+        elif lookup == "range":
+            matched = _browse_recipe_property_expected(value, rhs["lower"]) <= value <= _browse_recipe_property_expected(value, rhs["upper"])
+        else:
+            return False
+        return not matched if term["negated"] else bool(matched)
+    except Exception:
+        return False
+
+
+def _browse_recipe_property_iter(queryset, terms):
+    """Streams database-filtered candidates and tests only the selected properties before pagination."""
+    for obj in queryset.iterator(chunk_size=200):
+        if all(_browse_recipe_property_match(obj, term) for term in terms):
+            yield obj
+
+
+def _browse_recipe_property_page(state, queryset, start, stop):
+    """Returns a bounded page of matched instances while preserving queryset annotations."""
+    return _browse_islice(_browse_recipe_property_iter(queryset, state["property_terms"]), start, stop)

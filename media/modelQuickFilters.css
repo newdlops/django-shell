@@ -34,6 +34,10 @@
 .query-quick-filters .query-predicate-value>input,.query-quick-filters .query-predicate-value>select{flex:1 1 70px;min-width:0}
 .query-quick-filters .query-predicate-value>.query-value-chips{flex:1 0 100%}
 .query-quick-filters .query-predicate-value>.query-value-chips:empty{display:none}
+.query-property-input{display:flex;min-width:0;flex:2 1 120px}
+.query-property-value{align-items:flex-start}
+.query-property-input>.query-predicate-value{flex-wrap:wrap;min-width:0}
+.query-predicate-issues [data-severity="warning"]{color:var(--vscode-editorWarning-foreground,var(--vscode-descriptionForeground))}
 .query-quick-filters .query-predicate-value button{min-height:28px;background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground,var(--vscode-foreground))}
 .query-node-icon{display:inline-flex;align-items:center;justify-content:center;width:28px;height:30px;padding:0;background:transparent;color:var(--vscode-descriptionForeground)}
 .query-node-icon:hover{background:var(--vscode-list-hoverBackground);color:var(--vscode-foreground)}

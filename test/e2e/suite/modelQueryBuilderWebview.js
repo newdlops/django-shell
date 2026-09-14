@@ -33,7 +33,7 @@ async function assertModelQueryBuilderWebview(extension) {
     assert.deepEqual(snapshot.propertyLoads, ["property 1", "Error", "property 3", "property 4", "property 5", "property 6"]);
     assert.equal(fixture.calls.modelComputed, 6, "property Load, Reload/Retry, and every sort reach the host");
     assert.ok(snapshot.enabledOptionCount >= 2);
-    assert.deepEqual(snapshot.optionGroups, ["Relationships", "Fields", "Relationship checks"]);
+    assert.deepEqual(snapshot.optionGroups, ["Relationships", "Fields", "Model properties", "Relationship checks"]);
     assert.equal(snapshot.applyDisabled, true);
     assert.equal(snapshot.appliedFilters, "None");
     assert.equal(snapshot.exampleCount, 4);

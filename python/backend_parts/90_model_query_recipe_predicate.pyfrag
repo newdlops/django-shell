@@ -184,8 +184,16 @@ def _browse_recipe_validate_comparison(state, node, path, model, aliases, outer_
         _browse_recipe_issue(state, "LOOKUP_UNSUPPORTED", path + "/lookup", "Lookup is not supported.", "Choose a supported lookup.", node_id)
         return
     if lhs.get("kind") == "field":
-        resolved = _browse_recipe_resolve_path(state, model, lhs.get("path"), path + "/lhs/path", lookup == "isnull")
-        field = resolved[0] if resolved else None
+        column = _browse_recipe_property_column(model, lhs.get("path"))
+        if column is not None:
+            _browse_recipe_validate_property(state, node, path, model, column)
+            field = None
+            if lookup in ("blank", "not_blank"):
+                from django.db.models import CharField
+                field = CharField()
+        else:
+            resolved = _browse_recipe_resolve_path(state, model, lhs.get("path"), path + "/lhs/path", lookup == "isnull")
+            field = resolved[0] if resolved else None
     elif lhs.get("kind") == "computed":
         field = aliases.get(lhs.get("alias"))
         if field is None:

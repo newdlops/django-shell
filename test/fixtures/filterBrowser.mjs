@@ -31,11 +31,12 @@ function installBridge() {
     { name: "login_count", label: "Login count", type: "IntegerField" },
     { name: "created_at", label: "Created", type: "DateTimeField" },
     { name: "status", label: "Status", type: "IntegerField", choices: [[1, "Pending"], [2, "Active"]] },
-    { name: "long_customer_reference", label: "Customer reference from the imported regional account record — 표시 이름이 긴 필드", type: "CharField" }
+    { name: "long_customer_reference", label: "Customer reference from the imported regional account record — 표시 이름이 긴 필드", type: "CharField" },
+    ...["display_name", "total_price", "eligible"].map((name) => ({ name, type: "property", computed: true }))
   ].map((column) => ({ ...column, attname: column.name, editable: false, null: false }));
   const companyRelation = { name: "company", target: "accounts.Company", kind: "forward_fk", single: true };
   const filterTrees = {
-    "accounts.User": { fields: [...columns, { name: "company", attname: "company_id", type: "IntegerField" }], relations: [companyRelation] },
+    "accounts.User": { fields: [...columns.filter((column) => !column.computed), { name: "company", attname: "company_id", type: "IntegerField" }], relations: [companyRelation] },
     "accounts.Company": { fields: [{ name: "id", attname: "id", type: "AutoField", pk: true }, { name: "user", attname: "user_id", type: "IntegerField" }, { name: "name", attname: "name", type: "CharField" }], relations: [{ name: "user", target: "accounts.Contact", kind: "forward_fk", single: true }] },
     "accounts.Contact": { fields: [{ name: "email", attname: "email", type: "EmailField" }, { name: "is_active", attname: "is_active", type: "BooleanField" }], relations: [] }
   };
@@ -63,7 +64,11 @@ function installBridge() {
         reply({ type: "modelList", requestId: message.requestId, result: { ok: true, models: [{ app: "accounts", model: "User" }] } });
       } else if (message.type === "previewQueryRecipe") {
         const issues = message.recipe.where.children.filter((item) => item.kind === "comparison" && !item.lhs?.path).map((item) => ({ nodeId: item.nodeId, severity: "error", message: "Choose a field.", code: "field-required" }));
-        reply({ type: "queryRecipePreview", requestId: message.requestId, revision: message.revision, validation: { ok: issues.length === 0, issues, warnings: [], ormPreview: "User.objects.filter(...)" } });
+        for (const item of message.recipe.where.children) {
+          if (columns.some((column) => column.computed && column.name === item.lhs?.path) && (message.recipe.where.join !== "and" || message.recipe.where.negated)) { issues.push({ nodeId: item.nodeId, severity: "error", code: "PYTHON_PROPERTY_BOOLEAN_UNSUPPORTED", message: "Use this property as a direct root AND condition.", fix: "Choose All conditions (AND) and clear Exclude group." }); }
+          else if (columns.some((column) => column.computed && column.name === item.lhs?.path)) { issues.push({ nodeId: item.nodeId, severity: "warning", code: "PYTHON_PROPERTY_FULL_SCAN", message: "Property filter scans Python values before pagination", fix: "Add database filters to reduce work. Count scans all candidates." }); }
+        }
+        reply({ type: "queryRecipePreview", requestId: message.requestId, revision: message.revision, validation: { ok: !issues.some((issue) => issue.severity === "error"), issues, warnings: issues.filter((issue) => issue.severity === "warning"), ormPreview: "User.objects.filter(...)" } });
       } else if (message.type === "applyQueryRecipe") {
         if (window.filterFixture.rejectApply) { reply({ type: "queryRecipeRejected", revision: message.revision, issues: [{ severity: "error", code: "fixture-rejected", message: "The server could not apply these filters." }] }); }
         else {

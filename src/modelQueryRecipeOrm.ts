@@ -8,6 +8,7 @@ import { compileModelQueryComputed } from "./modelQueryComputedOrm";
 import { compileModelQueryPredicate, modelQueryOrmLiteral, modelQueryOrmModelExpression, modelQueryOrmString } from "./modelQueryPredicateOrm";
 import { validateModelQueryRecipe, type ModelQueryIssue, type ModelQueryValidation } from "./modelQueryRecipeValidation";
 import { MODEL_QUERY_RECIPE_LIMITS } from "./modelQueryRecipeLimits";
+import { modelQueryPropertyIterator, modelQueryPropertyPrelude, planModelQueryProperties, type ModelQueryPropertyPlan } from "./modelQueryPropertyFilter";
 
 /** Metadata and pagination available to a Recipe v2 ORM reconstruction. */
 export interface ModelQueryOrmCompileContext {
@@ -58,13 +59,16 @@ function build(recipe: ModelQueryRecipeV2, context: ModelQueryOrmCompileContext,
     const issue: ModelQueryIssue = { code: "FIELD_PATH_INVALID", fix: "Select a model property in Rows mode.", message: "Model property values require a property column and individual model rows.", path: "/field", severity: "error" };
     return { cell: "", preview: "", validation: { ...validation, humanSummary: "1 query error", issues: [...validation.issues, issue], ok: false } };
   }
-  const where = compileModelQueryPredicate(normalized.where, normalized.source, { metadata: context.metadata, source: normalized.source });
+  const properties = planModelQueryProperties(normalized, context.metadata);
+  const where = compileModelQueryPredicate(properties.where, normalized.source, { metadata: context.metadata, source: normalized.source });
   const computed = compileModelQueryComputed(normalized.computed, { metadata: context.metadata, source: normalized.source });
   const annotations = computed.length ? `.annotate(${computed.map((spec) => `${spec.alias}=${spec.expression}`).join(", ")})` : "";
   const post = compileModelQueryPredicate(normalized.postFilter, normalized.source, { metadata: context.metadata, source: normalized.source });
-  const sourceBase = `${modelQueryOrmModelExpression(normalized.source)}._base_manager${context.database !== undefined ? `.using(${JSON.stringify(context.database)})` : ""}.filter(${where.expression})${where.toMany ? ".distinct()" : ""}`;
+  const propertyAnnotations = properties.annotations.length ? `.annotate(${properties.annotations.map((item) => `${item.alias}=${declaredPropertyExpression(normalized, item.field)}`).join(", ")})` : "";
+  const sourceBase = `${modelQueryOrmModelExpression(normalized.source)}._base_manager${context.database !== undefined ? `.using(${JSON.stringify(context.database)})` : ""}${propertyAnnotations}.filter(${where.expression})${where.toMany ? ".distinct()" : ""}`;
   const rowsBase = `${sourceBase}${annotations}${normalized.postFilter.children.length ? `.filter(${post.expression})` : ""}`;
-  const cell = intent === "property" ? propertyCell(normalized, rowsBase, field, context) : intent === "summary" ? summaryCell(normalized, sourceBase, context) : intent === "count" ? countCell(normalized, normalized.mode === "summary" ? sourceBase : rowsBase, context) : rowsCell(normalized, rowsBase, context);
+  const expression = intent === "property" ? propertyCell(normalized, rowsBase, field, context, properties) : intent === "summary" ? summaryCell(normalized, sourceBase, context) : intent === "count" ? countCell(normalized, normalized.mode === "summary" ? sourceBase : rowsBase, context, properties) : rowsCell(normalized, rowsBase, context, properties);
+  const cell = (properties.terms.length ? modelQueryPropertyPrelude() : "") + expression;
   if (cell.length > MODEL_QUERY_RECIPE_LIMITS.generatedOrmCellCharacters) {
     return { cell: "", preview: "", validation: withGeneratedLimit(validation) };
   }
@@ -72,14 +76,14 @@ function build(recipe: ModelQueryRecipeV2, context: ModelQueryOrmCompileContext,
 }
 
 /** Reads one property per displayed row, or its declared SQL annotation, without pagination lookahead. */
-function propertyCell(recipe: ModelQueryRecipeV2, base: string, field: string, context: ModelQueryOrmCompileContext): string {
+function propertyCell(recipe: ModelQueryRecipeV2, base: string, field: string, context: ModelQueryOrmCompileContext, properties: ModelQueryPropertyPlan): string {
   const limit = Number.isInteger(context.limit) && context.limit > 0 ? context.limit : 50;
   const ordered = `${base}.order_by(${orderArguments(recipe.orderBy, "pk")})`;
   if (context.columns.some((column) => column.attname === field && column.annotated)) {
-    const declared = `${modelQueryOrmModelExpression(recipe.source)}.djshell_annotations`;
-    const expression = `(lambda __a: __a() if callable(__a) else __a)(${declared})[${modelQueryOrmString(field)}]`;
-    return `${ordered}.annotate(__djs=${expression}).values("pk", "__djs")[0:${limit}]`;
+    const annotated = `${ordered}.annotate(__djs=${declaredPropertyExpression(recipe, field)})`;
+    return properties.terms.length ? `[{"pk": __o.pk, "__djs": __o.__djs} for __o in _djs_it.islice(${modelQueryPropertyIterator(annotated, properties.terms)}, ${limit})]` : `${annotated}.values("pk", "__djs")[0:${limit}]`;
   }
+  const page = properties.terms.length ? `_djs_it.islice(${modelQueryPropertyIterator(ordered, properties.terms)}, ${limit})` : `${ordered}[0:${limit}]`;
   return [
     "def _djs_property_value(__o):",
     '    """Reads the requested property, retaining rows whose getter raises."""',
@@ -87,18 +91,19 @@ function propertyCell(recipe: ModelQueryRecipeV2, base: string, field: string, c
     `        return getattr(__o, ${modelQueryOrmString(field)})`,
     "    except Exception:",
     "        return None",
-    `[{"pk": __o.pk, "value": _djs_property_value(__o)} for __o in ${ordered}[0:${limit}]]`
+    `[{"pk": __o.pk, "value": _djs_property_value(__o)} for __o in ${page}]`
   ].join("\n");
 }
 
 /** Builds a bounded ordered page with one additional row for has-more detection. */
-function rowsCell(recipe: ModelQueryRecipeV2, base: string, context: ModelQueryOrmCompileContext): string {
+function rowsCell(recipe: ModelQueryRecipeV2, base: string, context: ModelQueryOrmCompileContext, properties: ModelQueryPropertyPlan): string {
   const offset = Number.isInteger(context.offset) && (context.offset ?? 0) > 0 ? context.offset ?? 0 : 0;
   const limit = Number.isInteger(context.limit) && context.limit > 0 ? context.limit : 50;
   const keyset = recipe.orderBy.length === 0 && !recipe.computed.some((item) => item.enabled);
   const cursor = keyset && context.cursor !== undefined && context.cursor !== null ? `.filter(pk__gt=${modelQueryOrmLiteral(context.cursor)})` : "";
   const sliceStart = keyset ? 0 : offset;
-  return `${base}${cursor}.order_by(${orderArguments(recipe.orderBy, "pk")})[${sliceStart}:${sliceStart + limit + 1}]`;
+  const ordered = `${base}${cursor}.order_by(${orderArguments(recipe.orderBy, "pk")})`;
+  return properties.terms.length ? `list(_djs_it.islice(${modelQueryPropertyIterator(ordered, properties.terms)}, ${sliceStart}, ${sliceStart + limit + 1})) or ${ordered}.none()` : `${ordered}[${sliceStart}:${sliceStart + limit + 1}]`;
 }
 
 /** Builds grouped summary querysets or a single global aggregate mapping row. */
@@ -112,13 +117,20 @@ function summaryCell(recipe: ModelQueryRecipeV2, base: string, context: ModelQue
 }
 
 /** Builds the count aligned with rows or grouped summary semantics. */
-function countCell(recipe: ModelQueryRecipeV2, base: string, context: ModelQueryOrmCompileContext): string {
+function countCell(recipe: ModelQueryRecipeV2, base: string, context: ModelQueryOrmCompileContext, properties: ModelQueryPropertyPlan): string {
+  if (properties.terms.length) { return `sum(1 for __o in ${modelQueryPropertyIterator(base, properties.terms)})`; }
   if (recipe.mode === "summary" && recipe.groupBy.length) {
     const group = recipe.groupBy.map((field) => modelQueryOrmString(field.path)).join(", ");
     const specs = compileModelQueryComputed(recipe.computed.filter((item) => item.enabled && item.kind === "aggregate"), { metadata: context.metadata, source: recipe.source });
     return `${base}.values(${group}).annotate(${specs.map((spec) => `${spec.alias}=${spec.expression}`).join(", ")}).count()`;
   }
   return `${base}.count()`;
+}
+
+/** Resolves a model's explicitly declared SQL expression without interpolating property values into code. */
+function declaredPropertyExpression(recipe: ModelQueryRecipeV2, field: string): string {
+  const declared = `${modelQueryOrmModelExpression(recipe.source)}.djshell_annotations`;
+  return `(lambda __a: __a() if callable(__a) else __a)(${declared})[${modelQueryOrmString(field)}]`;
 }
 
 /** Emits safe ordering terms, defaulting to a stable concrete identifier. */
